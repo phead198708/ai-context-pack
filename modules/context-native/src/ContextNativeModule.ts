@@ -12,6 +12,7 @@ declare class ContextNativeModule extends NativeModule {
   scanInbox(): Promise<readonly ImportManifestV1[]>;
   getPendingShareEvents(): Promise<readonly PendingShareEvent[]>;
   ackPendingShareEvent(id: string): Promise<boolean>;
+  ackEphemeralShareEvent(id: string): Promise<boolean>;
   getPendingRecoveryEvent(): Promise<RecoveryEvent | null>;
   ackRecoveryEvent(id: string): Promise<boolean>;
   recognizeText(

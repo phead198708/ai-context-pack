@@ -3,6 +3,10 @@ export interface PendingShareEvent {
   readonly schemaVersion: 1;
   readonly id: string;
   readonly result: ShareImportResult;
+  readonly durable?: boolean;
+  readonly code?:
+    | 'SHARE_RESULT_PERSIST_FAILED'
+    | 'SHARE_EPHEMERAL_QUEUE_OVERFLOW';
 }
 export interface RecoveryEvent {
   readonly schemaVersion: 1;
@@ -22,7 +26,13 @@ export const isPendingShareEvent = (
   value.schemaVersion === 1 &&
   typeof value.id === 'string' &&
   uuid.test(value.id) &&
-  (value.result === 'complete' || value.result === 'failed');
+  (value.result === 'complete' || value.result === 'failed') &&
+  (value.durable === undefined || typeof value.durable === 'boolean') &&
+  (value.code === undefined ||
+    value.code === 'SHARE_RESULT_PERSIST_FAILED' ||
+    value.code === 'SHARE_EPHEMERAL_QUEUE_OVERFLOW') &&
+  (value.durable !== false ||
+    (value.result === 'failed' && value.code !== undefined));
 
 export const isRecoveryEvent = (value: unknown): value is RecoveryEvent =>
   record(value) &&

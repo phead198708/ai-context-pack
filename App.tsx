@@ -11,107 +11,46 @@ import {
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import type { ImportManifestV1 } from './src/domain/contracts';
 import {
-  LatestRequestGate,
-  runLatestRequest,
-  ShareFailureLatch,
-} from './src/domain/latestRequestGate';
-import {
-  isPendingShareEvent,
-  shareImportErrorCode,
-} from './src/domain/shareImportResult';
-import { NativeBoundaryError } from './src/infrastructure/createNativeAdapter';
+  InboxEventWorkflow,
+  type InboxWorkflowState,
+} from './src/domain/inboxEventWorkflow';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
 import { colors, spacing, typography } from './src/ui/tokens';
 
 type Screen = 'inbox' | 'detail' | 'diagnostics';
-type LoadState =
-  | { kind: 'loading' }
-  | { kind: 'empty' }
-  | { kind: 'ready'; manifests: readonly ImportManifestV1[] }
-  | { kind: 'error'; code: string };
+type LoadState = InboxWorkflowState;
 
 function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>('inbox');
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
-  const refreshGate = useRef(new LatestRequestGate()).current;
-  const shareFailure = useRef(new ShareFailureLatch()).current;
-  const pendingShareFailureIds = useRef(new Set<string>()).current;
-  const refresh = useCallback(
-    async (showNewestImport = false): Promise<boolean> =>
-      runLatestRequest(
-        refreshGate,
-        async () => {
-          const recovery = await nativeAdapter.getPendingRecoveryEvent();
-          if (recovery) {
-            throw new NativeBoundaryError(recovery.code);
-          }
-          return nativeAdapter.scanInbox();
-        },
-        () => setState({ kind: 'loading' }),
-        manifests => {
-          setState(
-            manifests.length === 0
-              ? { kind: 'empty' }
-              : { kind: 'ready', manifests },
-          );
-          if (showNewestImport && manifests.length > 0) setScreen('detail');
-        },
-        error => setState({ kind: 'error', code: visibleErrorCode(error) }),
-      ),
-    [refreshGate],
-  );
-  const handleShareResult = useCallback(
-    async (result: unknown): Promise<void> => {
-      const errorCode = shareImportErrorCode(result);
-      if (errorCode) {
-        if (isPendingShareEvent(result)) pendingShareFailureIds.add(result.id);
-        shareFailure.recordFailure();
-        refreshGate.invalidate();
-        setScreen('inbox');
-        setState({ kind: 'error', code: errorCode });
-        return;
-      }
-      shareFailure.clear();
-      const refreshed = await refresh(true);
-      if (refreshed && isPendingShareEvent(result))
-        await nativeAdapter.ackPendingShareEvent(result.id);
-    },
-    [pendingShareFailureIds, refresh, refreshGate, shareFailure],
-  );
+  const setWorkflowState = useCallback((value: LoadState) => {
+    setState(value);
+    if (value.kind === 'error') setScreen('inbox');
+  }, []);
+  const workflow = useRef<InboxEventWorkflow | null>(null);
+  if (!workflow.current)
+    workflow.current = new InboxEventWorkflow(nativeAdapter, {
+      setState: setWorkflowState,
+      showNewestImport: () => setScreen('detail'),
+    });
   useEffect(() => {
-    refresh(true).catch(() =>
-      setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
-    );
+    workflow.current?.bootstrap().catch(() => undefined);
     const subscription = AppState.addEventListener('change', next => {
-      if (next === 'active' && shareFailure.allowsAutomaticRefresh())
-        refresh(true).catch(() =>
-          setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
-        );
+      if (next === 'active')
+        workflow.current?.appBecameActive().catch(() => undefined);
     });
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
       (event: unknown) => {
-        handleShareResult(event).catch(() =>
-          setState({ kind: 'error', code: 'NATIVE_SHARE_ACK_FAILED' }),
-        );
+        workflow.current?.receive(event).catch(() => undefined);
       },
     );
-    nativeAdapter
-      .getPendingShareEvents()
-      .then(async events => {
-        for (const event of events) {
-          await handleShareResult(event);
-        }
-      })
-      .catch(() => handleShareResult('invalid'));
     return () => {
-      refreshGate.invalidate();
       subscription.remove();
       inboxSubscription.remove();
     };
-  }, [handleShareResult, refresh, refreshGate, shareFailure]);
+  }, []);
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
@@ -139,21 +78,7 @@ function App(): React.JSX.Element {
           <Inbox
             state={state}
             onRetry={() => {
-              const acknowledge = async (): Promise<void> => {
-                for (const failureId of pendingShareFailureIds)
-                  await nativeAdapter.ackPendingShareEvent(failureId);
-                pendingShareFailureIds.clear();
-                let recovery = await nativeAdapter.getPendingRecoveryEvent();
-                while (recovery) {
-                  await nativeAdapter.ackRecoveryEvent(recovery.id);
-                  recovery = await nativeAdapter.getPendingRecoveryEvent();
-                }
-                shareFailure.clear();
-                await refresh();
-              };
-              acknowledge().catch(error =>
-                setState({ kind: 'error', code: visibleErrorCode(error) }),
-              );
+              workflow.current?.retry().catch(() => undefined);
             }}
           />
         )}
@@ -162,12 +87,6 @@ function App(): React.JSX.Element {
       </ScrollView>
     </SafeAreaView>
   );
-}
-
-function visibleErrorCode(error: unknown): string {
-  return error instanceof NativeBoundaryError
-    ? error.code
-    : 'INBOX_SCAN_FAILED';
 }
 
 function Inbox({

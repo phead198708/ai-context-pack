@@ -9,6 +9,9 @@ class ContextNativeModule extends NativeModule {
   async ackPendingShareEvent(): Promise<boolean> {
     return true;
   }
+  async ackEphemeralShareEvent(): Promise<boolean> {
+    return true;
+  }
   async getPendingRecoveryEvent(): Promise<null> {
     return null;
   }

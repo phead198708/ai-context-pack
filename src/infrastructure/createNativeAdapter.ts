@@ -14,6 +14,7 @@ export interface NativeMethods {
   scanInbox(): Promise<unknown>;
   getPendingShareEvents?(): Promise<unknown>;
   ackPendingShareEvent?(id: string): Promise<unknown>;
+  ackEphemeralShareEvent?(id: string): Promise<unknown>;
   getPendingRecoveryEvent?(): Promise<unknown>;
   ackRecoveryEvent?(id: string): Promise<unknown>;
   recognizeText(uri: string, script: 'latin' | 'chinese'): Promise<unknown>;
@@ -58,6 +59,12 @@ export const createNativeAdapter = (
           if ((await nativeModule.ackPendingShareEvent(id)) !== true)
             throw new NativeBoundaryError('NATIVE_SHARE_ACK_FAILED');
         },
+        ackEphemeralShareEvent: async id => {
+          if (!nativeModule.ackEphemeralShareEvent)
+            throw new NativeBoundaryError('NATIVE_EPHEMERAL_ACK_UNAVAILABLE');
+          if ((await nativeModule.ackEphemeralShareEvent(id)) !== true)
+            throw new NativeBoundaryError('NATIVE_EPHEMERAL_ACK_FAILED');
+        },
         getPendingRecoveryEvent: async () => {
           const value =
             (await nativeModule.getPendingRecoveryEvent?.()) ?? null;
@@ -89,6 +96,7 @@ export const createNativeAdapter = (
         scanInbox: async () => [],
         getPendingShareEvents: async () => [],
         ackPendingShareEvent: async () => undefined,
+        ackEphemeralShareEvent: async () => undefined,
         getPendingRecoveryEvent: async () => null,
         ackRecoveryEvent: async () => undefined,
         recognizeText: async () => {

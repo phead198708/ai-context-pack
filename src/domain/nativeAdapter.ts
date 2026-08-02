@@ -9,6 +9,7 @@ export interface NativeAdapter {
   scanInbox(): Promise<readonly ImportManifestV1[]>;
   getPendingShareEvents(): Promise<readonly PendingShareEvent[]>;
   ackPendingShareEvent(id: string): Promise<void>;
+  ackEphemeralShareEvent(id: string): Promise<void>;
   getPendingRecoveryEvent(): Promise<RecoveryEvent | null>;
   ackRecoveryEvent(id: string): Promise<void>;
   recognizeText(
