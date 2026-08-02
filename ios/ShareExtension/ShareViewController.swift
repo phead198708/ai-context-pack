@@ -35,7 +35,8 @@ final class ShareViewController: UIViewController {
   private func copyAndWriteManifest(source: URL, mediaType: String) throws {
     guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else { throw ShareError.appGroupUnavailable }
     let ingestionId = UUID().uuidString.lowercased(), itemId = UUID().uuidString.lowercased()
-    let directory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
+    let directory = container.appendingPathComponent("InboxStaging/\(ingestionId)", isDirectory: true)
+    let publishedDirectory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     var committed = false
     defer {
@@ -45,11 +46,14 @@ final class ShareViewController: UIViewController {
     try copyBounded(from: source, to: partial, limit: maximumImageBytes)
     try FileManager.default.moveItem(at: partial, to: destination)
     let bytes = (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-    let manifest: [String: Any] = ["schemaVersion": 1, "ingestionId": ingestionId, "createdAt": ISO8601DateFormatter().string(from: Date()), "source": "ios-share-extension", "status": "complete", "items": [["id": itemId, "mediaType": mediaType, "byteCount": bytes, "localUri": destination.absoluteString, "status": "copied"]]]
+    let publishedDestination = publishedDirectory.appendingPathComponent(destination.lastPathComponent)
+    let manifest: [String: Any] = ["schemaVersion": 1, "ingestionId": ingestionId, "createdAt": ISO8601DateFormatter().string(from: Date()), "source": "ios-share-extension", "status": "complete", "items": [["id": itemId, "mediaType": mediaType, "byteCount": bytes, "localUri": publishedDestination.absoluteString, "status": "copied"]]]
     let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     let manifestPartial = directory.appendingPathComponent("manifest.partial"), manifestURL = directory.appendingPathComponent("manifest.json")
     try data.write(to: manifestPartial, options: .atomic)
     try FileManager.default.moveItem(at: manifestPartial, to: manifestURL)
+    try FileManager.default.createDirectory(at: publishedDirectory.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try FileManager.default.moveItem(at: directory, to: publishedDirectory)
     committed = true
   }
 

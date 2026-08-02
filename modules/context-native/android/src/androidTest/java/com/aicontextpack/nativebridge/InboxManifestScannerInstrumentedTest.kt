@@ -69,15 +69,30 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
-  fun removesInterruptedTransactionsWithoutManifests() {
+  fun leavesFreshManifestlessTransactionsForActiveWriters() {
     val partial = File(inbox, "partial").apply { mkdirs() }
     File(partial, "item.partial").writeBytes(byteArrayOf(1, 2))
-    val copied = File(inbox, "copied").apply { mkdirs() }
-    File(copied, "item.bin").writeBytes(byteArrayOf(3, 4))
+    val staging = File(inbox.parentFile, "InboxStaging/fresh").apply { mkdirs() }
+    File(staging, "item.partial").writeBytes(byteArrayOf(3, 4))
 
     assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
-    assertEquals(false, partial.exists())
+    assertEquals(true, partial.exists())
+    assertEquals(true, staging.exists())
+  }
+
+  @Test
+  fun removesStaleInterruptedTransactionsAndSurfacesRecovery() {
+    val staleAt = System.currentTimeMillis() - 25 * 60 * 60 * 1_000L
+    val copied = File(inbox, "copied").apply { mkdirs() }
+    File(copied, "item.bin").writeBytes(byteArrayOf(3, 4))
+    copied.setLastModified(staleAt)
+    val staging = File(inbox.parentFile, "InboxStaging/stale").apply { mkdirs() }
+    File(staging, "item.partial").writeBytes(byteArrayOf(1, 2))
+    staging.setLastModified(staleAt)
+
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
     assertEquals(false, copied.exists())
+    assertEquals(false, staging.exists())
   }
 
   @Test

@@ -15,11 +15,14 @@ public final class ContextNativeModule: Module {
         throw NativeError("APP_GROUP_UNAVAILABLE")
       }
       let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
+      let staging = container.appendingPathComponent("InboxStaging", isDirectory: true)
+      let recovered: Bool
+      do { recovered = try recoverIncompleteTransactions(inbox: inbox, staging: staging) }
+      catch { throw NativeError("INBOX_SCAN_FAILED") }
+      if recovered { throw NativeError("INBOX_RECOVERY_REQUIRED") }
       var isDirectory: ObjCBool = false
       guard FileManager.default.fileExists(atPath: inbox.path, isDirectory: &isDirectory) else { return [] }
       guard isDirectory.boolValue else { throw NativeError("INBOX_SCAN_FAILED") }
-      do { try recoverIncompleteTransactions(inbox: inbox) }
-      catch { throw NativeError("INBOX_SCAN_FAILED") }
       var enumerationError: Error?
       guard let enumerator = FileManager.default.enumerator(
         at: inbox,
@@ -96,18 +99,38 @@ public final class ContextNativeModule: Module {
   }
 }
 
-private func recoverIncompleteTransactions(inbox: URL) throws {
+private func recoverIncompleteTransactions(inbox: URL, staging: URL, now: Date = Date()) throws -> Bool {
+  let staleBefore = now.addingTimeInterval(-24 * 60 * 60)
+  var recovered = try recoverCandidates(root: staging, staleBefore: staleBefore) { _ in true }
+  recovered = try recoverCandidates(root: inbox, staleBefore: staleBefore) { child in
+    !FileManager.default.fileExists(atPath: child.appendingPathComponent("manifest.json").path)
+  } || recovered
+  return recovered
+}
+
+private func recoverCandidates(
+  root: URL,
+  staleBefore: Date,
+  isIncomplete: (URL) -> Bool
+) throws -> Bool {
+  var isDirectory: ObjCBool = false
+  guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else { return false }
+  guard isDirectory.boolValue else { throw NativeError("INBOX_SCAN_FAILED") }
   let children = try FileManager.default.contentsOfDirectory(
-    at: inbox,
-    includingPropertiesForKeys: [.isDirectoryKey],
+    at: root,
+    includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
     options: [.skipsHiddenFiles]
   )
-  for child in children where (try child.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
-    let manifest = child.appendingPathComponent("manifest.json")
-    if !FileManager.default.fileExists(atPath: manifest.path) {
-      try FileManager.default.removeItem(at: child)
-    }
+  var recovered = false
+  for child in children {
+    let values = try child.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+    guard values.isDirectory == true,
+          isIncomplete(child),
+          (values.contentModificationDate ?? .distantFuture) <= staleBefore else { continue }
+    try FileManager.default.removeItem(at: child)
+    recovered = true
   }
+  return recovered
 }
 
 private func imageOrientation(source: CGImageSource) -> CGImagePropertyOrientation {

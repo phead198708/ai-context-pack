@@ -43,7 +43,8 @@ object ShareInboxImporter {
   internal fun importImage(context: Context, source: Uri, mediaType: String): Result {
     val ingestionId = UUID.randomUUID().toString()
     val itemId = UUID.randomUUID().toString()
-    val directory = File(context.filesDir, "Inbox/$ingestionId")
+    val directory = File(context.filesDir, "InboxStaging/$ingestionId")
+    val publishedDirectory = File(context.filesDir, "Inbox/$ingestionId")
     val partial = File(directory, "$itemId.partial")
     val destination = File(directory, "$itemId.bin")
     val manifest = File(directory, "manifest.json")
@@ -55,14 +56,17 @@ object ShareInboxImporter {
         partial.outputStream().use { output -> copyBounded(input, output, maxImageBytes) }
       }
       check(partial.renameTo(destination)) { "SHARE_ATOMIC_MOVE_FAILED" }
+      val publishedDestination = File(publishedDirectory, destination.name)
       val item = JSONObject().put("id", itemId).put("mediaType", mediaType)
-        .put("byteCount", destination.length()).put("localUri", destination.toURI().toString()).put("status", "copied")
+        .put("byteCount", destination.length()).put("localUri", publishedDestination.toURI().toString()).put("status", "copied")
       val payload = JSONObject()
         .put("schemaVersion", 1).put("ingestionId", ingestionId).put("createdAt", isoTimestamp())
         .put("source", "android-share-intent").put("status", "complete").put("items", JSONArray().put(item))
       val tempManifest = File(directory, "manifest.partial")
       tempManifest.writeText(payload.toString())
       check(tempManifest.renameTo(manifest)) { "MANIFEST_ATOMIC_MOVE_FAILED" }
+      check(publishedDirectory.parentFile?.mkdirs() == true || publishedDirectory.parentFile?.isDirectory == true)
+      check(directory.renameTo(publishedDirectory)) { "INGESTION_ATOMIC_PUBLISH_FAILED" }
       Result.COMPLETE
     } catch (_: Exception) {
       directory.deleteRecursively()

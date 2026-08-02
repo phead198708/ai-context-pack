@@ -73,14 +73,16 @@ class ContextNativeModule : Module() {
 
 internal object InboxManifestScanner {
   fun scan(inbox: File): List<Map<String, Any?>> {
-    if (!inbox.exists()) return emptyList()
-    if (!inbox.isDirectory || !inbox.canRead()) throw NativeException("INBOX_SCAN_FAILED")
-    val files = try {
-      recoverIncompleteTransactions(inbox)
-      manifestFiles(inbox)
+    val recovery = try {
+      IncompleteTransactionRecovery.recover(inbox)
     } catch (_: Exception) {
       throw NativeException("INBOX_SCAN_FAILED")
     }
+    if (recovery) throw NativeException("INBOX_RECOVERY_REQUIRED")
+    if (!inbox.exists()) return emptyList()
+    if (!inbox.isDirectory || !inbox.canRead()) throw NativeException("INBOX_SCAN_FAILED")
+    val files = try { manifestFiles(inbox) }
+    catch (_: Exception) { throw NativeException("INBOX_SCAN_FAILED") }
     return files.map { file ->
       try {
         val manifest = JSONObject(file.readText())
@@ -89,15 +91,6 @@ internal object InboxManifestScanner {
       } catch (_: Exception) {
         throw NativeException("INBOX_MANIFEST_INVALID")
       }
-    }
-  }
-
-  private fun recoverIncompleteTransactions(inbox: File) {
-    val inboxPath = inbox.canonicalPath + File.separator
-    val ingestions = inbox.listFiles() ?: error("INBOX_SCAN_FAILED")
-    ingestions.filter { it.isDirectory && !File(it, "manifest.json").isFile }.forEach { directory ->
-      check(directory.canonicalPath.startsWith(inboxPath))
-      check(directory.deleteRecursively() && !directory.exists())
     }
   }
 
@@ -136,6 +129,44 @@ internal object InboxManifestScanner {
 
   private fun jsonObjectToMap(value: JSONObject): Map<String, Any?> = value.keys().asSequence().associateWith { key ->
     when (val item = value.get(key)) { is JSONObject -> jsonObjectToMap(item); is org.json.JSONArray -> (0 until item.length()).map { index -> val child = item.get(index); if (child is JSONObject) jsonObjectToMap(child) else child }; JSONObject.NULL -> null; else -> item }
+  }
+}
+
+internal object IncompleteTransactionRecovery {
+  private const val staleAfterMs = 24 * 60 * 60 * 1_000L
+
+  fun recover(inbox: File, nowMs: Long = System.currentTimeMillis()): Boolean {
+    val staging = File(requireNotNull(inbox.parentFile), "InboxStaging")
+    var recovered = recoverCandidates(staging, nowMs) { true }
+    recovered = recoverCandidates(inbox, nowMs) { directory ->
+      !File(directory, "manifest.json").isFile
+    } || recovered
+    return recovered
+  }
+
+  private fun recoverCandidates(
+    root: File,
+    nowMs: Long,
+    isIncomplete: (File) -> Boolean,
+  ): Boolean {
+    if (!root.exists()) return false
+    check(root.isDirectory && root.canRead())
+    val rootPath = root.canonicalPath + File.separator
+    var recovered = false
+    (root.listFiles() ?: error("INBOX_SCAN_FAILED"))
+      .filter { directory ->
+        val modifiedAt = directory.lastModified()
+        directory.isDirectory &&
+          isIncomplete(directory) &&
+          modifiedAt > 0 &&
+          nowMs - modifiedAt >= staleAfterMs
+      }
+      .forEach { directory ->
+        check(directory.canonicalPath.startsWith(rootPath))
+        check(directory.deleteRecursively() && !directory.exists())
+        recovered = true
+      }
+    return recovered
   }
 }
 

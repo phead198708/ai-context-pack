@@ -29,6 +29,9 @@ class MainActivity : ReactActivity() {
   }
 
   private fun importSharedImage(intent: Intent?) {
+    if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) {
+      setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
+    }
     ShareInboxImporter.importIfSupportedAsync(applicationContext, intent) { result ->
       applicationContext.getSharedPreferences("ai-context-pack-share", android.content.Context.MODE_PRIVATE)
         .edit().putString("pending-result", result.wireValue).commit()
