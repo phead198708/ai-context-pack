@@ -2,6 +2,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
+private let maximumImageBytes = 52_428_800
 
 final class ShareViewController: UIViewController {
   private let statusLabel = UILabel()
@@ -17,12 +18,16 @@ final class ShareViewController: UIViewController {
   }
 
   private func receiveSingleImage() {
-    guard let provider = extensionContext?.inputItems.compactMap({ $0 as? NSExtensionItem }).flatMap({ $0.attachments ?? [] }).first(where: { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }) else {
+    guard let provider = extensionContext?.inputItems.compactMap({ $0 as? NSExtensionItem }).flatMap({ $0.attachments ?? [] }).first(where: { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }),
+          let selectedTypeIdentifier = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) else {
       finish(message: "No supported image", error: true); return
     }
-    provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] source, _ in
+    guard let mediaType = UTType(selectedTypeIdentifier)?.preferredMIMEType else {
+      finish(message: "Unsupported image type", error: true); return
+    }
+    provider.loadFileRepresentation(forTypeIdentifier: selectedTypeIdentifier) { [weak self] source, _ in
       guard let self, let source else { self?.finish(message: "Import failed", error: true); return }
-      do { try self.copyAndWriteManifest(source: source, mediaType: provider.registeredTypeIdentifiers.first ?? UTType.image.identifier); self.finish(message: "Image saved", error: false) }
+      do { try self.copyAndWriteManifest(source: source, mediaType: mediaType); self.finish(message: "Image saved", error: false) }
       catch { self.finish(message: "Import failed", error: true) }
     }
   }
@@ -37,7 +42,7 @@ final class ShareViewController: UIViewController {
       if !committed { try? FileManager.default.removeItem(at: directory) }
     }
     let partial = directory.appendingPathComponent("\(itemId).partial"), destination = directory.appendingPathComponent("\(itemId).bin")
-    try FileManager.default.copyItem(at: source, to: partial)
+    try copyBounded(from: source, to: partial, limit: maximumImageBytes)
     try FileManager.default.moveItem(at: partial, to: destination)
     let bytes = (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
     let manifest: [String: Any] = ["schemaVersion": 1, "ingestionId": ingestionId, "createdAt": ISO8601DateFormatter().string(from: Date()), "source": "ios-share-extension", "status": "complete", "items": [["id": itemId, "mediaType": mediaType, "byteCount": bytes, "localUri": destination.absoluteString, "status": "copied"]]]
@@ -48,9 +53,30 @@ final class ShareViewController: UIViewController {
     committed = true
   }
 
+  private func copyBounded(from source: URL, to destination: URL, limit: Int) throws {
+    if let size = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > limit {
+      throw ShareError.imageTooLarge
+    }
+    guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw ShareError.copyFailed }
+    let input = try FileHandle(forReadingFrom: source)
+    let output: FileHandle
+    do { output = try FileHandle(forWritingTo: destination) }
+    catch { try? input.close(); throw ShareError.copyFailed }
+    defer {
+      try? input.close()
+      try? output.close()
+    }
+    var total = 0
+    while let data = try input.read(upToCount: 64 * 1024), !data.isEmpty {
+      total += data.count
+      guard total <= limit else { throw ShareError.imageTooLarge }
+      try output.write(contentsOf: data)
+    }
+  }
+
   private func finish(message: String, error: Bool) {
     DispatchQueue.main.async { self.statusLabel.text = message; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { error ? self.extensionContext?.cancelRequest(withError: ShareError.importFailed) : self.extensionContext?.completeRequest(returningItems: nil) } }
   }
 }
 
-private enum ShareError: Error { case appGroupUnavailable, importFailed }
+private enum ShareError: Error { case appGroupUnavailable, copyFailed, imageTooLarge, importFailed }

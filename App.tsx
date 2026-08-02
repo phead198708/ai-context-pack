@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import type { ImportManifestV1 } from './src/domain/contracts';
+import { shareImportErrorCode } from './src/domain/shareImportResult';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
 import { colors, spacing, typography } from './src/ui/tokens';
 
@@ -51,7 +52,13 @@ function App(): React.JSX.Element {
     });
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
-      () => {
+      (result: unknown) => {
+        const errorCode = shareImportErrorCode(result);
+        if (errorCode) {
+          setScreen('inbox');
+          setState({ kind: 'error', code: errorCode });
+          return;
+        }
         refresh(true).catch(() =>
           setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
         );

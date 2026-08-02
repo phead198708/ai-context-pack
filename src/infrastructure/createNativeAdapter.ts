@@ -1,4 +1,5 @@
 import type { NativeAdapter } from '../domain/nativeAdapter';
+import { newestManifestsFirst } from '../domain/importOrdering';
 import {
   isImportManifestV1,
   isOCRResultV1,
@@ -28,7 +29,7 @@ export const createNativeAdapter = (
           const value = await nativeModule.scanInbox();
           if (!Array.isArray(value) || !value.every(isImportManifestV1))
             throw new NativeBoundaryError('NATIVE_MANIFEST_INVALID');
-          return value;
+          return newestManifestsFirst(value);
         },
         recognizeText: async (uri, script) => {
           const value = await nativeModule.recognizeText(uri, script);

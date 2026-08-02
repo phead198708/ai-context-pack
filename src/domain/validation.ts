@@ -6,6 +6,28 @@ import type {
 } from './contracts';
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
+
+function isOwnedInboxFileUri(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split('/').filter(Boolean);
+    const inboxIndex = segments.lastIndexOf('Inbox');
+    return (
+      url.protocol === 'file:' &&
+      url.hostname === '' &&
+      url.username === '' &&
+      url.password === '' &&
+      url.search === '' &&
+      url.hash === '' &&
+      inboxIndex >= 0 &&
+      segments.length >= inboxIndex + 3 &&
+      !segments.some(segment => segment === '.' || segment === '..')
+    );
+  } catch {
+    return false;
+  }
+}
 export function isNormalizedBoundsV1(
   value: unknown,
 ): value is NormalizedBoundsV1 {
@@ -32,6 +54,7 @@ export function isImportManifestV1(value: unknown): value is ImportManifestV1 {
   return (
     typeof value.ingestionId === 'string' &&
     typeof value.createdAt === 'string' &&
+    Number.isFinite(Date.parse(value.createdAt)) &&
     (value.source === 'ios-share-extension' ||
       value.source === 'android-share-intent') &&
     (value.status === 'complete' ||
@@ -42,8 +65,12 @@ export function isImportManifestV1(value: unknown): value is ImportManifestV1 {
         isObject(item) &&
         typeof item.id === 'string' &&
         typeof item.mediaType === 'string' &&
-        typeof item.byteCount === 'number' &&
-        typeof item.localUri === 'string' &&
+        /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(
+          item.mediaType,
+        ) &&
+        Number.isSafeInteger(item.byteCount) &&
+        (item.byteCount as number) >= 0 &&
+        isOwnedInboxFileUri(item.localUri) &&
         (item.status === 'copied' || item.status === 'failed'),
     )
   );

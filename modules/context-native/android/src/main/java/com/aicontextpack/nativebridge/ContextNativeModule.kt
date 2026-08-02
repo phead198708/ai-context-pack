@@ -23,9 +23,7 @@ class ContextNativeModule : Module() {
     AsyncFunction("scanInbox") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       val inbox = File(context.filesDir, "Inbox")
-      (inbox.walkTopDown().filter { it.isFile && it.name == "manifest.json" }.mapNotNull { file ->
-        runCatching { jsonObjectToMap(JSONObject(file.readText())) }.getOrNull()
-      }.toList())
+      InboxManifestScanner.scan(inbox)
     }
 
     AsyncFunction("recognizeText") { fileUri: String, script: String, promise: Promise ->
@@ -61,6 +59,34 @@ class ContextNativeModule : Module() {
     return mapOf("schemaVersion" to 1, "text" to result.text, "blocks" to blocks,
       "durationMs" to (System.nanoTime() - started) / 1_000_000.0,
       "engine" to if (script == "chinese") "ml-kit-chinese" else "ml-kit-latin", "revision" to "16.0.1")
+  }
+
+}
+
+internal object InboxManifestScanner {
+  fun scan(inbox: File): List<Map<String, Any?>> = inbox.walkTopDown()
+    .filter { it.isFile && it.name == "manifest.json" }
+    .map { file ->
+      try {
+        val manifest = JSONObject(file.readText())
+        validateOwnedManifest(manifest, inbox)
+        jsonObjectToMap(manifest)
+      } catch (_: Exception) {
+        throw NativeException("INBOX_MANIFEST_INVALID")
+      }
+    }.toList()
+
+  private fun validateOwnedManifest(manifest: JSONObject, inbox: File) {
+    val inboxPath = inbox.canonicalPath + File.separator
+    val items = manifest.getJSONArray("items")
+    for (index in 0 until items.length()) {
+      val item = items.getJSONObject(index)
+      val uri = Uri.parse(item.getString("localUri"))
+      check(uri.scheme == "file" && uri.authority.isNullOrEmpty())
+      val path = File(requireNotNull(uri.path)).canonicalPath
+      check(path.startsWith(inboxPath))
+      if (item.getString("status") == "copied") check(File(path).isFile)
+    }
   }
 
   private fun jsonObjectToMap(value: JSONObject): Map<String, Any?> = value.keys().asSequence().associateWith { key ->
@@ -106,4 +132,4 @@ internal object PdfProbe {
   }
 }
 
-private class NativeException(code: String) : CodedException(code)
+internal class NativeException(code: String) : CodedException(code)

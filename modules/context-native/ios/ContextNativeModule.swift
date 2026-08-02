@@ -10,18 +10,24 @@ public final class ContextNativeModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ContextNative")
 
-    AsyncFunction("scanInbox") { () -> [[String: Any]] in
+    AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
         return []
       }
       let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
       guard let enumerator = FileManager.default.enumerator(at: inbox, includingPropertiesForKeys: nil) else { return [] }
       let files = enumerator.compactMap { $0 as? URL }
-      return files.filter { $0.lastPathComponent == "manifest.json" }.compactMap { url in
-        guard let data = try? Data(contentsOf: url),
-              let value = try? JSONSerialization.jsonObject(with: data),
-              let manifest = value as? [String: Any] else { return nil }
-        return manifest
+      return try files.filter { $0.lastPathComponent == "manifest.json" }.map { url in
+        do {
+          let data = try Data(contentsOf: url)
+          guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NativeError("INBOX_MANIFEST_INVALID")
+          }
+          try validateOwnedManifest(manifest, inbox: inbox)
+          return manifest
+        } catch {
+          throw NativeError("INBOX_MANIFEST_INVALID")
+        }
       }
     }
 
@@ -36,7 +42,11 @@ public final class ContextNativeModule: Module {
       request.recognitionLevel = .accurate
       request.usesLanguageCorrection = true
       request.recognitionLanguages = script == "chinese" ? ["zh-Hans", "en-US"] : ["en-US"]
-      try VNImageRequestHandler(cgImage: image).perform([request])
+      do {
+        try VNImageRequestHandler(cgImage: image).perform([request])
+      } catch {
+        throw NativeError("OCR_RECOGNITION_FAILED")
+      }
       let observations = request.results ?? []
       let blocks: [[String: Any]] = observations.compactMap { observation in
         guard let candidate = observation.topCandidates(1).first else { return nil }
@@ -55,7 +65,12 @@ public final class ContextNativeModule: Module {
 
     AsyncFunction("probePdf") { (fileUri: String) throws -> [String: Any] in
       let url = try controlledFileURL(fileUri)
-      let values = try url.resourceValues(forKeys: [.fileSizeKey])
+      let values: URLResourceValues
+      do {
+        values = try url.resourceValues(forKeys: [.fileSizeKey])
+      } catch {
+        throw NativeError("PDF_INVALID_OR_TOO_LARGE")
+      }
       guard (values.fileSize ?? 0) <= 52_428_800 else { throw NativeError("PDF_TOO_LARGE") }
       guard let document = PDFDocument(url: url), document.pageCount <= 25 else { throw NativeError("PDF_INVALID_OR_TOO_MANY_PAGES") }
       var embedded = 0
@@ -63,6 +78,25 @@ public final class ContextNativeModule: Module {
       return ["pageCount": document.pageCount, "embeddedTextPages": embedded,
               "renderedFallbackPages": document.pageCount - embedded, "engine": "pdfkit",
               "limit": ["pages": 25, "bytes": 52_428_800]]
+    }
+  }
+}
+
+private func validateOwnedManifest(_ manifest: [String: Any], inbox: URL) throws {
+  guard let items = manifest["items"] as? [[String: Any]] else {
+    throw NativeError("INBOX_MANIFEST_INVALID")
+  }
+  let inboxPath = inbox.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+  for item in items {
+    guard let value = item["localUri"] as? String,
+          let url = URL(string: value),
+          url.isFileURL,
+          url.host == nil,
+          url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(inboxPath) else {
+      throw NativeError("INBOX_MANIFEST_INVALID")
+    }
+    if item["status"] as? String == "copied" && !FileManager.default.fileExists(atPath: url.path) {
+      throw NativeError("INBOX_MANIFEST_INVALID")
     }
   }
 }
@@ -77,7 +111,8 @@ private func durationMilliseconds(since start: ContinuousClock.Instant) -> Doubl
   return Double(duration.components.seconds) * 1_000 + Double(duration.components.attoseconds) / 1_000_000_000_000_000
 }
 
-private struct NativeError: Error, CustomStringConvertible {
-  let description: String
-  init(_ code: String) { description = code }
+private final class NativeError: Exception, @unchecked Sendable {
+  init(_ code: String) {
+    super.init(name: "ContextNativeError", description: code, code: code)
+  }
 }

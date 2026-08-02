@@ -12,7 +12,9 @@ export type SafeErrorCode =
   | 'NATIVE_PDF_RESULT_INVALID'
   | 'OCR_IMAGE_DECODE_FAILED'
   | 'OCR_RECOGNITION_FAILED'
-  | 'SHARE_COPY_FAILED';
+  | 'SHARE_COPY_FAILED'
+  | 'SHARE_IMPORT_FAILED'
+  | 'SHARE_IMPORT_EVENT_INVALID';
 export type SafeEngine =
   | 'apple-vision'
   | 'ml-kit-latin'
@@ -44,6 +46,8 @@ const allowedCodes = new Set<SafeErrorCode>([
   'OCR_IMAGE_DECODE_FAILED',
   'OCR_RECOGNITION_FAILED',
   'SHARE_COPY_FAILED',
+  'SHARE_IMPORT_FAILED',
+  'SHARE_IMPORT_EVENT_INVALID',
 ]);
 const allowedEngines = new Set<SafeEngine>([
   'apple-vision',

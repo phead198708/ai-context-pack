@@ -4,7 +4,9 @@
 
 `src/domain` owns versioned TypeScript DTOs and validation without importing React Native. `NativeAdapter` accepts controlled local file URIs and returns DTOs. The `ContextNative` local Expo module implements the boundary in Swift and Kotlin under the New Architecture. Images and PDFs never cross the bridge as byte arrays.
 
-The iOS Share Extension accepts one image, copies it atomically to the App Group Inbox, writes a minimal manifest, reports success/failure, and exits. It does not launch React Native or attempt to open the containing app. Android performs the same bounded copy while the shared content URI is valid and then routes through the single-task main activity. Heavy OCR/PDF work is available only from the main application adapter.
+The iOS Share Extension accepts one image, resolves the selected UTI to a MIME type, copies at most 50 MB to the App Group Inbox with rollback on any failure, writes a minimal manifest atomically, reports success/failure, and exits. It does not launch React Native or attempt to open the containing app. Android performs the same bounded, transactional copy on background I/O while the shared content URI is valid and then routes through the single-task main activity. Heavy OCR/PDF work is available only from the main application adapter.
+
+Both native inbox scanners fail closed when a manifest is unreadable, malformed, points outside the application-owned Inbox, or claims a copied file that does not exist. The TypeScript boundary independently validates schema version, timestamps, MIME types, owned local-file URI shape, and non-negative safe-integer byte counts before exposing a DTO. Valid manifests are ordered by creation time with a stable ingestion-ID tie-breaker, and Android share completion events surface failed or malformed outcomes as stable UI error codes.
 
 ## PDF feasibility
 
