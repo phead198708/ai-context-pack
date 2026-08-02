@@ -27,12 +27,21 @@
 - name: area:architecture
   color: "5319E7"
   description: Module boundaries, ADRs, dependencies, and shared protocols
+- name: area:mobile-app
+  color: "7057FF"
+  description: Shared React Native application lifecycle, navigation, and composition
 - name: area:ios-app
   color: "7057FF"
-  description: Main iOS/iPadOS app lifecycle, navigation, and composition
+  description: iOS/iPadOS-specific lifecycle, entitlements, and system integration
+- name: area:android-app
+  color: "3DDC84"
+  description: Android lifecycle, manifest, Gradle, and system integration
 - name: area:share-extension
   color: "8B5CF6"
   description: iOS Share Extension and App Group Inbox
+- name: area:android-share
+  color: "2DA44E"
+  description: Android ACTION_SEND/ACTION_SEND_MULTIPLE and app-private Inbox
 - name: area:ingestion
   color: "006B75"
   description: Import, type validation, manifests, and hashing
@@ -50,7 +59,7 @@
   description: Markdown, PDF, bundles, clipboard, and system sharing
 - name: area:persistence
   color: "BFDADC"
-  description: Metadata, files, migrations, cleanup, and recovery
+  description: SQLite metadata, files, migrations, cleanup, and recovery
 - name: area:ui-ux
   color: "F9D0C4"
   description: Editor, preview, onboarding, and accessibility
@@ -59,7 +68,24 @@
   description: Tests, fixtures, CI, performance, audits, and release gates
 - name: area:release
   color: "1D76DB"
-  description: TestFlight, App Store, metadata, and privacy declarations
+  description: TestFlight, Play Internal, App Store, Google Play, metadata, and privacy declarations
+
+- name: platform:shared
+  color: "0969DA"
+  description: Shared TypeScript, schemas, fixtures, or cross-platform product behavior
+- name: platform:ios
+  color: "A2AAAD"
+  description: iOS/iPadOS, Swift, Xcode, or Share Extension work
+- name: platform:android
+  color: "3DDC84"
+  description: Android, Kotlin, Gradle, or share-intent work
+
+- name: layer:react-native
+  color: "61DAFB"
+  description: React Native UI, TypeScript domain, and workflow orchestration
+- name: layer:native
+  color: "6E7781"
+  description: Swift/Kotlin native entry points, modules, or renderers
 
 - name: priority:p0
   color: "B60205"
@@ -76,7 +102,7 @@
 
 - name: phase:0-foundation
   color: "0052CC"
-  description: Project, architecture, CI, App Group, and critical spikes
+  description: React Native project, native entry points, CI, contracts, and critical spikes
 - name: phase:1-ingest
   color: "006B75"
   description: Inputs, extraction, manifests, and recovery
@@ -85,7 +111,7 @@
   description: Cleanup, budgets, privacy review, and export
 - name: phase:3-beta
   color: "7057FF"
-  description: Quality, real tasks, TestFlight, and App Store
+  description: Quality, real tasks, TestFlight, Play Internal, App Store, and Google Play
 - name: phase:post-mvp
   color: "D4C5F9"
   description: Video, Shortcuts, macOS, MCP, and later extensions
@@ -125,6 +151,19 @@
 - name: risk:performance
   color: "FFA500"
   description: Time, memory, storage, thermal, or extension-budget risk
-- name: risk:app-store
+- name: risk:store-review
   color: "6F42C1"
-  description: Review, entitlement, privacy declaration, or release risk
+  description: App Store or Google Play review, permission, declaration, or release risk
+- name: risk:platform-parity
+  color: "BF8700"
+  description: Cross-platform behavior, contract, or security guarantee may diverge
+- name: risk:experimental-api
+  color: "CF222E"
+  description: Depends on experimental or unsupported platform behavior
+
+- name: test:device-required
+  color: "8250DF"
+  description: Requires physical-device validation evidence
+- name: test:contract
+  color: "1F6FEB"
+  description: Both platforms must pass the same versioned contract fixtures
