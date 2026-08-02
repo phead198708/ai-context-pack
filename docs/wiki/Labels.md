@@ -2,105 +2,132 @@
 
 ## 使用规则
 
-每个 issue 至少包含：一个 type、一个 area、一个 priority、一个 phase、一个 size。只有在确实需要时添加 status 或 risk。颜色用于快速辨认维度；同一维度使用相近色系。
+每个 issue 至少包含一个 `type:*`、一个 `area:*`、一个 `priority:*`、一个 `phase:*`、一个 `size:*`。
 
-## Type：工作类型，必须且只能选一个
+所有实现 issue 还必须包含至少一个 `platform:*`。涉及代码边界时添加一个或多个 `layer:*`。只有确实需要时添加 `status:*`、`risk:*` 或 `test:*`。
+
+## Type：必须且只能选一个
 
 | Label | Color | 用途 |
 |---|---:|---|
-| type:epic | 3E4B9E | 跨多个 issue 的交付目标，只维护范围、依赖和 promotion gate |
-| type:feature | 1D76DB | 用户可感知的新能力 |
-| type:task | 0E8A16 | 明确的工程工作，不单独形成用户功能 |
-| type:spike | FBCA04 | 有时限的技术验证，输出结论/ADR，不直接承诺生产实现 |
-| type:bug | D73A4A | 已有行为偏离需求或发生回归 |
+| type:epic | 3E4B9E | 跨 issue 交付目标 |
+| type:feature | 1D76DB | 用户可感知能力 |
+| type:task | 0E8A16 | 明确工程工作 |
+| type:spike | FBCA04 | 有时限的技术验证，输出证据与 ADR |
+| type:bug | D73A4A | 已有行为偏离需求或回归 |
 | type:docs | 0075CA | 产品、架构、开发或发布文档 |
-| type:chore | BFD4F2 | 依赖、构建、维护和非功能性杂项 |
+| type:chore | BFD4F2 | 构建、依赖和维护工作 |
 
-## Area：主要影响区域，至少一个，可多选
+## Platform：实现 issue 至少一个，可多选
 
 | Label | Color | 用途 |
 |---|---:|---|
-| area:architecture | 5319E7 | 模块边界、ADR、依赖与通用协议 |
-| area:ios-app | 7057FF | 主 App 生命周期、导航和组装 |
-| area:share-extension | 8B5CF6 | iOS Share Extension 与 App Group Inbox |
+| platform:shared | 0969DA | 跨平台 TypeScript、schema、fixture 或产品行为 |
+| platform:ios | A2AAAD | iOS/iPadOS、Swift、Xcode、Share Extension |
+| platform:android | 3DDC84 | Android、Kotlin、Gradle、share intents |
+
+仅加 `platform:shared` 表示没有平台原生实现；同时包含三者表示共享层与两端适配器都在范围内。
+
+## Layer：按代码边界选择，可多选
+
+| Label | Color | 用途 |
+|---|---:|---|
+| layer:react-native | 61DAFB | React Native UI、TypeScript domain 和 workflow |
+| layer:native | 6E7781 | Swift/Kotlin 原生入口、模块或 renderer |
+
+## Area：至少一个，可多选
+
+| Label | Color | 用途 |
+|---|---:|---|
+| area:architecture | 5319E7 | 模块边界、ADR、依赖与协议 |
+| area:mobile-app | 7057FF | React Native 主 App 生命周期、导航和组装 |
+| area:ios-app | A2AAAD | iOS 专属 lifecycle、entitlement 与系统集成 |
+| area:android-app | 3DDC84 | Android lifecycle、manifest、Gradle 与系统集成 |
+| area:share-extension | 8B5CF6 | iOS Share Extension 与 App Group |
+| area:android-share | 2DA44E | Android ACTION_SEND/MULTIPLE 与私有 Inbox |
 | area:ingestion | 006B75 | 导入、类型识别、manifest、hash |
 | area:extraction | 008672 | OCR、PDF、文本和 URL 提取 |
 | area:processing | 0B4F6C | 规范化、去重、估算和压缩 |
-| area:privacy | B60205 | 敏感信息检测、审核、遮挡与日志安全 |
+| area:privacy | B60205 | 检测、审核、遮挡与日志安全 |
 | area:export | D4C5F9 | Markdown、PDF、bundle、clipboard、share |
-| area:persistence | BFDADC | SwiftData、文件存储、迁移、清理与恢复 |
+| area:persistence | BFDADC | SQLite、文件、迁移、清理与恢复 |
 | area:ui-ux | F9D0C4 | 编辑器、预览、onboarding、可访问性 |
 | area:quality | C5DEF5 | 测试、fixture、性能、CI 与 release gate |
-| area:release | 1D76DB | TestFlight、App Store、metadata 与隐私申报 |
+| area:release | 1D76DB | TestFlight、Play Internal、App Store、Google Play |
 
-## Priority：业务/交付优先级，必须且只能选一个
+## Priority：必须且只能选一个
 
 | Label | Color | 定义 |
 |---|---:|---|
-| priority:p0 | B60205 | 阻塞当前 phase 或涉及数据丢失/敏感信息泄漏，立即处理 |
-| priority:p1 | D93F0B | 当前 phase 必须完成，不能带入 promotion |
-| priority:p2 | FBCA04 | 重要但可在不破坏核心价值的前提下延期 |
-| priority:p3 | C2E0C6 | 候选改进或 post-MVP |
+| priority:p0 | B60205 | 阻塞 phase 或涉及数据丢失/隐私泄漏 |
+| priority:p1 | D93F0B | 当前 phase 必须完成 |
+| priority:p2 | FBCA04 | 重要但可延期 |
+| priority:p3 | C2E0C6 | 候选或 post-MVP |
 
-## Phase：交付阶段，必须且只能选一个
+## Phase：必须且只能选一个
 
 | Label | Color | 用途 |
 |---|---:|---|
-| phase:0-foundation | 0052CC | 工程、架构、CI、App Group 与关键 spike |
-| phase:1-ingest | 006B75 | 输入、提取、统一 manifest 和恢复 |
+| phase:0-foundation | 0052CC | RN 工程、原生入口、CI、contract 与关键 spike |
+| phase:1-ingest | 006B75 | 双端输入、提取、manifest 与恢复 |
 | phase:2-transform | 0E8A16 | 清洗、预算、隐私审核与导出 |
-| phase:3-beta | 7057FF | 质量、真实任务、TestFlight 与 App Store |
-| phase:post-mvp | D4C5F9 | 视频、Shortcuts、macOS、MCP 等扩展 |
+| phase:3-beta | 7057FF | 质量、真实任务、双端 beta 与上架 |
+| phase:post-mvp | D4C5F9 | 视频、自动化、macOS、MCP 等 |
 
-## Size：预估工作量，必须且只能选一个
+## Size：必须且只能选一个
 
 | Label | Color | 参考 |
 |---|---:|---|
-| size:xs | EDEDED | ≤ 半天，单一局部变更 |
-| size:s | D4EED1 | 约 1 天，范围明确 |
-| size:m | B7E4C7 | 2–3 天，少量跨模块协作 |
-| size:l | 74C69D | 4–7 天，需要设计与多类测试 |
-| size:xl | 40916C | >1 周，应优先拆分；epic 可使用 |
+| size:xs | EDEDED | ≤半天 |
+| size:s | D4EED1 | 约 1 天 |
+| size:m | B7E4C7 | 2–3 天 |
+| size:l | 74C69D | 4–7 天 |
+| size:xl | 40916C | >1 周；除 epic 外应优先拆分 |
 
-## Status：只表达异常或待决状态，可选
-
-| Label | Color | 用途 |
-|---|---:|---|
-| status:blocked | B60205 | 受外部依赖或前置 issue 阻塞，正文必须写 blocker |
-| status:needs-decision | FBCA04 | 缺少产品/架构决定，正文列出选项与截止点 |
-| status:needs-design | F9D0C4 | 开发前需要 UX flow 或视觉确认 |
-
-不创建 status:todo/in-progress/done；这些由 GitHub Projects/issue state 管理，避免两套状态漂移。
-
-## Risk：跨领域高风险，可选
+## Status：异常或待决状态，可选
 
 | Label | Color | 用途 |
 |---|---:|---|
-| risk:privacy | 8B0000 | 可能泄露、错误遮挡或不当保留用户内容 |
-| risk:data-loss | D73A4A | 可能丢失、覆盖或产生不可恢复状态 |
-| risk:performance | FFA500 | 时间、内存、磁盘或 Extension 限制风险 |
-| risk:app-store | 6F42C1 | 审核、entitlement、隐私申报或上架风险 |
+| status:blocked | B60205 | 有明确外部 blocker |
+| status:needs-decision | FBCA04 | 缺少产品/架构决定 |
+| status:needs-design | F9D0C4 | 需要 UX/视觉决定 |
+
+## Risk：可多选
+
+| Label | Color | 用途 |
+|---|---:|---|
+| risk:privacy | 8B0000 | 内容泄漏或错误遮挡 |
+| risk:data-loss | D73A4A | 丢失、覆盖或不可恢复状态 |
+| risk:performance | FFA500 | 时间、内存、磁盘、热量或 Extension 限制 |
+| risk:store-review | 6F42C1 | App Store/Google Play 审核、权限或申报 |
+| risk:platform-parity | BF8700 | 双端行为、contract 或安全保证不一致 |
+| risk:experimental-api | CF222E | 依赖实验性或非官方平台行为 |
+
+## Test：特殊验收要求，可选
+
+| Label | Color | 用途 |
+|---|---:|---|
+| test:device-required | 8250DF | 不能只靠 unit test/simulator，必须提供真实设备证据 |
+| test:contract | 1F6FEB | 两端必须通过同一 versioned contract fixture |
 
 ## 示例
 
-“Implement Share Extension inbox ingestion” 应使用：
+“Implement cross-platform share ingestion”：
 
 - type:feature
+- platform:shared
+- platform:ios
+- platform:android
+- layer:react-native
+- layer:native
 - area:share-extension
+- area:android-share
 - area:ingestion
 - priority:p0
 - phase:1-ingest
 - size:l
 - risk:data-loss
 - risk:performance
-
-“Evaluate SwiftData recovery behavior” 应使用：
-
-- type:spike
-- area:architecture
-- area:persistence
-- priority:p0
-- phase:0-foundation
-- size:s
-- status:needs-decision
-
+- risk:platform-parity
+- test:device-required
+- test:contract
