@@ -30,8 +30,13 @@ object ShareInboxImporter {
       return
     }
     executor.execute {
-      val mediaType = selectConcreteImageMediaType(intent.type, context.contentResolver.getType(source))
-      completion(if (mediaType == null) Result.FAILED else importImage(context, source, mediaType))
+      val result = try {
+        val mediaType = selectConcreteImageMediaType(intent.type, context.contentResolver.getType(source))
+        if (mediaType == null) Result.FAILED else importImage(context, source, mediaType)
+      } catch (_: Exception) {
+        Result.FAILED
+      }
+      completion(result)
     }
   }
 
@@ -66,7 +71,7 @@ object ShareInboxImporter {
   }
 
   internal fun selectConcreteImageMediaType(intentType: String?, resolvedType: String?): String? =
-    sequenceOf(intentType, resolvedType).firstOrNull { type ->
+    sequenceOf(resolvedType, intentType).firstOrNull { type ->
       type != null && concreteImageMime.matches(type)
     }
 

@@ -17,6 +17,14 @@ class ShareInboxImporterTest {
   }
 
   @Test
+  fun providerMimeTakesPrecedenceOverConflictingIntentMime() {
+    assertEquals(
+      "image/png",
+      ShareInboxImporter.selectConcreteImageMediaType("image/jpeg", "image/png")
+    )
+  }
+
+  @Test
   fun rejectsImageMimeWhenNoConcreteTypeExists() {
     assertEquals(null, ShareInboxImporter.selectConcreteImageMediaType("image/*", null))
     assertEquals(null, ShareInboxImporter.selectConcreteImageMediaType("image/jpeg; charset=utf-8", null))

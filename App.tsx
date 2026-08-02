@@ -15,6 +15,7 @@ import type { ImportManifestV1 } from './src/domain/contracts';
 import {
   LatestRequestGate,
   runLatestRequest,
+  ShareFailureLatch,
 } from './src/domain/latestRequestGate';
 import { shareImportErrorCode } from './src/domain/shareImportResult';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
@@ -31,6 +32,7 @@ function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>('inbox');
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const refreshGate = useRef(new LatestRequestGate()).current;
+  const shareFailure = useRef(new ShareFailureLatch()).current;
   const refresh = useCallback(
     async (showNewestImport = false): Promise<void> => {
       await runLatestRequest(
@@ -50,12 +52,29 @@ function App(): React.JSX.Element {
     },
     [refreshGate],
   );
+  const handleShareResult = useCallback(
+    (result: unknown): void => {
+      const errorCode = shareImportErrorCode(result);
+      if (errorCode) {
+        shareFailure.recordFailure();
+        refreshGate.invalidate();
+        setScreen('inbox');
+        setState({ kind: 'error', code: errorCode });
+        return;
+      }
+      shareFailure.clear();
+      refresh(true).catch(() =>
+        setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
+      );
+    },
+    [refresh, refreshGate, shareFailure],
+  );
   useEffect(() => {
     refresh(true).catch(() =>
       setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
     );
     const subscription = AppState.addEventListener('change', next => {
-      if (next === 'active')
+      if (next === 'active' && shareFailure.allowsAutomaticRefresh())
         refresh(true).catch(() =>
           setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
         );
@@ -63,24 +82,22 @@ function App(): React.JSX.Element {
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
       (result: unknown) => {
-        const errorCode = shareImportErrorCode(result);
-        if (errorCode) {
-          refreshGate.invalidate();
-          setScreen('inbox');
-          setState({ kind: 'error', code: errorCode });
-          return;
-        }
-        refresh(true).catch(() =>
-          setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
-        );
+        handleShareResult(result);
+        nativeAdapter.consumePendingShareResult().catch(() => undefined);
       },
     );
+    nativeAdapter
+      .consumePendingShareResult()
+      .then(result => {
+        if (result !== null) handleShareResult(result);
+      })
+      .catch(() => handleShareResult('invalid'));
     return () => {
       refreshGate.invalidate();
       subscription.remove();
       inboxSubscription.remove();
     };
-  }, [refresh, refreshGate]);
+  }, [handleShareResult, refresh, refreshGate, shareFailure]);
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
@@ -107,11 +124,12 @@ function App(): React.JSX.Element {
         {screen === 'inbox' && (
           <Inbox
             state={state}
-            onRetry={() =>
+            onRetry={() => {
+              shareFailure.clear();
               refresh().catch(() =>
                 setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
-              )
-            }
+              );
+            }}
           />
         )}
         {screen === 'detail' && <ImportDetail state={state} />}

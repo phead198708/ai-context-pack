@@ -6,6 +6,7 @@ import type {
 } from '../../../src/domain/contracts';
 declare class ContextNativeModule extends NativeModule {
   scanInbox(): Promise<readonly ImportManifestV1[]>;
+  consumePendingShareResult(): Promise<string | null>;
   recognizeText(
     fileUri: string,
     script: 'latin' | 'chinese',

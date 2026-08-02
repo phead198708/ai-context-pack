@@ -15,6 +15,22 @@ export class LatestRequestGate {
   }
 }
 
+export class ShareFailureLatch {
+  private failed = false;
+
+  recordFailure(): void {
+    this.failed = true;
+  }
+
+  clear(): void {
+    this.failed = false;
+  }
+
+  allowsAutomaticRefresh(): boolean {
+    return !this.failed;
+  }
+}
+
 export async function runLatestRequest<T>(
   gate: LatestRequestGate,
   request: () => Promise<T>,

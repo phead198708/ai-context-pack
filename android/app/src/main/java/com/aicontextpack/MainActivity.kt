@@ -30,6 +30,8 @@ class MainActivity : ReactActivity() {
 
   private fun importSharedImage(intent: Intent?) {
     ShareInboxImporter.importIfSupportedAsync(applicationContext, intent) { result ->
+      applicationContext.getSharedPreferences("ai-context-pack-share", android.content.Context.MODE_PRIVATE)
+        .edit().putString("pending-result", result.wireValue).commit()
       runOnUiThread {
         reactInstanceManager.currentReactContext
           ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)

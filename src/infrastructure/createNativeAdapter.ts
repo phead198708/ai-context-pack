@@ -8,6 +8,7 @@ import {
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
+  consumePendingShareResult?(): Promise<unknown>;
   recognizeText(uri: string, script: 'latin' | 'chinese'): Promise<unknown>;
   probePdf(uri: string): Promise<unknown>;
 }
@@ -31,6 +32,8 @@ export const createNativeAdapter = (
             throw new NativeBoundaryError('NATIVE_MANIFEST_INVALID');
           return newestManifestsFirst(value);
         },
+        consumePendingShareResult: async () =>
+          nativeModule.consumePendingShareResult?.() ?? null,
         recognizeText: async (uri, script) => {
           const value = await nativeModule.recognizeText(uri, script);
           if (!isOCRResultV1(value))
@@ -47,6 +50,7 @@ export const createNativeAdapter = (
     : {
         available: false,
         scanInbox: async () => [],
+        consumePendingShareResult: async () => null,
         recognizeText: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },

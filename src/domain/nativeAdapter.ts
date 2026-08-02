@@ -6,6 +6,7 @@ import type {
 export interface NativeAdapter {
   readonly available: boolean;
   scanInbox(): Promise<readonly ImportManifestV1[]>;
+  consumePendingShareResult(): Promise<unknown>;
   recognizeText(
     fileUri: string,
     script: 'latin' | 'chinese',

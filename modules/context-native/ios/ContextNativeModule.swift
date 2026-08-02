@@ -17,11 +17,19 @@ public final class ContextNativeModule: Module {
       let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
       var isDirectory: ObjCBool = false
       guard FileManager.default.fileExists(atPath: inbox.path, isDirectory: &isDirectory) else { return [] }
-      guard isDirectory.boolValue,
-            let enumerator = FileManager.default.enumerator(at: inbox, includingPropertiesForKeys: nil) else {
+      guard isDirectory.boolValue else { throw NativeError("INBOX_SCAN_FAILED") }
+      do { try recoverIncompleteTransactions(inbox: inbox) }
+      catch { throw NativeError("INBOX_SCAN_FAILED") }
+      var enumerationError: Error?
+      guard let enumerator = FileManager.default.enumerator(
+        at: inbox,
+        includingPropertiesForKeys: nil,
+        errorHandler: { _, error in enumerationError = error; return false }
+      ) else {
         throw NativeError("INBOX_SCAN_FAILED")
       }
       let files = enumerator.compactMap { $0 as? URL }
+      if enumerationError != nil { throw NativeError("INBOX_SCAN_FAILED") }
       return try files.filter { $0.lastPathComponent == "manifest.json" }.map { url in
         do {
           let data = try Data(contentsOf: url)
@@ -43,12 +51,13 @@ public final class ContextNativeModule: Module {
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
         throw NativeError("OCR_IMAGE_DECODE_FAILED")
       }
+      let orientation = imageOrientation(source: source)
       let request = VNRecognizeTextRequest()
       request.recognitionLevel = .accurate
       request.usesLanguageCorrection = true
       request.recognitionLanguages = script == "chinese" ? ["zh-Hans", "en-US"] : ["en-US"]
       do {
-        try VNImageRequestHandler(cgImage: image).perform([request])
+        try VNImageRequestHandler(cgImage: image, orientation: orientation).perform([request])
       } catch {
         throw NativeError("OCR_RECOGNITION_FAILED")
       }
@@ -85,6 +94,26 @@ public final class ContextNativeModule: Module {
               "limit": ["pages": 25, "bytes": 52_428_800]]
     }
   }
+}
+
+private func recoverIncompleteTransactions(inbox: URL) throws {
+  let children = try FileManager.default.contentsOfDirectory(
+    at: inbox,
+    includingPropertiesForKeys: [.isDirectoryKey],
+    options: [.skipsHiddenFiles]
+  )
+  for child in children where (try child.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
+    let manifest = child.appendingPathComponent("manifest.json")
+    if !FileManager.default.fileExists(atPath: manifest.path) {
+      try FileManager.default.removeItem(at: child)
+    }
+  }
+}
+
+private func imageOrientation(source: CGImageSource) -> CGImagePropertyOrientation {
+  guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+        let rawValue = properties[kCGImagePropertyOrientation] as? NSNumber else { return .up }
+  return CGImagePropertyOrientation(rawValue: rawValue.uint32Value) ?? .up
 }
 
 private func validateOwnedManifest(_ manifest: [String: Any], inbox: URL) throws {

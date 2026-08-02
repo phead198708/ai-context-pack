@@ -1,6 +1,7 @@
 package com.aicontextpack.nativebridge
 
 import androidx.test.platform.app.InstrumentationRegistry
+import android.system.Os
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -67,8 +68,45 @@ class InboxManifestScannerInstrumentedTest {
     assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
   }
 
-  private fun writeManifest(item: File, byteCount: Long = item.length()) {
-    val directory = File(inbox, "valid").apply { mkdirs() }
+  @Test
+  fun removesInterruptedTransactionsWithoutManifests() {
+    val partial = File(inbox, "partial").apply { mkdirs() }
+    File(partial, "item.partial").writeBytes(byteArrayOf(1, 2))
+    val copied = File(inbox, "copied").apply { mkdirs() }
+    File(copied, "item.bin").writeBytes(byteArrayOf(3, 4))
+
+    assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
+    assertEquals(false, partial.exists())
+    assertEquals(false, copied.exists())
+  }
+
+  @Test
+  fun rejectsInboxThatIsNotDirectory() {
+    inbox.deleteRecursively()
+    inbox.writeText("not a directory")
+
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+  }
+
+  @Test
+  fun rejectsTraversalFailure() {
+    val blocked = File(inbox, "blocked").apply { mkdirs() }
+    val item = File(blocked, "item.bin").apply { writeBytes(byteArrayOf(1)) }
+    writeManifest(item, manifestDirectory = blocked)
+    Os.chmod(blocked.path, 0)
+    try {
+      assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+    } finally {
+      Os.chmod(blocked.path, 448)
+    }
+  }
+
+  private fun writeManifest(
+    item: File,
+    byteCount: Long = item.length(),
+    manifestDirectory: File = File(inbox, "valid"),
+  ) {
+    val directory = manifestDirectory.apply { mkdirs() }
     val payload = JSONObject()
       .put("schemaVersion", 1)
       .put("ingestionId", "valid")

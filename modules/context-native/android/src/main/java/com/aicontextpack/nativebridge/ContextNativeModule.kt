@@ -26,6 +26,14 @@ class ContextNativeModule : Module() {
       InboxManifestScanner.scan(inbox)
     }
 
+    AsyncFunction("consumePendingShareResult") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      val preferences = context.getSharedPreferences("ai-context-pack-share", android.content.Context.MODE_PRIVATE)
+      val result = preferences.getString("pending-result", null)
+      if (result != null) preferences.edit().remove("pending-result").commit()
+      result
+    }
+
     AsyncFunction("recognizeText") { fileUri: String, script: String, promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
       val uri = controlledFileUri(fileUri)
@@ -64,9 +72,16 @@ class ContextNativeModule : Module() {
 }
 
 internal object InboxManifestScanner {
-  fun scan(inbox: File): List<Map<String, Any?>> = inbox.walkTopDown()
-    .filter { it.isFile && it.name == "manifest.json" }
-    .map { file ->
+  fun scan(inbox: File): List<Map<String, Any?>> {
+    if (!inbox.exists()) return emptyList()
+    if (!inbox.isDirectory || !inbox.canRead()) throw NativeException("INBOX_SCAN_FAILED")
+    val files = try {
+      recoverIncompleteTransactions(inbox)
+      manifestFiles(inbox)
+    } catch (_: Exception) {
+      throw NativeException("INBOX_SCAN_FAILED")
+    }
+    return files.map { file ->
       try {
         val manifest = JSONObject(file.readText())
         validateOwnedManifest(manifest, inbox)
@@ -74,7 +89,34 @@ internal object InboxManifestScanner {
       } catch (_: Exception) {
         throw NativeException("INBOX_MANIFEST_INVALID")
       }
-    }.toList()
+    }
+  }
+
+  private fun recoverIncompleteTransactions(inbox: File) {
+    val inboxPath = inbox.canonicalPath + File.separator
+    val ingestions = inbox.listFiles() ?: error("INBOX_SCAN_FAILED")
+    ingestions.filter { it.isDirectory && !File(it, "manifest.json").isFile }.forEach { directory ->
+      check(directory.canonicalPath.startsWith(inboxPath))
+      check(directory.deleteRecursively() && !directory.exists())
+    }
+  }
+
+  private fun manifestFiles(root: File): List<File> {
+    val rootPath = root.canonicalPath + File.separator
+    val manifests = mutableListOf<File>()
+    fun visit(directory: File) {
+      val children = directory.listFiles() ?: error("INBOX_SCAN_FAILED")
+      children.forEach { child ->
+        check(child.canonicalPath.startsWith(rootPath))
+        when {
+          child.isDirectory -> visit(child)
+          child.isFile && child.name == "manifest.json" -> manifests += child
+        }
+      }
+    }
+    visit(root)
+    return manifests
+  }
 
   private fun validateOwnedManifest(manifest: JSONObject, inbox: File) {
     val inboxPath = inbox.canonicalPath + File.separator

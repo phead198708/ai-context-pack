@@ -9,6 +9,7 @@ import { shareImportErrorCode } from '../src/domain/shareImportResult';
 import {
   LatestRequestGate,
   runLatestRequest,
+  ShareFailureLatch,
 } from '../src/domain/latestRequestGate';
 describe('versioned native contracts', () => {
   test('accepts the shared minimal manifest fixture', () => {
@@ -196,5 +197,13 @@ describe('versioned native contracts', () => {
     await pending;
 
     expect(visible).toEqual(['loading', 'share-error']);
+  });
+  test('suppresses lifecycle refreshes until retry or success clears failure', () => {
+    const latch = new ShareFailureLatch();
+    expect(latch.allowsAutomaticRefresh()).toBe(true);
+    latch.recordFailure();
+    expect(latch.allowsAutomaticRefresh()).toBe(false);
+    latch.clear();
+    expect(latch.allowsAutomaticRefresh()).toBe(true);
   });
 });
