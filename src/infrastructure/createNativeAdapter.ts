@@ -5,10 +5,17 @@ import {
   isOCRResultV1,
   isPDFProbeResultV1,
 } from '../domain/validation';
+import {
+  isPendingShareEvent,
+  isRecoveryEvent,
+} from '../domain/shareImportResult';
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
-  consumePendingShareResult?(): Promise<unknown>;
+  getPendingShareEvents?(): Promise<unknown>;
+  ackPendingShareEvent?(id: string): Promise<unknown>;
+  getPendingRecoveryEvent?(): Promise<unknown>;
+  ackRecoveryEvent?(id: string): Promise<unknown>;
   recognizeText(uri: string, script: 'latin' | 'chinese'): Promise<unknown>;
   probePdf(uri: string): Promise<unknown>;
 }
@@ -27,13 +34,37 @@ export const createNativeAdapter = (
     ? {
         available: true,
         scanInbox: async () => {
-          const value = await nativeModule.scanInbox();
+          let value: unknown;
+          try {
+            value = await nativeModule.scanInbox();
+          } catch (error) {
+            if (nativeErrorCode(error) === 'INBOX_RECOVERY_REQUIRED')
+              throw new NativeBoundaryError('INBOX_RECOVERY_REQUIRED');
+            throw error;
+          }
           if (!Array.isArray(value) || !value.every(isImportManifestV1))
             throw new NativeBoundaryError('NATIVE_MANIFEST_INVALID');
           return newestManifestsFirst(value);
         },
-        consumePendingShareResult: async () =>
-          nativeModule.consumePendingShareResult?.() ?? null,
+        getPendingShareEvents: async () => {
+          const value = (await nativeModule.getPendingShareEvents?.()) ?? [];
+          if (!Array.isArray(value) || !value.every(isPendingShareEvent))
+            throw new NativeBoundaryError('NATIVE_SHARE_EVENT_INVALID');
+          return value;
+        },
+        ackPendingShareEvent: async id => {
+          await nativeModule.ackPendingShareEvent?.(id);
+        },
+        getPendingRecoveryEvent: async () => {
+          const value =
+            (await nativeModule.getPendingRecoveryEvent?.()) ?? null;
+          if (value !== null && !isRecoveryEvent(value))
+            throw new NativeBoundaryError('NATIVE_RECOVERY_EVENT_INVALID');
+          return value;
+        },
+        ackRecoveryEvent: async id => {
+          await nativeModule.ackRecoveryEvent?.(id);
+        },
         recognizeText: async (uri, script) => {
           const value = await nativeModule.recognizeText(uri, script);
           if (!isOCRResultV1(value))
@@ -50,7 +81,10 @@ export const createNativeAdapter = (
     : {
         available: false,
         scanInbox: async () => [],
-        consumePendingShareResult: async () => null,
+        getPendingShareEvents: async () => [],
+        ackPendingShareEvent: async () => undefined,
+        getPendingRecoveryEvent: async () => null,
+        ackRecoveryEvent: async () => undefined,
         recognizeText: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
@@ -58,3 +92,13 @@ export const createNativeAdapter = (
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
       };
+
+function nativeErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const value = error as { code?: unknown; message?: unknown };
+  if (typeof value.code === 'string') return value.code;
+  return typeof value.message === 'string' &&
+    value.message.includes('INBOX_RECOVERY_REQUIRED')
+    ? 'INBOX_RECOVERY_REQUIRED'
+    : undefined;
+}

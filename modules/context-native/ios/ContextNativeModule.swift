@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import PDFKit
 import Vision
+import Darwin
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
 
@@ -16,8 +17,11 @@ public final class ContextNativeModule: Module {
       }
       let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
       let staging = container.appendingPathComponent("InboxStaging", isDirectory: true)
+      if try !MetadataEventStore.read(container: container, folder: "RecoveryEvents").isEmpty {
+        throw NativeError("INBOX_RECOVERY_REQUIRED")
+      }
       let recovered: Bool
-      do { recovered = try recoverIncompleteTransactions(inbox: inbox, staging: staging) }
+      do { recovered = try recoverIncompleteTransactions(inbox: inbox, staging: staging, container: container) }
       catch { throw NativeError("INBOX_SCAN_FAILED") }
       if recovered { throw NativeError("INBOX_RECOVERY_REQUIRED") }
       var isDirectory: ObjCBool = false
@@ -45,6 +49,21 @@ public final class ContextNativeModule: Module {
           throw NativeError("INBOX_MANIFEST_INVALID")
         }
       }
+    }
+
+    AsyncFunction("getPendingShareEvents") { () -> [[String: Any]] in [] }
+    AsyncFunction("ackPendingShareEvent") { (_: String) -> Bool in true }
+    AsyncFunction("getPendingRecoveryEvent") { () throws -> [String: Any]? in
+      guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
+        throw NativeError("APP_GROUP_UNAVAILABLE")
+      }
+      return try MetadataEventStore.read(container: container, folder: "RecoveryEvents").first
+    }
+    AsyncFunction("ackRecoveryEvent") { (id: String) throws -> Bool in
+      guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
+        throw NativeError("APP_GROUP_UNAVAILABLE")
+      }
+      return try MetadataEventStore.ack(container: container, folder: "RecoveryEvents", id: id)
     }
 
     AsyncFunction("recognizeText") { (fileUri: String, script: String) async throws -> [String: Any] in
@@ -99,10 +118,9 @@ public final class ContextNativeModule: Module {
   }
 }
 
-private func recoverIncompleteTransactions(inbox: URL, staging: URL, now: Date = Date()) throws -> Bool {
-  let staleBefore = now.addingTimeInterval(-24 * 60 * 60)
-  var recovered = try recoverCandidates(root: staging, staleBefore: staleBefore) { _ in true }
-  recovered = try recoverCandidates(root: inbox, staleBefore: staleBefore) { child in
+private func recoverIncompleteTransactions(inbox: URL, staging: URL, container: URL) throws -> Bool {
+  var recovered = try recoverCandidates(root: staging, container: container) { _ in true }
+  recovered = try recoverCandidates(root: inbox, container: container) { child in
     !FileManager.default.fileExists(atPath: child.appendingPathComponent("manifest.json").path)
   } || recovered
   return recovered
@@ -110,7 +128,7 @@ private func recoverIncompleteTransactions(inbox: URL, staging: URL, now: Date =
 
 private func recoverCandidates(
   root: URL,
-  staleBefore: Date,
+  container: URL,
   isIncomplete: (URL) -> Bool
 ) throws -> Bool {
   var isDirectory: ObjCBool = false
@@ -118,19 +136,87 @@ private func recoverCandidates(
   guard isDirectory.boolValue else { throw NativeError("INBOX_SCAN_FAILED") }
   let children = try FileManager.default.contentsOfDirectory(
     at: root,
-    includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+    includingPropertiesForKeys: [.isDirectoryKey],
     options: [.skipsHiddenFiles]
   )
   var recovered = false
   for child in children {
-    let values = try child.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
+    let values = try child.resourceValues(forKeys: [.isDirectoryKey])
     guard values.isDirectory == true,
           isIncomplete(child),
-          (values.contentModificationDate ?? .distantFuture) <= staleBefore else { continue }
+          let lock = try TransactionRecoveryLock.acquire(directory: child) else { continue }
+    defer { lock.release() }
+    try MetadataEventStore.persistRecovery(container: container)
     try FileManager.default.removeItem(at: child)
     recovered = true
   }
   return recovered
+}
+
+private final class TransactionRecoveryLock {
+  private var descriptor: Int32
+  private init(descriptor: Int32) { self.descriptor = descriptor }
+
+  static func acquire(directory: URL) throws -> TransactionRecoveryLock? {
+    let lockURL = directory.appendingPathComponent(".writer.lock")
+    guard FileManager.default.fileExists(atPath: lockURL.path) else {
+      return TransactionRecoveryLock(descriptor: -1)
+    }
+    let descriptor = Darwin.open(lockURL.path, O_RDWR)
+    guard descriptor >= 0 else { throw NativeError("INBOX_SCAN_FAILED") }
+    guard Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
+      let lockError = errno
+      Darwin.close(descriptor)
+      if lockError == EWOULDBLOCK || lockError == EAGAIN { return nil }
+      throw NativeError("INBOX_SCAN_FAILED")
+    }
+    return TransactionRecoveryLock(descriptor: descriptor)
+  }
+
+  func release() {
+    guard descriptor >= 0 else { return }
+    Darwin.lockf(descriptor, F_ULOCK, 0)
+    Darwin.close(descriptor)
+    descriptor = -1
+  }
+
+  deinit { release() }
+}
+
+private enum MetadataEventStore {
+  static func persistRecovery(container: URL) throws {
+    let id = UUID().uuidString.lowercased()
+    let event: [String: Any] = [
+      "schemaVersion": 1,
+      "id": id,
+      "code": "INBOX_RECOVERY_REQUIRED",
+      "createdAtMs": Int64(Date().timeIntervalSince1970 * 1_000)
+    ]
+    let directory = container.appendingPathComponent("RecoveryEvents", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+    try data.write(to: directory.appendingPathComponent("\(id).json"), options: [.atomic])
+  }
+
+  static func read(container: URL, folder: String) throws -> [[String: Any]] {
+    let directory = container.appendingPathComponent(folder, isDirectory: true)
+    guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+    return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+      .filter { $0.pathExtension == "json" }
+      .compactMap { url in
+        let data = try Data(contentsOf: url)
+        return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+      }
+      .sorted { ($0["createdAtMs"] as? NSNumber)?.int64Value ?? 0 < ($1["createdAtMs"] as? NSNumber)?.int64Value ?? 0 }
+  }
+
+  static func ack(container: URL, folder: String, id: String) throws -> Bool {
+    guard UUID(uuidString: id) != nil else { throw NativeError("METADATA_EVENT_ID_INVALID") }
+    let url = container.appendingPathComponent(folder, isDirectory: true).appendingPathComponent("\(id.lowercased()).json")
+    guard FileManager.default.fileExists(atPath: url.path) else { return true }
+    try FileManager.default.removeItem(at: url)
+    return true
+  }
 }
 
 private func imageOrientation(source: CGImageSource) -> CGImagePropertyOrientation {

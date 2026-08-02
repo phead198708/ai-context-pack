@@ -17,7 +17,11 @@ import {
   runLatestRequest,
   ShareFailureLatch,
 } from './src/domain/latestRequestGate';
-import { shareImportErrorCode } from './src/domain/shareImportResult';
+import {
+  isPendingShareEvent,
+  shareImportErrorCode,
+} from './src/domain/shareImportResult';
+import { NativeBoundaryError } from './src/infrastructure/createNativeAdapter';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
 import { colors, spacing, typography } from './src/ui/tokens';
 
@@ -33,11 +37,19 @@ function App(): React.JSX.Element {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const refreshGate = useRef(new LatestRequestGate()).current;
   const shareFailure = useRef(new ShareFailureLatch()).current;
+  const recoveryEventId = useRef<string | null>(null);
   const refresh = useCallback(
     async (showNewestImport = false): Promise<void> => {
       await runLatestRequest(
         refreshGate,
-        () => nativeAdapter.scanInbox(),
+        async () => {
+          const recovery = await nativeAdapter.getPendingRecoveryEvent();
+          if (recovery) {
+            recoveryEventId.current = recovery.id;
+            throw new NativeBoundaryError(recovery.code);
+          }
+          return nativeAdapter.scanInbox();
+        },
         () => setState({ kind: 'loading' }),
         manifests => {
           setState(
@@ -47,7 +59,7 @@ function App(): React.JSX.Element {
           );
           if (showNewestImport && manifests.length > 0) setScreen('detail');
         },
-        () => setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
+        error => setState({ kind: 'error', code: visibleErrorCode(error) }),
       );
     },
     [refreshGate],
@@ -81,15 +93,19 @@ function App(): React.JSX.Element {
     });
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
-      (result: unknown) => {
-        handleShareResult(result);
-        nativeAdapter.consumePendingShareResult().catch(() => undefined);
+      (event: unknown) => {
+        handleShareResult(event);
+        if (isPendingShareEvent(event))
+          nativeAdapter.ackPendingShareEvent(event.id).catch(() => undefined);
       },
     );
     nativeAdapter
-      .consumePendingShareResult()
-      .then(result => {
-        if (result !== null) handleShareResult(result);
+      .getPendingShareEvents()
+      .then(async events => {
+        for (const event of events) {
+          handleShareResult(event);
+          await nativeAdapter.ackPendingShareEvent(event.id);
+        }
       })
       .catch(() => handleShareResult('invalid'));
     return () => {
@@ -126,9 +142,17 @@ function App(): React.JSX.Element {
             state={state}
             onRetry={() => {
               shareFailure.clear();
-              refresh().catch(() =>
-                setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
-              );
+              const id = recoveryEventId.current;
+              const acknowledge = id
+                ? nativeAdapter.ackRecoveryEvent(id).then(() => {
+                    recoveryEventId.current = null;
+                  })
+                : Promise.resolve();
+              acknowledge
+                .then(() => refresh())
+                .catch(error =>
+                  setState({ kind: 'error', code: visibleErrorCode(error) }),
+                );
             }}
           />
         )}
@@ -137,6 +161,12 @@ function App(): React.JSX.Element {
       </ScrollView>
     </SafeAreaView>
   );
+}
+
+function visibleErrorCode(error: unknown): string {
+  return error instanceof NativeBoundaryError
+    ? error.code
+    : 'INBOX_SCAN_FAILED';
 }
 
 function Inbox({

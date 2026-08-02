@@ -3,7 +3,9 @@ package com.aicontextpack
 import android.os.Build
 import android.os.Bundle
 import android.content.Intent
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.aicontextpack.nativebridge.MetadataEventStore
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
@@ -19,7 +21,7 @@ class MainActivity : ReactActivity() {
     // This is required for expo-splash-screen.
     setTheme(R.style.AppTheme);
     super.onCreate(null)
-    importSharedImage(intent)
+    if (ShareLaunchGate.shouldConsumeInitialIntent(savedInstanceState != null)) importSharedImage(intent)
   }
 
   override fun onNewIntent(intent: Intent) {
@@ -33,12 +35,11 @@ class MainActivity : ReactActivity() {
       setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
     }
     ShareInboxImporter.importIfSupportedAsync(applicationContext, intent) { result ->
-      applicationContext.getSharedPreferences("ai-context-pack-share", android.content.Context.MODE_PRIVATE)
-        .edit().putString("pending-result", result.wireValue).commit()
+      val event = MetadataEventStore.persistShareResult(applicationContext.filesDir, result.wireValue)
       runOnUiThread {
         reactInstanceManager.currentReactContext
           ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-          ?.emit("AIContextPackInboxChanged", result.wireValue)
+          ?.emit("AIContextPackInboxChanged", Arguments.makeNativeMap(event))
       }
     }
   }
@@ -82,4 +83,8 @@ class MainActivity : ReactActivity() {
       // because it's doing more than [Activity.moveTaskToBack] in fact.
       super.invokeDefaultOnBackPressed()
   }
+}
+
+internal object ShareLaunchGate {
+  fun shouldConsumeInitialIntent(restoredSystemTask: Boolean): Boolean = !restoredSystemTask
 }

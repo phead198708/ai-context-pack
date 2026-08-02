@@ -36,14 +36,14 @@ export async function runLatestRequest<T>(
   request: () => Promise<T>,
   onStart: () => void,
   onSuccess: (value: T) => void,
-  onError: () => void,
+  onError: (error: unknown) => void,
 ): Promise<void> {
   const generation = gate.begin();
   onStart();
   try {
     const value = await request();
     if (gate.isCurrent(generation)) onSuccess(value);
-  } catch {
-    if (gate.isCurrent(generation)) onError();
+  } catch (error) {
+    if (gate.isCurrent(generation)) onError(error);
   }
 }

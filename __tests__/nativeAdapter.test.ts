@@ -34,4 +34,29 @@ describe('native adapter runtime boundary', () => {
       { code: 'NATIVE_PDF_RESULT_INVALID' },
     );
   });
+
+  test('validates versioned share events before exposing them', async () => {
+    const native = {
+      ...mockNativeModule,
+      getPendingShareEvents: jest
+        .fn()
+        .mockResolvedValue([
+          { schemaVersion: 1, id: 'not-an-id', result: 'complete' },
+        ]),
+    };
+    await expect(
+      createNativeAdapter(native).getPendingShareEvents(),
+    ).rejects.toMatchObject({
+      code: 'NATIVE_SHARE_EVENT_INVALID',
+    });
+  });
+
+  test('preserves the durable recovery error across the native boundary', async () => {
+    mockNativeModule.scanInbox.mockRejectedValue({
+      code: 'INBOX_RECOVERY_REQUIRED',
+    });
+    await expect(adapter.scanInbox()).rejects.toMatchObject({
+      code: 'INBOX_RECOVERY_REQUIRED',
+    });
+  });
 });

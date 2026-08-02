@@ -1,5 +1,6 @@
 import UIKit
 import UniformTypeIdentifiers
+import Darwin
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
 private let maximumImageBytes = 52_428_800
@@ -38,6 +39,7 @@ final class ShareViewController: UIViewController {
     let directory = container.appendingPathComponent("InboxStaging/\(ingestionId)", isDirectory: true)
     let publishedDirectory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let writerLock = try TransactionWriterLock(directory: directory)
     var committed = false
     defer {
       if !committed { try? FileManager.default.removeItem(at: directory) }
@@ -55,6 +57,7 @@ final class ShareViewController: UIViewController {
     try FileManager.default.createDirectory(at: publishedDirectory.deletingLastPathComponent(), withIntermediateDirectories: true)
     try FileManager.default.moveItem(at: directory, to: publishedDirectory)
     committed = true
+    writerLock.release()
   }
 
   private func copyBounded(from source: URL, to destination: URL, limit: Int) throws {
@@ -83,4 +86,29 @@ final class ShareViewController: UIViewController {
   }
 }
 
-private enum ShareError: Error { case appGroupUnavailable, copyFailed, imageTooLarge, importFailed }
+private final class TransactionWriterLock {
+  private var descriptor: Int32
+
+  init(directory: URL) throws {
+    descriptor = Darwin.open(
+      directory.appendingPathComponent(".writer.lock").path,
+      O_CREAT | O_RDWR,
+      S_IRUSR | S_IWUSR
+    )
+    guard descriptor >= 0, Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
+      if descriptor >= 0 { Darwin.close(descriptor) }
+      throw ShareError.writerLockUnavailable
+    }
+  }
+
+  func release() {
+    guard descriptor >= 0 else { return }
+    Darwin.lockf(descriptor, F_ULOCK, 0)
+    Darwin.close(descriptor)
+    descriptor = -1
+  }
+
+  deinit { release() }
+}
+
+private enum ShareError: Error { case appGroupUnavailable, copyFailed, imageTooLarge, importFailed, writerLockUnavailable }

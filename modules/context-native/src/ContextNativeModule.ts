@@ -4,9 +4,16 @@ import type {
   OCRResultV1,
   PDFProbeResultV1,
 } from '../../../src/domain/contracts';
+import type {
+  PendingShareEvent,
+  RecoveryEvent,
+} from '../../../src/domain/shareImportResult';
 declare class ContextNativeModule extends NativeModule {
   scanInbox(): Promise<readonly ImportManifestV1[]>;
-  consumePendingShareResult(): Promise<string | null>;
+  getPendingShareEvents(): Promise<readonly PendingShareEvent[]>;
+  ackPendingShareEvent(id: string): Promise<boolean>;
+  getPendingRecoveryEvent(): Promise<RecoveryEvent | null>;
+  ackRecoveryEvent(id: string): Promise<boolean>;
   recognizeText(
     fileUri: string,
     script: 'latin' | 'chinese',

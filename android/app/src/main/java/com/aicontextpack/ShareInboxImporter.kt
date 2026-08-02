@@ -6,6 +6,7 @@ import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,12 +26,9 @@ object ShareInboxImporter {
   fun importIfSupportedAsync(context: Context, intent: Intent?, completion: (Result) -> Unit) {
     if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return
     val source = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-    if (source == null) {
-      completion(Result.FAILED)
-      return
-    }
     executor.execute {
       val result = try {
+        requireNotNull(source) { "SHARE_STREAM_MISSING" }
         val mediaType = selectConcreteImageMediaType(intent.type, context.contentResolver.getType(source))
         if (mediaType == null) Result.FAILED else importImage(context, source, mediaType)
       } catch (_: Exception) {
@@ -48,9 +46,13 @@ object ShareInboxImporter {
     val partial = File(directory, "$itemId.partial")
     val destination = File(directory, "$itemId.bin")
     val manifest = File(directory, "manifest.json")
+    var lockFile: RandomAccessFile? = null
+    var writerLock: java.nio.channels.FileLock? = null
     return try {
       require(selectConcreteImageMediaType(mediaType, null) != null) { "SHARE_MIME_INVALID" }
       check(directory.mkdirs()) { "SHARE_DIRECTORY_CREATE_FAILED" }
+      lockFile = RandomAccessFile(File(directory, ".writer.lock"), "rw")
+      writerLock = lockFile.channel.lock()
       context.contentResolver.openInputStream(source).use { input ->
         requireNotNull(input) { "SHARE_URI_UNREADABLE" }
         partial.outputStream().use { output -> copyBounded(input, output, maxImageBytes) }
@@ -71,6 +73,9 @@ object ShareInboxImporter {
     } catch (_: Exception) {
       directory.deleteRecursively()
       Result.FAILED
+    } finally {
+      runCatching { writerLock?.release() }
+      runCatching { lockFile?.close() }
     }
   }
 

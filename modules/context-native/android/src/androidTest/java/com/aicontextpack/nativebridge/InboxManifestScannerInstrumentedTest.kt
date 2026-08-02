@@ -10,6 +10,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import java.io.File
+import java.io.RandomAccessFile
 
 class InboxManifestScannerInstrumentedTest {
   private lateinit var inbox: File
@@ -69,30 +70,49 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
-  fun leavesFreshManifestlessTransactionsForActiveWriters() {
+  fun leavesTransactionsWithLiveWriterLocksUntouched() {
     val partial = File(inbox, "partial").apply { mkdirs() }
     File(partial, "item.partial").writeBytes(byteArrayOf(1, 2))
     val staging = File(inbox.parentFile, "InboxStaging/fresh").apply { mkdirs() }
     File(staging, "item.partial").writeBytes(byteArrayOf(3, 4))
-
-    assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
-    assertEquals(true, partial.exists())
-    assertEquals(true, staging.exists())
+    val firstFile = RandomAccessFile(File(partial, ".writer.lock"), "rw")
+    val secondFile = RandomAccessFile(File(staging, ".writer.lock"), "rw")
+    val firstLock = firstFile.channel.lock()
+    val secondLock = secondFile.channel.lock()
+    try {
+      assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
+      assertEquals(true, partial.exists())
+      assertEquals(true, staging.exists())
+    } finally {
+      firstLock.release(); secondLock.release(); firstFile.close(); secondFile.close()
+    }
   }
 
   @Test
-  fun removesStaleInterruptedTransactionsAndSurfacesRecovery() {
-    val staleAt = System.currentTimeMillis() - 25 * 60 * 60 * 1_000L
+  fun removesFreshlyAbandonedUnlockedTransactionsAndSurfacesDurableRecovery() {
     val copied = File(inbox, "copied").apply { mkdirs() }
     File(copied, "item.bin").writeBytes(byteArrayOf(3, 4))
-    copied.setLastModified(staleAt)
     val staging = File(inbox.parentFile, "InboxStaging/stale").apply { mkdirs() }
     File(staging, "item.partial").writeBytes(byteArrayOf(1, 2))
-    staging.setLastModified(staleAt)
 
     assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
     assertEquals(false, copied.exists())
     assertEquals(false, staging.exists())
+    val events = MetadataEventStore.read(requireNotNull(inbox.parentFile), "RecoveryEvents")
+    assertEquals(2, events.size)
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+    events.forEach { MetadataEventStore.ack(requireNotNull(inbox.parentFile), "RecoveryEvents", it.getValue("id") as String) }
+    assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
+  }
+
+  @Test
+  fun acknowledgesOnlyTheSpecifiedShareEventDuringInterleaving() {
+    val filesDir = requireNotNull(inbox.parentFile)
+    val first = MetadataEventStore.persistShareResult(filesDir, "complete")
+    val second = MetadataEventStore.persistShareResult(filesDir, "failed")
+    MetadataEventStore.ack(filesDir, "PendingShareEvents", first.getValue("id") as String)
+    val remaining = MetadataEventStore.read(filesDir, "PendingShareEvents")
+    assertEquals(listOf(second.getValue("id")), remaining.map { it["id"] })
   }
 
   @Test
