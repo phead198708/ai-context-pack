@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ContextNativeModule"]
+  },
+  "android": {
+    "modules": ["com.aicontextpack.nativebridge.ContextNativeModule"]
+  }
+}

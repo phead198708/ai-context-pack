@@ -1,0 +1,13 @@
+android/build/
+android/app/build/
+android/**/.cxx/
+ios/build/
+ios/Pods/
+modules/context-native/android/build/
+docs/wiki/
+.github/
+ios/**/Images.xcassets/
+fixtures/assets/
+*.pbxproj
+Podfile.lock
+package-lock.json
