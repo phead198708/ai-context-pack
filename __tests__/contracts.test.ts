@@ -6,6 +6,10 @@ import {
 import { newestManifestsFirst } from '../src/domain/importOrdering';
 import type { ImportManifestV1 } from '../src/domain/contracts';
 import { shareImportErrorCode } from '../src/domain/shareImportResult';
+import {
+  LatestRequestGate,
+  runLatestRequest,
+} from '../src/domain/latestRequestGate';
 describe('versioned native contracts', () => {
   test('accepts the shared minimal manifest fixture', () => {
     expect(
@@ -105,6 +109,34 @@ describe('versioned native contracts', () => {
       }),
     ).toBe(false);
   });
+  test.each([
+    { durationMs: -1 },
+    { durationMs: Number.NaN },
+    { durationMs: Number.POSITIVE_INFINITY },
+    { durationMs: 1, confidence: -0.1 },
+    { durationMs: 1, confidence: 1.1 },
+    { durationMs: 1, confidence: Number.NaN },
+    { durationMs: 1, language: 42 },
+  ])('rejects invalid OCR optional/numeric fields %#', fields => {
+    const { confidence, language, ...resultFields } = fields;
+    expect(
+      isOCRResultV1({
+        schemaVersion: 1,
+        text: 'fixture',
+        blocks: [
+          {
+            text: 'fixture',
+            bounds: { x: 0, y: 0, width: 1, height: 1 },
+            ...(confidence === undefined ? {} : { confidence }),
+            ...(language === undefined ? {} : { language }),
+          },
+        ],
+        engine: 'apple-vision',
+        revision: '1',
+        ...resultFields,
+      }),
+    ).toBe(false);
+  });
   test('validates PDF probe page accounting and engine', () => {
     expect(
       isPDFProbeResultV1({
@@ -142,5 +174,27 @@ describe('versioned native contracts', () => {
     expect(shareImportErrorCode('fixture text')).toBe(
       'SHARE_IMPORT_EVENT_INVALID',
     );
+  });
+  test('does not let a deferred scan overwrite an invalidating failure', async () => {
+    const gate = new LatestRequestGate();
+    let resolveScan: ((value: string) => void) | undefined;
+    const scan = new Promise<string>(resolve => {
+      resolveScan = resolve;
+    });
+    const visible: string[] = [];
+    const pending = runLatestRequest(
+      gate,
+      () => scan,
+      () => visible.push('loading'),
+      value => visible.push(value),
+      () => visible.push('scan-error'),
+    );
+
+    gate.invalidate();
+    visible.push('share-error');
+    resolveScan?.('ready');
+    await pending;
+
+    expect(visible).toEqual(['loading', 'share-error']);
   });
 });

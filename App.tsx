@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -12,6 +12,10 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import type { ImportManifestV1 } from './src/domain/contracts';
+import {
+  LatestRequestGate,
+  runLatestRequest,
+} from './src/domain/latestRequestGate';
 import { shareImportErrorCode } from './src/domain/shareImportResult';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
 import { colors, spacing, typography } from './src/ui/tokens';
@@ -26,20 +30,26 @@ type LoadState =
 function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>('inbox');
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
-  const refresh = async (showNewestImport = false): Promise<void> => {
-    setState({ kind: 'loading' });
-    try {
-      const manifests = await nativeAdapter.scanInbox();
-      setState(
-        manifests.length === 0
-          ? { kind: 'empty' }
-          : { kind: 'ready', manifests },
+  const refreshGate = useRef(new LatestRequestGate()).current;
+  const refresh = useCallback(
+    async (showNewestImport = false): Promise<void> => {
+      await runLatestRequest(
+        refreshGate,
+        () => nativeAdapter.scanInbox(),
+        () => setState({ kind: 'loading' }),
+        manifests => {
+          setState(
+            manifests.length === 0
+              ? { kind: 'empty' }
+              : { kind: 'ready', manifests },
+          );
+          if (showNewestImport && manifests.length > 0) setScreen('detail');
+        },
+        () => setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
       );
-      if (showNewestImport && manifests.length > 0) setScreen('detail');
-    } catch {
-      setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' });
-    }
-  };
+    },
+    [refreshGate],
+  );
   useEffect(() => {
     refresh(true).catch(() =>
       setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
@@ -55,6 +65,7 @@ function App(): React.JSX.Element {
       (result: unknown) => {
         const errorCode = shareImportErrorCode(result);
         if (errorCode) {
+          refreshGate.invalidate();
           setScreen('inbox');
           setState({ kind: 'error', code: errorCode });
           return;
@@ -65,10 +76,11 @@ function App(): React.JSX.Element {
       },
     );
     return () => {
+      refreshGate.invalidate();
       subscription.remove();
       inboxSubscription.remove();
     };
-  }, []);
+  }, [refresh, refreshGate]);
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />

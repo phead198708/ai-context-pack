@@ -24,9 +24,15 @@ object ShareInboxImporter {
   @Suppress("DEPRECATION")
   fun importIfSupportedAsync(context: Context, intent: Intent?, completion: (Result) -> Unit) {
     if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return
-    val source = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) ?: return
-    val mediaType = intent.type ?: "application/octet-stream"
-    executor.execute { completion(importImage(context, source, mediaType)) }
+    val source = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+    if (source == null) {
+      completion(Result.FAILED)
+      return
+    }
+    executor.execute {
+      val mediaType = selectConcreteImageMediaType(intent.type, context.contentResolver.getType(source))
+      completion(if (mediaType == null) Result.FAILED else importImage(context, source, mediaType))
+    }
   }
 
   internal fun importImage(context: Context, source: Uri, mediaType: String): Result {
@@ -37,6 +43,7 @@ object ShareInboxImporter {
     val destination = File(directory, "$itemId.bin")
     val manifest = File(directory, "manifest.json")
     return try {
+      require(selectConcreteImageMediaType(mediaType, null) != null) { "SHARE_MIME_INVALID" }
       check(directory.mkdirs()) { "SHARE_DIRECTORY_CREATE_FAILED" }
       context.contentResolver.openInputStream(source).use { input ->
         requireNotNull(input) { "SHARE_URI_UNREADABLE" }
@@ -58,6 +65,11 @@ object ShareInboxImporter {
     }
   }
 
+  internal fun selectConcreteImageMediaType(intentType: String?, resolvedType: String?): String? =
+    sequenceOf(intentType, resolvedType).firstOrNull { type ->
+      type != null && concreteImageMime.matches(type)
+    }
+
   internal fun copyBounded(input: java.io.InputStream, output: java.io.OutputStream, limit: Long): Long {
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var total = 0L
@@ -73,4 +85,6 @@ object ShareInboxImporter {
   private fun isoTimestamp(): String = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
     timeZone = TimeZone.getTimeZone("UTC")
   }.format(Date())
+
+  private val concreteImageMime = Regex("^image/[a-z0-9][a-z0-9!#$&^_.+-]*$", RegexOption.IGNORE_CASE)
 }

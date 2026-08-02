@@ -85,7 +85,10 @@ internal object InboxManifestScanner {
       check(uri.scheme == "file" && uri.authority.isNullOrEmpty())
       val path = File(requireNotNull(uri.path)).canonicalPath
       check(path.startsWith(inboxPath))
-      if (item.getString("status") == "copied") check(File(path).isFile)
+      if (item.getString("status") == "copied") {
+        val copiedFile = File(path)
+        check(copiedFile.isFile && copiedFile.length() == item.getLong("byteCount"))
+      }
     }
   }
 

@@ -85,6 +85,8 @@ export function isOCRResultV1(value: unknown): value is OCRResultV1 {
   return (
     typeof value.text === 'string' &&
     typeof value.durationMs === 'number' &&
+    Number.isFinite(value.durationMs) &&
+    value.durationMs >= 0 &&
     (value.engine === 'apple-vision' ||
       value.engine === 'ml-kit-latin' ||
       value.engine === 'ml-kit-chinese') &&
@@ -93,7 +95,13 @@ export function isOCRResultV1(value: unknown): value is OCRResultV1 {
       block =>
         isObject(block) &&
         typeof block.text === 'string' &&
-        isNormalizedBoundsV1(block.bounds),
+        isNormalizedBoundsV1(block.bounds) &&
+        (block.confidence === undefined ||
+          (typeof block.confidence === 'number' &&
+            Number.isFinite(block.confidence) &&
+            block.confidence >= 0 &&
+            block.confidence <= 1)) &&
+        (block.language === undefined || typeof block.language === 'string'),
     )
   );
 }

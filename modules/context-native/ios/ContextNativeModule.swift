@@ -12,10 +12,15 @@ public final class ContextNativeModule: Module {
 
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
-        return []
+        throw NativeError("APP_GROUP_UNAVAILABLE")
       }
       let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
-      guard let enumerator = FileManager.default.enumerator(at: inbox, includingPropertiesForKeys: nil) else { return [] }
+      var isDirectory: ObjCBool = false
+      guard FileManager.default.fileExists(atPath: inbox.path, isDirectory: &isDirectory) else { return [] }
+      guard isDirectory.boolValue,
+            let enumerator = FileManager.default.enumerator(at: inbox, includingPropertiesForKeys: nil) else {
+        throw NativeError("INBOX_SCAN_FAILED")
+      }
       let files = enumerator.compactMap { $0 as? URL }
       return try files.filter { $0.lastPathComponent == "manifest.json" }.map { url in
         do {
@@ -95,8 +100,13 @@ private func validateOwnedManifest(_ manifest: [String: Any], inbox: URL) throws
           url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(inboxPath) else {
       throw NativeError("INBOX_MANIFEST_INVALID")
     }
-    if item["status"] as? String == "copied" && !FileManager.default.fileExists(atPath: url.path) {
-      throw NativeError("INBOX_MANIFEST_INVALID")
+    if item["status"] as? String == "copied" {
+      guard let byteCount = item["byteCount"] as? NSNumber,
+            FileManager.default.fileExists(atPath: url.path),
+            let actualBytes = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+            actualBytes == byteCount.intValue else {
+        throw NativeError("INBOX_MANIFEST_INVALID")
+      }
     }
   }
 }

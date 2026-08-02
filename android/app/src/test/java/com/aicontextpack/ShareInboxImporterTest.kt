@@ -9,6 +9,20 @@ import java.io.ByteArrayOutputStream
 
 class ShareInboxImporterTest {
   @Test
+  fun resolvesWildcardImageMimeFromProvider() {
+    assertEquals(
+      "image/jpeg",
+      ShareInboxImporter.selectConcreteImageMediaType("image/*", "image/jpeg")
+    )
+  }
+
+  @Test
+  fun rejectsImageMimeWhenNoConcreteTypeExists() {
+    assertEquals(null, ShareInboxImporter.selectConcreteImageMediaType("image/*", null))
+    assertEquals(null, ShareInboxImporter.selectConcreteImageMediaType("image/jpeg; charset=utf-8", null))
+  }
+
+  @Test
   fun copyBoundedCopiesContentWithinLimit() {
     val content = ByteArray(64) { index -> index.toByte() }
     val output = ByteArrayOutputStream()

@@ -56,7 +56,18 @@ class InboxManifestScannerInstrumentedTest {
     assertEquals(1, InboxManifestScanner.scan(inbox).size)
   }
 
-  private fun writeManifest(item: File) {
+  @Test
+  fun rejectsCopiedFileWithMismatchedByteCount() {
+    val item = File(inbox, "valid/item.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, byteCount = 4)
+
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+  }
+
+  private fun writeManifest(item: File, byteCount: Long = item.length()) {
     val directory = File(inbox, "valid").apply { mkdirs() }
     val payload = JSONObject()
       .put("schemaVersion", 1)
@@ -70,7 +81,7 @@ class InboxManifestScannerInstrumentedTest {
           JSONObject()
             .put("id", "item")
             .put("mediaType", "image/png")
-            .put("byteCount", item.length())
+            .put("byteCount", byteCount)
             .put("localUri", item.toURI().toString())
             .put("status", "copied"),
         ),
