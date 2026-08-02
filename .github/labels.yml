@@ -1,0 +1,130 @@
+# Canonical label metadata for ai-context-pack.
+# See docs/wiki/Labels.md for usage rules.
+# This file is intentionally workflow-agnostic and can be consumed by a label-sync action or script.
+
+- name: type:epic
+  color: "3E4B9E"
+  description: Cross-issue delivery objective with scope, dependencies, and promotion gate
+- name: type:feature
+  color: "1D76DB"
+  description: User-visible capability
+- name: type:task
+  color: "0E8A16"
+  description: Bounded engineering work
+- name: type:spike
+  color: "FBCA04"
+  description: Time-boxed investigation that ends with evidence and an ADR/decision
+- name: type:bug
+  color: "D73A4A"
+  description: Existing behavior differs from an accepted requirement or regressed
+- name: type:docs
+  color: "0075CA"
+  description: Product, architecture, development, or release documentation
+- name: type:chore
+  color: "BFD4F2"
+  description: Build, dependency, maintenance, or non-feature work
+
+- name: area:architecture
+  color: "5319E7"
+  description: Module boundaries, ADRs, dependencies, and shared protocols
+- name: area:ios-app
+  color: "7057FF"
+  description: Main iOS/iPadOS app lifecycle, navigation, and composition
+- name: area:share-extension
+  color: "8B5CF6"
+  description: iOS Share Extension and App Group Inbox
+- name: area:ingestion
+  color: "006B75"
+  description: Import, type validation, manifests, and hashing
+- name: area:extraction
+  color: "008672"
+  description: OCR, PDF, text, and URL extraction
+- name: area:processing
+  color: "0B4F6C"
+  description: Normalization, duplicate detection, estimation, and compression
+- name: area:privacy
+  color: "B60205"
+  description: Sensitive-data detection, review, redaction, and safe logging
+- name: area:export
+  color: "D4C5F9"
+  description: Markdown, PDF, bundles, clipboard, and system sharing
+- name: area:persistence
+  color: "BFDADC"
+  description: Metadata, files, migrations, cleanup, and recovery
+- name: area:ui-ux
+  color: "F9D0C4"
+  description: Editor, preview, onboarding, and accessibility
+- name: area:quality
+  color: "C5DEF5"
+  description: Tests, fixtures, CI, performance, audits, and release gates
+- name: area:release
+  color: "1D76DB"
+  description: TestFlight, App Store, metadata, and privacy declarations
+
+- name: priority:p0
+  color: "B60205"
+  description: Blocks the current phase or risks data loss/privacy leakage; address immediately
+- name: priority:p1
+  color: "D93F0B"
+  description: Must finish before the current phase can be promoted
+- name: priority:p2
+  color: "FBCA04"
+  description: Important but deferrable without breaking the core value
+- name: priority:p3
+  color: "C2E0C6"
+  description: Candidate improvement or post-MVP work
+
+- name: phase:0-foundation
+  color: "0052CC"
+  description: Project, architecture, CI, App Group, and critical spikes
+- name: phase:1-ingest
+  color: "006B75"
+  description: Inputs, extraction, manifests, and recovery
+- name: phase:2-transform
+  color: "0E8A16"
+  description: Cleanup, budgets, privacy review, and export
+- name: phase:3-beta
+  color: "7057FF"
+  description: Quality, real tasks, TestFlight, and App Store
+- name: phase:post-mvp
+  color: "D4C5F9"
+  description: Video, Shortcuts, macOS, MCP, and later extensions
+
+- name: size:xs
+  color: "EDEDED"
+  description: Half a day or less; one localized change
+- name: size:s
+  color: "D4EED1"
+  description: About one day with clear scope
+- name: size:m
+  color: "B7E4C7"
+  description: Two to three days with limited cross-module work
+- name: size:l
+  color: "74C69D"
+  description: Four to seven days with design and multiple test categories
+- name: size:xl
+  color: "40916C"
+  description: More than one week; split unless the issue is an epic
+
+- name: status:blocked
+  color: "B60205"
+  description: Blocked by an explicit external dependency or prerequisite
+- name: status:needs-decision
+  color: "FBCA04"
+  description: Requires a product or architecture decision before implementation
+- name: status:needs-design
+  color: "F9D0C4"
+  description: Requires a UX flow or visual decision before implementation
+
+- name: risk:privacy
+  color: "8B0000"
+  description: May expose, retain, or incorrectly redact user content
+- name: risk:data-loss
+  color: "D73A4A"
+  description: May lose, overwrite, or make state unrecoverable
+- name: risk:performance
+  color: "FFA500"
+  description: Time, memory, storage, thermal, or extension-budget risk
+- name: risk:app-store
+  color: "6F42C1"
+  description: Review, entitlement, privacy declaration, or release risk
