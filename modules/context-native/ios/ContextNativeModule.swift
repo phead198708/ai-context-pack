@@ -3,7 +3,6 @@ import Foundation
 import ImageIO
 import PDFKit
 import Vision
-import Darwin
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
 
@@ -17,11 +16,17 @@ public final class ContextNativeModule: Module {
       }
       let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
       let staging = container.appendingPathComponent("InboxStaging", isDirectory: true)
-      if try !MetadataEventStore.read(container: container, folder: "RecoveryEvents").isEmpty {
-        throw NativeError("INBOX_RECOVERY_REQUIRED")
+      do {
+        if try !RecoveryMetadataEventStore.read(container: container, folder: "RecoveryEvents").isEmpty {
+          throw NativeError("INBOX_RECOVERY_REQUIRED")
+        }
+      } catch let error as NativeError {
+        throw error
+      } catch {
+        throw NativeError("RECOVERY_EVENT_INVALID")
       }
       let recovered: Bool
-      do { recovered = try recoverIncompleteTransactions(inbox: inbox, staging: staging, container: container) }
+      do { recovered = try InboxRecoverySupport.recoverIncompleteTransactions(inbox: inbox, staging: staging, container: container) }
       catch { throw NativeError("INBOX_SCAN_FAILED") }
       if recovered { throw NativeError("INBOX_RECOVERY_REQUIRED") }
       var isDirectory: ObjCBool = false
@@ -43,7 +48,7 @@ public final class ContextNativeModule: Module {
           guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw NativeError("INBOX_MANIFEST_INVALID")
           }
-          try validateOwnedManifest(manifest, inbox: inbox)
+          try validateOwnedManifest(manifest, ingestion: url.deletingLastPathComponent())
           return manifest
         } catch {
           throw NativeError("INBOX_MANIFEST_INVALID")
@@ -53,17 +58,20 @@ public final class ContextNativeModule: Module {
 
     AsyncFunction("getPendingShareEvents") { () -> [[String: Any]] in [] }
     AsyncFunction("ackPendingShareEvent") { (_: String) -> Bool in true }
+    AsyncFunction("ackEphemeralShareEvent") { (_: String) -> Bool in true }
     AsyncFunction("getPendingRecoveryEvent") { () throws -> [String: Any]? in
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
         throw NativeError("APP_GROUP_UNAVAILABLE")
       }
-      return try MetadataEventStore.read(container: container, folder: "RecoveryEvents").first
+      do { return try RecoveryMetadataEventStore.read(container: container, folder: "RecoveryEvents").first }
+      catch { throw NativeError("RECOVERY_EVENT_INVALID") }
     }
     AsyncFunction("ackRecoveryEvent") { (id: String) throws -> Bool in
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
         throw NativeError("APP_GROUP_UNAVAILABLE")
       }
-      return try MetadataEventStore.ack(container: container, folder: "RecoveryEvents", id: id)
+      do { return try RecoveryMetadataEventStore.ack(container: container, folder: "RecoveryEvents", id: id) }
+      catch { throw NativeError("METADATA_EVENT_ID_INVALID") }
     }
 
     AsyncFunction("recognizeText") { (fileUri: String, script: String) async throws -> [String: Any] in
@@ -118,139 +126,23 @@ public final class ContextNativeModule: Module {
   }
 }
 
-private func recoverIncompleteTransactions(inbox: URL, staging: URL, container: URL) throws -> Bool {
-  var recovered = try recoverCandidates(root: staging, container: container) { _ in true }
-  recovered = try recoverCandidates(root: inbox, container: container) { child in
-    !FileManager.default.fileExists(atPath: child.appendingPathComponent("manifest.json").path)
-  } || recovered
-  return recovered
-}
-
-private func recoverCandidates(
-  root: URL,
-  container: URL,
-  isIncomplete: (URL) -> Bool
-) throws -> Bool {
-  var isDirectory: ObjCBool = false
-  guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else { return false }
-  guard isDirectory.boolValue else { throw NativeError("INBOX_SCAN_FAILED") }
-  let children = try FileManager.default.contentsOfDirectory(
-    at: root,
-    includingPropertiesForKeys: [.isDirectoryKey],
-    options: [.skipsHiddenFiles]
-  )
-  var recovered = false
-  for child in children {
-    let values = try child.resourceValues(forKeys: [.isDirectoryKey])
-    guard values.isDirectory == true,
-          isIncomplete(child),
-          let lock = try TransactionRecoveryLock.acquire(directory: child, container: container) else { continue }
-    defer { lock.release() }
-    try MetadataEventStore.persistRecovery(container: container)
-    try FileManager.default.removeItem(at: child)
-    recovered = true
-  }
-  return recovered
-}
-
-private final class TransactionRecoveryLock {
-  private var descriptor: Int32
-  private let removableURL: URL?
-  private init(descriptor: Int32, removableURL: URL? = nil) {
-    self.descriptor = descriptor
-    self.removableURL = removableURL
-  }
-
-  static func acquire(directory: URL, container: URL) throws -> TransactionRecoveryLock? {
-    let external = container.appendingPathComponent("InboxWriterLocks/\(directory.lastPathComponent).lock")
-    let legacy = directory.appendingPathComponent(".writer.lock")
-    let lockURL = FileManager.default.fileExists(atPath: external.path) ? external : legacy
-    guard FileManager.default.fileExists(atPath: lockURL.path) else {
-      return TransactionRecoveryLock(descriptor: -1)
-    }
-    let descriptor = Darwin.open(lockURL.path, O_RDWR)
-    guard descriptor >= 0 else { throw NativeError("INBOX_SCAN_FAILED") }
-    guard Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
-      let lockError = errno
-      Darwin.close(descriptor)
-      if lockError == EWOULDBLOCK || lockError == EAGAIN { return nil }
-      throw NativeError("INBOX_SCAN_FAILED")
-    }
-    return TransactionRecoveryLock(descriptor: descriptor, removableURL: lockURL == external ? external : nil)
-  }
-
-  func release() {
-    guard descriptor >= 0 else { return }
-    Darwin.lockf(descriptor, F_ULOCK, 0)
-    Darwin.close(descriptor)
-    descriptor = -1
-    if let removableURL { try? FileManager.default.removeItem(at: removableURL) }
-  }
-
-  deinit { release() }
-}
-
-private enum MetadataEventStore {
-  static func persistRecovery(container: URL) throws {
-    let id = UUID().uuidString.lowercased()
-    let event: [String: Any] = [
-      "schemaVersion": 1,
-      "id": id,
-      "code": "INBOX_RECOVERY_REQUIRED",
-      "createdAtMs": Int64(Date().timeIntervalSince1970 * 1_000)
-    ]
-    let directory = container.appendingPathComponent("RecoveryEvents", isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
-    try data.write(to: directory.appendingPathComponent("\(id).json"), options: [.atomic])
-  }
-
-  static func read(container: URL, folder: String) throws -> [[String: Any]] {
-    let directory = container.appendingPathComponent(folder, isDirectory: true)
-    guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
-    return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-      .filter { $0.pathExtension == "json" }
-      .map { url in
-        let data = try Data(contentsOf: url)
-        guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              event["schemaVersion"] as? Int == 1,
-              let id = event["id"] as? String,
-              UUID(uuidString: id) != nil,
-              event["code"] as? String == "INBOX_RECOVERY_REQUIRED",
-              event["createdAtMs"] is NSNumber else {
-          throw NativeError("RECOVERY_EVENT_INVALID")
-        }
-        return event
-      }
-      .sorted { ($0["createdAtMs"] as? NSNumber)?.int64Value ?? 0 < ($1["createdAtMs"] as? NSNumber)?.int64Value ?? 0 }
-  }
-
-  static func ack(container: URL, folder: String, id: String) throws -> Bool {
-    guard UUID(uuidString: id) != nil else { throw NativeError("METADATA_EVENT_ID_INVALID") }
-    let url = container.appendingPathComponent(folder, isDirectory: true).appendingPathComponent("\(id.lowercased()).json")
-    guard FileManager.default.fileExists(atPath: url.path) else { return true }
-    try FileManager.default.removeItem(at: url)
-    return true
-  }
-}
-
 private func imageOrientation(source: CGImageSource) -> CGImagePropertyOrientation {
   guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
         let rawValue = properties[kCGImagePropertyOrientation] as? NSNumber else { return .up }
   return CGImagePropertyOrientation(rawValue: rawValue.uint32Value) ?? .up
 }
 
-private func validateOwnedManifest(_ manifest: [String: Any], inbox: URL) throws {
+private func validateOwnedManifest(_ manifest: [String: Any], ingestion: URL) throws {
   guard let items = manifest["items"] as? [[String: Any]] else {
     throw NativeError("INBOX_MANIFEST_INVALID")
   }
-  let inboxPath = inbox.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+  let ingestionPath = ingestion.resolvingSymlinksInPath().standardizedFileURL.path + "/"
   for item in items {
     guard let value = item["localUri"] as? String,
           let url = URL(string: value),
           url.isFileURL,
           url.host == nil,
-          url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(inboxPath) else {
+          url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(ingestionPath) else {
       throw NativeError("INBOX_MANIFEST_INVALID")
     }
     if item["status"] as? String == "copied" {
