@@ -74,11 +74,17 @@ class MainActivity : ReactActivity() {
     }
     EphemeralShareEventStore.publishIfEphemeral(event)
     runOnUiThread {
-      reactInstanceManager.currentReactContext
+      currentReactContextOrNull()
         ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
         ?.emit("AIContextPackInboxChanged", Arguments.makeNativeMap(event))
     }
   }
+
+  private fun currentReactContextOrNull() =
+    ReactContextResolver.resolve(
+      host = { reactHost?.currentReactContext },
+      legacy = { reactInstanceManager.currentReactContext },
+    )
 
   /**
    * Returns the name of the main component registered from JavaScript. This is used to schedule
@@ -136,5 +142,17 @@ internal object ShareResultEventPublisher {
       "durable" to false,
       "code" to "SHARE_RESULT_PERSIST_FAILED",
     )
+  }
+}
+
+internal object ReactContextResolver {
+  // Events are already durable; live bridge delivery must stay optional during host transitions.
+  fun <T> resolve(host: () -> T?, legacy: () -> T?): T? =
+    resolveOrNull(host) ?: resolveOrNull(legacy)
+
+  private fun <T> resolveOrNull(provider: () -> T?): T? = try {
+    provider()
+  } catch (_: RuntimeException) {
+    null
   }
 }
