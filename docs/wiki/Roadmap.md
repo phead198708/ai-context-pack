@@ -2,110 +2,115 @@
 
 ## 总体策略
 
-先证明一条完整、隐私安全、可恢复的端到端路径，再扩展格式和自动化。每个 Phase 都有 promotion gate；未达到 gate 不进入下一阶段的功能堆叠。
+先证明一条 iOS/Android 都可用、隐私安全、可恢复的完整路径，再扩展格式和自动化。每个 Phase 都有 promotion gate；共享功能只有在两端达到明确验收后才算完成。
 
-## Phase 0 — Foundation
+## Phase 0 — Cross-platform foundation
 
-目标：得到可编译、可测试、可持续集成的原生 iOS 工程和已验证的关键技术决策。
+目标：得到可编译、可测试、可持续集成的 React Native 双端工程，并验证最危险的原生边界。
 
 交付：
 
-- Xcode 工程、App 与 Share Extension target。
-- 模块边界、领域模型、App Group、Persistence spike。
-- CI、lint、unit test、fixture 规则、隐私安全日志。
-- ADR：系统版本、存储、并发、PDF/ZIP 与 token estimator。
+- React Native 0.86 + Expo SDK 57 modules + TypeScript strict。
+- `ios/`、`android/` 纳入版本控制，Development Build 可运行。
+- iOS Share Extension + App Group Inbox。
+- Android ACTION_SEND/ACTION_SEND_MULTIPLE + app-private Inbox。
+- ImportManifestV1 跨平台 contract。
+- Vision/ML Kit OCR adapter spike。
+- PDFKit/PdfRenderer + OCR fallback spike。
+- SQLite/file storage、recovery、CI、privacy-safe logging。
+- ADR：React Native 架构、原生边界、系统版本和 upgrade policy。
 
 Promotion gate：
 
-- clean checkout 可构建。
-- App 与 Extension 在 CI/本地测试中通过。
-- Share Extension 能把单张图片写入 Inbox，主 App 可恢复读取。
+- clean checkout 可构建 iOS 主 App、iOS Extension 与 Android App。
+- 两端均可导入至少一张图片并生成通过同一 schema 的 manifest。
+- 两端 OCR adapter 返回合法 OCRResultV1。
+- Android PDF fallback 有基准结果和明确限制。
 - 无用户内容进入日志。
-- 未决架构问题有明确结论或有 owner 的 spike。
+- 不使用 Expo 实验性 iOS 入站分享或非官方自动打开主 App 行为。
 
-## Phase 1 — Ingest and Extract
+## Phase 1 — Ingest and extract
 
-目标：可靠接收所有 MVP 输入并生成统一、可恢复的提取结果。
+目标：可靠接收所有 MVP 输入，并在两个平台生成统一、可恢复的提取结果。
 
 交付：
 
-- Share Extension 多 item 接收。
-- Photos/Files/Text/URL 主 App 导入。
+- iOS/Android 多 item 系统分享接收。
+- 主 App 的 Photos/Files/Text/URL 导入。
 - 图片 OCR、PDF 文本提取与扫描页 OCR fallback。
 - 统一 manifest、hash、checkpoint、item 级错误。
-- 基础 Pack 列表、详情和状态展示。
+- React Native Pack 列表、详情、导入预览和状态展示。
 
 Promotion gate：
 
-- Photos、Files、Safari 三条端到端导入通过。
-- 20 张截图一次分享不丢项。
-- 四类 PDF fixture 有确定结果。
+- iOS Photos/Files/Safari 与 Android Photos/Files/Chrome 导入通过。
+- 两端一次分享 20 张截图不丢项。
+- 文本/扫描/混合/损坏/超限 PDF 有确定结果。
+- API 24 与 API 35+ Android PDF 路径均验证。
 - 中断恢复不重复、不丢失、不产生半写文件。
-- 所有失败项对用户可见并可重试。
+- 所有失败项可见并可重试。
 
-## Phase 2 — Transform, Privacy and Export
+## Phase 2 — Transform, privacy and export
 
-目标：将输入变成安全、紧凑、可发送的上下文包。
+目标：将输入变成安全、紧凑、可发送的跨平台上下文包。
 
 交付：
 
-- 规范化、完全/近似去重提示。
-- 预算估算、三种预设、图片压缩。
-- 敏感信息检测、审核与图片/文本遮挡。
-- Pack Editor、最终预览。
+- 共享 TypeScript 规范化、规则检测、预算估算和 Markdown。
+- 原生感知 hash、图片压缩和不可逆像素遮挡。
+- 敏感信息检测、审核、手工框选和文本替换。
+- React Native Pack Editor 与最终预览。
 - Markdown、PDF、attachment bundle 与系统分享。
 
 Promotion gate：
 
-- 典型 10 张截图流程在目标设备 15 秒内完成。
-- Markdown round-trip、ZIP manifest/hash 和 PDF 快照测试通过。
-- 高风险 finding 未决时默认阻止无提示快速导出。
+- 典型 10 张截图在支持设备预算内完成，UI 保持可响应。
+- 两端 Markdown/manifest 相同 fixture 结果一致。
+- PDF、bundle/hash/path traversal 测试通过。
+- 高风险 finding 未决时，两端均默认阻止正常导出。
 - flatten 后敏感像素/文本不可恢复。
-- 所有自动删除和遮挡均可解释、可复核。
+- 平台差异有文档，不存在静默功能降级。
 
-## Phase 3 — Beta and App Store Readiness
+## Phase 3 — Beta and store readiness
 
-目标：通过真实任务、性能和隐私审查，达到 TestFlight 与 App Store 可发布质量。
+目标：通过真实任务、性能和隐私审查，达到 TestFlight、Google Play Internal Testing、App Store 与 Google Play 的发布质量。
 
 交付：
 
-- 历史、删除、空间管理和生命周期清理。
-- onboarding、权限解释、空状态、错误恢复。
-- Accessibility、英文/中文、本地化截图。
-- 性能矩阵、崩溃与资源测试。
-- 隐私政策、App Privacy 回答、TestFlight build、发布 checklist。
+- 历史、删除、空间管理、迁移和生命周期清理。
+- onboarding、权限解释、空状态和错误恢复。
+- VoiceOver/TalkBack、Dynamic Type/font scaling、英文/中文。
+- 双端性能矩阵、崩溃、低内存、低磁盘与资源测试。
+- 隐私政策、store privacy/data safety 回答、beta build、release checklist。
 
 Promotion gate：
 
-- 至少 20 个真实任务，任务完成率 ≥80%。
-- P0/P1 bug 为 0；已知 P2 有明确接受或修复计划。
-- 飞行模式核心流程通过。
-- 隐私审计、日志审计、依赖/license 审计通过。
-- TestFlight 安装、升级、删除和数据清理路径验证。
+- 至少 20 个真实任务，并覆盖 iOS 与 Android；任务完成率 ≥80%。
+- P0/P1 bug 为 0。
+- 两端飞行模式核心流程通过。
+- 隐私、日志、依赖/license 和平台权限审计通过。
+- TestFlight 与 Play Internal 安装、升级、删除和数据清理路径验证。
 
 ## Phase 4 — Post-MVP
 
-候选方向按用户数据决定，不提前阻塞 MVP：
+- 屏幕录制：双端关键帧抽取、转录和重复帧删除。
+- iOS App Intents/Shortcuts 与 Android App Shortcuts/intent integrations。
+- ChatGPT、Claude、Codex 目标预设，同时保持标准输出。
+- macOS、浏览器扩展与跨设备 workflow。
+- MCP Server：仅让桌面 AI 读取用户明确选择的 Pack。
+- 可选云同步与端到端加密共享。
 
-- 屏幕录制：关键帧抽取、转录、重复帧删除。
-- App Intents/Shortcuts：快速创建和导出。
-- 目标预设：ChatGPT、Claude、Codex 的大小/格式模板，但保持标准输出。
-- macOS 与跨设备 clipboard workflow。
-- MCP Server：让桌面 AI 读取用户选择的 Pack。
-- 可选 iCloud 同步和端到端加密共享。
-
-进入条件：MVP 有稳定留存信号，且真实用户最常见失败明确指向该扩展。
+进入条件：MVP 有稳定使用证据，且真实失败明确指向该扩展。
 
 ## 建议开发顺序
 
-1. 工程与 CI。
-2. Domain/Persistence/App Group。
-3. Share Extension + 图片 happy path。
-4. 完整输入矩阵与 extraction。
-5. Pack Editor 基础 UI。
+1. Issue #3：双端工程与可行性 spike。
+2. Shared domain、schema、SQLite 与 Inbox recovery。
+3. iOS Share Extension + Android share receiver。
+4. OCR/PDF adapter 与完整输入矩阵。
+5. React Native Pack UI。
 6. normalization、duplicate、budget 与 compression。
-7. privacy detection/review/redaction。
+7. privacy detection/review/native redaction。
 8. Markdown → bundle → PDF export。
 9. recovery、storage、accessibility、localization。
-10. performance、Beta、App Store release。
-
+10. performance、双端 beta、store release。
