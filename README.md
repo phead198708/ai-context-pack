@@ -17,6 +17,7 @@ Incoming sharing is implemented with a native iOS Share Extension and Android sh
 
 ## Planning
 
+- [Master development Goal](docs/MASTER-GOAL.md)
 - [Product overview and usage](docs/wiki/Home.md)
 - [Detailed product specification](docs/wiki/Product-Spec.md)
 - [Technical architecture](docs/wiki/Architecture.md)
