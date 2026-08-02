@@ -53,7 +53,10 @@ export const createNativeAdapter = (
           return value;
         },
         ackPendingShareEvent: async id => {
-          await nativeModule.ackPendingShareEvent?.(id);
+          if (!nativeModule.ackPendingShareEvent)
+            throw new NativeBoundaryError('NATIVE_SHARE_ACK_UNAVAILABLE');
+          if ((await nativeModule.ackPendingShareEvent(id)) !== true)
+            throw new NativeBoundaryError('NATIVE_SHARE_ACK_FAILED');
         },
         getPendingRecoveryEvent: async () => {
           const value =
@@ -63,7 +66,10 @@ export const createNativeAdapter = (
           return value;
         },
         ackRecoveryEvent: async id => {
-          await nativeModule.ackRecoveryEvent?.(id);
+          if (!nativeModule.ackRecoveryEvent)
+            throw new NativeBoundaryError('NATIVE_RECOVERY_ACK_UNAVAILABLE');
+          if ((await nativeModule.ackRecoveryEvent(id)) !== true)
+            throw new NativeBoundaryError('NATIVE_RECOVERY_ACK_FAILED');
         },
         recognizeText: async (uri, script) => {
           const value = await nativeModule.recognizeText(uri, script);

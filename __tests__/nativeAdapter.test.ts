@@ -59,4 +59,28 @@ describe('native adapter runtime boundary', () => {
       code: 'INBOX_RECOVERY_REQUIRED',
     });
   });
+
+  test('requires explicit successful event acknowledgements', async () => {
+    const native = {
+      ...mockNativeModule,
+      ackPendingShareEvent: jest.fn().mockResolvedValue(false),
+      ackRecoveryEvent: jest.fn().mockResolvedValue(false),
+    };
+    const guarded = createNativeAdapter(native);
+    await expect(guarded.ackPendingShareEvent('event')).rejects.toMatchObject({
+      code: 'NATIVE_SHARE_ACK_FAILED',
+    });
+    await expect(guarded.ackRecoveryEvent('event')).rejects.toMatchObject({
+      code: 'NATIVE_RECOVERY_ACK_FAILED',
+    });
+  });
+
+  test('rejects acknowledgements when native methods are unavailable', async () => {
+    await expect(adapter.ackPendingShareEvent('event')).rejects.toMatchObject({
+      code: 'NATIVE_SHARE_ACK_UNAVAILABLE',
+    });
+    await expect(adapter.ackRecoveryEvent('event')).rejects.toMatchObject({
+      code: 'NATIVE_RECOVERY_ACK_UNAVAILABLE',
+    });
+  });
 });

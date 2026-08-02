@@ -12,4 +12,12 @@ class ShareLaunchGateTest {
   @Test fun doesNotReplayTheInitialIntentAfterSystemTaskRestoration() {
     assertFalse(ShareLaunchGate.shouldConsumeInitialIntent(restoredSystemTask = true))
   }
+
+
+  @Test fun persistenceFailureStillProducesAVisibleFailedEvent() {
+    val event = ShareResultEventPublisher.persistOrFallback("complete") { error("disk full") }
+    assertTrue(event["id"] is String)
+    assertTrue(event["result"] == "failed")
+    assertFalse(event["durable"] as Boolean)
+  }
 }

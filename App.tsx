@@ -37,15 +37,14 @@ function App(): React.JSX.Element {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const refreshGate = useRef(new LatestRequestGate()).current;
   const shareFailure = useRef(new ShareFailureLatch()).current;
-  const recoveryEventId = useRef<string | null>(null);
+  const pendingShareFailureIds = useRef(new Set<string>()).current;
   const refresh = useCallback(
-    async (showNewestImport = false): Promise<void> => {
-      await runLatestRequest(
+    async (showNewestImport = false): Promise<boolean> =>
+      runLatestRequest(
         refreshGate,
         async () => {
           const recovery = await nativeAdapter.getPendingRecoveryEvent();
           if (recovery) {
-            recoveryEventId.current = recovery.id;
             throw new NativeBoundaryError(recovery.code);
           }
           return nativeAdapter.scanInbox();
@@ -60,14 +59,14 @@ function App(): React.JSX.Element {
           if (showNewestImport && manifests.length > 0) setScreen('detail');
         },
         error => setState({ kind: 'error', code: visibleErrorCode(error) }),
-      );
-    },
+      ),
     [refreshGate],
   );
   const handleShareResult = useCallback(
-    (result: unknown): void => {
+    async (result: unknown): Promise<void> => {
       const errorCode = shareImportErrorCode(result);
       if (errorCode) {
+        if (isPendingShareEvent(result)) pendingShareFailureIds.add(result.id);
         shareFailure.recordFailure();
         refreshGate.invalidate();
         setScreen('inbox');
@@ -75,11 +74,11 @@ function App(): React.JSX.Element {
         return;
       }
       shareFailure.clear();
-      refresh(true).catch(() =>
-        setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
-      );
+      const refreshed = await refresh(true);
+      if (refreshed && isPendingShareEvent(result))
+        await nativeAdapter.ackPendingShareEvent(result.id);
     },
-    [refresh, refreshGate, shareFailure],
+    [pendingShareFailureIds, refresh, refreshGate, shareFailure],
   );
   useEffect(() => {
     refresh(true).catch(() =>
@@ -94,17 +93,16 @@ function App(): React.JSX.Element {
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
       (event: unknown) => {
-        handleShareResult(event);
-        if (isPendingShareEvent(event))
-          nativeAdapter.ackPendingShareEvent(event.id).catch(() => undefined);
+        handleShareResult(event).catch(() =>
+          setState({ kind: 'error', code: 'NATIVE_SHARE_ACK_FAILED' }),
+        );
       },
     );
     nativeAdapter
       .getPendingShareEvents()
       .then(async events => {
         for (const event of events) {
-          handleShareResult(event);
-          await nativeAdapter.ackPendingShareEvent(event.id);
+          await handleShareResult(event);
         }
       })
       .catch(() => handleShareResult('invalid'));
@@ -141,18 +139,21 @@ function App(): React.JSX.Element {
           <Inbox
             state={state}
             onRetry={() => {
-              shareFailure.clear();
-              const id = recoveryEventId.current;
-              const acknowledge = id
-                ? nativeAdapter.ackRecoveryEvent(id).then(() => {
-                    recoveryEventId.current = null;
-                  })
-                : Promise.resolve();
-              acknowledge
-                .then(() => refresh())
-                .catch(error =>
-                  setState({ kind: 'error', code: visibleErrorCode(error) }),
-                );
+              const acknowledge = async (): Promise<void> => {
+                for (const failureId of pendingShareFailureIds)
+                  await nativeAdapter.ackPendingShareEvent(failureId);
+                pendingShareFailureIds.clear();
+                let recovery = await nativeAdapter.getPendingRecoveryEvent();
+                while (recovery) {
+                  await nativeAdapter.ackRecoveryEvent(recovery.id);
+                  recovery = await nativeAdapter.getPendingRecoveryEvent();
+                }
+                shareFailure.clear();
+                await refresh();
+              };
+              acknowledge().catch(error =>
+                setState({ kind: 'error', code: visibleErrorCode(error) }),
+              );
             }}
           />
         )}

@@ -144,7 +144,7 @@ private func recoverCandidates(
     let values = try child.resourceValues(forKeys: [.isDirectoryKey])
     guard values.isDirectory == true,
           isIncomplete(child),
-          let lock = try TransactionRecoveryLock.acquire(directory: child) else { continue }
+          let lock = try TransactionRecoveryLock.acquire(directory: child, container: container) else { continue }
     defer { lock.release() }
     try MetadataEventStore.persistRecovery(container: container)
     try FileManager.default.removeItem(at: child)
@@ -155,10 +155,16 @@ private func recoverCandidates(
 
 private final class TransactionRecoveryLock {
   private var descriptor: Int32
-  private init(descriptor: Int32) { self.descriptor = descriptor }
+  private let removableURL: URL?
+  private init(descriptor: Int32, removableURL: URL? = nil) {
+    self.descriptor = descriptor
+    self.removableURL = removableURL
+  }
 
-  static func acquire(directory: URL) throws -> TransactionRecoveryLock? {
-    let lockURL = directory.appendingPathComponent(".writer.lock")
+  static func acquire(directory: URL, container: URL) throws -> TransactionRecoveryLock? {
+    let external = container.appendingPathComponent("InboxWriterLocks/\(directory.lastPathComponent).lock")
+    let legacy = directory.appendingPathComponent(".writer.lock")
+    let lockURL = FileManager.default.fileExists(atPath: external.path) ? external : legacy
     guard FileManager.default.fileExists(atPath: lockURL.path) else {
       return TransactionRecoveryLock(descriptor: -1)
     }
@@ -170,7 +176,7 @@ private final class TransactionRecoveryLock {
       if lockError == EWOULDBLOCK || lockError == EAGAIN { return nil }
       throw NativeError("INBOX_SCAN_FAILED")
     }
-    return TransactionRecoveryLock(descriptor: descriptor)
+    return TransactionRecoveryLock(descriptor: descriptor, removableURL: lockURL == external ? external : nil)
   }
 
   func release() {
@@ -178,6 +184,7 @@ private final class TransactionRecoveryLock {
     Darwin.lockf(descriptor, F_ULOCK, 0)
     Darwin.close(descriptor)
     descriptor = -1
+    if let removableURL { try? FileManager.default.removeItem(at: removableURL) }
   }
 
   deinit { release() }
@@ -203,9 +210,17 @@ private enum MetadataEventStore {
     guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
     return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
       .filter { $0.pathExtension == "json" }
-      .compactMap { url in
+      .map { url in
         let data = try Data(contentsOf: url)
-        return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              event["schemaVersion"] as? Int == 1,
+              let id = event["id"] as? String,
+              UUID(uuidString: id) != nil,
+              event["code"] as? String == "INBOX_RECOVERY_REQUIRED",
+              event["createdAtMs"] is NSNumber else {
+          throw NativeError("RECOVERY_EVENT_INVALID")
+        }
+        return event
       }
       .sorted { ($0["createdAtMs"] as? NSNumber)?.int64Value ?? 0 < ($1["createdAtMs"] as? NSNumber)?.int64Value ?? 0 }
   }

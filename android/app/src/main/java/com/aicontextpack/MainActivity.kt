@@ -35,7 +35,9 @@ class MainActivity : ReactActivity() {
       setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
     }
     ShareInboxImporter.importIfSupportedAsync(applicationContext, intent) { result ->
-      val event = MetadataEventStore.persistShareResult(applicationContext.filesDir, result.wireValue)
+      val event = ShareResultEventPublisher.persistOrFallback(result.wireValue) { value ->
+        MetadataEventStore.persistShareResult(applicationContext.filesDir, value)
+      }
       runOnUiThread {
         reactInstanceManager.currentReactContext
           ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
@@ -87,4 +89,20 @@ class MainActivity : ReactActivity() {
 
 internal object ShareLaunchGate {
   fun shouldConsumeInitialIntent(restoredSystemTask: Boolean): Boolean = !restoredSystemTask
+}
+
+internal object ShareResultEventPublisher {
+  fun persistOrFallback(
+    result: String,
+    persist: (String) -> Map<String, Any>,
+  ): Map<String, Any> = try {
+    persist(result)
+  } catch (_: Exception) {
+    mapOf(
+      "schemaVersion" to 1,
+      "id" to java.util.UUID.randomUUID().toString(),
+      "result" to "failed",
+      "durable" to false,
+    )
+  }
 }

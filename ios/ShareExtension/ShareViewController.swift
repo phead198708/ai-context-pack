@@ -38,8 +38,8 @@ final class ShareViewController: UIViewController {
     let ingestionId = UUID().uuidString.lowercased(), itemId = UUID().uuidString.lowercased()
     let directory = container.appendingPathComponent("InboxStaging/\(ingestionId)", isDirectory: true)
     let publishedDirectory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
+    let writerLock = try TransactionWriterLock(container: container, ingestionId: ingestionId)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let writerLock = try TransactionWriterLock(directory: directory)
     var committed = false
     defer {
       if !committed { try? FileManager.default.removeItem(at: directory) }
@@ -89,9 +89,14 @@ final class ShareViewController: UIViewController {
 private final class TransactionWriterLock {
   private var descriptor: Int32
 
-  init(directory: URL) throws {
+  private let lockURL: URL
+
+  init(container: URL, ingestionId: String) throws {
+    let lockDirectory = container.appendingPathComponent("InboxWriterLocks", isDirectory: true)
+    try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true)
+    lockURL = lockDirectory.appendingPathComponent("\(ingestionId).lock")
     descriptor = Darwin.open(
-      directory.appendingPathComponent(".writer.lock").path,
+      lockURL.path,
       O_CREAT | O_RDWR,
       S_IRUSR | S_IWUSR
     )
@@ -106,6 +111,7 @@ private final class TransactionWriterLock {
     Darwin.lockf(descriptor, F_ULOCK, 0)
     Darwin.close(descriptor)
     descriptor = -1
+    try? FileManager.default.removeItem(at: lockURL)
   }
 
   deinit { release() }

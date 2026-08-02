@@ -75,8 +75,9 @@ class InboxManifestScannerInstrumentedTest {
     File(partial, "item.partial").writeBytes(byteArrayOf(1, 2))
     val staging = File(inbox.parentFile, "InboxStaging/fresh").apply { mkdirs() }
     File(staging, "item.partial").writeBytes(byteArrayOf(3, 4))
-    val firstFile = RandomAccessFile(File(partial, ".writer.lock"), "rw")
-    val secondFile = RandomAccessFile(File(staging, ".writer.lock"), "rw")
+    val lockDirectory = File(inbox.parentFile, "InboxWriterLocks").apply { mkdirs() }
+    val firstFile = RandomAccessFile(File(lockDirectory, "partial.lock"), "rw")
+    val secondFile = RandomAccessFile(File(lockDirectory, "fresh.lock"), "rw")
     val firstLock = firstFile.channel.lock()
     val secondLock = secondFile.channel.lock()
     try {

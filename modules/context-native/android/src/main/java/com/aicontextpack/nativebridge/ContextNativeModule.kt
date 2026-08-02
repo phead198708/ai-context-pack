@@ -152,9 +152,10 @@ internal object InboxManifestScanner {
 
 internal object IncompleteTransactionRecovery {
   fun recover(inbox: File): Boolean {
-    val staging = File(requireNotNull(inbox.parentFile), "InboxStaging")
-    var recovered = recoverCandidates(staging) { true }
-    recovered = recoverCandidates(inbox) { directory ->
+    val filesDir = requireNotNull(inbox.parentFile)
+    val staging = File(filesDir, "InboxStaging")
+    var recovered = recoverCandidates(staging, filesDir) { true }
+    recovered = recoverCandidates(inbox, filesDir) { directory ->
       !File(directory, "manifest.json").isFile
     } || recovered
     return recovered
@@ -162,6 +163,7 @@ internal object IncompleteTransactionRecovery {
 
   private fun recoverCandidates(
     root: File,
+    filesDir: File,
     isIncomplete: (File) -> Boolean,
   ): Boolean {
     if (!root.exists()) return false
@@ -172,7 +174,7 @@ internal object IncompleteTransactionRecovery {
       .filter { directory -> directory.isDirectory && isIncomplete(directory) }
       .forEach { directory ->
         check(directory.canonicalPath.startsWith(rootPath))
-        acquireAbandonedWriterLock(directory)?.use {
+        acquireAbandonedWriterLock(directory, filesDir)?.use {
           MetadataEventStore.persistRecovery(requireNotNull(root.parentFile))
           check(directory.deleteRecursively() && !directory.exists())
           recovered = true
@@ -181,14 +183,19 @@ internal object IncompleteTransactionRecovery {
     return recovered
   }
 
-  private fun acquireAbandonedWriterLock(directory: File): AutoCloseable? {
-    val lockFile = File(directory, ".writer.lock")
+  private fun acquireAbandonedWriterLock(directory: File, filesDir: File): AutoCloseable? {
+    val external = File(File(filesDir, "InboxWriterLocks"), "${directory.name}.lock")
+    val lockFile = if (external.exists()) external else File(directory, ".writer.lock")
     if (!lockFile.exists()) return AutoCloseable {}
     val file = RandomAccessFile(lockFile, "rw")
     val lock = try { file.channel.tryLock() }
     catch (_: OverlappingFileLockException) { null }
     if (lock == null) { file.close(); return null }
-    return AutoCloseable { lock.release(); file.close() }
+    return AutoCloseable {
+      lock.release()
+      file.close()
+      if (lockFile == external) external.delete()
+    }
   }
 }
 
@@ -234,8 +241,12 @@ object MetadataEventStore {
     fields.forEach { (key, value) -> payload.put(key, value) }
     val partial = File(directory, "$id.partial")
     val published = File(directory, "$id.json")
-    partial.writeText(payload.toString())
-    check(partial.renameTo(published))
+    try {
+      partial.writeText(payload.toString())
+      check(partial.renameTo(published))
+    } finally {
+      if (!published.exists()) partial.delete()
+    }
     return mapOf("schemaVersion" to 1, "id" to id, "createdAtMs" to createdAtMs) + fields
   }
 }
