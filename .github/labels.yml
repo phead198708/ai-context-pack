@@ -80,6 +80,10 @@
   color: "3DDC84"
   description: Android, Kotlin, Gradle, or share-intent work
 
+- name: platform:desktop
+  color: "8B949E"
+  description: macOS, browser extension, MCP, or other desktop workflow
+
 - name: layer:react-native
   color: "61DAFB"
   description: React Native UI, TypeScript domain, and workflow orchestration
