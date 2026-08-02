@@ -2,7 +2,7 @@
 
 > Share anything. Clean it, compress it, redact it, and send it to any AI.
 
-AI Context Pack 是一款面向 iPhone/iPad 的本地优先工具：把散落在不同 App 中的截图、图片、PDF、网页链接和文字，整理成一份结构清晰、大小可控、敏感信息经过确认的“上下文包”，再通过系统分享菜单发送给 ChatGPT、Claude、Codex、邮件、Slack、GitHub 或其他目标。
+AI Context Pack 是一款面向 iOS/iPadOS 与 Android 的本地优先工具：把散落在不同 App 中的截图、图片、PDF、网页链接和文字，整理成一份结构清晰、大小可控、敏感信息经过确认的“上下文包”，再通过系统分享菜单发送给 ChatGPT、Claude、Codex、邮件、Slack、GitHub 或其他目标。
 
 ## 1. 要解决的问题
 
@@ -36,7 +36,7 @@ AI Context Pack 不做新的聊天机器人，而是把“准备 AI 上下文”
 
 1. **Local first**：MVP 的 OCR、去重、压缩、敏感信息检测和打包默认在设备上完成。
 2. **User in control**：删除、遮挡和内容改写必须可预览、可撤销；高风险操作不静默执行。
-3. **No new habit**：主要入口是 iOS Share Extension，也支持在主 App 内导入。
+3. **No new habit**：主要入口是 iOS Share Extension 与 Android 系统分享目标，也支持在主 App 内导入。
 4. **Output over storage**：产品价值是生成可立即使用的输出，不是长期收藏或截图分类。
 5. **Deterministic first**：MVP 优先使用可测试的 OCR、规则和本地框架，不依赖云端 LLM。
 6. **Destination-neutral**：输出使用 Markdown、PDF 和标准文件，不绑定单一 AI 平台。
@@ -49,7 +49,7 @@ AI Context Pack 不做新的聊天机器人，而是把“准备 AI 上下文”
 - PDF：文本型 PDF 与扫描型 PDF。
 - 纯文本或选中的文字。
 - 网页链接：保存 URL、标题和从 Safari 分享得到的可用文本；MVP 不做服务端网页爬取。
-- 从 Photos、Files、Safari 或其他支持系统分享菜单的 App 导入。
+- 从 iOS Photos、Files、Safari，以及 Android Photos、Files、Chrome 或其他支持系统分享菜单的 App 导入。
 
 ### 暂不进入 MVP
 
@@ -66,7 +66,7 @@ AI Context Pack 不做新的聊天机器人，而是把“准备 AI 上下文”
 
 1. 用户在 Photos、Files、Safari 或其他 App 中选择内容。
 2. 点击系统 Share，选择 **Context Pack**。
-3. Share Extension 将内容复制到 App Group 的临时 Inbox，并显示接收结果。
+3. iOS Share Extension 将内容复制到 App Group Inbox；Android share receiver 将内容复制到 app-private Inbox。
 4. 用户打开主 App，进入新建的 Draft Pack。
 5. App 自动执行解析、OCR、基础清洗、去重和大小估算。
 6. 用户调整顺序、删除内容、编辑标题与说明。
@@ -81,12 +81,13 @@ AI Context Pack 不做新的聊天机器人，而是把“准备 AI 上下文”
 3. 选择目标预设，例如 “Balanced Markdown” 或 “Compact Attachments”。
 4. 完成处理、检查和导出。
 
-### 路径 C：快速模式
+### 路径 C：快速添加
 
 1. 用户分享内容到 Context Pack。
-2. 若所有处理都满足安全条件，Extension 显示 Quick Export。
-3. 用户确认后直接分享标准 Markdown 或压缩附件。
-4. 检测到敏感信息、OCR 失败或超出预算时，必须进入主 App 复核。
+2. 系统入口只完成轻量复制、校验和 manifest 写入。
+3. Android 可路由到主 App 的导入预览；iOS Extension 显示“已加入待处理队列”后结束。
+4. OCR、PDF 渲染、压缩、敏感信息检测和导出全部在主 App 中执行。
+5. MVP 不依赖从 iOS Share Extension 自动打开主 App 的非官方行为。
 
 ## 6. 主要功能
 
@@ -99,8 +100,8 @@ AI Context Pack 不做新的聊天机器人，而是把“准备 AI 上下文”
 
 ### 6.2 内容提取
 
-- 图片使用 Apple Vision 做 OCR，记录文本块、置信度和坐标。
-- 文本型 PDF 直接提取文字；扫描页回退到逐页 OCR。
+- 图片在 iOS 使用 Apple Vision、在 Android 使用 ML Kit Text Recognition v2；两端输出统一的文本块、置信度与归一化坐标协议。
+- iOS 使用 PDFKit 提取文本并对扫描页 OCR；Android API 35+ 优先使用 PdfRenderer 文本内容，较低版本或扫描页采用逐页渲染与 OCR 回退。
 - 文本输入保持原始格式，并规范换行、不可见字符和编码。
 - URL 项保留原始链接与可用标题；从分享上下文中接收正文时一并保存。
 
@@ -161,28 +162,37 @@ AI Context Pack 不做新的聊天机器人，而是把“准备 AI 上下文”
 
 输出：结构化 Markdown，可作为后续比较分析的输入。
 
-## 8. 隐私与数据边界
+## 8. 平台支持与工程边界
+
+- React Native + TypeScript 负责共享 UI、领域模型、pipeline 编排、规则检测与 Markdown。
+- iOS 原生层负责 Share Extension、App Group、Vision、PDFKit 与 CoreGraphics。
+- Android 原生层负责 share intents、ContentResolver、ML Kit、PdfRenderer 与 Android Canvas。
+- JS/原生边界只传文件 URI、manifest、结构化结果、进度和错误码，不传整张图片或 PDF 的字节数组。
+- iOS 与 Android 可以使用不同系统引擎，但必须满足同一版本化 contract 和同一组跨平台验收 fixture。
+
+## 9. 隐私与数据边界
 
 - MVP 不要求账号，不默认上传用户内容。
 - 二进制原件保存在 App 私有目录；元数据存储在本地数据库。
-- Share Extension 的临时文件在成功导入或到期后清理。
+- iOS App Group Inbox 与 Android app-private Inbox 的临时文件在成功导入或到期后清理。
 - 导出前展示将要共享的具体文件和可能仍存在的风险。
 - 崩溃与性能诊断不得包含用户原文、OCR 结果、文件名、URL 查询参数或敏感检测结果。
 - 若未来加入云端能力，必须逐项 opt-in，并在上传前展示内容、提供方和目的。
 
-## 9. MVP 成功标准
+## 10. MVP 成功标准
 
-- 首次用户可在 60 秒内完成“分享内容 → 生成 Pack → 导出”。
+- iOS 与 Android 首次用户均可在 60 秒内完成“分享内容 → 生成 Pack → 导出”。
 - 典型 10 张截图的处理在支持设备上 15 秒内完成，且 UI 保持可响应。
 - 100% 的导出都能追溯到明确的输入项；失败项不会被静默遗漏。
 - 关闭网络后，图片、PDF、文本的核心流程仍可完成。
 - 测试语料中的已支持敏感模式达到预设召回率，且所有遮挡导出通过像素级验证。
 - Beta 阶段至少完成 20 个真实任务，任务成功率达到 80% 以上。
 
-## 10. 文档导航
+## 11. 文档导航
 
 - [详细产品需求](Product-Spec.md)
 - [技术架构](Architecture.md)
 - [实施路线图](Roadmap.md)
 - [Issue Label 规范](Labels.md)
+- [ADR-0001：React Native 双端架构](../adr/0001-react-native-cross-platform.md)
 
