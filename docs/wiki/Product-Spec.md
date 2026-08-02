@@ -3,11 +3,11 @@
 ## 1. 版本与假设
 
 - 目标版本：v0.1 MVP。
-- 首发平台：iPhone 和 iPad，iOS/iPadOS 18+。
-- 技术方向：原生 Swift/SwiftUI、本地优先、无账号。
+- 首发平台：iPhone、iPad 与 Android 手机/平板；iOS/iPadOS 16.4+，Android API 24+。
+- 技术方向：React Native 0.86 + Expo SDK 57 modules + TypeScript strict；Swift/Kotlin 原生适配器；本地优先、无账号。
 - 目标语言：首发 UI 支持英文和简体中文；OCR 使用系统支持的自动语言识别。
-- 主要分发：TestFlight，验收通过后提交 App Store。
-- 主要入口：系统 Share Extension；主 App 导入作为完整编辑入口。
+- 主要分发：TestFlight 与 Google Play Internal Testing；验收通过后提交 App Store 与 Google Play。
+- 主要入口：iOS Share Extension 与 Android share intents；主 App 导入作为完整编辑入口。
 
 ## 2. 用户故事
 
@@ -28,24 +28,26 @@
 
 验收：终止并重新打开 App 后，Draft 及顺序完整保留。
 
-### FR-002：Share Extension 接收
+### FR-002：系统分享接收
 
-- 接收 public.image、public.pdf、public.plain-text 和 public.url。
-- 支持一次分享多个 item，并显示已接收、拒绝和失败的数量。
-- Extension 只做轻量复制和校验，重处理交给主 App。
-- 使用 App Group 交换 manifest 与临时文件。
-- 内存不足、超时或部分文件失败时必须保留已成功项并提供可恢复错误。
+- iOS Share Extension 接收 image、PDF、plain text 与 URL，通过 NSItemProvider 读取并复制到 App Group Inbox。
+- Android 接收 ACTION_SEND 与 ACTION_SEND_MULTIPLE，通过 ContentResolver 立即复制到 app-private Inbox。
+- 两端支持一次分享多个 item，并显示已接收、拒绝和失败数量。
+- 系统入口只做轻量复制、校验和 ImportManifestV1 写入，重处理交给主 App。
+- iOS 不使用从 Extension 自动打开主 App 的非官方 API。
+- 内存不足、超时、URI 权限失效或部分文件失败时，保留已成功项并提供可恢复错误。
 
-验收：从 Photos、Files 和 Safari 各完成至少一条端到端路径；一次分享 20 张图片不丢项。
+验收：从 iOS Photos/Files/Safari 与 Android Photos/Files/Chrome 分别完成端到端路径；一次分享 20 张图片不丢项；两端 manifest 均通过同一 contract test。
 
 ### FR-003：主 App 导入
 
-- PhotosPicker 导入多张图片。
-- fileImporter 导入 PDF、图片和文本文件。
-- 支持粘贴纯文本或 URL。
-- 导入前后都显示类型、数量和不可支持项。
+- React Native 主 App 支持多图、PDF、文本文件、纯文本和 URL。
+- iOS 使用系统 Photos/Files picker，Android 使用系统 Photo Picker/Storage Access Framework。
+- 导入前后显示类型、数量、大小和不支持项。
+- 所有 provider URI 在授权窗口内复制到应用控制的文件目录。
+- 取消选择不产生空 Pack，不支持格式不导致 App 崩溃。
 
-验收：取消选择不会产生空 Pack；不支持格式不会导致 App 崩溃。
+验收：iOS 与 Android 的取消、部分失败、重复选择和权限失效场景均有自动化或可重复手工测试。
 
 ### FR-004：统一 Ingestion Manifest
 
@@ -58,21 +60,25 @@
 
 ### FR-005：图片 OCR
 
-- 使用 Vision 识别文本，保留文本块、bounding box、语言、置信度和阅读顺序。
-- 支持旋转方向和常见截图尺寸。
-- 低置信度文本在 UI 中标记。
-- 用户可选择只导出原图、只导出 OCR 或两者都导出。
+- iOS 使用 Apple Vision；Android 使用 ML Kit Text Recognition v2。
+- Android MVP 打包 Latin 与 Chinese 模型，确保首次使用和飞行模式可工作。
+- 两端统一输出 OCRResultV1：完整文本、block、归一化 bounding box、可选语言与置信度、engine/revision 和耗时。
+- 支持旋转方向和常见截图尺寸，低置信度文本在 UI 中标记。
+- JS/原生边界只传文件 URI 与结构化结果，不传图片字节。
+- 用户可选择只导出原图、只导出 OCR 或两者。
 
-验收：固定 fixture 的 OCR 结果可重复；英文/中文错误截图关键错误字符串可被找到。
+验收：英文/中文 fixture 在两端达到各自阈值；不要求两种引擎逐字相同，但 contract、坐标合法性和关键字符串结果必须稳定。
 
 ### FR-006：PDF 提取
 
-- 文本型 PDF 优先使用 PDFKit 提取文字。
-- 无文本或文本密度过低的页面使用渲染图 OCR。
-- 逐页记录提取方式、字符数和失败状态。
-- 加密、损坏或超大 PDF 给出可理解错误，不绕过保护。
+- iOS 使用 PDFKit 提取嵌入文本，无文本或低密度页面渲染后交给 Vision OCR。
+- Android API 35+ 优先使用 PdfRenderer 文本内容；API 24–34 与扫描页采用逐页渲染后交给 ML Kit。
+- 不在内存中保留整份 PDF 的位图；逐页处理、限制并发并支持取消/checkpoint。
+- 逐页记录提取方式、字符数、engine revision 和失败状态。
+- 加密、损坏、超页数或超大小 PDF 给出可理解错误，不绕过保护。
+- MVP 默认限制为单个 PDF 25 页、50 MB；修改限制必须有基准证据。
 
-验收：文本 PDF、扫描 PDF、混合 PDF、损坏 PDF 均有自动化 fixture。
+验收：文本、扫描、混合、损坏与超限 PDF 均有 fixture；Android API 24/35+ 和 iOS 分别验证。
 
 ### FR-007：文本与 URL 规范化
 
@@ -136,7 +142,7 @@
 - 删除默认仅从 Pack 移除；是否删除本地原件需二次确认。
 - 在数据未保存完成前提供明确进度，不允许误以为已完成。
 
-验收：VoiceOver 可完成核心流程；所有 destructive action 均可取消或撤销。
+验收：VoiceOver 与 TalkBack 均可完成核心流程；所有 destructive action 均可取消或撤销。
 
 ### FR-014：Markdown 输出
 
@@ -152,7 +158,7 @@
 - PDF 适合人类阅读，包含目录、页码和来源信息。
 - Attachment bundle 包含 README.md、manifest.json 和处理后附件。
 - ZIP 内不得包含原始未遮挡派生物或临时文件。
-- 支持保存到 Files 和系统 Share Sheet。
+- 支持保存到 iOS Files、Android Documents 与系统 Share Sheet。
 
 验收：解压后的 manifest 引用均存在，哈希校验正确，无路径穿越文件名。
 
@@ -190,7 +196,7 @@
 
 ### NFR-003：资源限制
 
-- Share Extension 避免重处理并尽快完成复制。
+- iOS Share Extension 与 Android share receiver 避免重处理并尽快完成复制。
 - Pipeline 设置并发上限，针对内存警告降级。
 - 磁盘空间不足时在写入前失败并保留可恢复状态。
 
@@ -202,11 +208,18 @@
 
 ### NFR-005：可访问性与本地化
 
-- Dynamic Type、VoiceOver、足够颜色对比度。
-- 用户可见字符串进入 String Catalog。
+- Dynamic Type/Android font scaling、VoiceOver/TalkBack、足够颜色对比度。
+- 用户可见字符串进入共享 i18n catalog；平台原生 target 的字符串进入对应资源。
 - 英文和简体中文 UI 在 Beta 前完成。
 
-### NFR-006：可测试性
+### NFR-006：跨平台一致性
+
+- 共享领域协议和 manifest 必须版本化。
+- 每个功能 issue 明确 shared、iOS、Android 的职责与验收。
+- 平台结果允许实现差异，但不得静默缺失功能或降低隐私保障。
+- 支持矩阵至少覆盖 iOS 16.4、当前 iOS，以及 Android API 24、35、36。
+
+### NFR-007：可测试性
 
 - 核心 pipeline 使用协议和纯数据模型，可在无 UI 环境测试。
 - 测试 fixture 不包含真实凭据或个人信息。
