@@ -25,6 +25,7 @@
 | platform:shared | 0969DA | 跨平台 TypeScript、schema、fixture 或产品行为 |
 | platform:ios | A2AAAD | iOS/iPadOS、Swift、Xcode、Share Extension |
 | platform:android | 3DDC84 | Android、Kotlin、Gradle、share intents |
+| platform:desktop | 8B949E | macOS、浏览器扩展、MCP 或其他桌面工作流 |
 
 仅加 `platform:shared` 表示没有平台原生实现；同时包含三者表示共享层与两端适配器都在范围内。
 
