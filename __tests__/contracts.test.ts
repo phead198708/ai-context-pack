@@ -1,4 +1,8 @@
-import { isImportManifestV1, isOCRResultV1 } from '../src/domain/validation';
+import {
+  isImportManifestV1,
+  isOCRResultV1,
+  isPDFProbeResultV1,
+} from '../src/domain/validation';
 describe('versioned native contracts', () => {
   test('accepts the shared minimal manifest fixture', () => {
     expect(
@@ -47,6 +51,26 @@ describe('versioned native contracts', () => {
         durationMs: 1,
         engine: 'apple-vision',
         revision: '1',
+      }),
+    ).toBe(false);
+  });
+  test('validates PDF probe page accounting and engine', () => {
+    expect(
+      isPDFProbeResultV1({
+        pageCount: 1,
+        embeddedTextPages: 1,
+        renderedFallbackPages: 0,
+        engine: 'pdf-renderer',
+        limit: { pages: 25, bytes: 52_428_800 },
+      }),
+    ).toBe(true);
+    expect(
+      isPDFProbeResultV1({
+        pageCount: 1,
+        embeddedTextPages: 1,
+        renderedFallbackPages: 1,
+        engine: 'pdf-renderer',
+        limit: { pages: 25, bytes: 52_428_800 },
       }),
     ).toBe(false);
   });

@@ -32,6 +32,10 @@ final class ShareViewController: UIViewController {
     let ingestionId = UUID().uuidString.lowercased(), itemId = UUID().uuidString.lowercased()
     let directory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    var committed = false
+    defer {
+      if !committed { try? FileManager.default.removeItem(at: directory) }
+    }
     let partial = directory.appendingPathComponent("\(itemId).partial"), destination = directory.appendingPathComponent("\(itemId).bin")
     try FileManager.default.copyItem(at: source, to: partial)
     try FileManager.default.moveItem(at: partial, to: destination)
@@ -41,6 +45,7 @@ final class ShareViewController: UIViewController {
     let manifestPartial = directory.appendingPathComponent("manifest.partial"), manifestURL = directory.appendingPathComponent("manifest.json")
     try data.write(to: manifestPartial, options: .atomic)
     try FileManager.default.moveItem(at: manifestPartial, to: manifestURL)
+    committed = true
   }
 
   private func finish(message: String, error: Bool) {

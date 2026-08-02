@@ -1,0 +1,37 @@
+import {
+  createNativeAdapter,
+  NativeBoundaryError,
+} from '../src/infrastructure/createNativeAdapter';
+
+describe('native adapter runtime boundary', () => {
+  const mockNativeModule = {
+    scanInbox: jest.fn(),
+    recognizeText: jest.fn(),
+    probePdf: jest.fn(),
+  };
+  const adapter = createNativeAdapter(mockNativeModule);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('rejects invalid manifests returned by native code', async () => {
+    mockNativeModule.scanInbox.mockResolvedValue([
+      { schemaVersion: 2, items: [] },
+    ]);
+
+    await expect(adapter.scanInbox()).rejects.toEqual(
+      new NativeBoundaryError('NATIVE_MANIFEST_INVALID'),
+    );
+  });
+
+  test('rejects invalid OCR and PDF DTOs', async () => {
+    mockNativeModule.recognizeText.mockResolvedValue({ schemaVersion: 1 });
+    mockNativeModule.probePdf.mockResolvedValue({ pageCount: 1 });
+
+    await expect(
+      adapter.recognizeText('file:///fixture.png', 'latin'),
+    ).rejects.toMatchObject({ code: 'NATIVE_OCR_RESULT_INVALID' });
+    await expect(adapter.probePdf('file:///fixture.pdf')).rejects.toMatchObject(
+      { code: 'NATIVE_PDF_RESULT_INVALID' },
+    );
+  });
+});

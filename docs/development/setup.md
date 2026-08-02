@@ -28,6 +28,9 @@ Build without committing signing data:
 ```sh
 xcodebuild -workspace ios/AIContextPack.xcworkspace -scheme AIContextPack -configuration Debug -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build
 ./android/gradlew -p android :app:testDebugUnitTest :context-native:testDebugUnitTest :app:assembleDebug
+
+# With an API 35+ emulator/device attached, execute the real text/scanned PDF fixtures.
+./android/gradlew -p android :context-native:connectedDebugAndroidTest
 ```
 
 Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go.

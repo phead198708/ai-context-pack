@@ -9,10 +9,10 @@ The iOS Share Extension accepts one image, copies it atomically to the App Group
 ## PDF feasibility
 
 - iOS opens a local file using PDFKit, rejects files above 50 MB or 25 pages, counts pages with embedded text, and marks remaining pages for sequential render plus Vision fallback.
-- Android opens a local file with `PdfRenderer`, rejects files above 50 MB or 25 pages, and marks pages for sequential render plus bundled ML Kit fallback. API 35+ embedded-text extraction is reserved for production Issue #11; API 24–34 uses page rendering.
+- Android opens a local file with `PdfRenderer`, rejects files above 50 MB or 25 pages, uses `PdfRenderer.Page.getTextContents()` on API 35+ to count embedded-text pages, and marks only pages without embedded text for sequential render plus bundled ML Kit fallback. API 24–34 marks every page for page rendering because the platform has no embedded-text API.
 - The spike never retains full-document bitmaps. Production extraction, page checkpoints, cancellation, corrupted/encrypted classification, and benchmarks across the supported API/device matrix remain Issue #11.
 
-Synthetic one-page text and scanned fixtures are stored under `fixtures/`. The expected MVP bounds are 25 pages and 52,428,800 bytes.
+Synthetic one-page text and scanned fixtures are stored under `fixtures/`. `PdfProbeInstrumentedTest` runs both fixtures on API 35+ and proves the text page is classified as embedded while the scanned page is classified for rendered fallback. The expected MVP bounds are 25 pages and 52,428,800 bytes.
 
 ## Privacy-safe diagnostics
 
@@ -20,15 +20,16 @@ Normal logs may contain only event names, stable error codes, counts, byte sizes
 
 ## Dependency review
 
-| Dependency                     | Pin / source           | Purpose                       | Architecture / maintenance                         | License            | Privacy, size, and platform impact                                                |
-| ------------------------------ | ---------------------- | ----------------------------- | -------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------- |
-| React Native                   | 0.86.2                 | Shared runtime                | New Architecture baseline, maintained by Meta      | MIT                | Hermes/native runtime on both platforms; no content network path                  |
-| Expo                           | 57.0.9                 | Modules API, CLI, autolinking | SDK 57 supports RN 0.86; maintained by Expo        | MIT                | Adds local module infrastructure on both platforms                                |
-| expo-dev-client                | 57.0.10                | Development builds            | Maintained SDK module, New Architecture compatible | MIT                | Debug-only workflow; no release core dependency on Expo Go                        |
-| expo-status-bar                | 57.0.1                 | Shared status-bar UI          | Maintained SDK module                              | MIT                | Negligible; no content access                                                     |
-| react-native-safe-area-context | 5.7.0                  | Safe layout                   | Maintained, New Architecture compatible            | MIT                | Small native/UI dependency on both platforms                                      |
-| ML Kit text recognition        | 16.0.1 Latin + Chinese | Offline Android OCR spike     | Current Google bundled v2 artifacts                | Google APIs terms  | Roughly 4 MB per bundled script/architecture; no model download or content upload |
-| Vision / PDFKit / PdfRenderer  | Platform SDK           | Offline OCR/PDF probe         | OS-supported APIs                                  | Platform SDK terms | No third-party binary; device-local content processing                            |
+| Dependency                     | Pin / source           | Purpose                             | Architecture / maintenance                         | License              | Privacy, size, and platform impact                                                |
+| ------------------------------ | ---------------------- | ----------------------------------- | -------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------- |
+| React Native                   | 0.86.2                 | Shared runtime                      | New Architecture baseline, maintained by Meta      | MIT                  | Hermes/native runtime on both platforms; no content network path                  |
+| Expo                           | 57.0.9                 | Modules API, CLI, autolinking       | SDK 57 supports RN 0.86; maintained by Expo        | MIT                  | Adds local module infrastructure on both platforms                                |
+| expo-dev-client                | 57.0.10                | Development builds                  | Maintained SDK module, New Architecture compatible | MIT                  | Debug-only workflow; no release core dependency on Expo Go                        |
+| expo-status-bar                | 57.0.1                 | Shared status-bar UI                | Maintained SDK module                              | MIT                  | Negligible; no content access                                                     |
+| react-native-safe-area-context | 5.7.0                  | Safe layout                         | Maintained, New Architecture compatible            | MIT                  | Small native/UI dependency on both platforms                                      |
+| ML Kit text recognition        | 16.0.1 Latin + Chinese | Offline Android OCR spike           | Current Google bundled v2 artifacts                | Google APIs terms    | Roughly 4 MB per bundled script/architecture; no model download or content upload |
+| Vision / PDFKit / PdfRenderer  | Platform SDK           | Offline OCR/PDF probe               | OS-supported APIs                                  | Platform SDK terms   | No third-party binary; device-local content processing                            |
+| AndroidX Test runner / JUnit   | 1.7.0 / 1.3.0 / 4.13.2 | Native regression and fixture tests | Test-only maintained AndroidX/JUnit tooling        | Apache-2.0 / EPL-1.0 | Debug-test dependency only; no release binary or content network path             |
 
 No archive/share wrapper, remote service, analytics SDK, or experimental incoming-share package is added.
 

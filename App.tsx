@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
+  DeviceEventEmitter,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -48,7 +49,18 @@ function App(): React.JSX.Element {
           setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
         );
     });
-    return () => subscription.remove();
+    const inboxSubscription = DeviceEventEmitter.addListener(
+      'AIContextPackInboxChanged',
+      () => {
+        refresh(true).catch(() =>
+          setState({ kind: 'error', code: 'INBOX_SCAN_FAILED' }),
+        );
+      },
+    );
+    return () => {
+      subscription.remove();
+      inboxSubscription.remove();
+    };
   }, []);
   return (
     <SafeAreaView style={styles.safeArea}>

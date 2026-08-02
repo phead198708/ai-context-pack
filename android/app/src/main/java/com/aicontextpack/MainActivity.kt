@@ -3,6 +3,7 @@ package com.aicontextpack
 import android.os.Build
 import android.os.Bundle
 import android.content.Intent
+import com.facebook.react.modules.core.DeviceEventManagerModule
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
@@ -18,13 +19,23 @@ class MainActivity : ReactActivity() {
     // This is required for expo-splash-screen.
     setTheme(R.style.AppTheme);
     super.onCreate(null)
-    ShareInboxImporter.importIfSupported(this, intent)
+    importSharedImage(intent)
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
-    ShareInboxImporter.importIfSupported(this, intent)
+    importSharedImage(intent)
+  }
+
+  private fun importSharedImage(intent: Intent?) {
+    ShareInboxImporter.importIfSupportedAsync(applicationContext, intent) { result ->
+      runOnUiThread {
+        reactInstanceManager.currentReactContext
+          ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+          ?.emit("AIContextPackInboxChanged", result.wireValue)
+      }
+    }
   }
 
   /**

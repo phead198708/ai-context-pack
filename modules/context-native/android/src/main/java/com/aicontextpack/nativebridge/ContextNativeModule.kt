@@ -2,6 +2,7 @@ package com.aicontextpack.nativebridge
 
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
@@ -34,7 +35,7 @@ class ContextNativeModule : Module() {
       val image = try { InputImage.fromFilePath(context, uri) } catch (_: Exception) { return@AsyncFunction promise.reject(NativeException("OCR_IMAGE_DECODE_FAILED")) }
       val recognizer = if (script == "chinese") TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()) else TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
       recognizer.process(image)
-        .addOnSuccessListener { result -> promise.resolve(ocrResult(result, script, started)) }
+        .addOnSuccessListener { result -> promise.resolve(ocrResult(result, image.width, image.height, script, started)) }
         .addOnFailureListener { promise.reject(NativeException("OCR_RECOGNITION_FAILED")) }
         .addOnCompleteListener { recognizer.close() }
     }
@@ -43,12 +44,7 @@ class ContextNativeModule : Module() {
       val file = File(controlledFileUri(fileUri).path ?: throw NativeException("INVALID_LOCAL_FILE_URI"))
       if (!file.isFile || file.length() > 52_428_800) throw NativeException("PDF_INVALID_OR_TOO_LARGE")
       val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-      PdfRenderer(descriptor).use { renderer ->
-        if (renderer.pageCount > 25) throw NativeException("PDF_TOO_MANY_PAGES")
-        mapOf("pageCount" to renderer.pageCount, "embeddedTextPages" to 0,
-          "renderedFallbackPages" to renderer.pageCount, "engine" to "pdf-renderer",
-          "limit" to mapOf("pages" to 25, "bytes" to 52_428_800))
-      }
+      PdfProbe.probe(descriptor)
     }
   }
 
@@ -58,10 +54,10 @@ class ContextNativeModule : Module() {
     return uri
   }
 
-  private fun ocrResult(result: Text, script: String, started: Long): Map<String, Any> {
-    val width = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }.maxOfOrNull { it.boundingBox?.right ?: 1 }?.coerceAtLeast(1) ?: 1
-    val height = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }.maxOfOrNull { it.boundingBox?.bottom ?: 1 }?.coerceAtLeast(1) ?: 1
-    val blocks = result.textBlocks.mapNotNull { block -> block.boundingBox?.let { box -> mapOf("text" to block.text, "bounds" to mapOf("x" to box.left.toDouble() / width, "y" to box.top.toDouble() / height, "width" to box.width().toDouble() / width, "height" to box.height().toDouble() / height)) } }
+  private fun ocrResult(result: Text, sourceWidth: Int, sourceHeight: Int, script: String, started: Long): Map<String, Any> {
+    val width = sourceWidth.coerceAtLeast(1)
+    val height = sourceHeight.coerceAtLeast(1)
+    val blocks = result.textBlocks.mapNotNull { block -> block.boundingBox?.let { box -> mapOf("text" to block.text, "bounds" to OcrBoundsNormalizer.normalize(box.left, box.top, box.width(), box.height(), width, height)) } }
     return mapOf("schemaVersion" to 1, "text" to result.text, "blocks" to blocks,
       "durationMs" to (System.nanoTime() - started) / 1_000_000.0,
       "engine" to if (script == "chinese") "ml-kit-chinese" else "ml-kit-latin", "revision" to "16.0.1")
@@ -69,6 +65,44 @@ class ContextNativeModule : Module() {
 
   private fun jsonObjectToMap(value: JSONObject): Map<String, Any?> = value.keys().asSequence().associateWith { key ->
     when (val item = value.get(key)) { is JSONObject -> jsonObjectToMap(item); is org.json.JSONArray -> (0 until item.length()).map { index -> val child = item.get(index); if (child is JSONObject) jsonObjectToMap(child) else child }; JSONObject.NULL -> null; else -> item }
+  }
+}
+
+internal object OcrBoundsNormalizer {
+  fun normalize(left: Int, top: Int, boxWidth: Int, boxHeight: Int, sourceWidth: Int, sourceHeight: Int): Map<String, Double> {
+    val width = sourceWidth.coerceAtLeast(1).toDouble()
+    val height = sourceHeight.coerceAtLeast(1).toDouble()
+    val clippedLeft = left.toDouble().coerceIn(0.0, width)
+    val clippedTop = top.toDouble().coerceIn(0.0, height)
+    val clippedRight = (left.toLong() + boxWidth).toDouble().coerceIn(clippedLeft, width)
+    val clippedBottom = (top.toLong() + boxHeight).toDouble().coerceIn(clippedTop, height)
+    return mapOf(
+      "x" to clippedLeft / width,
+      "y" to clippedTop / height,
+      "width" to (clippedRight - clippedLeft) / width,
+      "height" to (clippedBottom - clippedTop) / height,
+    )
+  }
+}
+
+internal object PdfProbe {
+  fun probe(descriptor: ParcelFileDescriptor): Map<String, Any> = PdfRenderer(descriptor).use { renderer ->
+    if (renderer.pageCount > 25) throw NativeException("PDF_TOO_MANY_PAGES")
+    var embeddedTextPages = 0
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+      for (index in 0 until renderer.pageCount) {
+        renderer.openPage(index).use { page ->
+          if (page.textContents.any { content -> content.text.isNotBlank() }) embeddedTextPages += 1
+        }
+      }
+    }
+    mapOf(
+      "pageCount" to renderer.pageCount,
+      "embeddedTextPages" to embeddedTextPages,
+      "renderedFallbackPages" to renderer.pageCount - embeddedTextPages,
+      "engine" to "pdf-renderer",
+      "limit" to mapOf("pages" to 25, "bytes" to 52_428_800),
+    )
   }
 }
 
