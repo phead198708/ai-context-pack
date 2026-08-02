@@ -70,14 +70,25 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun rejectsManifestThatReferencesAnotherIngestion() {
+    val other = File(inbox, "other/item.bin").apply {
+      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(other, manifestDirectory = File(inbox, "claimed"))
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+  }
+
+  @Test
   fun leavesTransactionsWithLiveWriterLocksUntouched() {
-    val partial = File(inbox, "partial").apply { mkdirs() }
+    val partialId = "123e4567-e89b-42d3-a456-426614174000"
+    val stagingId = "223e4567-e89b-42d3-a456-426614174000"
+    val partial = File(inbox, partialId).apply { mkdirs() }
     File(partial, "item.partial").writeBytes(byteArrayOf(1, 2))
-    val staging = File(inbox.parentFile, "InboxStaging/fresh").apply { mkdirs() }
+    val staging = File(inbox.parentFile, "InboxStaging/$stagingId").apply { mkdirs() }
     File(staging, "item.partial").writeBytes(byteArrayOf(3, 4))
     val lockDirectory = File(inbox.parentFile, "InboxWriterLocks").apply { mkdirs() }
-    val firstFile = RandomAccessFile(File(lockDirectory, "partial.lock"), "rw")
-    val secondFile = RandomAccessFile(File(lockDirectory, "fresh.lock"), "rw")
+    val firstFile = RandomAccessFile(File(lockDirectory, "$partialId.lock"), "rw")
+    val secondFile = RandomAccessFile(File(lockDirectory, "$stagingId.lock"), "rw")
     val firstLock = firstFile.channel.lock()
     val secondLock = secondFile.channel.lock()
     try {
@@ -87,6 +98,30 @@ class InboxManifestScannerInstrumentedTest {
     } finally {
       firstLock.release(); secondLock.release(); firstFile.close(); secondFile.close()
     }
+  }
+
+  @Test
+  fun preservesLivePreDirectoryLockAndRemovesItAfterAbandonment() {
+    val id = "323e4567-e89b-42d3-a456-426614174000"
+    val lockFile = File(inbox.parentFile, "InboxWriterLocks/$id.lock").apply {
+      parentFile?.mkdirs(); createNewFile()
+    }
+    RandomAccessFile(lockFile, "rw").use { owner ->
+      owner.channel.lock().use {
+        assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
+        assertEquals(true, lockFile.exists())
+      }
+    }
+    assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
+    assertEquals(false, lockFile.exists())
+  }
+
+  @Test
+  fun failsClosedOnMalformedLockRegistryEntry() {
+    File(inbox.parentFile, "InboxWriterLocks/provider-name.lock").apply {
+      parentFile?.mkdirs(); createNewFile()
+    }
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
   }
 
   @Test
@@ -114,6 +149,25 @@ class InboxManifestScannerInstrumentedTest {
     MetadataEventStore.ack(filesDir, "PendingShareEvents", first.getValue("id") as String)
     val remaining = MetadataEventStore.read(filesDir, "PendingShareEvents")
     assertEquals(listOf(second.getValue("id")), remaining.map { it["id"] })
+  }
+
+  @Test
+  fun cleansPartialEventWhenAtomicRenameFails() {
+    val id = "423e4567-e89b-42d3-a456-426614174000"
+    val directory = File(inbox.parentFile, "PendingShareEvents").apply { mkdirs() }
+    File(directory, "$id.json").mkdirs()
+    assertThrows(Exception::class.java) {
+      MetadataEventStore.persistShareResult(requireNotNull(inbox.parentFile), "failed", eventId = id)
+    }
+    assertEquals(false, File(directory, "$id.partial").exists())
+  }
+
+  @Test
+  fun surfacesEventStoreWriteFailure() {
+    File(inbox.parentFile, "PendingShareEvents").writeText("not a directory")
+    assertThrows(Exception::class.java) {
+      MetadataEventStore.persistShareResult(requireNotNull(inbox.parentFile), "failed")
+    }
   }
 
   @Test

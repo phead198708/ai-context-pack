@@ -23,14 +23,21 @@ object ShareInboxImporter {
   enum class Result(val wireValue: String) { COMPLETE("complete"), FAILED("failed") }
 
   @Suppress("DEPRECATION")
-  fun importIfSupportedAsync(context: Context, intent: Intent?, completion: (Result) -> Unit) {
+  fun importIfSupportedAsync(
+    context: Context,
+    intent: Intent?,
+    ingestionId: String,
+    started: () -> Unit,
+    completion: (Result) -> Unit,
+  ) {
     if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return
     val source = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
     executor.execute {
       val result = try {
+        started()
         requireNotNull(source) { "SHARE_STREAM_MISSING" }
         val mediaType = selectConcreteImageMediaType(intent.type, context.contentResolver.getType(source))
-        if (mediaType == null) Result.FAILED else importImage(context, source, mediaType)
+        if (mediaType == null) Result.FAILED else importImage(context, source, mediaType, ingestionId)
       } catch (_: Exception) {
         Result.FAILED
       }
@@ -38,8 +45,12 @@ object ShareInboxImporter {
     }
   }
 
-  internal fun importImage(context: Context, source: Uri, mediaType: String): Result {
-    val ingestionId = UUID.randomUUID().toString()
+  internal fun importImage(
+    context: Context,
+    source: Uri,
+    mediaType: String,
+    ingestionId: String = UUID.randomUUID().toString(),
+  ): Result {
     val itemId = UUID.randomUUID().toString()
     val directory = File(context.filesDir, "InboxStaging/$ingestionId")
     val lockDirectory = File(context.filesDir, "InboxWriterLocks")

@@ -31,7 +31,8 @@ class ContextNativeModule : Module() {
 
     AsyncFunction("getPendingShareEvents") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
-      MetadataEventStore.read(context.filesDir, "PendingShareEvents")
+      try { MetadataEventStore.read(context.filesDir, "PendingShareEvents") + EphemeralShareEventStore.read() }
+      catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
     }
 
     AsyncFunction("ackPendingShareEvent") { id: String ->
@@ -39,9 +40,14 @@ class ContextNativeModule : Module() {
       MetadataEventStore.ack(context.filesDir, "PendingShareEvents", id)
     }
 
+    AsyncFunction("ackEphemeralShareEvent") { id: String ->
+      EphemeralShareEventStore.ack(id)
+    }
+
     AsyncFunction("getPendingRecoveryEvent") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
-      MetadataEventStore.read(context.filesDir, "RecoveryEvents").firstOrNull()
+      try { MetadataEventStore.read(context.filesDir, "RecoveryEvents").firstOrNull() }
+      catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
     }
 
     AsyncFunction("ackRecoveryEvent") { id: String ->
@@ -104,7 +110,7 @@ internal object InboxManifestScanner {
     return files.map { file ->
       try {
         val manifest = JSONObject(file.readText())
-        validateOwnedManifest(manifest, inbox)
+        validateOwnedManifest(manifest, requireNotNull(file.parentFile))
         jsonObjectToMap(manifest)
       } catch (_: Exception) {
         throw NativeException("INBOX_MANIFEST_INVALID")
@@ -129,15 +135,15 @@ internal object InboxManifestScanner {
     return manifests
   }
 
-  private fun validateOwnedManifest(manifest: JSONObject, inbox: File) {
-    val inboxPath = inbox.canonicalPath + File.separator
+  private fun validateOwnedManifest(manifest: JSONObject, ingestion: File) {
+    val ingestionPath = ingestion.canonicalPath + File.separator
     val items = manifest.getJSONArray("items")
     for (index in 0 until items.length()) {
       val item = items.getJSONObject(index)
       val uri = Uri.parse(item.getString("localUri"))
       check(uri.scheme == "file" && uri.authority.isNullOrEmpty())
       val path = File(requireNotNull(uri.path)).canonicalPath
-      check(path.startsWith(inboxPath))
+      check(path.startsWith(ingestionPath))
       if (item.getString("status") == "copied") {
         val copiedFile = File(path)
         check(copiedFile.isFile && copiedFile.length() == item.getLong("byteCount"))
@@ -153,12 +159,34 @@ internal object InboxManifestScanner {
 internal object IncompleteTransactionRecovery {
   fun recover(inbox: File): Boolean {
     val filesDir = requireNotNull(inbox.parentFile)
+    recoverOrphanLocks(filesDir)
     val staging = File(filesDir, "InboxStaging")
     var recovered = recoverCandidates(staging, filesDir) { true }
     recovered = recoverCandidates(inbox, filesDir) { directory ->
       !File(directory, "manifest.json").isFile
     } || recovered
     return recovered
+  }
+
+  private fun recoverOrphanLocks(filesDir: File) {
+    val lockDirectory = File(filesDir, "InboxWriterLocks")
+    if (!lockDirectory.exists()) return
+    check(lockDirectory.isDirectory && lockDirectory.canRead())
+    val lockName = Regex("^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.lock$", RegexOption.IGNORE_CASE)
+    (lockDirectory.listFiles() ?: error("INBOX_LOCK_SCAN_FAILED")).forEach { lockFile ->
+      val match = lockName.matchEntire(lockFile.name)
+      check(lockFile.isFile && match != null)
+      val id = requireNotNull(match).groupValues[1]
+      if (File(filesDir, "InboxStaging/$id").exists() || File(filesDir, "Inbox/$id").exists()) return@forEach
+      RandomAccessFile(lockFile, "rw").use { file ->
+        val lock = try { file.channel.tryLock() }
+        catch (_: OverlappingFileLockException) { null }
+        if (lock != null) {
+          lock.release()
+          check(lockFile.delete() || !lockFile.exists())
+        }
+      }
+    }
   }
 
   private fun recoverCandidates(
@@ -202,27 +230,48 @@ internal object IncompleteTransactionRecovery {
 object MetadataEventStore {
   private val idPattern = Regex("^[0-9a-fA-F-]{36}$")
 
-  fun persistShareResult(filesDir: File, result: String): Map<String, Any> =
-    persist(filesDir, "PendingShareEvents", mapOf("result" to result))
+  fun persistShareResult(
+    filesDir: File,
+    result: String,
+    transactionId: String? = null,
+    eventId: String = UUID.randomUUID().toString(),
+  ): Map<String, Any> =
+    persist(filesDir, "PendingShareEvents", mapOf("result" to result) +
+      (transactionId?.let { mapOf("transactionId" to it) } ?: emptyMap()), eventId)
 
   fun persistRecovery(filesDir: File): Map<String, Any> =
-    persist(filesDir, "RecoveryEvents", mapOf("code" to "INBOX_RECOVERY_REQUIRED"))
+    persist(filesDir, "RecoveryEvents", mapOf("code" to "INBOX_RECOVERY_REQUIRED"), UUID.randomUUID().toString())
 
   fun read(filesDir: File, folder: String): List<Map<String, Any>> {
     val directory = File(filesDir, folder)
     if (!directory.exists()) return emptyList()
-    check(directory.isDirectory)
-    return (directory.listFiles() ?: error("EVENT_STORE_READ_FAILED"))
+    if (!directory.isDirectory) throw MetadataEventException("NATIVE_EVENT_STORE_READ_FAILED")
+    return (directory.listFiles() ?: throw MetadataEventException("NATIVE_EVENT_STORE_READ_FAILED"))
       .filter { it.isFile && it.extension == "json" }
       .map { file ->
-        val value = JSONObject(file.readText())
-        mapOf(
-          "schemaVersion" to value.getInt("schemaVersion"),
-          "id" to value.getString("id"),
-          "createdAtMs" to value.getLong("createdAtMs"),
-          "result" to value.optString("result", ""),
-          "code" to value.optString("code", ""),
-        ).filterValues { it != "" }
+        try {
+          val value = JSONObject(file.readText())
+          val id = value.getString("id")
+          check(value.getInt("schemaVersion") == 1 && idPattern.matches(id))
+          if (folder == "PendingShareEvents")
+            check(value.getString("result") == "complete" || value.getString("result") == "failed")
+          if (folder == "RecoveryEvents")
+            check(value.getString("code") == "INBOX_RECOVERY_REQUIRED")
+          mapOf(
+            "schemaVersion" to 1,
+            "id" to id,
+            "createdAtMs" to value.getLong("createdAtMs"),
+            "result" to value.optString("result", ""),
+            "code" to value.optString("code", ""),
+          ).filterValues { it != "" }
+        } catch (_: java.io.IOException) {
+          throw MetadataEventException("NATIVE_EVENT_STORE_READ_FAILED")
+        } catch (_: Exception) {
+          val quarantined = File(directory, "${file.nameWithoutExtension}.invalid")
+          if (!file.renameTo(quarantined))
+            throw MetadataEventException("NATIVE_EVENT_STORE_READ_FAILED")
+          throw MetadataEventException("NATIVE_EVENT_SCHEMA_INVALID")
+        }
       }.sortedBy { it["createdAtMs"] as Long }
   }
 
@@ -232,8 +281,8 @@ object MetadataEventStore {
     return !event.exists() || event.delete()
   }
 
-  private fun persist(filesDir: File, folder: String, fields: Map<String, String>): Map<String, Any> {
-    val id = UUID.randomUUID().toString()
+  private fun persist(filesDir: File, folder: String, fields: Map<String, String>, id: String): Map<String, Any> {
+    require(idPattern.matches(id))
     val directory = File(filesDir, folder)
     check(directory.mkdirs() || directory.isDirectory)
     val createdAtMs = System.currentTimeMillis()
@@ -245,9 +294,43 @@ object MetadataEventStore {
       partial.writeText(payload.toString())
       check(partial.renameTo(published))
     } finally {
-      if (!published.exists()) partial.delete()
+      partial.delete()
     }
     return mapOf("schemaVersion" to 1, "id" to id, "createdAtMs" to createdAtMs) + fields
+  }
+}
+
+class MetadataEventException(val stableCode: String) : Exception(stableCode)
+
+object EphemeralShareEventStore {
+  private const val capacity = 16
+  private const val overflowId = "00000000-0000-4000-8000-000000000001"
+  private val events = LinkedHashMap<String, Map<String, Any>>()
+  private var overflowed = false
+
+  @Synchronized
+  fun publishIfEphemeral(event: Map<String, Any>) {
+    if (event["durable"] != false) return
+    val id = event["id"] as? String ?: return
+    if (events.size >= capacity && !events.containsKey(id)) {
+      overflowed = true
+      return
+    }
+    events[id] = event
+  }
+
+  @Synchronized fun read(): List<Map<String, Any>> = events.values.toList() +
+    if (overflowed) listOf(mapOf(
+      "schemaVersion" to 1,
+      "id" to overflowId,
+      "result" to "failed",
+      "durable" to false,
+      "code" to "SHARE_EPHEMERAL_QUEUE_OVERFLOW",
+    )) else emptyList()
+
+  @Synchronized fun ack(id: String): Boolean {
+    if (id == overflowId && overflowed) { overflowed = false; return true }
+    return events.remove(id) != null
   }
 }
 
