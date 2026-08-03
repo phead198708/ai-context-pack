@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aicontextpack.local/schemas/contracts/v1/risk-finding-v1.schema.json",
   "title": "RiskFindingV1",
+  "$comment": "Structural V1 schema. Cross-field semantic authority: src/domain/validation.ts#isRiskFindingV1.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -56,8 +57,16 @@
       "required": ["kind", "start", "length"],
       "properties": {
         "kind": { "const": "text-range" },
-        "start": { "type": "integer", "minimum": 0 },
-        "length": { "type": "integer", "minimum": 1 }
+        "start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
       }
     },
     "imageRegion": {

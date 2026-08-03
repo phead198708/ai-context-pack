@@ -1,3 +1,5 @@
+import type { DomainErrorCode } from './errors';
+
 export type PackId = string;
 export type ItemId = string;
 export type ArtifactId = string;
@@ -116,7 +118,7 @@ export interface ImportRecord {
   readonly createdAt: string;
   readonly status: 'complete' | 'partial' | 'failed';
   readonly itemIds: readonly ItemId[];
-  readonly errorCodes: readonly string[];
+  readonly errorCodes: readonly DomainErrorCode[];
 }
 
 export type PipelineStage =
@@ -144,7 +146,7 @@ export interface PipelineRun {
   readonly attempt: number;
   readonly processorVersion: ProcessorVersion;
   readonly checkpointId?: string;
-  readonly errorCode?: string;
+  readonly errorCode?: DomainErrorCode;
   readonly startedAt: string;
   readonly updatedAt: string;
   readonly completedAt?: string;
@@ -208,5 +210,5 @@ export interface ExportRecord {
   readonly status: 'running' | 'complete' | 'failed' | 'cancelled';
   readonly manifestSha256?: string;
   readonly artifactIds: readonly ArtifactId[];
-  readonly errorCode?: string;
+  readonly errorCode?: DomainErrorCode;
 }

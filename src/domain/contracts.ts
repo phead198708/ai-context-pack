@@ -74,7 +74,6 @@ export interface CompletePDFPageExtractionV1 extends PDFPageExtractionBaseV1 {
   readonly status: 'complete';
   readonly text: string;
   readonly blocks: readonly OCRBlockV1[];
-  readonly characterCount: number;
 }
 
 export interface FailedPDFPageExtractionV1 extends PDFPageExtractionBaseV1 {

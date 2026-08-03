@@ -37,7 +37,7 @@ Tests execute every allowed transition and every invalid state-command pair.
 
 ## Contract registry
 
-| Contract             | Type/runtime validator                    | JSON Schema                                                                                           | Canonical fixture                                                                     |
+| Contract             | Semantic runtime validator                | Structural JSON Schema                                                                                | Canonical fixture                                                                     |
 | -------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | ImportManifestV1     | `contracts.ts` / `isImportManifestV1`     | [`import-manifest-v1.schema.json`](../../schemas/contracts/v1/import-manifest-v1.schema.json)         | [`import-manifest-v1.json`](../../fixtures/contracts/import-manifest-v1.json)         |
 | OCRResultV1          | `contracts.ts` / `isOCRResultV1`          | [`ocr-result-v1.schema.json`](../../schemas/contracts/v1/ocr-result-v1.schema.json)                   | [`ocr-result-v1.json`](../../fixtures/contracts/ocr-result-v1.json)                   |
@@ -47,6 +47,14 @@ Tests execute every allowed transition and every invalid state-command pair.
 | ExportManifestV1     | `contracts.ts` / `isExportManifestV1`     | [`export-manifest-v1.schema.json`](../../schemas/contracts/v1/export-manifest-v1.schema.json)         | [`export-manifest-v1.json`](../../fixtures/contracts/export-manifest-v1.json)         |
 
 The Swift and Kotlin test encoders construct all six payloads independently and compare their canonical JSON with these same repository fixtures.
+
+### Structural and semantic validation
+
+The Draft 2020-12 schemas are the machine-readable structural layer: required and unknown fields, primitive ranges, enums, canonical identifiers, safe path syntax, aggregate import composition, and checkpoint reason/action combinations. Jest compiles every schema with Ajv and runs all six canonical fixtures plus the structural portion of the negative corpus through it.
+
+The exported TypeScript validator named in each schema's `$comment` is the semantic authority. Consumers must run it after structural validation. Standard Draft 2020-12 cannot portably express projected uniqueness, an import path equal to `<item.id>.bin`, array position equal to `item.order`, or sums such as `x + width <= 1`; the negative corpus proves these payloads pass the structural schema and fail the semantic authority. Native import readers mirror the relevant `ImportManifestV1` semantic checks at the platform boundary.
+
+`PDFPageExtractionV1.text` is a JSON Unicode string and deliberately has no redundant `characterCount`. JavaScript/Kotlin UTF-16 length and Swift grapheme counts differ for emoji and combining sequences, so persisting a derived count would make V1 platform-dependent. The canonical fixture contains Simplified Chinese, an emoji sequence, and a combining sequence to exercise exact Swift/Kotlin/TypeScript payload parity.
 
 ### Import path rule
 

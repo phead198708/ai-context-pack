@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aicontextpack.local/schemas/contracts/v1/pipeline-checkpoint-v1.schema.json",
   "title": "PipelineCheckpointV1",
+  "$comment": "Structural V1 schema. Cross-field semantic authority: src/domain/validation.ts#isPipelineCheckpointV1.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -43,9 +44,69 @@
     },
     "processor": { "type": "string", "minLength": 1 },
     "processorVersion": { "type": "string", "minLength": 1 },
-    "updatedAt": { "type": "string", "format": "date-time" },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"
+    },
     "errorCode": { "$ref": "#/$defs/errorCode" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "reason": { "enum": ["periodic", "backgrounded"] }
+        },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": { "resumeAction": { "const": "continue" } },
+        "not": {
+          "properties": { "errorCode": true },
+          "required": ["errorCode"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "reason": { "const": "cancelled" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": { "resumeAction": { "const": "retry-stage" } },
+        "not": {
+          "properties": { "errorCode": true },
+          "required": ["errorCode"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "reason": { "const": "stage-failure" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": {
+          "resumeAction": { "const": "retry-stage" },
+          "errorCode": { "$ref": "#/$defs/errorCode" }
+        },
+        "required": ["errorCode"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "reason": { "const": "recovery" } },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": {
+          "resumeAction": { "const": "recover-stage" },
+          "errorCode": { "$ref": "#/$defs/errorCode" }
+        },
+        "required": ["errorCode"]
+      }
+    }
+  ],
   "$defs": {
     "uuid": {
       "type": "string",

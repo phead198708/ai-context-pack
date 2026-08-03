@@ -80,7 +80,7 @@ Required versioned schemas:
 - RiskFindingV1
 - ExportManifestV1
 
-Both platforms run the same schema validation and contract fixtures. Compatibility rules require readers to reject unknown breaking versions explicitly rather than guess.
+Shared tests compile every structural JSON Schema and then apply the exported TypeScript semantic validator. Swift and Kotlin independently encode the same canonical fixtures, while native boundary readers mirror the semantic rules they consume. Cross-field invariants that standard JSON Schema cannot express are explicitly tested against the runtime semantic authority. Compatibility rules require readers to reject unknown breaking versions explicitly rather than guess.
 
 Canonical documentation:
 

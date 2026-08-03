@@ -2,18 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aicontextpack.local/schemas/contracts/v1/pdf-page-extraction-v1.schema.json",
   "title": "PDFPageExtractionV1",
+  "$comment": "Structural V1 schema. Cross-field semantic authority: src/domain/validation.ts#isPDFPageExtractionV1.",
   "oneOf": [{ "$ref": "#/$defs/complete" }, { "$ref": "#/$defs/failed" }],
   "$defs": {
-    "baseProperties": {
-      "schemaVersion": { "const": 1 },
-      "pageIndex": { "type": "integer", "minimum": 0 },
-      "method": { "enum": ["embedded-text", "rendered-ocr"] },
-      "engine": {
-        "enum": ["pdfkit", "pdf-renderer", "apple-vision", "ml-kit"]
-      },
-      "revision": { "type": "string", "minLength": 1 },
-      "durationMs": { "type": "number", "minimum": 0 }
-    },
     "bounds": {
       "type": "object",
       "additionalProperties": false,
@@ -68,12 +59,15 @@
         "durationMs",
         "status",
         "text",
-        "blocks",
-        "characterCount"
+        "blocks"
       ],
       "properties": {
         "schemaVersion": { "const": 1 },
-        "pageIndex": { "type": "integer", "minimum": 0 },
+        "pageIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "method": { "enum": ["embedded-text", "rendered-ocr"] },
         "engine": {
           "enum": ["pdfkit", "pdf-renderer", "apple-vision", "ml-kit"]
@@ -85,8 +79,7 @@
         "blocks": {
           "type": "array",
           "items": { "$ref": "#/$defs/block" }
-        },
-        "characterCount": { "type": "integer", "minimum": 0 }
+        }
       }
     },
     "failed": {
@@ -104,7 +97,11 @@
       ],
       "properties": {
         "schemaVersion": { "const": 1 },
-        "pageIndex": { "type": "integer", "minimum": 0 },
+        "pageIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "method": { "enum": ["embedded-text", "rendered-ocr"] },
         "engine": {
           "enum": ["pdfkit", "pdf-renderer", "apple-vision", "ml-kit"]

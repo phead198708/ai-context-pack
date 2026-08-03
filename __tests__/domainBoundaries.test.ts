@@ -15,11 +15,16 @@ const forbiddenImports = [
   /^expo(?:\/|$|-)/,
   /^node:/,
   /(?:^|\/)infrastructure(?:\/|$)/,
+  /(?:^|\/)repositor(?:y|ies)(?:\/|$)/,
   /(?:^|\/)ui(?:\/|$)/,
   /(?:^|\/)features(?:\/|$)/,
   /(?:^|\/)app(?:\/|$)/,
   /modules\/context-native/,
 ];
+
+function isForbiddenDomainImport(specifier: string): boolean {
+  return forbiddenImports.some(pattern => pattern.test(specifier));
+}
 
 function filesBelow(directory: string): readonly string[] {
   return readdirSync(directory).flatMap(name => {
@@ -40,14 +45,20 @@ describe('domain dependency boundary', () => {
       const source = readFileSync(file, 'utf8');
       for (const match of source.matchAll(importPattern)) {
         const specifier = match[1];
-        if (
-          specifier !== undefined &&
-          forbiddenImports.some(pattern => pattern.test(specifier))
-        )
+        if (specifier !== undefined && isForbiddenDomainImport(specifier))
           violations.push(`${relative(process.cwd(), file)} -> ${specifier}`);
       }
     }
 
     expect(violations).toEqual([]);
+  });
+
+  test.each([
+    '../repository/contextPackRepository',
+    '../repositories/contextPackRepository',
+    '../../repository/contextPackRepository',
+    '@app/repositories/contextPackRepository',
+  ])('rejects seeded repository import %s', specifier => {
+    expect(isForbiddenDomainImport(specifier)).toBe(true);
   });
 });

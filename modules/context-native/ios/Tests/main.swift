@@ -308,6 +308,20 @@ final class InboxRecoverySupportTests: XCTestCase {
     }
   }
 
+  func testMalformedCurrentVersionManifestIsSchemaInvalid() throws {
+    let id = UUID().uuidString.lowercased()
+    let directory = root.appendingPathComponent("Inbox/\(id)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("{truncated".utf8).write(to: directory.appendingPathComponent("manifest.json"))
+
+    XCTAssertThrowsError(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    ) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+      XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
+    }
+  }
+
   func testNestedManifestIsRejected() throws {
     let id = UUID().uuidString.lowercased()
     try writeManifest(directoryId: id, manifestId: id)

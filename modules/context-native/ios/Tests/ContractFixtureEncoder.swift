@@ -49,9 +49,8 @@ enum ContractFixtureEncoder {
       "revision": "1",
       "durationMs": 2,
       "status": "complete",
-      "text": "Synthetic PDF fixture",
+      "text": "中文 👩🏽‍💻 e\u{0301}",
       "blocks": [],
-      "characterCount": 21,
     ],
     "pipeline-checkpoint-v1.json": [
       "schemaVersion": 1,

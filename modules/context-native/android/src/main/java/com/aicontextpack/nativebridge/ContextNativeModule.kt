@@ -15,6 +15,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.text.ParsePosition
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -153,8 +154,12 @@ internal object InboxManifestScanner {
         jsonObjectToMap(manifest)
       } catch (error: InboxManifestValidationException) {
         throw NativeException(error.stableCode)
+      } catch (_: IOException) {
+        throw NativeException("INBOX_SCAN_FAILED")
+      } catch (_: SecurityException) {
+        throw NativeException("INBOX_SCAN_FAILED")
       } catch (_: Exception) {
-        throw NativeException("INBOX_MANIFEST_INVALID")
+        throw NativeException("SCHEMA_INVALID")
       }
     }
   }
@@ -220,7 +225,7 @@ internal object InboxManifestScanner {
           check(item.getString("errorCode") in stableErrorCodes)
           failed += 1
         }
-        else -> error("INBOX_MANIFEST_INVALID")
+        else -> throw InboxManifestValidationException("SCHEMA_INVALID")
       }
     }
     check(

@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://aicontextpack.local/schemas/contracts/v1/ocr-result-v1.schema.json",
   "title": "OCRResultV1",
+  "$comment": "Structural V1 schema. Cross-field semantic authority: src/domain/validation.ts#isOCRResultV1.",
   "type": "object",
   "additionalProperties": false,
   "required": [

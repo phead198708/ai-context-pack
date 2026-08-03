@@ -98,9 +98,8 @@ private object ContractFixtureEncoder {
     .put("revision", "1")
     .put("durationMs", 2)
     .put("status", "complete")
-    .put("text", "Synthetic PDF fixture")
+    .put("text", "中文 👩🏽‍💻 e\u0301")
     .put("blocks", JSONArray())
-    .put("characterCount", 21)
 
   private fun pipelineCheckpoint() = JSONObject()
     .put("schemaVersion", 1)

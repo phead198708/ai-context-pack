@@ -41,7 +41,9 @@ class InboxManifestScannerInstrumentedTest {
       writeText("{truncated")
     }
 
-    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
   }
 
   @Test
@@ -70,7 +72,48 @@ class InboxManifestScannerInstrumentedTest {
     }
     writeManifest(item, byteCount = 4)
 
-    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
+  }
+
+  @Test
+  fun rejectsInvalidCurrentVersionTimestampAsSchemaInvalid() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, createdAt = "not-a-timestamp")
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
+  }
+
+  @Test
+  fun rejectsInvalidCurrentVersionItemOrderAsSchemaInvalid() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, itemOrder = 1)
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
+  }
+
+  @Test
+  fun rejectsInvalidCurrentVersionAggregateStatusAsSchemaInvalid() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, manifestStatus = "failed")
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
   }
 
   @Test
@@ -411,7 +454,9 @@ class InboxManifestScannerInstrumentedTest {
     inbox.deleteRecursively()
     inbox.writeText("not a directory")
 
-    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("INBOX_SCAN_FAILED", error.code)
   }
 
   @Test
@@ -433,20 +478,23 @@ class InboxManifestScannerInstrumentedTest {
     manifestDirectory: File = File(inbox, validIngestionId),
     ingestionId: String = manifestDirectory.name,
     schemaVersion: Int = 1,
+    createdAt: String = "2026-01-01T00:00:00Z",
+    itemOrder: Int = 0,
+    manifestStatus: String = "complete",
   ) {
     val directory = manifestDirectory.apply { mkdirs() }
     val payload = JSONObject()
       .put("schemaVersion", schemaVersion)
       .put("ingestionId", ingestionId)
-      .put("createdAt", "2026-01-01T00:00:00Z")
+      .put("createdAt", createdAt)
       .put("source", "android-share-intent")
-      .put("status", "complete")
+      .put("status", manifestStatus)
       .put(
         "items",
         JSONArray().put(
           JSONObject()
             .put("id", validItemId)
-            .put("order", 0)
+            .put("order", itemOrder)
             .put("mediaType", "image/png")
             .put("byteCount", byteCount)
             .put("relativePath", item.name)

@@ -268,12 +268,10 @@ export function isPDFPageExtractionV1(
         'status',
         'text',
         'blocks',
-        'characterCount',
       ]) &&
       typeof value.text === 'string' &&
       Array.isArray(value.blocks) &&
-      value.blocks.every(isOCRBlockV1) &&
-      value.characterCount === value.text.length
+      value.blocks.every(isOCRBlockV1)
     );
   }
   return (

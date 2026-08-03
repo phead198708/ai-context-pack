@@ -70,7 +70,10 @@ enum InboxManifestValidator {
       let manifestURL = ingestion.appendingPathComponent("manifest.json")
       guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
       let data = try Data(contentsOf: manifestURL)
-      guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      let decoded: Any
+      do { decoded = try JSONSerialization.jsonObject(with: data) }
+      catch { throw InboxManifestValidationError.invalidManifest }
+      guard let manifest = decoded as? [String: Any] else {
         throw InboxManifestValidationError.invalidManifest
       }
       try validate(manifest, ingestion: ingestion, id: id)

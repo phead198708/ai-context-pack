@@ -6,7 +6,6 @@
   "revision": "1",
   "durationMs": 2,
   "status": "complete",
-  "text": "Synthetic PDF fixture",
-  "blocks": [],
-  "characterCount": 21
+  "text": "中文 👩🏽‍💻 e\u0301",
+  "blocks": []
 }
