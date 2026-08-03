@@ -67,9 +67,8 @@ object ShareInboxImporter {
         partial.outputStream().use { output -> copyBounded(input, output, maxImageBytes) }
       }
       check(partial.renameTo(destination)) { "SHARE_ATOMIC_MOVE_FAILED" }
-      val publishedDestination = File(publishedDirectory, destination.name)
-      val item = JSONObject().put("id", itemId).put("mediaType", mediaType)
-        .put("byteCount", destination.length()).put("localUri", publishedDestination.toURI().toString()).put("status", "copied")
+      val item = JSONObject().put("id", itemId).put("order", 0).put("mediaType", mediaType)
+        .put("byteCount", destination.length()).put("relativePath", destination.name).put("status", "copied")
       val payload = JSONObject()
         .put("schemaVersion", 1).put("ingestionId", ingestionId).put("createdAt", isoTimestamp())
         .put("source", "android-share-intent").put("status", "complete").put("items", JSONArray().put(item))

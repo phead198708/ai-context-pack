@@ -15,6 +15,10 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.File
+import java.text.ParsePosition
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 
 class ContextNativeModule : Module() {
@@ -95,6 +99,38 @@ class ContextNativeModule : Module() {
 internal object InboxManifestScanner {
   private val ingestionIdPattern =
     Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+  private val mediaTypePattern =
+    Regex("^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$")
+  private val isoDateTimePattern =
+    Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$")
+  private val sha256Pattern = Regex("^[0-9a-f]{64}$")
+  private val manifestKeys = setOf(
+    "schemaVersion", "ingestionId", "createdAt", "source", "status", "items",
+  )
+  private val copiedItemKeys = setOf(
+    "id", "order", "mediaType", "status", "byteCount", "relativePath", "sha256",
+  )
+  private val failedItemKeys = setOf(
+    "id", "order", "mediaType", "status", "byteCount", "errorCode",
+  )
+  private val stableErrorCodes = setOf(
+    "DOMAIN_INVALID_TRANSITION",
+    "SCHEMA_INVALID",
+    "SCHEMA_VERSION_UNSUPPORTED",
+    "ARTIFACT_INTEGRITY_FAILED",
+    "IMPORT_PROVIDER_PERMISSION_EXPIRED",
+    "IMPORT_TYPE_UNSUPPORTED",
+    "IMPORT_COPY_FAILED",
+    "IMPORT_PARTIAL_FAILURE",
+    "PIPELINE_STAGE_FAILED",
+    "PROCESSOR_OUTPUT_INVALID",
+    "PIPELINE_RECOVERY_REQUIRED",
+    "PRIVACY_REVIEW_REQUIRED",
+    "PRIVACY_EXPORT_BLOCKED",
+    "RESOURCE_LOW_DISK",
+    "RESOURCE_MEMORY_PRESSURE",
+    "STORAGE_WRITE_FAILED",
+  )
 
   fun scan(inbox: File): List<Map<String, Any?>> {
     if (MetadataEventStore.read(requireNotNull(inbox.parentFile), "RecoveryEvents").isNotEmpty()) {
@@ -115,6 +151,8 @@ internal object InboxManifestScanner {
         val manifest = JSONObject(file.readText())
         validateOwnedManifest(manifest, requireNotNull(file.parentFile))
         jsonObjectToMap(manifest)
+      } catch (error: InboxManifestValidationException) {
+        throw NativeException(error.stableCode)
       } catch (_: Exception) {
         throw NativeException("INBOX_MANIFEST_INVALID")
       }
@@ -136,26 +174,79 @@ internal object InboxManifestScanner {
   }
 
   private fun validateOwnedManifest(manifest: JSONObject, ingestion: File) {
+    val schemaVersion = manifest.opt("schemaVersion")
+    check(schemaVersion is Number)
+    if (schemaVersion.toDouble() != 1.0) {
+      throw InboxManifestValidationException("SCHEMA_VERSION_UNSUPPORTED")
+    }
+    check(manifest.keys().asSequence().toSet() == manifestKeys)
     val ingestionId = manifest.getString("ingestionId")
     check(ingestionIdPattern.matches(ingestionId) && UUID.fromString(ingestionId).toString() == ingestionId)
     check(ingestionId == ingestion.name)
+    check(isIsoDateTime(manifest.getString("createdAt")))
+    check(manifest.getString("source") in setOf("ios-share-extension", "android-share-intent"))
+    val manifestStatus = manifest.getString("status")
+    check(manifestStatus in setOf("complete", "partial", "failed"))
     val ownedDirectory = ingestion.canonicalFile
     val items = manifest.getJSONArray("items")
+    check(items.length() > 0)
+    val ids = mutableSetOf<String>()
+    var copied = 0
+    var failed = 0
     for (index in 0 until items.length()) {
       val item = items.getJSONObject(index)
-      val uri = Uri.parse(item.getString("localUri"))
-      check(
-        uri.scheme == "file" &&
-          uri.authority.isNullOrEmpty() &&
-          uri.query == null &&
-          uri.fragment == null
-      )
-      val copiedFile = File(requireNotNull(uri.path)).canonicalFile
-      check(copiedFile.parentFile == ownedDirectory)
-      if (item.getString("status") == "copied") {
-        check(copiedFile.isFile && copiedFile.length() == item.getLong("byteCount"))
+      val itemId = item.getString("id")
+      check(ingestionIdPattern.matches(itemId) && UUID.fromString(itemId).toString() == itemId)
+      check(ids.add(itemId) && nonNegativeInteger(item.opt("order")) == index.toLong())
+      check(mediaTypePattern.matches(item.getString("mediaType")))
+      when (item.getString("status")) {
+        "copied" -> {
+          val keys = item.keys().asSequence().toSet()
+          check(keys.all(copiedItemKeys::contains))
+          check(keys.containsAll(copiedItemKeys - "sha256"))
+          val relativePath = item.getString("relativePath")
+          check(relativePath == "$itemId.bin" && '/' !in relativePath && '\\' !in relativePath)
+          check(!item.has("localUri") && !item.has("providerUri"))
+          if (item.has("sha256")) check(sha256Pattern.matches(item.getString("sha256")))
+          val copiedFile = File(ownedDirectory, relativePath).canonicalFile
+          check(copiedFile.parentFile == ownedDirectory)
+          val byteCount = requireNotNull(nonNegativeInteger(item.opt("byteCount")))
+          check(copiedFile.isFile && copiedFile.length() == byteCount)
+          copied += 1
+        }
+        "failed" -> {
+          check(item.keys().asSequence().toSet() == failedItemKeys)
+          check(nonNegativeInteger(item.opt("byteCount")) == 0L)
+          check(item.getString("errorCode") in stableErrorCodes)
+          failed += 1
+        }
+        else -> error("INBOX_MANIFEST_INVALID")
       }
     }
+    check(
+      (manifestStatus == "complete" && copied > 0 && failed == 0) ||
+        (manifestStatus == "partial" && copied > 0 && failed > 0) ||
+        (manifestStatus == "failed" && copied == 0 && failed > 0)
+    )
+  }
+
+  private fun nonNegativeInteger(value: Any?): Long? {
+    val number = (value as? Number)?.toDouble() ?: return null
+    if (!number.isFinite() || number < 0 || number % 1.0 != 0.0 || number > 9_007_199_254_740_991.0) {
+      return null
+    }
+    return number.toLong()
+  }
+
+  private fun isIsoDateTime(value: String): Boolean {
+    if (!isoDateTimePattern.matches(value)) return false
+    val withoutFraction = value.replace(Regex("\\.\\d+(?=Z$)"), "")
+    val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+      isLenient = false
+      timeZone = TimeZone.getTimeZone("UTC")
+    }
+    val position = ParsePosition(0)
+    return formatter.parse(withoutFraction, position) != null && position.index == withoutFraction.length
   }
 
   private fun jsonObjectToMap(value: JSONObject): Map<String, Any?> = value.keys().asSequence().associateWith { key ->
@@ -392,4 +483,6 @@ internal object PdfProbe {
   }
 }
 
-internal class NativeException(code: String) : CodedException(code)
+internal class NativeException(code: String) : CodedException(code, code, null)
+
+private class InboxManifestValidationException(val stableCode: String) : Exception(stableCode)

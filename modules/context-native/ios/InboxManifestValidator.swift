@@ -1,10 +1,47 @@
+import CoreFoundation
 import Foundation
 
-enum InboxManifestValidationError: Error {
+enum InboxManifestValidationError: Error, Equatable {
   case invalidManifest
+  case unsupportedVersion
+
+  var stableCode: String {
+    switch self {
+    case .invalidManifest: "SCHEMA_INVALID"
+    case .unsupportedVersion: "SCHEMA_VERSION_UNSUPPORTED"
+    }
+  }
 }
 
 enum InboxManifestValidator {
+  private static let manifestKeys: Set<String> = [
+    "schemaVersion", "ingestionId", "createdAt", "source", "status", "items",
+  ]
+  private static let copiedItemKeys: Set<String> = [
+    "id", "order", "mediaType", "status", "byteCount", "relativePath", "sha256",
+  ]
+  private static let failedItemKeys: Set<String> = [
+    "id", "order", "mediaType", "status", "byteCount", "errorCode",
+  ]
+  private static let stableErrorCodes: Set<String> = [
+    "DOMAIN_INVALID_TRANSITION",
+    "SCHEMA_INVALID",
+    "SCHEMA_VERSION_UNSUPPORTED",
+    "ARTIFACT_INTEGRITY_FAILED",
+    "IMPORT_PROVIDER_PERMISSION_EXPIRED",
+    "IMPORT_TYPE_UNSUPPORTED",
+    "IMPORT_COPY_FAILED",
+    "IMPORT_PARTIAL_FAILURE",
+    "PIPELINE_STAGE_FAILED",
+    "PROCESSOR_OUTPUT_INVALID",
+    "PIPELINE_RECOVERY_REQUIRED",
+    "PRIVACY_REVIEW_REQUIRED",
+    "PRIVACY_EXPORT_BLOCKED",
+    "RESOURCE_LOW_DISK",
+    "RESOURCE_MEMORY_PRESSURE",
+    "STORAGE_WRITE_FAILED",
+  ]
+
   static func read(inbox: URL) throws -> [[String: Any]] {
     let root = inbox.resolvingSymlinksInPath().standardizedFileURL
     let directories = try FileManager.default.contentsOfDirectory(
@@ -42,29 +79,77 @@ enum InboxManifestValidator {
   }
 
   private static func validate(_ manifest: [String: Any], ingestion: URL, id: String) throws {
-    guard manifest["ingestionId"] as? String == id,
-          let items = manifest["items"] as? [[String: Any]] else {
+    guard let schemaVersion = nonNegativeInteger(manifest["schemaVersion"]) else {
       throw InboxManifestValidationError.invalidManifest
     }
+    guard schemaVersion == 1 else {
+      throw InboxManifestValidationError.unsupportedVersion
+    }
+    guard Set(manifest.keys) == manifestKeys,
+          manifest["ingestionId"] as? String == id,
+          let createdAt = manifest["createdAt"] as? String,
+          isoDateTime(createdAt),
+          let source = manifest["source"] as? String,
+          source == "ios-share-extension" || source == "android-share-intent",
+          let status = manifest["status"] as? String,
+          ["complete", "partial", "failed"].contains(status),
+          let items = manifest["items"] as? [[String: Any]],
+          !items.isEmpty else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+
     let ownedDirectory = ingestion.resolvingSymlinksInPath().standardizedFileURL
-    for item in items {
-      guard let value = item["localUri"] as? String,
-            let url = URL(string: value),
-            url.isFileURL,
-            url.host == nil,
-            url.query == nil,
-            url.fragment == nil,
-            url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL == ownedDirectory else {
+    var itemIds = Set<String>()
+    var copied = 0
+    var failed = 0
+    for (order, item) in items.enumerated() {
+      guard let itemId = item["id"] as? String,
+            canonicalUUID(itemId),
+            itemIds.insert(itemId).inserted,
+            nonNegativeInteger(item["order"]) == Int64(order),
+            let mediaType = item["mediaType"] as? String,
+            mediaType.range(of: "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$", options: .regularExpression) != nil,
+            let itemStatus = item["status"] as? String else {
         throw InboxManifestValidationError.invalidManifest
       }
-      if item["status"] as? String == "copied" {
-        guard let byteCount = item["byteCount"] as? NSNumber,
-              FileManager.default.fileExists(atPath: url.path),
-              let actualBytes = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              actualBytes == byteCount.intValue else {
+
+      if itemStatus == "copied" {
+        guard Set(item.keys).isSubset(of: copiedItemKeys),
+              copiedItemKeys.subtracting(["sha256"]).isSubset(of: Set(item.keys)),
+              let relativePath = item["relativePath"] as? String,
+              relativePath == "\(itemId).bin",
+              !relativePath.contains("/") && !relativePath.contains("\\"),
+              let byteCount = nonNegativeInteger(item["byteCount"]),
+              item["sha256"] == nil || validSHA256(item["sha256"]),
+              item["localUri"] == nil,
+              item["providerUri"] == nil else {
           throw InboxManifestValidationError.invalidManifest
         }
+        let file = ingestion.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
+        guard file.deletingLastPathComponent() == ownedDirectory,
+              FileManager.default.fileExists(atPath: file.path),
+              let actualBytes = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              Int64(actualBytes) == byteCount else {
+          throw InboxManifestValidationError.invalidManifest
+        }
+        copied += 1
+      } else if itemStatus == "failed" {
+        guard Set(item.keys) == failedItemKeys,
+              nonNegativeInteger(item["byteCount"]) == 0,
+              let errorCode = item["errorCode"] as? String,
+              stableErrorCodes.contains(errorCode) else {
+          throw InboxManifestValidationError.invalidManifest
+        }
+        failed += 1
+      } else {
+        throw InboxManifestValidationError.invalidManifest
       }
+    }
+
+    guard (status == "complete" && copied > 0 && failed == 0)
+            || (status == "partial" && copied > 0 && failed > 0)
+            || (status == "failed" && copied == 0 && failed > 0) else {
+      throw InboxManifestValidationError.invalidManifest
     }
   }
 
@@ -75,5 +160,34 @@ enum InboxManifestValidator {
       options: .regularExpression
     )
     return range != nil && uuid.uuidString.lowercased() == value
+  }
+
+  private static func isoDateTime(_ value: String) -> Bool {
+    guard value.range(
+      of: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      options: .regularExpression
+    ) != nil else { return false }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = value.contains(".")
+      ? [.withInternetDateTime, .withFractionalSeconds]
+      : [.withInternetDateTime]
+    return formatter.date(from: value) != nil
+  }
+
+  private static func validSHA256(_ value: Any?) -> Bool {
+    guard let value = value as? String else { return false }
+    return value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+  }
+
+  private static func nonNegativeInteger(_ value: Any?) -> Int64? {
+    guard let value = value as? NSNumber,
+          CFGetTypeID(value) != CFBooleanGetTypeID(),
+          value.doubleValue.isFinite,
+          value.doubleValue >= 0,
+          value.doubleValue.rounded() == value.doubleValue,
+          value.doubleValue <= Double(9_007_199_254_740_991) else {
+      return nil
+    }
+    return value.int64Value
   }
 }

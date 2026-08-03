@@ -33,10 +33,11 @@ describe('native adapter runtime boundary', () => {
       status: 'complete',
       items: [
         {
-          id: 'item',
+          id: '223e4567-e89b-42d3-a456-426614174000',
+          order: 0,
           mediaType: 'image/png',
           byteCount: 1,
-          localUri: `file:///data/Inbox/${ingestionId}/item.bin`,
+          relativePath: '223e4567-e89b-42d3-a456-426614174000.bin',
           status: 'copied',
         },
       ],

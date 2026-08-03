@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aicontextpack.local/schemas/contracts/v1/pdf-page-extraction-v1.schema.json",
+  "title": "PDFPageExtractionV1",
+  "oneOf": [{ "$ref": "#/$defs/complete" }, { "$ref": "#/$defs/failed" }],
+  "$defs": {
+    "baseProperties": {
+      "schemaVersion": { "const": 1 },
+      "pageIndex": { "type": "integer", "minimum": 0 },
+      "method": { "enum": ["embedded-text", "rendered-ocr"] },
+      "engine": {
+        "enum": ["pdfkit", "pdf-renderer", "apple-vision", "ml-kit"]
+      },
+      "revision": { "type": "string", "minLength": 1 },
+      "durationMs": { "type": "number", "minimum": 0 }
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "width": { "type": "number", "minimum": 0, "maximum": 1 },
+        "height": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "bounds"],
+      "properties": {
+        "text": { "type": "string" },
+        "bounds": { "$ref": "#/$defs/bounds" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "language": { "type": "string", "minLength": 1 }
+      }
+    },
+    "errorCode": {
+      "enum": [
+        "DOMAIN_INVALID_TRANSITION",
+        "SCHEMA_INVALID",
+        "SCHEMA_VERSION_UNSUPPORTED",
+        "ARTIFACT_INTEGRITY_FAILED",
+        "IMPORT_PROVIDER_PERMISSION_EXPIRED",
+        "IMPORT_TYPE_UNSUPPORTED",
+        "IMPORT_COPY_FAILED",
+        "IMPORT_PARTIAL_FAILURE",
+        "PIPELINE_STAGE_FAILED",
+        "PROCESSOR_OUTPUT_INVALID",
+        "PIPELINE_RECOVERY_REQUIRED",
+        "PRIVACY_REVIEW_REQUIRED",
+        "PRIVACY_EXPORT_BLOCKED",
+        "RESOURCE_LOW_DISK",
+        "RESOURCE_MEMORY_PRESSURE",
+        "STORAGE_WRITE_FAILED"
+      ]
+    },
+    "complete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "pageIndex",
+        "method",
+        "engine",
+        "revision",
+        "durationMs",
+        "status",
+        "text",
+        "blocks",
+        "characterCount"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "pageIndex": { "type": "integer", "minimum": 0 },
+        "method": { "enum": ["embedded-text", "rendered-ocr"] },
+        "engine": {
+          "enum": ["pdfkit", "pdf-renderer", "apple-vision", "ml-kit"]
+        },
+        "revision": { "type": "string", "minLength": 1 },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "status": { "const": "complete" },
+        "text": { "type": "string" },
+        "blocks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/block" }
+        },
+        "characterCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "pageIndex",
+        "method",
+        "engine",
+        "revision",
+        "durationMs",
+        "status",
+        "errorCode"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "pageIndex": { "type": "integer", "minimum": 0 },
+        "method": { "enum": ["embedded-text", "rendered-ocr"] },
+        "engine": {
+          "enum": ["pdfkit", "pdf-renderer", "apple-vision", "ml-kit"]
+        },
+        "revision": { "type": "string", "minLength": 1 },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "status": { "const": "failed" },
+        "errorCode": { "$ref": "#/$defs/errorCode" }
+      }
+    }
+  }
+}

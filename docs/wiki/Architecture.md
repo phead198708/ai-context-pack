@@ -82,6 +82,11 @@ Required versioned schemas:
 
 Both platforms run the same schema validation and contract fixtures. Compatibility rules require readers to reject unknown breaking versions explicitly rather than guess.
 
+Canonical documentation:
+
+- [Shared domain, schemas, fixtures, and compatibility policy](../architecture/shared-domain-contracts.md)
+- [Stable error catalog and retry/terminal/user-action semantics](../architecture/error-catalog.md)
+
 ## 6. Processing pipeline
 
 Pack state:

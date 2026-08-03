@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "pageIndex": 0,
+  "method": "embedded-text",
+  "engine": "pdfkit",
+  "revision": "1",
+  "durationMs": 2,
+  "status": "complete",
+  "text": "Synthetic PDF fixture",
+  "blocks": [],
+  "characterCount": 21
+}

@@ -53,7 +53,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun returnsValidOwnedManifest() {
-    val item = File(inbox, "$validIngestionId/item.bin").apply {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs()
       writeBytes(byteArrayOf(1, 2, 3))
     }
@@ -64,7 +64,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsCopiedFileWithMismatchedByteCount() {
-    val item = File(inbox, "$validIngestionId/item.bin").apply {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs()
       writeBytes(byteArrayOf(1, 2, 3))
     }
@@ -75,7 +75,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsManifestThatReferencesAnotherIngestion() {
-    val other = File(inbox, "$otherIngestionId/item.bin").apply {
+    val other = File(inbox, "$otherIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
     }
     writeManifest(other, manifestDirectory = File(inbox, validIngestionId))
@@ -84,7 +84,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsManifestWhoseIdDoesNotMatchItsDirectory() {
-    val item = File(inbox, "$validIngestionId/item.bin").apply {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
     }
     writeManifest(item, ingestionId = otherIngestionId)
@@ -93,8 +93,20 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun rejectsUnknownManifestSchemaVersionWithStableCode() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, schemaVersion = 2)
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_VERSION_UNSUPPORTED", error.code)
+  }
+
+  @Test
   fun rejectsNestedManifest() {
-    val item = File(inbox, "$validIngestionId/item.bin").apply {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
     }
     writeManifest(item)
@@ -107,7 +119,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsInvalidIngestionDirectoryName() {
-    val item = File(inbox, "not-a-uuid/item.bin").apply {
+    val item = File(inbox, "not-a-uuid/$validItemId.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
     }
     writeManifest(item, manifestDirectory = requireNotNull(item.parentFile), ingestionId = "not-a-uuid")
@@ -405,7 +417,7 @@ class InboxManifestScannerInstrumentedTest {
   @Test
   fun rejectsTraversalFailure() {
     val blocked = File(inbox, validIngestionId).apply { mkdirs() }
-    val item = File(blocked, "item.bin").apply { writeBytes(byteArrayOf(1)) }
+    val item = File(blocked, "$validItemId.bin").apply { writeBytes(byteArrayOf(1)) }
     writeManifest(item, manifestDirectory = blocked)
     Os.chmod(blocked.path, 0)
     try {
@@ -420,10 +432,11 @@ class InboxManifestScannerInstrumentedTest {
     byteCount: Long = item.length(),
     manifestDirectory: File = File(inbox, validIngestionId),
     ingestionId: String = manifestDirectory.name,
+    schemaVersion: Int = 1,
   ) {
     val directory = manifestDirectory.apply { mkdirs() }
     val payload = JSONObject()
-      .put("schemaVersion", 1)
+      .put("schemaVersion", schemaVersion)
       .put("ingestionId", ingestionId)
       .put("createdAt", "2026-01-01T00:00:00Z")
       .put("source", "android-share-intent")
@@ -432,10 +445,11 @@ class InboxManifestScannerInstrumentedTest {
         "items",
         JSONArray().put(
           JSONObject()
-            .put("id", "item")
+            .put("id", validItemId)
+            .put("order", 0)
             .put("mediaType", "image/png")
             .put("byteCount", byteCount)
-            .put("localUri", item.toURI().toString())
+            .put("relativePath", item.name)
             .put("status", "copied"),
         ),
       )
@@ -445,5 +459,6 @@ class InboxManifestScannerInstrumentedTest {
   companion object {
     private const val validIngestionId = "623e4567-e89b-42d3-a456-426614174000"
     private const val otherIngestionId = "723e4567-e89b-42d3-a456-426614174000"
+    private const val validItemId = "823e4567-e89b-42d3-a456-426614174000"
   }
 }

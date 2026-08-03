@@ -36,6 +36,7 @@ public final class ContextNativeModule: Module {
       guard FileManager.default.fileExists(atPath: inbox.path, isDirectory: &isDirectory) else { return [] }
       guard isDirectory.boolValue else { throw NativeError("INBOX_SCAN_FAILED") }
       do { return try InboxManifestValidator.read(inbox: inbox) }
+      catch let error as InboxManifestValidationError { throw NativeError(error.stableCode) }
       catch { throw NativeError("INBOX_MANIFEST_INVALID") }
     }
 

@@ -1,16 +1,18 @@
 {
   "schemaVersion": 1,
-  "ingestionId": "synthetic-001",
+  "ingestionId": "123e4567-e89b-42d3-a456-426614174000",
   "createdAt": "2026-01-01T00:00:00Z",
   "source": "android-share-intent",
   "status": "complete",
   "items": [
     {
-      "id": "item-001",
+      "id": "223e4567-e89b-42d3-a456-426614174000",
+      "order": 0,
       "mediaType": "image/png",
       "byteCount": 128,
-      "localUri": "file:///internal/Inbox/synthetic-001/item-001.png",
-      "status": "copied"
+      "relativePath": "223e4567-e89b-42d3-a456-426614174000.bin",
+      "status": "copied",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
   ]
 }

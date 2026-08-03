@@ -14,7 +14,10 @@ android {
     testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
   }
   sourceSets {
-    androidTest.assets.srcDirs = [file("${rootProject.projectDir}/../fixtures/media")]
+    androidTest.assets.srcDirs = [
+      file("${rootProject.projectDir}/../fixtures/media"),
+      file("${rootProject.projectDir}/../fixtures/contracts"),
+    ]
   }
 }
 

@@ -259,6 +259,24 @@ final class InboxRecoverySupportTests: XCTestCase {
     )
   }
 
+  func testSwiftEncodersMatchEverySharedV1Fixture() throws {
+    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let repository = testDirectory
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let fixtures = repository.appendingPathComponent("fixtures/contracts", isDirectory: true)
+
+    for (name, payload) in ContractFixtureEncoder.payloads {
+      let expectedData = try Data(contentsOf: fixtures.appendingPathComponent(name))
+      let expected = try JSONSerialization.jsonObject(with: expectedData)
+      let canonicalExpected = try JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys])
+      let canonicalPayload = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+      XCTAssertEqual(canonicalPayload, canonicalExpected, name)
+    }
+  }
+
   func testManifestIdentityMatchesItsSingleLayerDirectory() throws {
     let id = UUID().uuidString.lowercased()
     try writeManifest(directoryId: id, manifestId: id)
@@ -276,6 +294,18 @@ final class InboxRecoverySupportTests: XCTestCase {
     )
 
     XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
+  }
+
+  func testUnknownManifestSchemaVersionIsExplicitlyRejected() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id, schemaVersion: 2)
+
+    XCTAssertThrowsError(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    ) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
+      XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_VERSION_UNSUPPORTED")
+    }
   }
 
   func testNestedManifestIsRejected() throws {
@@ -298,28 +328,35 @@ final class InboxRecoverySupportTests: XCTestCase {
     let id = UUID().uuidString.lowercased()
     let otherId = UUID().uuidString.lowercased()
     try writeManifest(directoryId: otherId, manifestId: otherId)
-    let otherItem = root.appendingPathComponent("Inbox/\(otherId)/item.bin")
+    let otherItem = root.appendingPathComponent("Inbox/\(otherId)/823e4567-e89b-42d3-a456-426614174000.bin")
     try writeManifest(directoryId: id, manifestId: id, itemURL: otherItem)
 
     XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
   }
 
-  private func writeManifest(directoryId: String, manifestId: String, itemURL externalItem: URL? = nil) throws {
+  private func writeManifest(
+    directoryId: String,
+    manifestId: String,
+    itemURL externalItem: URL? = nil,
+    schemaVersion: Int = 1
+  ) throws {
     let directory = root.appendingPathComponent("Inbox/\(directoryId)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let item = externalItem ?? directory.appendingPathComponent("item.bin")
+    let itemId = "823e4567-e89b-42d3-a456-426614174000"
+    let item = externalItem ?? directory.appendingPathComponent("\(itemId).bin")
     if externalItem == nil { try Data([1, 2, 3]).write(to: item) }
     let manifest: [String: Any] = [
-      "schemaVersion": 1,
+      "schemaVersion": schemaVersion,
       "ingestionId": manifestId,
       "createdAt": "2026-01-01T00:00:00.000Z",
       "source": "ios-share-extension",
       "status": "complete",
       "items": [[
-        "id": "item",
+        "id": itemId,
+        "order": 0,
         "mediaType": "image/png",
         "byteCount": 3,
-        "localUri": item.absoluteString,
+        "relativePath": item.lastPathComponent,
         "status": "copied"
       ]]
     ]

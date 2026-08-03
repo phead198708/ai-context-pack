@@ -17,6 +17,7 @@ import {
 } from '../src/domain/latestRequestGate';
 describe('versioned native contracts', () => {
   const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
+  const itemId = '223e4567-e89b-42d3-a456-426614174000';
   test('accepts the shared minimal manifest fixture', () => {
     expect(
       isImportManifestV1({
@@ -27,10 +28,11 @@ describe('versioned native contracts', () => {
         status: 'complete',
         items: [
           {
-            id: 'item-001',
+            id: itemId,
+            order: 0,
             mediaType: 'image/png',
             byteCount: 128,
-            localUri: `file:///internal/Inbox/${ingestionId}/item-001.png`,
+            relativePath: `${itemId}.bin`,
             status: 'copied',
           },
         ],
@@ -42,9 +44,9 @@ describe('versioned native contracts', () => {
   });
   test.each([
     'content://provider/item',
-    'https://example.com/item.png',
-    'file:///tmp/item.png',
-  ])('rejects non-owned manifest URI %s', localUri => {
+    '/private/container/item.bin',
+    'file:///tmp/item.bin',
+  ])('rejects non-relative manifest path %s', relativePath => {
     expect(
       isImportManifestV1({
         schemaVersion: 1,
@@ -54,10 +56,11 @@ describe('versioned native contracts', () => {
         status: 'complete',
         items: [
           {
-            id: 'item-001',
+            id: itemId,
+            order: 0,
             mediaType: 'image/png',
             byteCount: 128,
-            localUri,
+            relativePath,
             status: 'copied',
           },
         ],
@@ -76,10 +79,11 @@ describe('versioned native contracts', () => {
           status: 'complete',
           items: [
             {
-              id: 'item-001',
+              id: itemId,
+              order: 0,
               mediaType: 'image/png',
               byteCount,
-              localUri: `file:///private/container/Inbox/${ingestionId}/item-001.bin`,
+              relativePath: `${itemId}.bin`,
               status: 'copied',
             },
           ],
@@ -90,30 +94,31 @@ describe('versioned native contracts', () => {
   test.each([
     {
       id: '223e4567-e89b-42d3-a456-426614174000',
-      uri: `file:///internal/Inbox/${ingestionId}/item.bin`,
+      path: '323e4567-e89b-42d3-a456-426614174000.bin',
     },
     {
-      id: ingestionId,
-      uri: `file:///internal/Inbox/${ingestionId}/nested/item.bin`,
+      id: itemId,
+      path: `nested/${itemId}.bin`,
     },
     {
       id: 'not-a-uuid',
-      uri: 'file:///internal/Inbox/not-a-uuid/item.bin',
+      path: 'not-a-uuid.bin',
     },
-  ])('rejects manifest directory identity mismatch %#', ({ id, uri }) => {
+  ])('rejects manifest item identity/path mismatch %#', ({ id, path }) => {
     expect(
       isImportManifestV1({
         schemaVersion: 1,
-        ingestionId: id,
+        ingestionId,
         createdAt: '2026-01-01T00:00:00Z',
         source: 'ios-share-extension',
         status: 'complete',
         items: [
           {
-            id: 'item',
+            id,
+            order: 0,
             mediaType: 'image/png',
             byteCount: 1,
-            localUri: uri,
+            relativePath: path,
             status: 'copied',
           },
         ],
