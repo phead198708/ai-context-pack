@@ -22,6 +22,7 @@ export class InboxEventWorkflow {
   private readonly seen = new Set<string>();
   private readonly failures = new Map<string, PendingShareEvent>();
   private readonly completes = new Map<string, PendingShareEvent>();
+  private readonly blockers = new Map<string, string>();
 
   constructor(
     private readonly native: NativeAdapter,
@@ -30,12 +31,16 @@ export class InboxEventWorkflow {
 
   bootstrap(): Promise<void> {
     return this.enqueue(async () => {
-      await this.refresh(false);
+      await this.refresh(false, false);
       let events: readonly PendingShareEvent[];
       try {
         events = await this.native.getPendingShareEvents();
       } catch (error) {
-        this.fail(error, 'NATIVE_SHARE_EVENT_STORE_READ_FAILED');
+        this.latch(
+          'event-store',
+          error,
+          'NATIVE_SHARE_EVENT_STORE_READ_FAILED',
+        );
         return;
       }
       for (const event of events) await this.process(event);
@@ -45,10 +50,11 @@ export class InboxEventWorkflow {
   receive(value: unknown): Promise<void> {
     return this.enqueue(async () => {
       if (!isPendingShareEvent(value)) {
-        this.view.setState({
-          kind: 'error',
-          code: 'NATIVE_SHARE_EVENT_INVALID',
-        });
+        this.latch(
+          `invalid:${validEventId(value) ?? 'live'}`,
+          null,
+          'NATIVE_SHARE_EVENT_INVALID',
+        );
         return;
       }
       await this.process(value);
@@ -57,20 +63,42 @@ export class InboxEventWorkflow {
 
   appBecameActive(): Promise<void> {
     return this.enqueue(async () => {
-      if (this.failures.size === 0) await this.refresh(false);
+      if (this.blockers.size === 0) await this.refresh(false, false);
     });
   }
 
   retry(): Promise<void> {
     return this.enqueue(async () => {
+      let events: readonly PendingShareEvent[];
+      try {
+        events = await this.native.getPendingShareEvents();
+        this.clear('event-store');
+        this.clearPrefix('invalid:');
+      } catch (error) {
+        this.latch(
+          'event-store',
+          error,
+          'NATIVE_SHARE_EVENT_STORE_READ_FAILED',
+        );
+        return;
+      }
+      for (const event of events) await this.process(event, true);
+
       for (const [id, event] of [...this.failures]) {
         try {
           if (event.durable === false)
             await this.native.ackEphemeralShareEvent(id);
           else await this.native.ackPendingShareEvent(id);
           this.failures.delete(id);
+          this.clear(`failure:${id}`);
         } catch (error) {
-          this.fail(error, 'NATIVE_SHARE_ACK_FAILED');
+          this.latch(
+            `failure:${id}`,
+            error,
+            event.durable === false
+              ? 'NATIVE_EPHEMERAL_ACK_FAILED'
+              : 'NATIVE_SHARE_ACK_FAILED',
+          );
           return;
         }
       }
@@ -79,81 +107,113 @@ export class InboxEventWorkflow {
         let recovery = await this.native.getPendingRecoveryEvent();
         while (recovery) {
           await this.native.ackRecoveryEvent(recovery.id);
+          this.clear(`recovery:${recovery.id}`);
           recovery = await this.native.getPendingRecoveryEvent();
         }
+        this.clear('recovery-ack');
       } catch (error) {
-        this.fail(error, 'NATIVE_RECOVERY_ACK_FAILED');
+        this.latch('recovery-ack', error, 'NATIVE_RECOVERY_ACK_FAILED');
         return;
       }
 
       for (const event of [...this.completes.values()])
-        if (!(await this.finishComplete(event))) return;
+        if (!(await this.finishComplete(event, true))) return;
       if (this.failures.size === 0 && this.completes.size === 0)
-        await this.refresh(false);
+        await this.refresh(false, true);
     });
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {
-    const result = this.chain.then(work, work);
-    this.chain = result.catch(() => undefined);
+    const guarded = async () => {
+      try {
+        await work();
+      } catch (error) {
+        this.latch('unexpected', error, 'INBOX_WORKFLOW_UNEXPECTED');
+      }
+    };
+    const result = this.chain.then(guarded, guarded);
+    this.chain = result;
     return result;
   }
 
-  private async process(event: PendingShareEvent): Promise<void> {
+  private async process(
+    event: PendingShareEvent,
+    retrying = false,
+  ): Promise<void> {
     if (this.seen.has(event.id)) return;
     this.seen.add(event.id);
     if (event.result === 'failed') {
       this.failures.set(event.id, event);
-      this.view.setState({
-        kind: 'error',
-        code: event.code ?? 'SHARE_IMPORT_FAILED',
-      });
+      this.latch(
+        `failure:${event.id}`,
+        null,
+        event.code ?? 'SHARE_IMPORT_FAILED',
+      );
       return;
     }
     this.completes.set(event.id, event);
-    await this.finishComplete(event);
+    if (retrying || !this.hasOperationalBlocker())
+      await this.finishComplete(event, retrying);
   }
 
-  private async finishComplete(event: PendingShareEvent): Promise<boolean> {
-    const manifests = await this.scan();
+  private async finishComplete(
+    event: PendingShareEvent,
+    retrying: boolean,
+  ): Promise<boolean> {
+    const manifests = await this.scan(retrying);
     if (!manifests) return false;
     try {
       if (event.durable === false)
         await this.native.ackEphemeralShareEvent(event.id);
       else await this.native.ackPendingShareEvent(event.id);
       this.completes.delete(event.id);
+      this.clear(`complete-ack:${event.id}`);
     } catch (error) {
-      this.fail(error, 'NATIVE_SHARE_ACK_FAILED');
+      this.latch(
+        `complete-ack:${event.id}`,
+        error,
+        event.durable === false
+          ? 'NATIVE_EPHEMERAL_ACK_FAILED'
+          : 'NATIVE_SHARE_ACK_FAILED',
+      );
       return false;
     }
-    if (this.failures.size === 0) {
+    if (this.blockers.size === 0) {
       this.show(manifests);
       if (manifests.length > 0) this.view.showNewestImport();
     }
     return true;
   }
 
-  private async refresh(showNewest: boolean): Promise<boolean> {
-    const manifests = await this.scan();
+  private async refresh(
+    showNewest: boolean,
+    retrying: boolean,
+  ): Promise<boolean> {
+    const manifests = await this.scan(retrying);
     if (!manifests) return false;
-    if (this.failures.size === 0) {
+    if (retrying) this.clear('unexpected');
+    if (this.blockers.size === 0) {
       this.show(manifests);
       if (showNewest && manifests.length > 0) this.view.showNewestImport();
     }
     return true;
   }
 
-  private async scan(): Promise<readonly ImportManifestV1[] | null> {
-    if (this.failures.size === 0) this.view.setState({ kind: 'loading' });
+  private async scan(
+    retrying: boolean,
+  ): Promise<readonly ImportManifestV1[] | null> {
+    if (this.blockers.size === 0) this.view.setState({ kind: 'loading' });
     try {
       const recovery = await this.native.getPendingRecoveryEvent();
       if (recovery) {
-        this.view.setState({ kind: 'error', code: recovery.code });
+        this.latch(`recovery:${recovery.id}`, null, recovery.code);
         return null;
       }
-      return await this.native.scanInbox();
+      const manifests = await this.native.scanInbox();
+      if (retrying) this.clear('scan');
+      return manifests;
     } catch (error) {
-      this.fail(error, 'INBOX_SCAN_FAILED');
+      this.latch('scan', error, 'INBOX_SCAN_FAILED');
       return null;
     }
   }
@@ -164,12 +224,36 @@ export class InboxEventWorkflow {
     );
   }
 
-  private fail(error: unknown, fallback: string): void {
-    this.view.setState({
-      kind: 'error',
-      code: workflowErrorCode(error, fallback),
-    });
+  private hasOperationalBlocker(): boolean {
+    return [...this.blockers.keys()].some(key => !key.startsWith('failure:'));
   }
+
+  private latch(key: string, error: unknown, fallback: string): void {
+    const code = workflowErrorCode(error, fallback);
+    if (this.blockers.get(key) === code) return;
+    this.blockers.set(key, code);
+    this.view.setState({ kind: 'error', code });
+  }
+
+  private clear(key: string): void {
+    this.blockers.delete(key);
+  }
+
+  private clearPrefix(prefix: string): void {
+    for (const key of this.blockers.keys())
+      if (key.startsWith(prefix)) this.blockers.delete(key);
+  }
+}
+
+function validEventId(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const id = (value as { id?: unknown }).id;
+  return typeof id === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      id,
+    )
+    ? id
+    : null;
 }
 
 function workflowErrorCode(error: unknown, fallback: string): string {

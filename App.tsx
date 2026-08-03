@@ -35,15 +35,14 @@ function App(): React.JSX.Element {
       showNewestImport: () => setScreen('detail'),
     });
   useEffect(() => {
-    workflow.current?.bootstrap().catch(() => undefined);
+    workflow.current?.bootstrap();
     const subscription = AppState.addEventListener('change', next => {
-      if (next === 'active')
-        workflow.current?.appBecameActive().catch(() => undefined);
+      if (next === 'active') workflow.current?.appBecameActive();
     });
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
       (event: unknown) => {
-        workflow.current?.receive(event).catch(() => undefined);
+        workflow.current?.receive(event);
       },
     );
     return () => {
@@ -78,7 +77,7 @@ function App(): React.JSX.Element {
           <Inbox
             state={state}
             onRetry={() => {
-              workflow.current?.retry().catch(() => undefined);
+              workflow.current?.retry();
             }}
           />
         )}

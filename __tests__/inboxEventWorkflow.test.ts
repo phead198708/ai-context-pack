@@ -240,4 +240,184 @@ describe('InboxEventWorkflow integration', () => {
     expect(h.native.ackPendingShareEvent).not.toHaveBeenCalled();
     expect(h.native.ackEphemeralShareEvent).toHaveBeenCalledWith(ids[0]);
   });
+
+  test('invalid live event remains latched across AppState active', async () => {
+    const scan = jest.fn().mockResolvedValue([manifest]);
+    const h = harness({ scanInbox: scan });
+    await h.workflow.receive({
+      schemaVersion: 1,
+      id: ids[0],
+      result: 'unknown',
+    });
+
+    await h.workflow.appBecameActive();
+
+    expect(scan).not.toHaveBeenCalled();
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_SHARE_EVENT_INVALID',
+    });
+  });
+
+  test('event-store read failure remains latched across AppState active', async () => {
+    const scan = jest.fn().mockResolvedValue([manifest]);
+    const h = harness({
+      scanInbox: scan,
+      getPendingShareEvents: jest
+        .fn()
+        .mockRejectedValue(
+          new NativeBoundaryError('NATIVE_SHARE_EVENT_STORE_READ_FAILED'),
+        ),
+    });
+    await h.workflow.bootstrap();
+
+    await h.workflow.appBecameActive();
+
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_SHARE_EVENT_STORE_READ_FAILED',
+    });
+  });
+
+  test('complete ACK failure remains latched across AppState active', async () => {
+    const scan = jest.fn().mockResolvedValue([manifest]);
+    const h = harness({
+      scanInbox: scan,
+      ackPendingShareEvent: jest
+        .fn()
+        .mockRejectedValue(new NativeBoundaryError('NATIVE_SHARE_ACK_FAILED')),
+    });
+    await h.workflow.receive(event(0, 'complete'));
+
+    await h.workflow.appBecameActive();
+
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_SHARE_ACK_FAILED',
+    });
+  });
+
+  test('recovery ACK failure remains latched across AppState active', async () => {
+    const recovery = {
+      schemaVersion: 1 as const,
+      id: ids[2]!,
+      code: 'INBOX_RECOVERY_REQUIRED' as const,
+    };
+    const getRecovery = jest.fn().mockResolvedValue(recovery);
+    const h = harness({
+      getPendingRecoveryEvent: getRecovery,
+      ackRecoveryEvent: jest
+        .fn()
+        .mockRejectedValue(
+          new NativeBoundaryError('NATIVE_RECOVERY_ACK_FAILED'),
+        ),
+    });
+    await h.workflow.receive(event(0, 'complete'));
+    await h.workflow.retry();
+    const callsAfterRetry = getRecovery.mock.calls.length;
+
+    await h.workflow.appBecameActive();
+
+    expect(getRecovery).toHaveBeenCalledTimes(callsAfterRetry);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_RECOVERY_ACK_FAILED',
+    });
+  });
+
+  test('failed Retry preserves the more specific ACK error latch', async () => {
+    const ack = jest
+      .fn()
+      .mockRejectedValue(
+        new NativeBoundaryError('NATIVE_SHARE_ACK_UNAVAILABLE'),
+      );
+    const h = harness({ ackPendingShareEvent: ack });
+    await h.workflow.receive(event(0, 'failed'));
+
+    await h.workflow.retry();
+    await h.workflow.retry();
+
+    expect(ack).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_SHARE_ACK_UNAVAILABLE',
+    });
+  });
+
+  test('successful Retry clears an ACK latch and allows later AppState refresh', async () => {
+    const scan = jest.fn().mockResolvedValue([manifest]);
+    const ack = jest
+      .fn()
+      .mockRejectedValueOnce(new NativeBoundaryError('NATIVE_SHARE_ACK_FAILED'))
+      .mockResolvedValue(undefined);
+    const h = harness({ scanInbox: scan, ackPendingShareEvent: ack });
+    await h.workflow.receive(event(0, 'complete'));
+    await h.workflow.appBecameActive();
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    await h.workflow.retry();
+    const callsAfterRetry = scan.mock.calls.length;
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+
+    await h.workflow.appBecameActive();
+    expect(scan).toHaveBeenCalledTimes(callsAfterRetry + 1);
+  });
+
+  test('duplicate invalid event ID creates only one blocking latch', async () => {
+    const h = harness();
+    const invalid = { schemaVersion: 1, id: ids[0], result: 'unknown' };
+
+    await h.workflow.receive(invalid);
+    await h.workflow.receive(invalid);
+
+    expect(h.states).toEqual([
+      { kind: 'error', code: 'NATIVE_SHARE_EVENT_INVALID' },
+    ]);
+  });
+
+  test('scan failure is not retried by AppState and clears after explicit Retry', async () => {
+    const scan = jest
+      .fn()
+      .mockRejectedValueOnce(new NativeBoundaryError('NATIVE_MANIFEST_INVALID'))
+      .mockResolvedValue([manifest]);
+    const h = harness({ scanInbox: scan });
+    await h.workflow.bootstrap();
+
+    await h.workflow.appBecameActive();
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_MANIFEST_INVALID',
+    });
+
+    await h.workflow.retry();
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('ephemeral ACK failure keeps its exact code until Retry succeeds', async () => {
+    const ack = jest
+      .fn()
+      .mockRejectedValueOnce(
+        new NativeBoundaryError('NATIVE_EPHEMERAL_ACK_UNAVAILABLE'),
+      )
+      .mockResolvedValue(undefined);
+    const h = harness({ ackEphemeralShareEvent: ack });
+    await h.workflow.receive(
+      event(0, 'failed', {
+        durable: false,
+        code: 'SHARE_RESULT_PERSIST_FAILED',
+      }),
+    );
+
+    await h.workflow.retry();
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_EPHEMERAL_ACK_UNAVAILABLE',
+    });
+    await h.workflow.retry();
+    expect(ack).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
 });
