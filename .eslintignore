@@ -1,6 +1,7 @@
 android/build/
 android/app/build/
 android/**/.cxx/
+coverage/
 ios/build/
 ios/Pods/
 modules/context-native/android/build/

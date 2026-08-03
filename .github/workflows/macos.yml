@@ -60,6 +60,8 @@ jobs:
         run: npm ci
       - name: Run shared tests on macOS
         run: npm test -- --ci
+      - name: Verify workspace-independent podspec checksums
+        run: bundle exec ruby -rcocoapods scripts/verify-podspec-checksum.rb
       - name: Resolve locked CocoaPods dependencies
         run: bundle exec pod install --project-directory=ios --deployment
       - name: Prove Pod resolution did not change tracked integration files

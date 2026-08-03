@@ -84,6 +84,13 @@ if (!all.includes('run: npm test -- --ci')) {
   throw new Error('WORKFLOW_MACOS_SHARED_TEST_MISSING');
 }
 if (
+  !all.includes(
+    'run: bundle exec ruby -rcocoapods scripts/verify-podspec-checksum.rb',
+  )
+) {
+  throw new Error('WORKFLOW_PODSPEC_CHECKSUM_TEST_MISSING');
+}
+if (
   rubyVersion !== '3.4.9' ||
   !/^\s+ruby-version:\s+3\.4\.9$/m.test(
     readFileSync(join(workflowRoot, 'macos.yml'), 'utf8'),
