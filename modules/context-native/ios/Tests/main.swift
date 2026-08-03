@@ -499,6 +499,634 @@ final class InboxRecoverySupportTests: XCTestCase {
     "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
 }
 
+final class InboxArtifactHandoffTests: XCTestCase {
+  private var container: URL!
+  private var applicationSupport: URL!
+
+  override func setUpWithError() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    container = root.appendingPathComponent("Group", isDirectory: true)
+    applicationSupport = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+    try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: applicationSupport, withIntermediateDirectories: true)
+  }
+
+  override func tearDownWithError() throws {
+    try? FileManager.default.removeItem(at: container.deletingLastPathComponent())
+  }
+
+  func testHandoffPublishesOwnedPathAndAcknowledgesOnlyAfterCommitBoundary() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1, 2, 3]))])
+
+    let result = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max }
+    )
+
+    let artifacts = try XCTUnwrap(result["artifacts"] as? [[String: Any]])
+    XCTAssertEqual(artifacts.count, 1)
+    XCTAssertEqual((result["manifestFingerprint"] as? String)?.count, 64)
+    XCTAssertEqual((artifacts.first?["sha256"] as? String)?.count, 64)
+    XCTAssertEqual(
+      artifacts.first?["relativePath"] as? String,
+      "Packs/\(packId)/originals/\(itemId).bin"
+    )
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: applicationSupport.appendingPathComponent("Packs/\(packId)/originals/\(itemId).bin").path
+    ))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(ingestionId)").path
+    ))
+
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId
+    ))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(ingestionId)").path
+    ))
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId
+    ))
+  }
+
+  func testEveryHandoffInterruptionReplaysWithoutDuplicateArtifacts() throws {
+    let points: [InboxArtifactHandoffPoint] = [
+      .beforeCopy, .duringCopy, .afterFileClose, .beforePublishRename,
+    ]
+    for point in points {
+      let ingestionId = UUID().uuidString.lowercased()
+      let packId = UUID().uuidString.lowercased()
+      let itemId = UUID().uuidString.lowercased()
+      try writeManifest(
+        ingestionId: ingestionId,
+        items: [(itemId, "image/png", Data(repeating: 7, count: 131_072))]
+      )
+      var interrupted = false
+      XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+        container: container,
+        applicationSupport: applicationSupport,
+        ingestionId: ingestionId,
+        packId: packId,
+        requiredHeadroomBytes: 0,
+        availableBytes: { _ in Int64.max },
+        operationHook: { observed in
+          if !interrupted && samePoint(observed, point) {
+            interrupted = true
+            throw TestIOError.injected
+          }
+        }
+      ))
+      XCTAssertTrue(interrupted)
+
+      let replay = try InboxArtifactHandoff.handoff(
+        container: container,
+        applicationSupport: applicationSupport,
+        ingestionId: ingestionId,
+        packId: packId,
+        requiredHeadroomBytes: 0,
+        availableBytes: { _ in Int64.max }
+      )
+      XCTAssertEqual((replay["artifacts"] as? [[String: Any]])?.count, 1)
+      let directory = applicationSupport.appendingPathComponent("Packs/\(packId)/originals")
+      XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["\(itemId).bin"])
+    }
+  }
+
+  func testLowDiskFailsBeforeAnyPartialFileIsCreated() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1]))])
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 1,
+      availableBytes: { _ in 1 }
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .lowDisk)
+      XCTAssertEqual((error as? InboxArtifactHandoffError)?.stableCode, "RESOURCE_LOW_DISK")
+    }
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: applicationSupport.appendingPathComponent("Packs/\(packId)").path
+    ))
+  }
+
+  func testReplayBudgetsOnlyHeadroomWhenArtifactIsAlreadyPublished() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: ingestionId,
+      items: [(itemId, "image/png", Data(repeating: 1, count: 4_096))]
+    )
+    _ = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 128,
+      availableBytes: { _ in Int64.max }
+    )
+
+    let replay = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 128,
+      availableBytes: { _ in 128 }
+    )
+    XCTAssertEqual((replay["artifacts"] as? [[String: Any]])?.count, 1)
+  }
+
+  func testNewDestinationHierarchySynchronizesEveryDirectoryAndParent() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1]))])
+    var synchronized: [String] = []
+
+    _ = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max },
+      directorySynchronizer: { synchronized.append($0.standardizedFileURL.path) }
+    )
+
+    let packs = applicationSupport.appendingPathComponent("Packs")
+    let pack = packs.appendingPathComponent(packId)
+    let originals = pack.appendingPathComponent("originals")
+    for directory in [
+      applicationSupport!.deletingLastPathComponent(),
+      applicationSupport!,
+      packs,
+      pack,
+      originals,
+    ] {
+      XCTAssertTrue(synchronized.contains(directory.standardizedFileURL.path))
+    }
+  }
+
+  func testFreshInstallCreatesAndSynchronizesApplicationSupportAncestors() throws {
+    let root = container.deletingLastPathComponent()
+    let library = root.appendingPathComponent("Library", isDirectory: true)
+    try FileManager.default.createDirectory(at: library, withIntermediateDirectories: false)
+    let applicationSupportDirectory = library.appendingPathComponent(
+      "Application Support",
+      isDirectory: true
+    )
+    applicationSupport = applicationSupportDirectory.appendingPathComponent(
+      "AIContextPack",
+      isDirectory: true
+    )
+    XCTAssertFalse(FileManager.default.fileExists(atPath: applicationSupportDirectory.path))
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1]))])
+    var synchronized: [String] = []
+    var capacityProbe: URL?
+
+    _ = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { directory in
+        capacityProbe = directory
+        return Int64.max
+      },
+      directorySynchronizer: { synchronized.append($0.standardizedFileURL.path) }
+    )
+
+    XCTAssertEqual(capacityProbe?.standardizedFileURL, library.standardizedFileURL)
+    let packs = applicationSupport.appendingPathComponent("Packs")
+    let pack = packs.appendingPathComponent(packId)
+    let originals = pack.appendingPathComponent("originals")
+    for directory in [
+      library,
+      applicationSupportDirectory,
+      applicationSupport!,
+      packs,
+      pack,
+      originals,
+    ] {
+      XCTAssertTrue(synchronized.contains(directory.standardizedFileURL.path))
+    }
+  }
+
+  func testDirectorySynchronizationFailureFailsBeforePublishingArtifacts() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1]))])
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max },
+      directorySynchronizer: { directory in
+        if directory.lastPathComponent == packId { throw TestIOError.injected }
+      }
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .writeFailed)
+    }
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: applicationSupport.appendingPathComponent(
+        "Packs/\(packId)/originals/\(itemId).bin"
+      ).path
+    ))
+    var retriedExistingPackSync = false
+    _ = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max },
+      directorySynchronizer: { directory in
+        if directory.lastPathComponent == packId { retriedExistingPackSync = true }
+      }
+    )
+    XCTAssertTrue(retriedExistingPackSync)
+  }
+
+  func testAcknowledgementCrashAfterRenameLeavesScannerInvisibleTombstone() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1]))])
+    var interrupted = false
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId,
+      operationHook: { point in
+        if !interrupted, case .afterTombstoneRename = point {
+          interrupted = true
+          throw TestIOError.injected
+        }
+      }
+    ))
+    XCTAssertTrue(interrupted)
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(ingestionId)").path
+    ))
+    XCTAssertTrue(
+      try InboxManifestValidator.read(
+        inbox: container.appendingPathComponent("Inbox")
+      ).isEmpty
+    )
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path).count, 1)
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId
+    ))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+  }
+
+  func testAcknowledgementTombstoneDeletionIsBestEffortAndRetryable() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1]))])
+    var deletionObserved = false
+    var childrenBeforeInterruption = 0
+    var childrenAfterInterruption = 0
+
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId,
+      tombstoneRemover: { tombstone in
+        deletionObserved = true
+        let children = try FileManager.default.contentsOfDirectory(
+          at: tombstone,
+          includingPropertiesForKeys: nil
+        )
+        childrenBeforeInterruption = children.count
+        try FileManager.default.removeItem(at: try XCTUnwrap(children.first))
+        childrenAfterInterruption = try FileManager.default.contentsOfDirectory(
+          at: tombstone,
+          includingPropertiesForKeys: nil
+        ).count
+        throw TestIOError.injected
+      }
+    ))
+    XCTAssertTrue(deletionObserved)
+    XCTAssertEqual(childrenAfterInterruption, childrenBeforeInterruption - 1)
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path).count, 1)
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId
+    ))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+  }
+
+  func testStartupSweepResumesAfterInterruption() throws {
+    _ = try leaveAcknowledgementTombstone()
+    _ = try leaveAcknowledgementTombstone()
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+    var removals = 0
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.sweepAcknowledgementTombstones(
+      container: container,
+      operationHook: { point in
+        if case .afterRemoval = point {
+          removals += 1
+          if removals == 1 { throw TestIOError.injected }
+        }
+      }
+    ))
+    XCTAssertEqual(removals, 1)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path).count, 1)
+
+    InboxArtifactHandoff.runStartupMaintenance(container: container)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+  }
+
+  func testStartupSweepRetriesDeletionFailure() throws {
+    _ = try leaveAcknowledgementTombstone()
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+
+    let failed = try InboxArtifactHandoff.sweepAcknowledgementTombstones(
+      container: container,
+      tombstoneRemover: { _ in throw TestIOError.injected }
+    )
+    XCTAssertEqual(failed, InboxTombstoneSweepResult(scanned: 1, removed: 0, failed: 1))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path).count, 1)
+
+    InboxArtifactHandoff.runStartupMaintenance(container: container)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+  }
+
+  func testStartupSweepContainsParentSynchronizationFailure() throws {
+    _ = try leaveAcknowledgementTombstone()
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+
+    let failed = try InboxArtifactHandoff.sweepAcknowledgementTombstones(
+      container: container,
+      directorySynchronizer: { directory in
+        if directory.standardizedFileURL == tombstones.standardizedFileURL {
+          throw TestIOError.injected
+        }
+      }
+    )
+    XCTAssertEqual(failed, InboxTombstoneSweepResult(scanned: 1, removed: 0, failed: 1))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+    InboxArtifactHandoff.runStartupMaintenance(container: container)
+  }
+
+  func testRequestedManifestSnapshotSerializesConcurrentAckOfOtherIngestion() throws {
+    let requestedId = UUID().uuidString.lowercased()
+    let acknowledgedId = UUID().uuidString.lowercased()
+    let requestedItem = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: requestedId,
+      items: [(requestedItem, "image/png", Data([1]))]
+    )
+    try writeManifest(
+      ingestionId: acknowledgedId,
+      items: [(UUID().uuidString.lowercased(), "image/png", Data([2]))]
+    )
+    let snapshotEntered = DispatchSemaphore(value: 0)
+    let releaseSnapshot = DispatchSemaphore(value: 0)
+    let handoffFinished = DispatchSemaphore(value: 0)
+    let ackAttempted = DispatchSemaphore(value: 0)
+    let ackFinished = DispatchSemaphore(value: 0)
+    var handoffError: Error?
+    var acknowledgementError: Error?
+
+    DispatchQueue.global().async {
+      defer { handoffFinished.signal() }
+      do {
+        _ = try InboxArtifactHandoff.handoff(
+          container: self.container,
+          applicationSupport: self.applicationSupport,
+          ingestionId: requestedId,
+          packId: UUID().uuidString.lowercased(),
+          requiredHeadroomBytes: 0,
+          availableBytes: { _ in Int64.max },
+          snapshotHook: {
+            snapshotEntered.signal()
+            _ = releaseSnapshot.wait(timeout: .now() + 5)
+          }
+        )
+      } catch {
+        handoffError = error
+      }
+    }
+    XCTAssertEqual(snapshotEntered.wait(timeout: .now() + 5), .success)
+    DispatchQueue.global().async {
+      ackAttempted.signal()
+      do {
+        _ = try InboxArtifactHandoff.acknowledge(
+          container: self.container,
+          ingestionId: acknowledgedId
+        )
+      } catch {
+        acknowledgementError = error
+      }
+      ackFinished.signal()
+    }
+    XCTAssertEqual(ackAttempted.wait(timeout: .now() + 5), .success)
+    XCTAssertEqual(ackFinished.wait(timeout: .now() + 0.1), .timedOut)
+    releaseSnapshot.signal()
+    XCTAssertEqual(handoffFinished.wait(timeout: .now() + 5), .success)
+    XCTAssertEqual(ackFinished.wait(timeout: .now() + 5), .success)
+    XCTAssertNil(handoffError)
+    XCTAssertNil(acknowledgementError)
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(requestedId)").path
+    ))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(acknowledgedId)").path
+    ))
+  }
+
+  func testManifestMutationDuringHandoffFailsExactByteBinding() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1, 2, 3]))])
+    let manifest = container.appendingPathComponent("Inbox/\(ingestionId)/manifest.json")
+    var mutated = false
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max },
+      operationHook: { point in
+        if !mutated && samePoint(point, .afterFileClose) {
+          mutated = true
+          var bytes = try Data(contentsOf: manifest)
+          bytes.append(0x20)
+          try bytes.write(to: manifest)
+        }
+      }
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .integrityFailed)
+      XCTAssertEqual(
+        (error as? InboxArtifactHandoffError)?.stableCode,
+        "ARTIFACT_INTEGRITY_FAILED"
+      )
+    }
+    XCTAssertTrue(mutated)
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(ingestionId)").path
+    ))
+  }
+
+  func testExistingDestinationMustMatchSourceEvenWithoutManifestHash() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1, 2, 3]))])
+    let destination = applicationSupport.appendingPathComponent(
+      "Packs/\(packId)/originals/\(itemId).bin"
+    )
+    try FileManager.default.createDirectory(
+      at: destination.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try Data([3, 2, 1]).write(to: destination)
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max }
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .integrityFailed)
+    }
+  }
+
+  func testTwentyImageAndNearLimitPdfCopyBenchmarkDoesNotRunOcr() throws {
+    let imageIngestion = UUID().uuidString.lowercased()
+    let imagePack = UUID().uuidString.lowercased()
+    let imageItems = (0..<20).map { _ in
+      (UUID().uuidString.lowercased(), "image/png", Data(repeating: 1, count: 256 * 1024))
+    }
+    try writeManifest(ingestionId: imageIngestion, items: imageItems)
+    let imagesStarted = Date()
+    let imageResult = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: imageIngestion,
+      packId: imagePack,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max }
+    )
+    XCTAssertEqual((imageResult["artifacts"] as? [[String: Any]])?.count, 20)
+    let imageDuration = Date().timeIntervalSince(imagesStarted)
+
+    let pdfIngestion = UUID().uuidString.lowercased()
+    let pdfPack = UUID().uuidString.lowercased()
+    let pdfId = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: pdfIngestion,
+      items: [(pdfId, "application/pdf", Data(repeating: 2, count: 49 * 1024 * 1024))]
+    )
+    let pdfStarted = Date()
+    let pdfResult = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: pdfIngestion,
+      packId: pdfPack,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max }
+    )
+    XCTAssertEqual((pdfResult["artifacts"] as? [[String: Any]])?.count, 1)
+    let pdfDuration = Date().timeIntervalSince(pdfStarted)
+
+    print(
+      "PERSISTENCE_BENCHMARK platform=swift images=20 imageBytes=5242880 " +
+      "imageMs=\(Int(imageDuration * 1_000)) pdfBytes=51380224 pdfMs=\(Int(pdfDuration * 1_000)) ocrRuns=0"
+    )
+    XCTAssertLessThan(imageDuration, 10)
+    XCTAssertLessThan(pdfDuration, 10)
+  }
+
+  private func writeManifest(
+    ingestionId: String,
+    items: [(String, String, Data)]
+  ) throws {
+    let directory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    var payloadItems: [[String: Any]] = []
+    for (index, item) in items.enumerated() {
+      try item.2.write(to: directory.appendingPathComponent("\(item.0).bin"))
+      payloadItems.append([
+        "id": item.0,
+        "order": index,
+        "mediaType": item.1,
+        "status": "copied",
+        "byteCount": item.2.count,
+        "relativePath": "\(item.0).bin",
+      ])
+    }
+    let payload: [String: Any] = [
+      "schemaVersion": 1,
+      "ingestionId": ingestionId,
+      "createdAt": "2026-08-03T00:00:00Z",
+      "source": "ios-share-extension",
+      "status": "complete",
+      "items": payloadItems,
+    ]
+    try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+      .write(to: directory.appendingPathComponent("manifest.json"))
+  }
+
+  private func leaveAcknowledgementTombstone() throws -> String {
+    let ingestionId = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: ingestionId,
+      items: [(UUID().uuidString.lowercased(), "image/png", Data([1]))]
+    )
+    XCTAssertThrowsError(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId,
+      operationHook: { point in
+        if case .afterTombstoneRename = point { throw TestIOError.injected }
+      }
+    ))
+    return ingestionId
+  }
+}
+
+private func samePoint(_ lhs: InboxArtifactHandoffPoint, _ rhs: InboxArtifactHandoffPoint) -> Bool {
+  switch (lhs, rhs) {
+  case (.beforeCopy, .beforeCopy),
+       (.duringCopy, .duringCopy),
+       (.afterFileClose, .afterFileClose),
+       (.beforePublishRename, .beforePublishRename): true
+  default: false
+  }
+}
+
 private enum TestIOError: Error {
   case injected
 }

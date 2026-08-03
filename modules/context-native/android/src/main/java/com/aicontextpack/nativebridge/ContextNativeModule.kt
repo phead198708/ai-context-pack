@@ -26,6 +26,15 @@ class ContextNativeModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ContextNative")
 
+    OnCreate {
+      appContext.reactContext?.let { context ->
+        Thread(
+          { InboxArtifactHandoff.runStartupMaintenance(context.filesDir) },
+          "ai-context-pack-tombstone-sweep",
+        ).start()
+      }
+    }
+
     AsyncFunction("scanInbox") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       val inbox = File(context.filesDir, "Inbox")
@@ -58,6 +67,26 @@ class ContextNativeModule : Module() {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       try { MetadataEventStore.ack(context.filesDir, "RecoveryEvents", id) }
       catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
+    }
+
+    AsyncFunction("handoffInbox") { ingestionId: String, packId: String, requiredHeadroomBytes: Double ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        InboxArtifactHandoff.handoff(
+          context.filesDir,
+          ingestionId,
+          packId,
+          requiredHeadroomBytes.toLong(),
+        )
+      } catch (error: InboxArtifactHandoffException) {
+        throw NativeException(error.stableCode)
+      }
+    }
+
+    AsyncFunction("acknowledgeInbox") { ingestionId: String ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { InboxArtifactHandoff.acknowledge(context.filesDir, ingestionId) }
+      catch (error: InboxArtifactHandoffException) { throw NativeException(error.stableCode) }
     }
 
     AsyncFunction("recognizeText") { fileUri: String, script: String, promise: Promise ->
@@ -161,6 +190,38 @@ internal object InboxManifestScanner {
       } catch (_: Exception) {
         throw NativeException("SCHEMA_INVALID")
       }
+    }
+  }
+
+  fun readPublished(inbox: File, ingestionId: String): Map<String, Any?> {
+    if (!ingestionIdPattern.matches(ingestionId) ||
+      UUID.fromString(ingestionId).toString() != ingestionId
+    ) {
+      throw NativeException("SCHEMA_INVALID")
+    }
+    if (!inbox.isDirectory || !inbox.canRead()) throw NativeException("INBOX_SCAN_FAILED")
+    val ingestion = File(inbox, ingestionId)
+    val manifestFile = try {
+      check(ingestion.isDirectory && ingestion.parentFile?.canonicalFile == inbox.canonicalFile)
+      check(ingestion.canonicalPath.startsWith(inbox.canonicalPath + File.separator))
+      val children = ingestion.listFiles() ?: error("INBOX_SCAN_FAILED")
+      check(children.none { it.isDirectory })
+      File(ingestion, "manifest.json").also { check(it.isFile) }
+    } catch (_: Exception) {
+      throw NativeException("INBOX_SCAN_FAILED")
+    }
+    return try {
+      val manifest = strictJsonObject(manifestFile.readText())
+      validateOwnedManifest(manifest, ingestion)
+      jsonObjectToMap(manifest)
+    } catch (error: InboxManifestValidationException) {
+      throw NativeException(error.stableCode)
+    } catch (_: IOException) {
+      throw NativeException("INBOX_SCAN_FAILED")
+    } catch (_: SecurityException) {
+      throw NativeException("INBOX_SCAN_FAILED")
+    } catch (_: Exception) {
+      throw NativeException("SCHEMA_INVALID")
     }
   }
 

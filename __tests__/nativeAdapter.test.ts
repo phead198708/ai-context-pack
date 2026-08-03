@@ -136,4 +136,99 @@ describe('native adapter runtime boundary', () => {
       code: 'NATIVE_RECOVERY_ACK_UNAVAILABLE',
     });
   });
+
+  test('validates native Inbox handoff paths and metadata', async () => {
+    const itemId = '323e4567-e89b-42d3-a456-426614174000';
+    const packId = '423e4567-e89b-42d3-a456-426614174000';
+    const native = {
+      ...mockNativeModule,
+      handoffInbox: jest.fn().mockResolvedValue({
+        manifest: {
+          schemaVersion: 1,
+          ingestionId: '123e4567-e89b-42d3-a456-426614174000',
+          createdAt: '2026-08-03T00:00:00Z',
+          source: 'android-share-intent',
+          status: 'complete',
+          items: [
+            {
+              id: itemId,
+              order: 0,
+              mediaType: 'image/png',
+              status: 'copied',
+              byteCount: 3,
+              relativePath: `${itemId}.bin`,
+              sha256: 'a'.repeat(64),
+            },
+          ],
+        },
+        manifestFingerprint: 'b'.repeat(64),
+        artifacts: [
+          {
+            id: itemId,
+            itemId,
+            relativePath: `Packs/${packId}/originals/${itemId}.bin`,
+            mediaType: 'image/png',
+            byteCount: 3,
+            sha256: 'a'.repeat(64),
+          },
+        ],
+      }),
+    };
+
+    await expect(
+      createNativeAdapter(native).handoffInbox('ingestion', packId, 3),
+    ).resolves.toMatchObject({
+      artifacts: [expect.objectContaining({ id: itemId })],
+    });
+    native.handoffInbox.mockResolvedValue({
+      manifest: {
+        schemaVersion: 1,
+        ingestionId: '123e4567-e89b-42d3-a456-426614174000',
+        createdAt: '2026-08-03T00:00:00Z',
+        source: 'android-share-intent',
+        status: 'complete',
+        items: [
+          {
+            id: itemId,
+            order: 0,
+            mediaType: 'image/png',
+            status: 'copied',
+            byteCount: 3,
+            relativePath: `${itemId}.bin`,
+          },
+        ],
+      },
+      manifestFingerprint: 'b'.repeat(64),
+      artifacts: [
+        {
+          id: itemId,
+          itemId,
+          relativePath: '../private-name.png',
+          mediaType: 'image/png',
+          byteCount: 3,
+        },
+      ],
+    });
+    await expect(
+      createNativeAdapter(native).handoffInbox('ingestion', packId, 3),
+    ).rejects.toMatchObject({ code: 'NATIVE_HANDOFF_INVALID' });
+  });
+
+  test('requires explicit Inbox handoff availability and acknowledgement', async () => {
+    await expect(
+      adapter.handoffInbox('ingestion', 'pack', 1),
+    ).rejects.toMatchObject({
+      code: 'NATIVE_HANDOFF_UNAVAILABLE',
+    });
+    await expect(adapter.acknowledgeInbox('ingestion')).rejects.toMatchObject({
+      code: 'NATIVE_INBOX_ACK_UNAVAILABLE',
+    });
+    const guarded = createNativeAdapter({
+      ...mockNativeModule,
+      acknowledgeInbox: jest.fn().mockResolvedValue(false),
+    });
+    await expect(guarded.acknowledgeInbox('ingestion')).rejects.toMatchObject({
+      code: 'NATIVE_INBOX_ACK_FAILED',
+    });
+  });
 });

@@ -10,6 +10,15 @@ public final class ContextNativeModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ContextNative")
 
+    OnCreate {
+      guard let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      ) else { return }
+      DispatchQueue.global(qos: .utility).async {
+        InboxArtifactHandoff.runStartupMaintenance(container: container)
+      }
+    }
+
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
         throw NativeError("APP_GROUP_UNAVAILABLE")
@@ -58,6 +67,43 @@ public final class ContextNativeModule: Module {
       do { return try RecoveryMetadataEventStore.ack(container: container, folder: "RecoveryEvents", id: id) }
       catch let error as RecoveryMetadataEventError { throw NativeError(error.stableCode) }
       catch { throw NativeError("NATIVE_RECOVERY_ACK_FAILED") }
+    }
+
+    AsyncFunction("handoffInbox") { (ingestionId: String, packId: String, requiredHeadroomBytes: Int64) throws -> [String: Any] in
+      guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
+        throw NativeError("APP_GROUP_UNAVAILABLE")
+      }
+      guard let applicationSupport = FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      let ownedRoot = applicationSupport.appendingPathComponent("AIContextPack", isDirectory: true)
+      do {
+        return try InboxArtifactHandoff.handoff(
+          container: container,
+          applicationSupport: ownedRoot,
+          ingestionId: ingestionId,
+          packId: packId,
+          requiredHeadroomBytes: requiredHeadroomBytes
+        )
+      } catch let error as InboxArtifactHandoffError {
+        throw NativeError(error.stableCode)
+      } catch let error as InboxManifestValidationError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("acknowledgeInbox") { (ingestionId: String) throws -> Bool in
+      guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
+        throw NativeError("APP_GROUP_UNAVAILABLE")
+      }
+      do { return try InboxArtifactHandoff.acknowledge(container: container, ingestionId: ingestionId) }
+      catch let error as InboxArtifactHandoffError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("STORAGE_WRITE_FAILED") }
     }
 
     AsyncFunction("recognizeText") { (fileUri: String, script: String) async throws -> [String: Any] in

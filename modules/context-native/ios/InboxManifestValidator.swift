@@ -54,34 +54,62 @@ enum InboxManifestValidator {
     )
     var ids = Set<String>()
     return try directories.compactMap { ingestion in
-      let values = try ingestion.resourceValues(forKeys: [.isDirectoryKey])
       let id = ingestion.lastPathComponent
-      guard values.isDirectory == true,
-            ingestion.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL == root,
-            canonicalUUID(id),
-            ids.insert(id).inserted else {
+      guard ids.insert(id).inserted else {
         throw InboxManifestValidationError.invalidManifest
       }
-      let children = try FileManager.default.contentsOfDirectory(
-        at: ingestion,
-        includingPropertiesForKeys: [.isDirectoryKey],
-        options: [.skipsHiddenFiles]
-      )
-      guard try children.allSatisfy({ try $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory != true }) else {
-        throw InboxManifestValidationError.invalidManifest
-      }
-      let manifestURL = ingestion.appendingPathComponent("manifest.json")
-      guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
-      let data = try Data(contentsOf: manifestURL)
-      let decoded: Any
-      do { decoded = try JSONSerialization.jsonObject(with: data) }
-      catch { throw InboxManifestValidationError.invalidManifest }
-      guard let manifest = decoded as? [String: Any] else {
-        throw InboxManifestValidationError.invalidManifest
-      }
-      try validate(manifest, ingestion: ingestion, id: id)
-      return manifest
+      return try readIngestion(root: root, ingestion: ingestion, id: id)
     }
+  }
+
+  static func readPublished(inbox: URL, ingestionId: String) throws -> [String: Any] {
+    guard canonicalUUID(ingestionId) else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    let root = inbox.resolvingSymlinksInPath().standardizedFileURL
+    let ingestion = root.appendingPathComponent(ingestionId, isDirectory: true)
+    guard let manifest = try readIngestion(
+      root: root,
+      ingestion: ingestion,
+      id: ingestionId
+    ) else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    return manifest
+  }
+
+  private static func readIngestion(
+    root: URL,
+    ingestion: URL,
+    id: String
+  ) throws -> [String: Any]? {
+    let values = try ingestion.resourceValues(forKeys: [.isDirectoryKey])
+    guard values.isDirectory == true,
+          ingestion.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL == root,
+          canonicalUUID(id) else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    let children = try FileManager.default.contentsOfDirectory(
+      at: ingestion,
+      includingPropertiesForKeys: [.isDirectoryKey],
+      options: [.skipsHiddenFiles]
+    )
+    guard try children.allSatisfy({
+      try $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory != true
+    }) else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    let manifestURL = ingestion.appendingPathComponent("manifest.json")
+    guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
+    let data = try Data(contentsOf: manifestURL)
+    let decoded: Any
+    do { decoded = try JSONSerialization.jsonObject(with: data) }
+    catch { throw InboxManifestValidationError.invalidManifest }
+    guard let manifest = decoded as? [String: Any] else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    try validate(manifest, ingestion: ingestion, id: id)
+    return manifest
   }
 
   private static func validate(_ manifest: [String: Any], ingestion: URL, id: String) throws {
