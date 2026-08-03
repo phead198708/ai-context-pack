@@ -55,7 +55,7 @@ jobs:
           test "$(npm --version)" = "${NPM_VERSION}"
           test "$(ruby --version | awk '{print $2}')" = "3.4.9"
           test "$(bundle --version)" = "Bundler version 2.6.9"
-          xcodebuild -version | grep 'Xcode 26.6'
+          xcodebuild -version | grep -Fx 'Xcode 26.6'
       - name: Install locked JavaScript dependencies
         run: npm ci
       - name: Run shared tests on macOS

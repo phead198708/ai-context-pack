@@ -4,7 +4,14 @@ import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workflowRoot = join(repositoryRoot, '.github', 'workflows');
+const linuxWorkflow = readFileSync(join(workflowRoot, 'linux.yml'), 'utf8');
 const macosWorkflow = readFileSync(join(workflowRoot, 'macos.yml'), 'utf8');
+const packageManifest = JSON.parse(
+  readFileSync(join(repositoryRoot, 'package.json'), 'utf8'),
+);
+const packageLock = JSON.parse(
+  readFileSync(join(repositoryRoot, 'package-lock.json'), 'utf8'),
+);
 const rubyVersion = readFileSync(
   join(repositoryRoot, '.ruby-version'),
   'utf8',
@@ -25,12 +32,14 @@ const forbiddenPatterns = [
   /\bsecrets\s*\./i,
   /\bsecrets\s*\[/i,
   /\bsecrets\s*:\s*inherit\b/i,
+  /\$\{\{[^}]*\bsecrets\b[^}]*\}\}/i,
   /permissions:\s*write-all/,
   /permissions:[\s\S]*?\b(?:actions|checks|contents|deployments|id-token|issues|packages|pages|pull-requests|security-events|statuses):\s*write\b/,
 ];
 const secretPolicyExamples = [
   '${{ secrets.TOKEN }}',
   "${{ secrets['TOKEN'] }}",
+  '${{ toJSON(secrets) }}',
   'secrets: inherit',
 ];
 if (
@@ -92,6 +101,14 @@ if (
   throw new Error('WORKFLOW_PODSPEC_CHECKSUM_TEST_MISSING');
 }
 if (
+  packageManifest.devDependencies?.['expo-doctor'] !== '1.20.1' ||
+  packageLock.packages?.['node_modules/expo-doctor']?.version !== '1.20.1' ||
+  packageLock.packages?.['node_modules/expo-doctor']?.dev !== true ||
+  !linuxWorkflow.includes('run: npm run doctor')
+) {
+  throw new Error('WORKFLOW_EXPO_DOCTOR_PIN_INVALID');
+}
+if (
   rubyVersion !== '3.4.9' ||
   !/^\s+ruby-version:\s+3\.4\.9$/m.test(macosWorkflow)
 ) {
@@ -103,7 +120,7 @@ if (
     macosWorkflow,
   ) ||
   !macosWorkflow.includes('-xcode-26.6-ruby-3.4.9-pods-') ||
-  !macosWorkflow.includes("xcodebuild -version | grep 'Xcode 26.6'")
+  !macosWorkflow.includes("xcodebuild -version | grep -Fx 'Xcode 26.6'")
 ) {
   throw new Error('WORKFLOW_XCODE_PIN_INVALID');
 }

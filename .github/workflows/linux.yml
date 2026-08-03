@@ -53,7 +53,7 @@ jobs:
       - name: Verify persistence migrations
         run: npm run test:persistence-migrations
       - name: Run Expo Doctor
-        run: npx expo-doctor
+        run: npm run doctor
       - name: Audit high-severity npm findings
         run: npm audit --audit-level=high
       - name: Upload synthetic shared reports
