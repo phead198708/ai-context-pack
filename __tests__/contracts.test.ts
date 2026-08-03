@@ -224,7 +224,8 @@ describe('versioned native contracts', () => {
     '00000000-0000-0000-0000-000000000000',
     '00000000-0000-0000-8000-000000000000',
     '00000000-0000-4000-0000-000000000000',
-  ])('rejects non-RFC metadata event ID %s', id => {
+    '123E4567-E89B-42D3-A456-426614174000',
+  ])('rejects noncanonical metadata event ID %s', id => {
     expect(
       isPendingShareEvent({ schemaVersion: 1, id, result: 'complete' }),
     ).toBe(false);

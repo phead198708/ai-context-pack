@@ -76,6 +76,33 @@ describe('native adapter runtime boundary', () => {
     });
   });
 
+  test('rejects uppercase event IDs at the native boundary', async () => {
+    const uppercaseId = '123E4567-E89B-42D3-A456-426614174000';
+    const shareNative = {
+      ...mockNativeModule,
+      getPendingShareEvents: jest
+        .fn()
+        .mockResolvedValue([
+          { schemaVersion: 1, id: uppercaseId, result: 'complete' },
+        ]),
+    };
+    const recoveryNative = {
+      ...mockNativeModule,
+      getPendingRecoveryEvent: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        id: uppercaseId,
+        code: 'INBOX_RECOVERY_REQUIRED',
+      }),
+    };
+
+    await expect(
+      createNativeAdapter(shareNative).getPendingShareEvents(),
+    ).rejects.toMatchObject({ code: 'NATIVE_SHARE_EVENT_INVALID' });
+    await expect(
+      createNativeAdapter(recoveryNative).getPendingRecoveryEvent(),
+    ).rejects.toMatchObject({ code: 'NATIVE_RECOVERY_EVENT_INVALID' });
+  });
+
   test('preserves the durable recovery error across the native boundary', async () => {
     mockNativeModule.scanInbox.mockRejectedValue({
       code: 'INBOX_RECOVERY_REQUIRED',

@@ -195,6 +195,25 @@ describe('InboxEventWorkflow integration', () => {
     });
   });
 
+  test('fails closed on uppercase live event ID', async () => {
+    const scan = jest.fn().mockResolvedValue([manifest]);
+    const h = harness({ scanInbox: scan });
+
+    await h.workflow.receive({
+      schemaVersion: 1,
+      id: ids[0]!.toUpperCase(),
+      result: 'complete',
+    });
+    await h.workflow.appBecameActive();
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'NATIVE_SHARE_EVENT_INVALID',
+    });
+    expect(scan).not.toHaveBeenCalled();
+    expect(h.native.ackPendingShareEvent).not.toHaveBeenCalled();
+  });
+
   test('one Retry acknowledges every recovery event', async () => {
     const recoveries = [
       {

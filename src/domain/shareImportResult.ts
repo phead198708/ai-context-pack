@@ -1,3 +1,5 @@
+import { isCanonicalUuid } from './canonicalUuid';
+
 export type ShareImportResult = 'complete' | 'failed';
 export type ShareImportErrorCode =
   | 'SHARE_IMPORT_FAILED'
@@ -25,8 +27,6 @@ export interface RecoveryEvent {
   readonly code: 'INBOX_RECOVERY_REQUIRED';
 }
 
-const uuid =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 const shareImportErrorCodes: ReadonlySet<ShareImportErrorCode> = new Set([
@@ -49,8 +49,7 @@ export const isPendingShareEvent = (
 ): value is PendingShareEvent =>
   record(value) &&
   value.schemaVersion === 1 &&
-  typeof value.id === 'string' &&
-  uuid.test(value.id) &&
+  isCanonicalUuid(value.id) &&
   (value.result === 'complete' || value.result === 'failed') &&
   (value.durable === undefined || typeof value.durable === 'boolean') &&
   (value.code === undefined ||
@@ -62,8 +61,7 @@ export const isPendingShareEvent = (
 export const isRecoveryEvent = (value: unknown): value is RecoveryEvent =>
   record(value) &&
   value.schemaVersion === 1 &&
-  typeof value.id === 'string' &&
-  uuid.test(value.id) &&
+  isCanonicalUuid(value.id) &&
   value.code === 'INBOX_RECOVERY_REQUIRED';
 
 export function shareImportErrorCode(result: unknown): string | null {

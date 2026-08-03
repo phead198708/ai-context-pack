@@ -1,4 +1,5 @@
 import type { ImportManifestV1 } from './contracts';
+import { isCanonicalUuid } from './canonicalUuid';
 import {
   isPendingShareEvent,
   type PendingShareEvent,
@@ -248,12 +249,7 @@ export class InboxEventWorkflow {
 function validEventId(value: unknown): string | null {
   if (typeof value !== 'object' || value === null) return null;
   const id = (value as { id?: unknown }).id;
-  return typeof id === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      id,
-    )
-    ? id
-    : null;
+  return isCanonicalUuid(id) ? id : null;
 }
 
 function workflowErrorCode(error: unknown, fallback: string): string {
