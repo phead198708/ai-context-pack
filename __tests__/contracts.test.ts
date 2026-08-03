@@ -192,8 +192,8 @@ describe('versioned native contracts', () => {
     ).toBe(false);
   });
   test('orders manifests newest-first with a stable tie-breaker', () => {
-    const manifest = (ingestionId: string, createdAt: string) =>
-      ({ ingestionId, createdAt } as ImportManifestV1);
+    const manifest = (id: string, createdAt: string) =>
+      ({ ingestionId: id, createdAt } as ImportManifestV1);
     expect(
       newestManifestsFirst([
         manifest('a', '2026-01-01T00:00:00Z'),

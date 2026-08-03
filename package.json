@@ -43,5 +43,12 @@
   },
   "engines": {
     "node": "^22.13.0"
+  },
+  "expo": {
+    "doctor": {
+      "appConfigFieldsNotSyncedCheck": {
+        "enabled": false
+      }
+    }
   }
 }

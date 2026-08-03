@@ -35,6 +35,8 @@ xcodebuild -workspace ios/AIContextPack.xcworkspace -scheme AIContextPack -confi
 
 Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go.
 
+Expo Doctor's app-config synchronization check is intentionally disabled in `package.json`: this repository commits and reviews its native projects, and every native field (including the URL scheme) must be mirrored explicitly instead of regenerated with Prebuild.
+
 After installing the Android development build, verify its committed native URL registration with:
 
 ```sh
