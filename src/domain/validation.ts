@@ -21,7 +21,7 @@ const mediaTypePattern =
   /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const isoDateTimePattern =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+  /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?Z$/;
 const safeRelativePathPattern =
   /^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9._-]*)*$/;
 
@@ -41,11 +41,27 @@ function hasOnlyKeys(
 }
 
 function isIsoDateTime(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    isoDateTimePattern.test(value) &&
-    Number.isFinite(Date.parse(value))
-  );
+  if (typeof value !== 'string' || !isoDateTimePattern.test(value))
+    return false;
+
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  const daysInMonth = [
+    31,
+    year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  return day <= (daysInMonth[month - 1] ?? 0);
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

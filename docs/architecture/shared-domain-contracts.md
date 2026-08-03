@@ -54,11 +54,13 @@ The Draft 2020-12 schemas are the machine-readable structural layer: required an
 
 The exported TypeScript validator named in each schema's `$comment` is the semantic authority. Consumers must run it after structural validation. Standard Draft 2020-12 cannot portably express projected uniqueness, an import path equal to `<item.id>.bin`, array position equal to `item.order`, or sums such as `x + width <= 1`; the negative corpus proves these payloads pass the structural schema and fail the semantic authority. Native import readers mirror the relevant `ImportManifestV1` semantic checks at the platform boundary.
 
+V1 timestamps use canonical UTC `YYYY-MM-DDTHH:mm:ss[.fraction]Z` with one to nine optional fractional digits. The date must exist in the proleptic Gregorian calendar, hours are `00`–`23`, and minutes/seconds are `00`–`59`; rollover forms such as `24:00:00`, leap-second `:60`, and parser-normalized nonexistent dates are invalid. JSON Schema, TypeScript, Swift, and Kotlin exercise the same calendar rules, including valid leap-day and nanosecond-precision cases.
+
 `PDFPageExtractionV1.text` is a JSON Unicode string and deliberately has no redundant `characterCount`. JavaScript/Kotlin UTF-16 length and Swift grapheme counts differ for emoji and combining sequences, so persisting a derived count would make V1 platform-dependent. The canonical fixture contains Simplified Chinese, an emoji sequence, and a combining sequence to exercise exact Swift/Kotlin/TypeScript payload parity.
 
 ### Import path rule
 
-`ImportManifestV1` stores an item-relative generated filename such as `<item-uuid>.bin`. The iOS/Android scanner resolves that value only below the ingestion directory, verifies the file byte count, and rejects `localUri`, provider URIs, absolute paths, traversal, nested paths, item/path identity mismatch, duplicate item IDs, and inconsistent aggregate status.
+`ImportManifestV1` stores an item-relative generated filename such as `<item-uuid>.bin`. Both native scanners require strict JSON syntax before contract validation, resolve the item only below the ingestion directory, and verify its file byte count. When `sha256` is present they stream the owned file through SHA-256 and compare the lowercase digest. Missing files, byte-count mismatches, unreadable item bytes, and digest mismatches are `ARTIFACT_INTEGRITY_FAILED`; malformed contract syntax or fields remain `SCHEMA_INVALID`. The readers also reject `localUri`, provider URIs, absolute paths, traversal, nested paths, item/path identity mismatch, duplicate item IDs, and inconsistent aggregate status.
 
 Infrastructure may resolve a validated relative path to a controlled file URL at the moment a native processor needs it. That URL is not persisted back into the contract.
 

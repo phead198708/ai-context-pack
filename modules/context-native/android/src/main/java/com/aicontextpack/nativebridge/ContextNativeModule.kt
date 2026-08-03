@@ -4,6 +4,8 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.JsonReader
+import android.util.JsonToken
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
@@ -16,10 +18,8 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
-import java.text.ParsePosition
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import java.io.StringReader
+import java.security.MessageDigest
 import java.util.UUID
 
 class ContextNativeModule : Module() {
@@ -103,7 +103,7 @@ internal object InboxManifestScanner {
   private val mediaTypePattern =
     Regex("^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$")
   private val isoDateTimePattern =
-    Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$")
+    Regex("^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d{1,9})?Z$")
   private val sha256Pattern = Regex("^[0-9a-f]{64}$")
   private val manifestKeys = setOf(
     "schemaVersion", "ingestionId", "createdAt", "source", "status", "items",
@@ -149,7 +149,7 @@ internal object InboxManifestScanner {
     catch (_: Exception) { throw NativeException("INBOX_SCAN_FAILED") }
     return files.map { file ->
       try {
-        val manifest = JSONObject(file.readText())
+        val manifest = strictJsonObject(file.readText())
         validateOwnedManifest(manifest, requireNotNull(file.parentFile))
         jsonObjectToMap(manifest)
       } catch (error: InboxManifestValidationException) {
@@ -216,7 +216,12 @@ internal object InboxManifestScanner {
           val copiedFile = File(ownedDirectory, relativePath).canonicalFile
           check(copiedFile.parentFile == ownedDirectory)
           val byteCount = requireNotNull(nonNegativeInteger(item.opt("byteCount")))
-          check(copiedFile.isFile && copiedFile.length() == byteCount)
+          if (!copiedFile.isFile || copiedFile.length() != byteCount) {
+            throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+          }
+          if (item.has("sha256") && sha256(copiedFile) != item.getString("sha256")) {
+            throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+          }
           copied += 1
         }
         "failed" -> {
@@ -245,13 +250,79 @@ internal object InboxManifestScanner {
 
   private fun isIsoDateTime(value: String): Boolean {
     if (!isoDateTimePattern.matches(value)) return false
-    val withoutFraction = value.replace(Regex("\\.\\d+(?=Z$)"), "")
-    val formatter = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-      isLenient = false
-      timeZone = TimeZone.getTimeZone("UTC")
+    val year = value.substring(0, 4).toInt()
+    val month = value.substring(5, 7).toInt()
+    val day = value.substring(8, 10).toInt()
+    val maximumDay = when (month) {
+      2 -> if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) 29 else 28
+      4, 6, 9, 11 -> 30
+      else -> 31
     }
-    val position = ParsePosition(0)
-    return formatter.parse(withoutFraction, position) != null && position.index == withoutFraction.length
+    return day <= maximumDay
+  }
+
+  private fun strictJsonObject(text: String): JSONObject {
+    try {
+      JsonReader(StringReader(text)).use { reader ->
+        reader.isLenient = false
+        check(reader.peek() == JsonToken.BEGIN_OBJECT)
+        consumeJsonValue(reader)
+        check(reader.peek() == JsonToken.END_DOCUMENT)
+      }
+      return JSONObject(text)
+    } catch (error: InboxManifestValidationException) {
+      throw error
+    } catch (_: Exception) {
+      throw InboxManifestValidationException("SCHEMA_INVALID")
+    }
+  }
+
+  private fun consumeJsonValue(reader: JsonReader) {
+    when (reader.peek()) {
+      JsonToken.BEGIN_OBJECT -> {
+        reader.beginObject()
+        while (reader.hasNext()) {
+          reader.nextName()
+          consumeJsonValue(reader)
+        }
+        reader.endObject()
+      }
+      JsonToken.BEGIN_ARRAY -> {
+        reader.beginArray()
+        while (reader.hasNext()) consumeJsonValue(reader)
+        reader.endArray()
+      }
+      JsonToken.STRING, JsonToken.NUMBER -> reader.nextString()
+      JsonToken.BOOLEAN -> reader.nextBoolean()
+      JsonToken.NULL -> reader.nextNull()
+      else -> error("SCHEMA_INVALID")
+    }
+  }
+
+  private fun sha256(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    try {
+      file.inputStream().buffered().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+          val count = input.read(buffer)
+          if (count < 0) break
+          digest.update(buffer, 0, count)
+        }
+      }
+    } catch (_: IOException) {
+      throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+    } catch (_: SecurityException) {
+      throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    val hexadecimal = "0123456789abcdef"
+    return buildString(64) {
+      digest.digest().forEach { byte ->
+        val value = byte.toInt() and 0xff
+        append(hexadecimal[value ushr 4])
+        append(hexadecimal[value and 0x0f])
+      }
+    }
   }
 
   private fun jsonObjectToMap(value: JSONObject): Map<String, Any?> = value.keys().asSequence().associateWith { key ->

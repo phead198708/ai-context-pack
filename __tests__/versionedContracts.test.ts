@@ -144,6 +144,15 @@ const negativeContractCorpus: readonly {
     }),
   },
   {
+    name: 'import timestamp on a nonexistent Gregorian leap day',
+    fixture: 'import-manifest-v1.json',
+    authority: 'structural-schema',
+    mutate: fixture => ({
+      ...fixture,
+      createdAt: '2026-02-29T00:00:00Z',
+    }),
+  },
+  {
     name: 'import aggregate status inconsistent with copied items',
     fixture: 'import-manifest-v1.json',
     authority: 'structural-schema',
@@ -233,6 +242,15 @@ const negativeContractCorpus: readonly {
     mutate: fixture => ({ ...fixture, resumeAction: 'continue' }),
   },
   {
+    name: 'pipeline timestamp using normalized 24-hour rollover',
+    fixture: 'pipeline-checkpoint-v1.json',
+    authority: 'structural-schema',
+    mutate: fixture => ({
+      ...fixture,
+      updatedAt: '2026-01-01T24:00:00Z',
+    }),
+  },
+  {
     name: 'risk confidence outside the normalized range',
     fixture: 'risk-finding-v1.json',
     authority: 'structural-schema',
@@ -265,6 +283,15 @@ const negativeContractCorpus: readonly {
           relativePath: '../export.bin',
         },
       ],
+    }),
+  },
+  {
+    name: 'export timestamp on a nonexistent Gregorian day',
+    fixture: 'export-manifest-v1.json',
+    authority: 'structural-schema',
+    mutate: fixture => ({
+      ...fixture,
+      createdAt: '2026-04-31T00:00:00Z',
     }),
   },
   {
@@ -326,6 +353,29 @@ describe('V1 contract fixtures and machine-readable schemas', () => {
         .sort(),
     ).toEqual(compiledContracts.map(contract => contract.fixture).sort());
   });
+
+  test.each([
+    ['import-manifest-v1.json', 'createdAt'],
+    ['pipeline-checkpoint-v1.json', 'updatedAt'],
+    ['export-manifest-v1.json', 'createdAt'],
+  ] as const)(
+    '%s accepts a real leap day with nanosecond precision',
+    (fixtureName, timestampField) => {
+      const contract = contractForFixture(fixtureName);
+      const fixture = objectValue(loadJson(fixtureDirectory, fixtureName));
+      const candidate = {
+        ...fixture,
+        [timestampField]: '2024-02-29T23:59:59.123456789Z',
+      };
+
+      expect(contract.validateSchema(candidate)).toBe(true);
+      expect(contract.validate(candidate)).toBe(true);
+      expect(contract.decode(candidate)).toEqual({
+        ok: true,
+        value: candidate,
+      });
+    },
+  );
 });
 
 describe('compatibility and migration policy', () => {

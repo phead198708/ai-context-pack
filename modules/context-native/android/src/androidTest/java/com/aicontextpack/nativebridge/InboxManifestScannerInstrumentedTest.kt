@@ -47,6 +47,37 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun rejectsFullyShapedManifestUsingLenientNonJsonSyntax() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    val lenientPayload = """
+      {
+        schemaVersion: 1,
+        ingestionId: '$validIngestionId',
+        createdAt: '2026-01-01T00:00:00Z',
+        source: 'android-share-intent',
+        status: 'complete',
+        items: [{
+          id: '$validItemId',
+          order: 0,
+          mediaType: 'image/png',
+          byteCount: 3,
+          relativePath: '${item.name}',
+          status: 'copied'
+        }]
+      }
+    """.trimIndent()
+    assertEquals(1, JSONObject(lenientPayload).getInt("schemaVersion"))
+    File(requireNotNull(item.parentFile), "manifest.json").writeText(lenientPayload)
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
+  }
+
+  @Test
   fun rejectsFileUriOutsideOwnedInbox() {
     writeManifest(File(inbox.parentFile, "outside.bin"))
 
@@ -65,7 +96,7 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
-  fun rejectsCopiedFileWithMismatchedByteCount() {
+  fun classifiesCopiedFileWithMismatchedByteCountAsArtifactIntegrityFailure() {
     val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs()
       writeBytes(byteArrayOf(1, 2, 3))
@@ -74,7 +105,46 @@ class InboxManifestScannerInstrumentedTest {
 
     val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
 
-    assertEquals("SCHEMA_INVALID", error.code)
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", error.code)
+  }
+
+  @Test
+  fun classifiesMissingCopiedFileAsArtifactIntegrityFailure() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item)
+    assertEquals(true, item.delete())
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", error.code)
+  }
+
+  @Test
+  fun classifiesEqualLengthDigestMismatchAsArtifactIntegrityFailure() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, sha256 = originalItemSha256)
+    item.writeBytes(byteArrayOf(3, 2, 1))
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", error.code)
+  }
+
+  @Test
+  fun acceptsMatchingCopiedFileDigest() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, sha256 = originalItemSha256)
+
+    assertEquals(1, InboxManifestScanner.scan(inbox).size)
   }
 
   @Test
@@ -83,11 +153,29 @@ class InboxManifestScannerInstrumentedTest {
       parentFile?.mkdirs()
       writeBytes(byteArrayOf(1, 2, 3))
     }
-    writeManifest(item, createdAt = "not-a-timestamp")
+    listOf(
+      "not-a-timestamp",
+      "2026-02-29T00:00:00Z",
+      "2026-01-01T24:00:00Z",
+      "2026-04-31T00:00:00Z",
+    ).forEach { timestamp ->
+      writeManifest(item, createdAt = timestamp)
 
-    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+      val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
 
-    assertEquals("SCHEMA_INVALID", error.code)
+      assertEquals("SCHEMA_INVALID", error.code)
+    }
+  }
+
+  @Test
+  fun acceptsRealLeapDayWithNanosecondPrecision() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, createdAt = "2024-02-29T23:59:59.123456789Z")
+
+    assertEquals(1, InboxManifestScanner.scan(inbox).size)
   }
 
   @Test
@@ -481,8 +569,17 @@ class InboxManifestScannerInstrumentedTest {
     createdAt: String = "2026-01-01T00:00:00Z",
     itemOrder: Int = 0,
     manifestStatus: String = "complete",
+    sha256: String? = null,
   ) {
     val directory = manifestDirectory.apply { mkdirs() }
+    val copiedItem = JSONObject()
+      .put("id", validItemId)
+      .put("order", itemOrder)
+      .put("mediaType", "image/png")
+      .put("byteCount", byteCount)
+      .put("relativePath", item.name)
+      .put("status", "copied")
+    if (sha256 != null) copiedItem.put("sha256", sha256)
     val payload = JSONObject()
       .put("schemaVersion", schemaVersion)
       .put("ingestionId", ingestionId)
@@ -491,15 +588,7 @@ class InboxManifestScannerInstrumentedTest {
       .put("status", manifestStatus)
       .put(
         "items",
-        JSONArray().put(
-          JSONObject()
-            .put("id", validItemId)
-            .put("order", itemOrder)
-            .put("mediaType", "image/png")
-            .put("byteCount", byteCount)
-            .put("relativePath", item.name)
-            .put("status", "copied"),
-        ),
+        JSONArray().put(copiedItem),
       )
     File(directory, "manifest.json").writeText(payload.toString())
   }
@@ -508,5 +597,7 @@ class InboxManifestScannerInstrumentedTest {
     private const val validIngestionId = "623e4567-e89b-42d3-a456-426614174000"
     private const val otherIngestionId = "723e4567-e89b-42d3-a456-426614174000"
     private const val validItemId = "823e4567-e89b-42d3-a456-426614174000"
+    private const val originalItemSha256 =
+      "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
   }
 }

@@ -1,14 +1,17 @@
 import CoreFoundation
+import CryptoKit
 import Foundation
 
 enum InboxManifestValidationError: Error, Equatable {
   case invalidManifest
   case unsupportedVersion
+  case artifactIntegrityFailed
 
   var stableCode: String {
     switch self {
     case .invalidManifest: "SCHEMA_INVALID"
     case .unsupportedVersion: "SCHEMA_VERSION_UNSUPPORTED"
+    case .artifactIntegrityFailed: "ARTIFACT_INTEGRITY_FAILED"
     }
   }
 }
@@ -128,12 +131,25 @@ enum InboxManifestValidator {
               item["providerUri"] == nil else {
           throw InboxManifestValidationError.invalidManifest
         }
-        let file = ingestion.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
-        guard file.deletingLastPathComponent() == ownedDirectory,
-              FileManager.default.fileExists(atPath: file.path),
-              let actualBytes = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              Int64(actualBytes) == byteCount else {
+        let candidate = ingestion.appendingPathComponent(relativePath).standardizedFileURL
+        guard FileManager.default.fileExists(atPath: candidate.path) else {
+          throw InboxManifestValidationError.artifactIntegrityFailed
+        }
+        let file = candidate.resolvingSymlinksInPath().standardizedFileURL
+        guard file.deletingLastPathComponent() == ownedDirectory else {
           throw InboxManifestValidationError.invalidManifest
+        }
+        guard let actualBytes = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              Int64(actualBytes) == byteCount else {
+          throw InboxManifestValidationError.artifactIntegrityFailed
+        }
+        if let expectedDigest = item["sha256"] as? String {
+          let actualDigest: String
+          do { actualDigest = try sha256(file) }
+          catch { throw InboxManifestValidationError.artifactIntegrityFailed }
+          guard actualDigest == expectedDigest else {
+            throw InboxManifestValidationError.artifactIntegrityFailed
+          }
         }
         copied += 1
       } else if itemStatus == "failed" {
@@ -167,19 +183,41 @@ enum InboxManifestValidator {
 
   private static func isoDateTime(_ value: String) -> Bool {
     guard value.range(
-      of: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$",
+      of: "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d{1,9})?Z$",
       options: .regularExpression
     ) != nil else { return false }
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = value.contains(".")
-      ? [.withInternetDateTime, .withFractionalSeconds]
-      : [.withInternetDateTime]
-    return formatter.date(from: value) != nil
+    let year = Int(value.prefix(4))!
+    let monthStart = value.index(value.startIndex, offsetBy: 5)
+    let monthEnd = value.index(monthStart, offsetBy: 2)
+    let dayStart = value.index(value.startIndex, offsetBy: 8)
+    let dayEnd = value.index(dayStart, offsetBy: 2)
+    let month = Int(value[monthStart..<monthEnd])!
+    let day = Int(value[dayStart..<dayEnd])!
+    let maximumDay: Int
+    switch month {
+    case 2:
+      maximumDay = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) ? 29 : 28
+    case 4, 6, 9, 11:
+      maximumDay = 30
+    default:
+      maximumDay = 31
+    }
+    return day <= maximumDay
   }
 
   private static func validSHA256(_ value: Any?) -> Bool {
     guard let value = value as? String else { return false }
     return value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+  }
+
+  private static func sha256(_ file: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: file)
+    defer { try? handle.close() }
+    var hasher = SHA256()
+    while let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty {
+      hasher.update(data: data)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   private static func nonNegativeInteger(_ value: Any?) -> Int64? {
