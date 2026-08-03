@@ -60,6 +60,26 @@ class ContextNativeModule : Module() {
       catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
     }
 
+    AsyncFunction("handoffInbox") { ingestionId: String, packId: String, requiredHeadroomBytes: Double ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        InboxArtifactHandoff.handoff(
+          context.filesDir,
+          ingestionId,
+          packId,
+          requiredHeadroomBytes.toLong(),
+        )
+      } catch (error: InboxArtifactHandoffException) {
+        throw NativeException(error.stableCode)
+      }
+    }
+
+    AsyncFunction("acknowledgeInbox") { ingestionId: String ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { InboxArtifactHandoff.acknowledge(context.filesDir, ingestionId) }
+      catch (error: InboxArtifactHandoffException) { throw NativeException(error.stableCode) }
+    }
+
     AsyncFunction("recognizeText") { fileUri: String, script: String, promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
       val uri = controlledFileUri(fileUri)

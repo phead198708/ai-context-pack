@@ -222,6 +222,8 @@ PODS:
   - ExpoModulesWorklets (57.0.8):
     - ExpoModulesCore
     - ExpoModulesJSI
+  - ExpoSQLite (57.0.1):
+    - ExpoModulesCore
   - EXUpdatesInterface (57.0.1):
     - ExpoModulesCore
   - FBLazyVector (0.86.2)
@@ -2131,13 +2133,14 @@ DEPENDENCIES:
   - expo-dev-menu-interface (from `../node_modules/expo-dev-menu-interface/ios`)
   - ExpoAsset (from `../node_modules/expo/node_modules/expo-asset/ios`)
   - "ExpoDomWebView (from `../node_modules/expo/node_modules/@expo/dom-webview/ios`)"
-  - ExpoFileSystem (from `../node_modules/expo/node_modules/expo-file-system/ios`)
+  - ExpoFileSystem (from `../node_modules/expo-file-system/ios`)
   - ExpoFont (from `../node_modules/expo/node_modules/expo-font/ios`)
   - ExpoKeepAwake (from `../node_modules/expo/node_modules/expo-keep-awake/ios`)
   - "ExpoLogBox (from `../node_modules/expo/node_modules/@expo/log-box`)"
   - ExpoModulesCore (from `../node_modules/expo-modules-core`)
   - ExpoModulesJSI (from `../node_modules/expo-modules-jsi/apple`)
   - ExpoModulesWorklets (from `../node_modules/expo-modules-core`)
+  - ExpoSQLite (from `../node_modules/expo-sqlite/ios`)
   - EXUpdatesInterface (from `../node_modules/expo-updates-interface/ios`)
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
@@ -2241,7 +2244,7 @@ EXTERNAL SOURCES:
   ExpoDomWebView:
     :path: "../node_modules/expo/node_modules/@expo/dom-webview/ios"
   ExpoFileSystem:
-    :path: "../node_modules/expo/node_modules/expo-file-system/ios"
+    :path: "../node_modules/expo-file-system/ios"
   ExpoFont:
     :path: "../node_modules/expo/node_modules/expo-font/ios"
   ExpoKeepAwake:
@@ -2254,6 +2257,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/expo-modules-jsi/apple"
   ExpoModulesWorklets:
     :path: "../node_modules/expo-modules-core"
+  ExpoSQLite:
+    :path: "../node_modules/expo-sqlite/ios"
   EXUpdatesInterface:
     :path: "../node_modules/expo-updates-interface/ios"
   FBLazyVector:
@@ -2429,6 +2434,7 @@ SPEC CHECKSUMS:
   ExpoModulesCore: f11074bc70908ea2585884b61db6123b415be1ef
   ExpoModulesJSI: 6cb6d299ace493e7dd20ba94c99e8c4799b07afd
   ExpoModulesWorklets: cde13c788133d042cbd1128ff9ffa9a6345f4476
+  ExpoSQLite: b4b265ea48e563c08cf40931587f4b962b4a8941
   EXUpdatesInterface: 38eacf4b5c0d686727ccbfebaf4f76eab3766a63
   FBLazyVector: 3c3be9a019176b5699455f7f66c5444b78a411c6
   hermes-engine: 458505f1440085b70340522172836768fa39fe77

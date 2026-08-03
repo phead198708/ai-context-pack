@@ -33,6 +33,8 @@ function harness(overrides: Partial<NativeAdapter> = {}) {
     ackEphemeralShareEvent: jest.fn().mockResolvedValue(undefined),
     getPendingRecoveryEvent: jest.fn().mockResolvedValue(null),
     ackRecoveryEvent: jest.fn().mockResolvedValue(undefined),
+    handoffInbox: jest.fn().mockResolvedValue([]),
+    acknowledgeInbox: jest.fn().mockResolvedValue(undefined),
     recognizeText: jest.fn(),
     probePdf: jest.fn(),
     ...overrides,

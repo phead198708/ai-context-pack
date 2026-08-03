@@ -1,4 +1,7 @@
-import type { NativeAdapter } from '../domain/nativeAdapter';
+import type {
+  NativeAdapter,
+  NativeHandoffResult,
+} from '../domain/nativeAdapter';
 import { newestManifestsFirst } from '../domain/importOrdering';
 import {
   isImportManifestV1,
@@ -9,6 +12,8 @@ import {
   isPendingShareEvent,
   isRecoveryEvent,
 } from '../domain/shareImportResult';
+import { isCanonicalUuid } from '../domain/canonicalUuid';
+import { isOwnedArtifactPath } from './persistence/ownedPaths';
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
@@ -17,6 +22,12 @@ export interface NativeMethods {
   ackEphemeralShareEvent?(id: string): Promise<unknown>;
   getPendingRecoveryEvent?(): Promise<unknown>;
   ackRecoveryEvent?(id: string): Promise<unknown>;
+  handoffInbox?(
+    ingestionId: string,
+    packId: string,
+    requiredHeadroomBytes: number,
+  ): Promise<unknown>;
+  acknowledgeInbox?(ingestionId: string): Promise<unknown>;
   recognizeText(uri: string, script: 'latin' | 'chinese'): Promise<unknown>;
   probePdf(uri: string): Promise<unknown>;
 }
@@ -83,6 +94,24 @@ export const createNativeAdapter = (
           if ((await nativeModule.ackRecoveryEvent(id)) !== true)
             throw new NativeBoundaryError('NATIVE_RECOVERY_ACK_FAILED');
         },
+        handoffInbox: async (ingestionId, packId, requiredHeadroomBytes) => {
+          if (!nativeModule.handoffInbox)
+            throw new NativeBoundaryError('NATIVE_HANDOFF_UNAVAILABLE');
+          const value = await nativeModule.handoffInbox(
+            ingestionId,
+            packId,
+            requiredHeadroomBytes,
+          );
+          if (!isNativeHandoffResult(value))
+            throw new NativeBoundaryError('NATIVE_HANDOFF_INVALID');
+          return value;
+        },
+        acknowledgeInbox: async ingestionId => {
+          if (!nativeModule.acknowledgeInbox)
+            throw new NativeBoundaryError('NATIVE_INBOX_ACK_UNAVAILABLE');
+          if ((await nativeModule.acknowledgeInbox(ingestionId)) !== true)
+            throw new NativeBoundaryError('NATIVE_INBOX_ACK_FAILED');
+        },
         recognizeText: async (uri, script) => {
           const value = await nativeModule.recognizeText(uri, script);
           if (!isOCRResultV1(value))
@@ -104,6 +133,12 @@ export const createNativeAdapter = (
         ackEphemeralShareEvent: async () => undefined,
         getPendingRecoveryEvent: async () => null,
         ackRecoveryEvent: async () => undefined,
+        handoffInbox: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        acknowledgeInbox: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
         recognizeText: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
@@ -120,4 +155,51 @@ function nativeErrorCode(error: unknown): string | undefined {
     value.message.includes('INBOX_RECOVERY_REQUIRED')
     ? 'INBOX_RECOVERY_REQUIRED'
     : undefined;
+}
+
+function isNativeHandoffArtifact(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const artifact = value as Record<string, unknown>;
+  const keys = Object.keys(artifact);
+  return (
+    keys.every(key =>
+      [
+        'id',
+        'itemId',
+        'relativePath',
+        'mediaType',
+        'byteCount',
+        'sha256',
+      ].includes(key),
+    ) &&
+    isCanonicalUuid(artifact.id) &&
+    artifact.itemId === artifact.id &&
+    typeof artifact.relativePath === 'string' &&
+    isOwnedArtifactPath(artifact.relativePath) &&
+    typeof artifact.mediaType === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/.test(
+      artifact.mediaType,
+    ) &&
+    typeof artifact.byteCount === 'number' &&
+    Number.isSafeInteger(artifact.byteCount) &&
+    artifact.byteCount >= 0 &&
+    typeof artifact.sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(artifact.sha256)
+  );
+}
+
+function isNativeHandoffResult(value: unknown): value is NativeHandoffResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const result = value as Record<string, unknown>;
+  return (
+    Object.keys(result).length === 3 &&
+    Object.hasOwn(result, 'manifest') &&
+    Object.hasOwn(result, 'manifestFingerprint') &&
+    Object.hasOwn(result, 'artifacts') &&
+    isImportManifestV1(result.manifest) &&
+    typeof result.manifestFingerprint === 'string' &&
+    /^[0-9a-f]{64}$/.test(result.manifestFingerprint) &&
+    Array.isArray(result.artifacts) &&
+    result.artifacts.every(isNativeHandoffArtifact)
+  );
 }

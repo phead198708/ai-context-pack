@@ -69,6 +69,8 @@ Logical layout:
 
 Every import begins with an atomic, schema-versioned ImportManifestV1. Provider files are copied before permission can expire. A recovery scan is idempotent.
 
+Persistence, file ownership, migration, locking, cleanup, and replay details are fixed by [ADR-0002](../adr/0002-sqlite-file-storage-and-inbox-recovery.md).
+
 ## 5. Shared contracts
 
 Required versioned schemas:

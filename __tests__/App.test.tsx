@@ -25,6 +25,8 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
     ackEphemeralShareEvent: jest.fn(),
     getPendingRecoveryEvent: jest.fn(),
     ackRecoveryEvent: jest.fn(),
+    handoffInbox: jest.fn(),
+    acknowledgeInbox: jest.fn(),
     recognizeText: jest.fn(),
     probePdf: jest.fn(),
   },
