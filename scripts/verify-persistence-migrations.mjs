@@ -58,8 +58,18 @@ INSERT INTO artifacts (
     "SELECT type FROM pragma_table_info('artifacts') WHERE name = 'relative_path';",
     'TEXT',
   );
+  const binaryColumns = query(
+    `SELECT COUNT(*)
+     FROM sqlite_schema AS schema
+     JOIN pragma_table_info(schema.name) AS column
+     WHERE schema.type = 'table'
+       AND schema.name NOT LIKE 'sqlite_%'
+       AND upper(trim(column.type)) LIKE '%BLOB%';`,
+  );
+  if (!/^\d+$/.test(binaryColumns) || Number(binaryColumns) !== 0)
+    throw new Error('PERSISTENCE_BINARY_COLUMN_ASSERTION_FAILED');
   process.stdout.write(
-    'PERSISTENCE_MIGRATIONS versions=0->1->2 rowsPreserved=1 binaryColumns=0 result=pass\n',
+    `PERSISTENCE_MIGRATIONS versions=0->1->2 rowsPreserved=1 binaryColumns=${binaryColumns} result=pass\n`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true });
@@ -75,9 +85,15 @@ function execute(sql) {
 }
 
 function assertQuery(sql, expected) {
+  if (query(sql) !== expected)
+    throw new Error('PERSISTENCE_MIGRATION_ASSERTION_FAILED');
+}
+
+function query(sql) {
   const result = spawnSync('sqlite3', [database, sql], {
     encoding: 'utf8',
   });
-  if (result.status !== 0 || result.stdout.trim() !== expected)
+  if (result.status !== 0)
     throw new Error('PERSISTENCE_MIGRATION_ASSERTION_FAILED');
+  return result.stdout.trim();
 }

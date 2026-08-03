@@ -28,6 +28,11 @@ enum InboxArtifactHandoffPoint {
   case beforePublishRename
 }
 
+enum InboxAcknowledgementPoint {
+  case afterTombstoneRename
+  case duringTombstoneDeletion
+}
+
 enum InboxArtifactHandoff {
   static func handoff(
     container: URL,
@@ -36,7 +41,8 @@ enum InboxArtifactHandoff {
     packId: String,
     requiredHeadroomBytes: Int64,
     availableBytes: (URL) throws -> Int64 = availableCapacity,
-    operationHook: (InboxArtifactHandoffPoint) throws -> Void = { _ in }
+    operationHook: (InboxArtifactHandoffPoint) throws -> Void = { _ in },
+    directorySynchronizer: (URL) throws -> Void = synchronizeDirectory
   ) throws -> [String: Any] {
     try requireCanonicalUUID(ingestionId)
     try requireCanonicalUUID(packId)
@@ -59,11 +65,21 @@ enum InboxArtifactHandoff {
           let items = manifest["items"] as? [[String: Any]] else {
       throw InboxArtifactHandoffError.manifestMissing
     }
+    let destinationDirectory = applicationSupport
+      .appendingPathComponent("Packs", isDirectory: true)
+      .appendingPathComponent(packId, isDirectory: true)
+      .appendingPathComponent("originals", isDirectory: true)
     var requiredFreeBytes = requiredHeadroomBytes
     for item in items where item["status"] as? String == "copied" {
-      guard let byteCount = (item["byteCount"] as? NSNumber)?.int64Value,
-            byteCount >= 0,
-            requiredFreeBytes <= Int64.max - byteCount else {
+      guard let itemId = item["id"] as? String,
+            let byteCount = (item["byteCount"] as? NSNumber)?.int64Value,
+            byteCount >= 0 else {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
+      try requireCanonicalUUID(itemId)
+      let destination = destinationDirectory.appendingPathComponent("\(itemId).bin")
+      if FileManager.default.fileExists(atPath: destination.path) { continue }
+      guard requiredFreeBytes <= Int64.max - byteCount else {
         throw InboxArtifactHandoffError.integrityFailed
       }
       requiredFreeBytes += byteCount
@@ -71,18 +87,11 @@ enum InboxArtifactHandoff {
     if try availableBytes(applicationSupport) < requiredFreeBytes {
       throw InboxArtifactHandoffError.lowDisk
     }
-    let destinationDirectory = applicationSupport
-      .appendingPathComponent("Packs", isDirectory: true)
-      .appendingPathComponent(packId, isDirectory: true)
-      .appendingPathComponent("originals", isDirectory: true)
-    do {
-      try FileManager.default.createDirectory(
-        at: destinationDirectory,
-        withIntermediateDirectories: true
-      )
-    } catch {
-      throw InboxArtifactHandoffError.writeFailed
-    }
+    try ensureDestinationHierarchy(
+      applicationSupport: applicationSupport,
+      packId: packId,
+      directorySynchronizer: directorySynchronizer
+    )
 
     let artifacts: [[String: Any]] = try items.compactMap { item -> [String: Any]? in
       guard item["status"] as? String == "copied" else { return nil }
@@ -106,7 +115,8 @@ enum InboxArtifactHandoff {
         destination: destination,
         byteCount: byteCount,
         sha256: sha256,
-        operationHook: operationHook
+        operationHook: operationHook,
+        directorySynchronizer: directorySynchronizer
       )
       var result: [String: Any] = [
         "id": itemId,
@@ -131,9 +141,20 @@ enum InboxArtifactHandoff {
     ]
   }
 
-  static func acknowledge(container: URL, ingestionId: String) throws -> Bool {
+  static func acknowledge(
+    container: URL,
+    ingestionId: String,
+    operationHook: (InboxAcknowledgementPoint) throws -> Void = { _ in },
+    directorySynchronizer: (URL) throws -> Void = synchronizeDirectory,
+    tombstoneRemover: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+  ) throws -> Bool {
     try requireCanonicalUUID(ingestionId)
-    let directory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
+    let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
+    let directory = inbox.appendingPathComponent(ingestionId, isDirectory: true)
+    let tombstoneRoot = container.appendingPathComponent(
+      "InboxAckTombstones",
+      isDirectory: true
+    )
     return try InboxWriterRegistry.withLock(container: container) { locks in
       if InboxWriterRegistry.isLocallyOwned(ingestionId) {
         throw InboxArtifactHandoffError.acknowledgementBlocked
@@ -142,13 +163,35 @@ enum InboxArtifactHandoff {
       if FileManager.default.fileExists(atPath: lock.path) {
         throw InboxArtifactHandoffError.acknowledgementBlocked
       }
-      guard FileManager.default.fileExists(atPath: directory.path) else { return true }
-      do {
-        try FileManager.default.removeItem(at: directory)
+      guard FileManager.default.fileExists(atPath: directory.path) else {
+        cleanupTombstones(
+          root: tombstoneRoot,
+          ingestionId: ingestionId,
+          operationHook: operationHook,
+          directorySynchronizer: directorySynchronizer,
+          tombstoneRemover: tombstoneRemover
+        )
         return true
-      } catch {
-        throw InboxArtifactHandoffError.writeFailed
       }
+      try ensureDurableDirectory(
+        tombstoneRoot,
+        directorySynchronizer: directorySynchronizer
+      )
+      let tombstone = tombstoneRoot.appendingPathComponent(
+        "\(ingestionId)-\(UUID().uuidString.lowercased()).ack",
+        isDirectory: true
+      )
+      try atomicMove(from: directory, to: tombstone)
+      try directorySynchronizer(inbox)
+      try directorySynchronizer(tombstoneRoot)
+      try operationHook(.afterTombstoneRename)
+      cleanupTombstone(
+        tombstone,
+        operationHook: operationHook,
+        directorySynchronizer: directorySynchronizer,
+        tombstoneRemover: tombstoneRemover
+      )
+      return true
     }
   }
 
@@ -158,7 +201,8 @@ enum InboxArtifactHandoff {
     destination: URL,
     byteCount: Int64,
     sha256: String?,
-    operationHook: (InboxArtifactHandoffPoint) throws -> Void
+    operationHook: (InboxArtifactHandoffPoint) throws -> Void,
+    directorySynchronizer: (URL) throws -> Void
   ) throws -> String {
     if FileManager.default.fileExists(atPath: destination.path) {
       let sourceHash = try verify(url: source, byteCount: byteCount, sha256: sha256)
@@ -195,13 +239,99 @@ enum InboxArtifactHandoff {
       try operationHook(.afterFileClose)
       let actualHash = try verify(url: partial, byteCount: byteCount, sha256: sha256)
       try operationHook(.beforePublishRename)
-      try FileManager.default.moveItem(at: partial, to: destination)
-      try synchronizeDirectory(destination.deletingLastPathComponent())
+      try atomicMove(from: partial, to: destination)
+      try directorySynchronizer(destination.deletingLastPathComponent())
       return actualHash
     } catch let error as InboxArtifactHandoffError {
       throw error
     } catch {
       throw InboxArtifactHandoffError.writeFailed
+    }
+  }
+
+  private static func ensureDestinationHierarchy(
+    applicationSupport: URL,
+    packId: String,
+    directorySynchronizer: (URL) throws -> Void
+  ) throws {
+    try ensureDurableDirectory(applicationSupport, directorySynchronizer: directorySynchronizer)
+    let packs = applicationSupport.appendingPathComponent("Packs", isDirectory: true)
+    try ensureDurableDirectory(packs, directorySynchronizer: directorySynchronizer)
+    let pack = packs.appendingPathComponent(packId, isDirectory: true)
+    try ensureDurableDirectory(pack, directorySynchronizer: directorySynchronizer)
+    try ensureDurableDirectory(
+      pack.appendingPathComponent("originals", isDirectory: true),
+      directorySynchronizer: directorySynchronizer
+    )
+  }
+
+  private static func atomicMove(from source: URL, to destination: URL) throws {
+    guard Darwin.rename(source.path, destination.path) == 0 else {
+      throw InboxArtifactHandoffError.writeFailed
+    }
+  }
+
+  private static func ensureDurableDirectory(
+    _ directory: URL,
+    directorySynchronizer: (URL) throws -> Void
+  ) throws {
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
+      guard isDirectory.boolValue else { throw InboxArtifactHandoffError.writeFailed }
+    } else {
+      do {
+        try FileManager.default.createDirectory(
+          at: directory,
+          withIntermediateDirectories: false
+        )
+      } catch {
+        throw InboxArtifactHandoffError.writeFailed
+      }
+    }
+    do {
+      try directorySynchronizer(directory)
+      try directorySynchronizer(directory.deletingLastPathComponent())
+    } catch let error as InboxArtifactHandoffError {
+      throw error
+    } catch {
+      throw InboxArtifactHandoffError.writeFailed
+    }
+  }
+
+  private static func cleanupTombstones(
+    root: URL,
+    ingestionId: String,
+    operationHook: (InboxAcknowledgementPoint) throws -> Void,
+    directorySynchronizer: (URL) throws -> Void,
+    tombstoneRemover: (URL) throws -> Void
+  ) {
+    guard let children = try? FileManager.default.contentsOfDirectory(
+      at: root,
+      includingPropertiesForKeys: nil
+    ) else { return }
+    for child in children where child.lastPathComponent.hasPrefix("\(ingestionId)-") {
+      cleanupTombstone(
+        child,
+        operationHook: operationHook,
+        directorySynchronizer: directorySynchronizer,
+        tombstoneRemover: tombstoneRemover
+      )
+    }
+  }
+
+  private static func cleanupTombstone(
+    _ tombstone: URL,
+    operationHook: (InboxAcknowledgementPoint) throws -> Void,
+    directorySynchronizer: (URL) throws -> Void,
+    tombstoneRemover: (URL) throws -> Void
+  ) {
+    do {
+      try operationHook(.duringTombstoneDeletion)
+      try tombstoneRemover(tombstone)
+      try directorySynchronizer(tombstone.deletingLastPathComponent())
+    } catch {
+      // The atomic rename already removed the scanner-visible Inbox entry.
+      // Tombstone removal is intentionally retryable best-effort cleanup.
     }
   }
 

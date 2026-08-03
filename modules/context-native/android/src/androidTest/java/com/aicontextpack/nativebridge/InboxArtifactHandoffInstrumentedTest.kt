@@ -105,6 +105,139 @@ class InboxArtifactHandoffInstrumentedTest {
     assertFalse(File(root, "Packs/$packId").exists())
   }
 
+  @Test fun replayBudgetsOnlyHeadroomWhenArtifactIsAlreadyPublished() {
+    val ingestionId = uuid()
+    val packId = uuid()
+    val itemId = uuid()
+    writeManifest(
+      ingestionId,
+      listOf(Item(itemId, "image/png", ByteArray(4_096) { 1 })),
+    )
+    InboxArtifactHandoff.handoff(
+      root, ingestionId, packId, 128, availableBytes = { Long.MAX_VALUE },
+    )
+
+    assertEquals(
+      1,
+      (InboxArtifactHandoff.handoff(
+        root, ingestionId, packId, 128, availableBytes = { 128 },
+      )["artifacts"] as List<*>).size,
+    )
+  }
+
+  @Test fun newDestinationHierarchySynchronizesEveryDirectoryAndParent() {
+    val ingestionId = uuid()
+    val packId = uuid()
+    val itemId = uuid()
+    writeManifest(ingestionId, listOf(Item(itemId, "image/png", byteArrayOf(1))))
+    val synchronized = mutableListOf<String>()
+
+    InboxArtifactHandoff.handoff(
+      root,
+      ingestionId,
+      packId,
+      0,
+      availableBytes = { Long.MAX_VALUE },
+      directorySynchronizer = { synchronized += it.canonicalPath },
+    )
+
+    val packs = File(root, "Packs")
+    val pack = File(packs, packId)
+    val originals = File(pack, "originals")
+    listOf(root, packs, pack, originals).forEach { directory ->
+      assertTrue(synchronized.contains(directory.canonicalPath))
+    }
+  }
+
+  @Test fun directorySynchronizationFailureFailsBeforePublishingArtifacts() {
+    val ingestionId = uuid()
+    val packId = uuid()
+    val itemId = uuid()
+    writeManifest(ingestionId, listOf(Item(itemId, "image/png", byteArrayOf(1))))
+
+    val error = assertThrows(InboxArtifactHandoffException::class.java) {
+      InboxArtifactHandoff.handoff(
+        root,
+        ingestionId,
+        packId,
+        0,
+        availableBytes = { Long.MAX_VALUE },
+        directorySynchronizer = { directory ->
+          if (directory.name == packId) throw IllegalStateException("SIMULATED_SYNC_FAILURE")
+        },
+      )
+    }
+    assertEquals("STORAGE_WRITE_FAILED", error.stableCode)
+    assertFalse(File(root, "Packs/$packId/originals/$itemId.bin").exists())
+    var retriedExistingPackSync = false
+    InboxArtifactHandoff.handoff(
+      root,
+      ingestionId,
+      packId,
+      0,
+      availableBytes = { Long.MAX_VALUE },
+      directorySynchronizer = { directory ->
+        if (directory.name == packId) retriedExistingPackSync = true
+      },
+    )
+    assertTrue(retriedExistingPackSync)
+  }
+
+  @Test fun acknowledgementCrashAfterRenameLeavesScannerInvisibleTombstone() {
+    val ingestionId = uuid()
+    writeManifest(ingestionId, listOf(Item(uuid(), "image/png", byteArrayOf(1))))
+    var interrupted = false
+
+    assertThrows(IllegalStateException::class.java) {
+      InboxArtifactHandoff.acknowledge(
+        root,
+        ingestionId,
+        operationHook = { point ->
+          if (!interrupted &&
+            point == InboxArtifactHandoff.AcknowledgementPoint.AFTER_TOMBSTONE_RENAME
+          ) {
+            interrupted = true
+            throw IllegalStateException("SIMULATED_INTERRUPTION")
+          }
+        },
+      )
+    }
+    assertTrue(interrupted)
+    assertFalse(File(root, "Inbox/$ingestionId").exists())
+    assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(File(root, "Inbox")))
+    val tombstones = File(root, "InboxAckTombstones")
+    assertEquals(1, tombstones.listFiles()?.size)
+    assertTrue(InboxArtifactHandoff.acknowledge(root, ingestionId))
+    assertTrue(tombstones.listFiles()?.isEmpty() == true)
+  }
+
+  @Test fun acknowledgementTombstoneDeletionIsBestEffortAndRetryable() {
+    val ingestionId = uuid()
+    writeManifest(ingestionId, listOf(Item(uuid(), "image/png", byteArrayOf(1))))
+    var deletionObserved = false
+    var childrenBeforeInterruption = 0
+    var childrenAfterInterruption = 0
+
+    assertTrue(InboxArtifactHandoff.acknowledge(
+      root,
+      ingestionId,
+      tombstoneRemover = { tombstone ->
+        deletionObserved = true
+        val children = requireNotNull(tombstone.listFiles())
+        childrenBeforeInterruption = children.size
+        assertTrue(requireNotNull(children.firstOrNull()).deleteRecursively())
+        childrenAfterInterruption = requireNotNull(tombstone.listFiles()).size
+        throw IllegalStateException("SIMULATED_INTERRUPTION")
+      },
+    ))
+    assertTrue(deletionObserved)
+    assertEquals(childrenBeforeInterruption - 1, childrenAfterInterruption)
+    val tombstones = File(root, "InboxAckTombstones")
+    assertEquals(1, tombstones.listFiles()?.size)
+    assertTrue(InboxArtifactHandoff.acknowledge(root, ingestionId))
+    assertTrue(tombstones.listFiles()?.isEmpty() == true)
+  }
+
   @Test fun manifestMutationDuringHandoffFailsExactByteBinding() {
     val ingestionId = uuid()
     val packId = uuid()

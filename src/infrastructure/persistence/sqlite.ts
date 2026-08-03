@@ -12,6 +12,10 @@ import type {
 import { PERSISTENCE_SCHEMA_VERSION } from './contracts';
 import { PERSISTENCE_MIGRATIONS } from './migrations';
 import { assertOwnedArtifactPath, ownedOriginalPath } from './ownedPaths';
+import {
+  artifactIdentitySetsEqual,
+  type ArtifactIdentity,
+} from './artifactIdentity';
 
 type SqlValue = string | number | null;
 
@@ -187,6 +191,32 @@ export class ExpoSqlitePersistenceRepository implements PersistenceRepository {
           existing.pack_id !== input.packId ||
           existing.manifest_fingerprint !== input.manifestFingerprint
         )
+          throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
+        const persistedRows = await transaction.all<{
+          id: string;
+          item_id: string;
+          relative_path: string;
+          media_type: string;
+          byte_count: number;
+          sha256: string;
+        }>(
+          `SELECT a.id, a.item_id, a.relative_path, a.media_type, a.byte_count, a.sha256
+           FROM artifacts a
+           JOIN import_items item ON item.id = a.item_id
+           WHERE item.ingestion_id = ?`,
+          [input.manifest.ingestionId],
+        );
+        const persistedArtifacts: ArtifactIdentity[] = persistedRows.map(
+          row => ({
+            id: row.id,
+            itemId: row.item_id,
+            relativePath: row.relative_path,
+            mediaType: row.media_type,
+            byteCount: row.byte_count,
+            sha256: row.sha256,
+          }),
+        );
+        if (!artifactIdentitySetsEqual(persistedArtifacts, input.artifacts))
           throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
         await transaction.run(
           'DELETE FROM recovery_journal WHERE ingestion_id = ?',

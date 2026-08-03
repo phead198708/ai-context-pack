@@ -20,7 +20,7 @@ The database uses:
 - `foreign_keys=ON`, WAL journal mode, `synchronous=FULL`, and a 5-second busy timeout;
 - exclusive async transactions for migrations, import commits, and reference-aware deletes;
 - `PRAGMA user_version` migrations from empty → v1 → v2;
-- a unique `imports.ingestion_id` idempotency key plus an exact-byte manifest SHA-256 conflict check;
+- a unique `imports.ingestion_id` idempotency key plus exact-byte manifest SHA-256 and complete persisted-artifact-set replay checks;
 - `artifact_references` rather than inferred liveness;
 - no `BLOB` content columns.
 
@@ -44,13 +44,13 @@ App Group and app-private Inbox files remain immutable sources until database co
 1. The native Inbox writer owns a per-ingestion cross-process lock.
 2. It copies provider bytes to staging partial files, synchronizes them, validates size/hash, writes a partial manifest, and publishes the ingestion only by atomic rename.
 3. The main app rescans and semantically validates the published manifest.
-4. Native handoff checks `sum(copied byteCount) + 16 MiB headroom` against available storage before creating a destination.
-5. Each artifact is streamed to `<item-id>.bin.partial`, synchronized, size/hash checked, and atomically renamed in the destination directory. The directory is synchronized after publish. On replay, an existing destination is accepted only when its computed SHA-256 matches the current source, even if the manifest omitted an expected hash.
+4. Native handoff checks `sum(byteCount for destinations not yet published) + 16 MiB headroom` against available storage before creating a destination. Replay never budgets already-published bytes again.
+5. Native code creates the `Packs/<pack-id>/originals` hierarchy one level at a time and synchronizes every new directory plus its parent before it can return artifacts. Each artifact is streamed to `<item-id>.bin.partial`, synchronized, size/hash checked, atomically renamed, and followed by a destination-directory synchronization. On replay, an existing destination is accepted only when its computed SHA-256 matches the current source, even if the manifest omitted an expected hash.
 6. The same native call returns the validated manifest, SHA-256 of its exact bytes, and the bound artifact list. JavaScript cannot supply or substitute the fingerprint.
-7. The repository commits the import, items, artifacts, references, and journal removal in one exclusive SQLite transaction.
-8. Only after commit does the app ACK the ingestion. ACK takes the writer registry lock and deletes the Inbox directory. Missing ACK targets are idempotent success.
+7. The repository commits the import, items, artifacts, references, and journal removal in one exclusive SQLite transaction. An existing import replays only when pack, exact manifest fingerprint, and the canonical artifact set (IDs, item IDs, relative paths, media types, byte counts, and SHA-256 values) all match.
+8. Only after commit does the app ACK the ingestion. Under the writer registry lock, ACK atomically renames the live ingestion into the same-volume, scanner-invisible `InboxAckTombstones` sibling, synchronizes both parent directories, then removes the tombstone as best-effort cleanup. Missing live targets are idempotent success and retry leftover tombstone cleanup.
 
-If the app stops before step 7, the published owned file and original Inbox both remain. Replay revalidates an existing destination and commits once. If it stops after step 7 but before step 8, the unique ingestion ID and matching manifest fingerprint produce `replayed`, then ACK removes the source. The same ingestion ID with a different fingerprint fails as `ARTIFACT_INTEGRITY_FAILED`.
+If the app stops before step 7, the published owned file and original Inbox both remain. Replay revalidates an existing destination without requiring its bytes as free space and commits once. If it stops after step 7 but before step 8, the unique ingestion ID and matching manifest/artifact identities produce `replayed`, then ACK removes the source. If ACK stops after its rename, scanners cannot observe a partial deletion and a later ACK removes the tombstone. Any fingerprint or artifact-set mismatch fails as `ARTIFACT_INTEGRITY_FAILED` without ACK.
 
 ## iOS coordination decision
 
@@ -80,6 +80,11 @@ Keep the existing stable registry file plus per-ingestion POSIX advisory locks f
 | Low disk                            | `RESOURCE_LOW_DISK` before destination creation; Inbox retained             | shared, Swift, and Kotlin tests                               |
 | v1 app database update              | v2 applied with rows preserved                                              | `npm run test:persistence-migrations`                         |
 | Cleanup races recovery              | Transactional reference recheck wins; file retained                         | shared cleanup race test                                      |
+| Replay with low free space          | Existing artifacts require only fixed headroom and remain replayable        | Swift/Kotlin published-destination budget tests               |
+| New destination hierarchy           | Every new directory and parent is synchronized before handoff returns       | Swift/Kotlin injected directory-sync tests                    |
+| Replay artifact hash mismatch       | Exact fingerprint alone is insufficient; journal retained and no ACK occurs | shared coordinator and SQLite repository tests                |
+| ACK stops after atomic rename       | Live Inbox is absent; tombstone is scanner-invisible and retryable          | Swift/Kotlin acknowledgement interruption tests               |
+| ACK tombstone deletion stops        | ACK remains successful; later ACK completes best-effort cleanup             | Swift/Kotlin tombstone deletion tests                         |
 
 ## Spike benchmarks
 
@@ -87,8 +92,8 @@ Synthetic filenames and bytes only; no OCR or PDF rendering was invoked.
 
 | Harness                                                | 20 image artifacts (5 MiB total) | application/pdf artifact (49 MiB) | OCR runs |
 | ------------------------------------------------------ | -------------------------------: | --------------------------------: | -------: |
-| Swift Foundation/CryptoKit host harness, Apple Silicon |                            21 ms |                            219 ms |        0 |
-| Pixel 9 Pro AVD, Android API 35                        |                           124 ms |                             99 ms |        0 |
+| Swift Foundation/CryptoKit host harness, Apple Silicon |                            20 ms |                             82 ms |        0 |
+| Pixel 9 Pro AVD, Android API 35                        |                           182 ms |                            150 ms |        0 |
 
 These are Phase 0 correctness/baseline measurements, not release performance claims. Issue #5 still requires representative physical-device evidence because it carries `test:device-required`.
 
@@ -121,4 +126,4 @@ No separate file-system wrapper is selected. Resource-sensitive handoff remains 
 
 ## Consequences
 
-The shared layer owns persistence semantics and transactions; native code owns only controlled file handoff. Recovery keeps extra source/owned bytes until commit and may temporarily consume roughly twice the incoming content plus headroom. This is deliberate: low disk fails before copy, and correctness takes priority over early cleanup.
+The shared layer owns persistence semantics and transactions; native code owns only controlled file handoff. Initial recovery keeps source and owned bytes until commit and may temporarily consume roughly twice the incoming content plus headroom. Replay budgets only missing destinations plus headroom. This is deliberate: low disk fails before copy without making a completed publish permanently unreplayable, and correctness takes priority over early cleanup.

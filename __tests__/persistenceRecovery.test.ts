@@ -20,6 +20,7 @@ import {
   ownedOriginalPath,
 } from '../src/infrastructure/persistence/ownedPaths';
 import { PERSISTENCE_MIGRATIONS } from '../src/infrastructure/persistence/migrations';
+import { artifactIdentitySetsEqual } from '../src/infrastructure/persistence/artifactIdentity';
 
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const packId = '223e4567-e89b-42d3-a456-426614174000';
@@ -71,12 +72,35 @@ function manifest(
   };
 }
 
+function manifestWithoutItemHash(): ImportManifestV1 {
+  const value = manifest();
+  return {
+    ...value,
+    items: value.items.map(item =>
+      item.status === 'copied'
+        ? {
+            id: item.id,
+            order: item.order,
+            mediaType: item.mediaType,
+            status: item.status,
+            byteCount: item.byteCount,
+            relativePath: item.relativePath,
+          }
+        : item,
+    ),
+  };
+}
+
 class MemoryRepository implements PersistenceRepository {
   readonly imports = new Map<string, PersistedImportSummary>();
   readonly journals = new Map<string, RecoveryJournalEntry>();
   readonly candidates: CleanupCandidate[] = [];
   readonly references = new Set<string>();
   readonly knownPaths = new Set<string>();
+  readonly artifactsByIngestion = new Map<
+    string,
+    readonly NativeHandoffArtifact[]
+  >();
   initializeCount = 0;
   commitCount = 0;
   acquireReferenceDuringDelete = false;
@@ -96,7 +120,11 @@ class MemoryRepository implements PersistenceRepository {
     if (existing) {
       if (
         existing.packId !== input.packId ||
-        existing.manifestFingerprint !== input.manifestFingerprint
+        existing.manifestFingerprint !== input.manifestFingerprint ||
+        !artifactIdentitySetsEqual(
+          this.artifactsByIngestion.get(input.manifest.ingestionId) ?? [],
+          input.artifacts,
+        )
       )
         throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
       this.journals.delete(input.manifest.ingestionId);
@@ -116,6 +144,10 @@ class MemoryRepository implements PersistenceRepository {
     );
     input.artifacts.forEach(artifact =>
       this.knownPaths.add(artifact.relativePath),
+    );
+    this.artifactsByIngestion.set(
+      input.manifest.ingestionId,
+      input.artifacts.map(artifact => ({ ...artifact })),
     );
     this.journals.delete(input.manifest.ingestionId);
     return 'created';
@@ -172,6 +204,7 @@ class MemoryHandoff implements NativeInboxHandoff {
   manifestValue: ImportManifestV1 = manifest();
   fingerprintValue = fingerprint;
   artifactPathOverride: string | undefined;
+  artifactSha256 = 'b'.repeat(64);
 
   async handoffInbox(
     _ingestionId: string,
@@ -201,7 +234,7 @@ class MemoryHandoff implements NativeInboxHandoff {
             ownedOriginalPath(targetPackId, itemId),
           mediaType: 'image/png',
           byteCount: 8,
-          sha256: 'b'.repeat(64),
+          sha256: this.artifactSha256,
         },
       ] satisfies readonly NativeHandoffArtifact[],
     });
@@ -303,6 +336,24 @@ describe('persistence and dual-Inbox recovery spike', () => {
         ingestionId,
       }),
     ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+  });
+
+  test('same fingerprint with a different artifact hash fails closed without ACK', async () => {
+    const repository = new MemoryRepository();
+    const handoff = new MemoryHandoff();
+    handoff.manifestValue = manifestWithoutItemHash();
+    const coordinator = new InboxPersistenceCoordinator(repository, handoff);
+    await expect(coordinator.recover({ packId, ingestionId })).resolves.toBe(
+      'created',
+    );
+    handoff.artifactSha256 = 'c'.repeat(64);
+
+    await expect(
+      coordinator.recover({ packId, ingestionId }),
+    ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+    expect(repository.commitCount).toBe(1);
+    expect(handoff.acknowledgementCount).toBe(1);
+    expect(repository.journals.get(ingestionId)?.phase).toBe('files-published');
   });
 
   test('valid owned path for a different Pack still fails closed', async () => {

@@ -12,6 +12,7 @@ internal class InboxArtifactHandoffException(val stableCode: String) : Exception
 
 internal object InboxArtifactHandoff {
   enum class Point { BEFORE_COPY, DURING_COPY, AFTER_FILE_CLOSE, BEFORE_PUBLISH_RENAME }
+  enum class AcknowledgementPoint { AFTER_TOMBSTONE_RENAME, DURING_TOMBSTONE_DELETION }
 
   fun handoff(
     filesDir: File,
@@ -20,6 +21,7 @@ internal object InboxArtifactHandoff {
     requiredHeadroomBytes: Long,
     availableBytes: (File) -> Long = { it.usableSpace },
     operationHook: (Point) -> Unit = {},
+    directorySynchronizer: (File) -> Unit = ::syncDirectory,
   ): Map<String, Any> {
     requireCanonicalUuid(ingestionId)
     requireCanonicalUuid(packId)
@@ -38,11 +40,19 @@ internal object InboxArtifactHandoff {
     @Suppress("UNCHECKED_CAST")
     val items = manifest["items"] as? List<Map<String, Any?>>
       ?: throw InboxArtifactHandoffException("SCHEMA_INVALID")
+    val destinationDirectory = File(filesDir, "Packs/$packId/originals")
     var requiredFreeBytes = requiredHeadroomBytes
     items.filter { it["status"] == "copied" }.forEach { item ->
+      val itemId = item["id"] as? String
+        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       val byteCount = (item["byteCount"] as? Number)?.toLong()
         ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      if (byteCount < 0 || requiredFreeBytes > Long.MAX_VALUE - byteCount) {
+      requireCanonicalUuid(itemId)
+      if (byteCount < 0) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      if (File(destinationDirectory, "$itemId.bin").exists()) return@forEach
+      if (requiredFreeBytes > Long.MAX_VALUE - byteCount) {
         throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       }
       requiredFreeBytes += byteCount
@@ -50,10 +60,7 @@ internal object InboxArtifactHandoff {
     if (availableBytes(filesDir) < requiredFreeBytes) {
       throw InboxArtifactHandoffException("RESOURCE_LOW_DISK")
     }
-    val destinationDirectory = File(filesDir, "Packs/$packId/originals")
-    if (!destinationDirectory.mkdirs() && !destinationDirectory.isDirectory) {
-      throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
-    }
+    ensureDestinationHierarchy(filesDir, packId, directorySynchronizer)
     val artifacts: List<Map<String, Any>> = items.mapNotNull { item ->
       if (item["status"] != "copied") return@mapNotNull null
       val itemId = item["id"] as? String
@@ -73,7 +80,13 @@ internal object InboxArtifactHandoff {
       val destination = File(destinationDirectory, "$itemId.bin")
       val partial = File(destinationDirectory, "$itemId.bin.partial")
       val actualHash = publish(
-        source, partial, destination, byteCount, expectedHash, operationHook,
+        source,
+        partial,
+        destination,
+        byteCount,
+        expectedHash,
+        operationHook,
+        directorySynchronizer,
       )
       val result = mutableMapOf<String, Any>(
         "id" to itemId,
@@ -97,17 +110,43 @@ internal object InboxArtifactHandoff {
     )
   }
 
-  fun acknowledge(filesDir: File, ingestionId: String): Boolean {
+  fun acknowledge(
+    filesDir: File,
+    ingestionId: String,
+    operationHook: (AcknowledgementPoint) -> Unit = {},
+    directorySynchronizer: (File) -> Unit = ::syncDirectory,
+    tombstoneRemover: (File) -> Boolean = { it.deleteRecursively() },
+  ): Boolean {
     requireCanonicalUuid(ingestionId)
     return InboxWriterOwnership.withRegistry(filesDir) { locks ->
       if (File(locks, "$ingestionId.lock").exists()) {
         throw InboxArtifactHandoffException("PIPELINE_RECOVERY_REQUIRED")
       }
-      val directory = File(filesDir, "Inbox/$ingestionId")
-      if (!directory.exists()) return@withRegistry true
-      if (!directory.deleteRecursively() || directory.exists()) {
-        throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+      val inbox = File(filesDir, "Inbox")
+      val directory = File(inbox, ingestionId)
+      val tombstoneRoot = File(filesDir, "InboxAckTombstones")
+      if (!directory.exists()) {
+        cleanupTombstones(
+          tombstoneRoot,
+          ingestionId,
+          operationHook,
+          directorySynchronizer,
+          tombstoneRemover,
+        )
+        return@withRegistry true
       }
+      ensureDurableDirectory(tombstoneRoot, directorySynchronizer)
+      val tombstone = File(tombstoneRoot, "$ingestionId-${UUID.randomUUID()}.ack")
+      atomicMove(directory, tombstone)
+      directorySynchronizer(inbox)
+      directorySynchronizer(tombstoneRoot)
+      operationHook(AcknowledgementPoint.AFTER_TOMBSTONE_RENAME)
+      cleanupTombstone(
+        tombstone,
+        operationHook,
+        directorySynchronizer,
+        tombstoneRemover,
+      )
       true
     }
   }
@@ -119,6 +158,7 @@ internal object InboxArtifactHandoff {
     byteCount: Long,
     expectedHash: String?,
     operationHook: (Point) -> Unit,
+    directorySynchronizer: (File) -> Unit,
   ): String {
     if (destination.exists()) {
       val sourceHash = verify(source, byteCount, expectedHash)
@@ -149,25 +189,102 @@ internal object InboxArtifactHandoff {
       operationHook(Point.AFTER_FILE_CLOSE)
       val actualHash = verify(partial, byteCount, expectedHash)
       operationHook(Point.BEFORE_PUBLISH_RENAME)
-      val published = if (Build.VERSION.SDK_INT >= 26) {
-        runCatching {
-          java.nio.file.Files.move(
-            partial.toPath(),
-            destination.toPath(),
-            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-          )
-        }.isSuccess
-      } else {
-        partial.renameTo(destination)
-      }
-      if (!published) throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
-      syncDirectory(destination.parentFile ?: throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED"))
+      atomicMove(partial, destination)
+      directorySynchronizer(
+        destination.parentFile ?: throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED"),
+      )
       return actualHash
     } catch (error: InboxArtifactHandoffException) {
       throw error
     } catch (_: Exception) {
       throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
     }
+  }
+
+  private fun ensureDestinationHierarchy(
+    filesDir: File,
+    packId: String,
+    directorySynchronizer: (File) -> Unit,
+  ) {
+    val packs = File(filesDir, "Packs")
+    ensureDurableDirectory(packs, directorySynchronizer)
+    val pack = File(packs, packId)
+    ensureDurableDirectory(pack, directorySynchronizer)
+    ensureDurableDirectory(File(pack, "originals"), directorySynchronizer)
+  }
+
+  private fun ensureDurableDirectory(
+    directory: File,
+    directorySynchronizer: (File) -> Unit,
+  ) {
+    val parent = directory.parentFile
+      ?: throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    try {
+      if (directory.exists()) {
+        if (!directory.isDirectory) {
+          throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+        }
+      } else {
+        if (!directory.mkdir()) throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+      }
+      directorySynchronizer(directory)
+      directorySynchronizer(parent)
+    } catch (error: InboxArtifactHandoffException) {
+      throw error
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    }
+  }
+
+  private fun atomicMove(source: File, destination: File) {
+    val published = if (Build.VERSION.SDK_INT >= 26) {
+      runCatching {
+        java.nio.file.Files.move(
+          source.toPath(),
+          destination.toPath(),
+          java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+        )
+      }.isSuccess
+    } else {
+      source.renameTo(destination)
+    }
+    if (!published) throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+  }
+
+  private fun cleanupTombstones(
+    root: File,
+    ingestionId: String,
+    operationHook: (AcknowledgementPoint) -> Unit,
+    directorySynchronizer: (File) -> Unit,
+    tombstoneRemover: (File) -> Boolean,
+  ) {
+    root.listFiles()
+      ?.filter { it.name.startsWith("$ingestionId-") }
+      ?.forEach {
+        cleanupTombstone(
+          it,
+          operationHook,
+          directorySynchronizer,
+          tombstoneRemover,
+        )
+      }
+  }
+
+  private fun cleanupTombstone(
+    tombstone: File,
+    operationHook: (AcknowledgementPoint) -> Unit,
+    directorySynchronizer: (File) -> Unit,
+    tombstoneRemover: (File) -> Boolean,
+  ) {
+    runCatching {
+      operationHook(AcknowledgementPoint.DURING_TOMBSTONE_DELETION)
+      if (!tombstoneRemover(tombstone) || tombstone.exists()) {
+        throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+      }
+      tombstone.parentFile?.let(directorySynchronizer)
+    }
+    // The atomic rename already removed the scanner-visible Inbox entry.
+    // Tombstone removal is intentionally retryable best-effort cleanup.
   }
 
   private fun verify(file: File, byteCount: Long, expectedHash: String?): String {
