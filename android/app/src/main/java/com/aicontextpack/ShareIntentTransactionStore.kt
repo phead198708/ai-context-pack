@@ -2,8 +2,12 @@ package com.aicontextpack
 
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 internal class ShareIntentTransactionStore(
   private val filesDir: File,
@@ -54,8 +58,16 @@ internal class ShareIntentTransactionStore(
   private val directory = File(filesDir, "ShareIntentTransactions")
   private val queueIndex = File(directory, "queue.index")
 
-  @Synchronized
-  fun snapshot(): Snapshot {
+  fun snapshot(): Snapshot = try {
+    withJournalLock(::snapshotLocked)
+  } catch (_: Exception) {
+    Snapshot(
+      emptyList(),
+      listOf(StoreIssue(stableIssueId("journal-lock"), "SHARE_TRANSACTION_STORE_READ_FAILED")),
+    )
+  }
+
+  private fun snapshotLocked(): Snapshot {
     val issues = mutableListOf<StoreIssue>()
     if (!directory.exists()) return Snapshot(emptyList(), emptyList())
     if (!directory.isDirectory) {
@@ -104,15 +116,24 @@ internal class ShareIntentTransactionStore(
     return Snapshot(transactions.filter { it.isNonterminal }, issues.distinctBy { it.id to it.code })
   }
 
-  @Synchronized
   fun acceptNew(id: String = UUID.randomUUID().toString()): Transaction {
     requireCanonicalUuid(id)
+    return try {
+      withJournalLock { acceptNewLocked(id) }
+    } catch (error: ShareTransactionException) {
+      throw error
+    } catch (error: Exception) {
+      throw ShareTransactionException("SHARE_TRANSACTION_STORE_WRITE_FAILED", id, error)
+    }
+  }
+
+  private fun acceptNewLocked(id: String): Transaction {
     try {
       ensureDirectory()
     } catch (error: Exception) {
       throw ShareTransactionException("SHARE_TRANSACTION_STORE_WRITE_FAILED", id, error)
     }
-    val current = snapshot()
+    val current = snapshotLocked()
     if (current.issues.isNotEmpty()) {
       throw ShareTransactionException(current.issues.first().code, current.issues.first().id)
     }
@@ -133,8 +154,7 @@ internal class ShareIntentTransactionStore(
     return transaction
   }
 
-  @Synchronized
-  fun markInProgress(id: String): Transaction = update(id) { current ->
+  fun markInProgress(id: String): Transaction = updateWithJournalLock(id) { current ->
     when (current.state) {
       State.ACCEPTED -> current.copy(state = State.IN_PROGRESS)
       State.IN_PROGRESS -> current
@@ -142,8 +162,7 @@ internal class ShareIntentTransactionStore(
     }
   }
 
-  @Synchronized
-  fun markRecoveryRequired(id: String): Transaction = update(id) { current ->
+  fun markRecoveryRequired(id: String): Transaction = updateWithJournalLock(id) { current ->
     when (current.state) {
       State.ACCEPTED, State.IN_PROGRESS, State.RECOVERY_REQUIRED ->
         current.copy(state = State.RECOVERY_REQUIRED)
@@ -151,17 +170,16 @@ internal class ShareIntentTransactionStore(
     }
   }
 
-  @Synchronized
   fun prepareTerminal(
     id: String,
     result: TerminalResult,
     code: String? = null,
-  ): Transaction = update(id) { current ->
+  ): Transaction = updateWithJournalLock(id) { current ->
     if (current.terminalResult != null && current.terminalResult != result) {
       throw ShareTransactionException("SHARE_TRANSACTION_TERMINAL_CONFLICT", id)
     }
     if ((current.state == State.COMPLETE || current.state == State.FAILED) &&
-      current.terminalResult == result) return@update current
+      current.terminalResult == result) return@updateWithJournalLock current
     current.copy(
       state = if (result == TerminalResult.COMPLETE) State.COMPLETE_NEEDS_EVENT
       else State.FAILED_NEEDS_EVENT,
@@ -170,8 +188,7 @@ internal class ShareIntentTransactionStore(
     )
   }
 
-  @Synchronized
-  fun markEventPublished(id: String): Transaction = update(id) { current ->
+  fun markEventPublished(id: String): Transaction = updateWithJournalLock(id) { current ->
     when (current.state) {
       State.COMPLETE_NEEDS_EVENT -> current.copy(state = State.COMPLETE)
       State.FAILED_NEEDS_EVENT -> current.copy(state = State.FAILED)
@@ -180,8 +197,21 @@ internal class ShareIntentTransactionStore(
     }
   }
 
-  private fun update(id: String, transform: (Transaction) -> Transaction): Transaction {
+  private fun updateWithJournalLock(
+    id: String,
+    transform: (Transaction) -> Transaction,
+  ): Transaction {
     requireCanonicalUuid(id)
+    return try {
+      withJournalLock { updateLocked(id, transform) }
+    } catch (error: ShareTransactionException) {
+      throw error
+    } catch (error: Exception) {
+      throw ShareTransactionException("SHARE_TRANSACTION_TRANSITION_FAILED", id, error)
+    }
+  }
+
+  private fun updateLocked(id: String, transform: (Transaction) -> Transaction): Transaction {
     val current = try {
       readState(File(directory, "$id.state"))
     } catch (error: ShareTransactionException) {
@@ -294,16 +324,20 @@ internal class ShareIntentTransactionStore(
         append("terminalCode=$it\n")
       }
     }
-    publish(File(directory, "${transaction.id}.partial"), File(directory, "${transaction.id}.state"), payload)
+    publish(File(directory, "${transaction.id}.state"), payload)
   }
 
   private fun publishQueueIndex(ids: List<String>) {
     ensureDirectory()
     val payload = "schemaVersion=1\nids=${ids.joinToString(",")}\n"
-    publish(File(directory, "queue.partial"), queueIndex, payload)
+    publish(queueIndex, payload)
   }
 
-  private fun publish(partial: File, destination: File, payload: String) {
+  private fun publish(destination: File, payload: String) {
+    val partial = File(
+      requireNotNull(destination.parentFile),
+      "${destination.name}.${UUID.randomUUID()}.partial",
+    )
     try {
       faultInjector.check(WritePoint.BEFORE_PARTIAL_WRITE, destination, payload)
       partial.writeText(payload)
@@ -316,6 +350,17 @@ internal class ShareIntentTransactionStore(
 
   private fun ensureDirectory() {
     check(directory.mkdirs() || directory.isDirectory)
+  }
+
+  private fun <T> withJournalLock(block: () -> T): T {
+    val lockFile = File(filesDir, journalLockFileName)
+    val lockKey = runCatching { lockFile.canonicalPath }.getOrElse { lockFile.absolutePath }
+    return processLocks.computeIfAbsent(lockKey) { ReentrantLock() }.withLock {
+      check(filesDir.mkdirs() || filesDir.isDirectory)
+      RandomAccessFile(lockFile, "rw").use { handle ->
+        handle.channel.lock().use { block() }
+      }
+    }
   }
 
   private fun quarantine(file: File, issue: StoreIssue, issues: MutableList<StoreIssue>) {
@@ -354,6 +399,8 @@ internal class ShareIntentTransactionStore(
   }
 
   companion object {
+    private const val journalLockFileName = ".share-intent-transactions.lock"
+    private val processLocks = ConcurrentHashMap<String, ReentrantLock>()
     private val stableCode = Regex("^[A-Z][A-Z0-9_]{2,80}$")
   }
 }

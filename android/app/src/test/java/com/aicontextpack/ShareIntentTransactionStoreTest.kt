@@ -10,6 +10,11 @@ import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 class ShareIntentTransactionStoreTest {
   private lateinit var filesDir: File
@@ -53,6 +58,72 @@ class ShareIntentTransactionStoreTest {
     store.markEventPublished(first.id)
 
     assertEquals(listOf(second.id), ShareIntentTransactionStore(filesDir).snapshot().transactions.map { it.id })
+  }
+
+  @Test fun separateStoreInstancesSerializeTerminalPublicationAndAcceptance() {
+    val terminal = store.acceptNew("123e4567-e89b-42d3-a456-426614174000")
+    val queued = store.acceptNew("223e4567-e89b-42d3-a456-426614174000")
+    store.prepareTerminal(terminal.id, ShareIntentTransactionStore.TerminalResult.COMPLETE)
+    val publicationReached = CountDownLatch(1)
+    val allowPublication = CountDownLatch(1)
+    val acceptanceStarted = CountDownLatch(1)
+    val acceptanceEnteredJournal = CountDownLatch(1)
+    val failures = ConcurrentLinkedQueue<Throwable>()
+    val accepted = AtomicReference<ShareIntentTransactionStore.Transaction>()
+    val transitioningStore = ShareIntentTransactionStore(filesDir) { point, destination, _ ->
+      if (point == ShareIntentTransactionStore.WritePoint.BEFORE_ATOMIC_RENAME &&
+        destination.name == "queue.index") {
+        publicationReached.countDown()
+        check(allowPublication.await(5, TimeUnit.SECONDS))
+      }
+    }
+    val acceptingStore = ShareIntentTransactionStore(filesDir) { point, destination, _ ->
+      if (point == ShareIntentTransactionStore.WritePoint.BEFORE_PARTIAL_WRITE &&
+        destination.name.endsWith(".state")) acceptanceEnteredJournal.countDown()
+    }
+
+    val transitionThread = thread(name = "terminal-publication-barrier") {
+      try {
+        transitioningStore.markEventPublished(terminal.id)
+      } catch (error: Throwable) {
+        failures += error
+      }
+    }
+    assertTrue(publicationReached.await(5, TimeUnit.SECONDS))
+    val acceptThread = thread(name = "acceptance-barrier") {
+      acceptanceStarted.countDown()
+      try {
+        accepted.set(acceptingStore.acceptNew("323e4567-e89b-42d3-a456-426614174000"))
+      } catch (error: Throwable) {
+        failures += error
+      }
+    }
+    assertTrue(acceptanceStarted.await(5, TimeUnit.SECONDS))
+    assertFalse(acceptanceEnteredJournal.await(250, TimeUnit.MILLISECONDS))
+
+    allowPublication.countDown()
+    transitionThread.join(5_000)
+    acceptThread.join(5_000)
+
+    assertFalse(transitionThread.isAlive)
+    assertFalse(acceptThread.isAlive)
+    failures.peek()?.let { throw AssertionError("concurrent journal operation failed", it) }
+    assertTrue(acceptanceEnteredJournal.await(1, TimeUnit.SECONDS))
+    assertEquals(3L, accepted.get().order)
+    val snapshot = ShareIntentTransactionStore(filesDir).snapshot()
+    assertEquals(listOf(queued.id, accepted.get().id), snapshot.transactions.map { it.id })
+    assertEquals(listOf(2L, 3L), snapshot.transactions.map { it.order })
+    assertEquals(emptyList<ShareIntentTransactionStore.StoreIssue>(), snapshot.issues)
+    val terminalState = File(filesDir, "ShareIntentTransactions/${terminal.id}.state").readText()
+    assertTrue(terminalState.contains("state=COMPLETE\n"))
+    assertTrue(terminalState.contains("terminalResult=COMPLETE\n"))
+    assertEquals(
+      "schemaVersion=1\nids=${queued.id},${accepted.get().id}\n",
+      File(filesDir, "ShareIntentTransactions/queue.index").readText(),
+    )
+    assertFalse(File(filesDir, "ShareIntentTransactions").listFiles().orEmpty().any {
+      it.name.endsWith(".partial")
+    })
   }
 
   @Test fun corruptQueueIndexIsQuarantinedAndRebuiltFromEveryJournalRecord() {
