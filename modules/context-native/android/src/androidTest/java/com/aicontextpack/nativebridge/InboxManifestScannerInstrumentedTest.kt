@@ -241,6 +241,39 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun quarantinesFilenameIdMismatchInBothEventStoresSoRetryCannotLoop() {
+    val filesDir = requireNotNull(inbox.parentFile)
+    val filenameId = "623e4567-e89b-42d3-a456-426614174000"
+    val payloadId = "723e4567-e89b-42d3-a456-426614174000"
+    val cases = listOf(
+      "PendingShareEvents" to mapOf("result" to "complete"),
+      "RecoveryEvents" to mapOf("code" to "INBOX_RECOVERY_REQUIRED"),
+    )
+
+    cases.forEach { (folder, fields) ->
+      val directory = File(filesDir, folder).apply { mkdirs() }
+      val event = File(directory, "$filenameId.json")
+      val payload = JSONObject()
+        .put("schemaVersion", 1)
+        .put("id", payloadId)
+        .put("createdAtMs", 1L)
+      fields.forEach { (key, value) -> payload.put(key, value) }
+      event.writeText(payload.toString())
+
+      val error = assertThrows(MetadataEventException::class.java) {
+        MetadataEventStore.read(filesDir, folder)
+      }
+
+      assertEquals("NATIVE_EVENT_SCHEMA_INVALID", error.stableCode)
+      assertEquals(false, event.exists())
+      assertEquals(1, directory.listFiles().orEmpty().count {
+        it.name.startsWith("$filenameId.json.") && it.name.endsWith(".invalid")
+      })
+      assertEquals(emptyList<Map<String, Any>>(), MetadataEventStore.read(filesDir, folder))
+    }
+  }
+
+  @Test
   fun classifiesInvalidAndMissingRecoveryAcknowledgements() {
     val filesDir = requireNotNull(inbox.parentFile)
     val invalid = assertThrows(MetadataEventException::class.java) {

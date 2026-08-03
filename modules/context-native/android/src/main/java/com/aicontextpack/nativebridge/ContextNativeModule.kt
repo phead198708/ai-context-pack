@@ -221,7 +221,9 @@ internal object IncompleteTransactionRecovery {
 }
 
 object MetadataEventStore {
-  private val idPattern = Regex("^[0-9a-fA-F-]{36}$")
+  private val canonicalIdPattern = Regex(
+    "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+  )
 
   fun persistShareResult(
     filesDir: File,
@@ -245,9 +247,11 @@ object MetadataEventStore {
       .filter { it.isFile && it.extension == "json" }
       .map { file ->
         try {
+          val filenameId = file.name.removeSuffix(".json")
+          check(isCanonicalId(filenameId))
           val value = JSONObject(file.readText())
           val id = value.getString("id")
-          check(value.getInt("schemaVersion") == 1 && idPattern.matches(id))
+          check(value.getInt("schemaVersion") == 1 && isCanonicalId(id) && id == filenameId)
           if (folder == "PendingShareEvents")
             check(value.getString("result") == "complete" || value.getString("result") == "failed")
           if (folder == "RecoveryEvents")
@@ -262,7 +266,7 @@ object MetadataEventStore {
         } catch (_: java.io.IOException) {
           throw MetadataEventException("NATIVE_EVENT_STORE_READ_FAILED")
         } catch (_: Exception) {
-          val quarantined = File(directory, "${file.nameWithoutExtension}.invalid")
+          val quarantined = File(directory, "${file.name}.${UUID.randomUUID()}.invalid")
           if (!file.renameTo(quarantined))
             throw MetadataEventException("NATIVE_EVENT_STORE_READ_FAILED")
           throw MetadataEventException("NATIVE_EVENT_SCHEMA_INVALID")
@@ -271,7 +275,7 @@ object MetadataEventStore {
   }
 
   fun ack(filesDir: File, folder: String, id: String): Boolean {
-    if (!idPattern.matches(id) || runCatching { UUID.fromString(id).toString() }.getOrNull() != id)
+    if (!isCanonicalId(id))
       throw MetadataEventException("METADATA_EVENT_ID_INVALID")
     val event = File(File(filesDir, folder), "$id.json")
     if (!event.exists()) return true
@@ -283,7 +287,7 @@ object MetadataEventStore {
   }
 
   private fun persist(filesDir: File, folder: String, fields: Map<String, String>, id: String): Map<String, Any> {
-    require(idPattern.matches(id))
+    if (!isCanonicalId(id)) throw MetadataEventException("METADATA_EVENT_ID_INVALID")
     val directory = File(filesDir, folder)
     check(directory.mkdirs() || directory.isDirectory)
     val createdAtMs = System.currentTimeMillis()
@@ -311,6 +315,9 @@ object MetadataEventStore {
     }
     return mapOf("schemaVersion" to 1, "id" to id, "createdAtMs" to createdAtMs) + fields
   }
+
+  private fun isCanonicalId(id: String): Boolean =
+    canonicalIdPattern.matches(id) && runCatching { UUID.fromString(id).toString() }.getOrNull() == id
 }
 
 class MetadataEventException(val stableCode: String) : Exception(stableCode)
