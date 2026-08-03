@@ -20,7 +20,7 @@ Enable “Require branches to be up to date before merging,” require conversat
 
 - Node `22.13.1` comes from `.nvmrc`; npm `10.9.2` comes from `package.json#packageManager`. Workflows assert both exact versions before install.
 - Android uses Eclipse Temurin `17.0.19+10` and the committed Gradle `9.3.1` wrapper. Node/npm and Gradle caches are keyed by their lock/build inputs and toolchain selected by the setup actions.
-- macOS uses the `macos-15` image with Xcode `26.3`, Ruby `3.4.9`, Bundler `2.6.9`, `Gemfile.lock`, and `ios/Podfile.lock`. The CocoaPods cache key includes Xcode/Ruby plus all JavaScript/Ruby/Pod locks; DerivedData is never cached.
+- macOS uses the `macos-26` image with Xcode `26.6`, Ruby `3.4.9`, Bundler `2.6.9`, `Gemfile.lock`, and `ios/Podfile.lock`. Xcode 26.6 is the tested SDK 57 baseline and satisfies ADR 0001's Xcode 26.4+ requirement; Xcode 26.3 fails while compiling `expo-modules-jsi` because its Swift compiler cannot disambiguate the package's `abs(Double)` call. The CocoaPods cache key includes Xcode/Ruby plus all JavaScript/Ruby/Pod locks; DerivedData is never cached.
 - Every third-party action is pinned to a full commit SHA and annotated with the reviewed release version.
 
 ## Fixtures and artifacts

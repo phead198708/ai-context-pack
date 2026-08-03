@@ -18,12 +18,12 @@ env:
   NODE_VERSION: 22.13.1
   NPM_VERSION: 10.9.2
   NODE_ENV: development
-  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 
 jobs:
   ios:
     name: iOS app & Share Extension
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -48,14 +48,14 @@ jobs:
           path: |
             ios/Pods
             ~/Library/Caches/CocoaPods
-          key: ${{ runner.os }}-xcode-26.3-ruby-3.4.9-pods-${{ hashFiles('Gemfile.lock', 'ios/Podfile.lock', 'package-lock.json') }}
+          key: ${{ runner.os }}-xcode-26.6-ruby-3.4.9-pods-${{ hashFiles('Gemfile.lock', 'ios/Podfile.lock', 'package-lock.json') }}
       - name: Verify Node, npm, Ruby, Bundler, and Xcode pins
         run: |
           test "$(node --version)" = "v${NODE_VERSION}"
           test "$(npm --version)" = "${NPM_VERSION}"
           test "$(ruby --version | awk '{print $2}')" = "3.4.9"
           test "$(bundle --version)" = "Bundler version 2.6.9"
-          xcodebuild -version | grep 'Xcode 26.3'
+          xcodebuild -version | grep 'Xcode 26.6'
       - name: Install locked JavaScript dependencies
         run: npm ci
       - name: Run shared tests on macOS

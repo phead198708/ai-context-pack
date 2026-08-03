@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workflowRoot = join(repositoryRoot, '.github', 'workflows');
+const macosWorkflow = readFileSync(join(workflowRoot, 'macos.yml'), 'utf8');
 const rubyVersion = readFileSync(
   join(repositoryRoot, '.ruby-version'),
   'utf8',
@@ -92,11 +93,19 @@ if (
 }
 if (
   rubyVersion !== '3.4.9' ||
-  !/^\s+ruby-version:\s+3\.4\.9$/m.test(
-    readFileSync(join(workflowRoot, 'macos.yml'), 'utf8'),
-  )
+  !/^\s+ruby-version:\s+3\.4\.9$/m.test(macosWorkflow)
 ) {
   throw new Error('WORKFLOW_RUBY_PIN_INVALID');
+}
+if (
+  !/^\s+runs-on:\s+macos-26$/m.test(macosWorkflow) ||
+  !/^\s+DEVELOPER_DIR:\s+\/Applications\/Xcode_26\.6\.app\/Contents\/Developer$/m.test(
+    macosWorkflow,
+  ) ||
+  !macosWorkflow.includes('-xcode-26.6-ruby-3.4.9-pods-') ||
+  !macosWorkflow.includes("xcodebuild -version | grep 'Xcode 26.6'")
+) {
+  throw new Error('WORKFLOW_XCODE_PIN_INVALID');
 }
 
 console.info(
