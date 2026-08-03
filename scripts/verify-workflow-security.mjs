@@ -32,7 +32,9 @@ const forbiddenPatterns = [
   /\bsecrets\s*\./i,
   /\bsecrets\s*\[/i,
   /\bsecrets\s*:\s*inherit\b/i,
-  /\$\{\{[^}]*\bsecrets\b[^}]*\}\}/i,
+  // Reject the identifier anywhere in workflow source, including comments and quoted/braced
+  // expressions, so source formatting cannot create a parser-boundary bypass.
+  /\bsecrets\b/i,
   /permissions:\s*write-all/,
   /permissions:[\s\S]*?\b(?:actions|checks|contents|deployments|id-token|issues|packages|pages|pull-requests|security-events|statuses):\s*write\b/,
 ];
@@ -40,6 +42,7 @@ const secretPolicyExamples = [
   '${{ secrets.TOKEN }}',
   "${{ secrets['TOKEN'] }}",
   '${{ toJSON(secrets) }}',
+  "${{ format('{0}', toJSON(secrets)) }}",
   'secrets: inherit',
 ];
 if (
