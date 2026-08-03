@@ -13,7 +13,7 @@ let package = Package(
       name: "ContextNativeRecovery",
       path: ".",
       exclude: ["ContextNative.podspec", "ContextNativeModule.swift", "Tests"],
-      sources: ["InboxRecoverySupport.swift", "InboxWriterOwnership.swift"]
+      sources: ["InboxManifestValidator.swift", "InboxRecoverySupport.swift", "InboxWriterOwnership.swift"]
     ),
     .testTarget(
       name: "ContextNativeRecoveryTests",

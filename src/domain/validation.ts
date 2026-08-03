@@ -7,7 +7,13 @@ import type {
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
-function isOwnedInboxFileUri(value: unknown): value is string {
+const canonicalUuid =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function isOwnedInboxFileUri(
+  value: unknown,
+  ingestionId: string,
+): value is string {
   if (typeof value !== 'string') return false;
   try {
     const url = new URL(value);
@@ -21,7 +27,8 @@ function isOwnedInboxFileUri(value: unknown): value is string {
       url.search === '' &&
       url.hash === '' &&
       inboxIndex >= 0 &&
-      segments.length >= inboxIndex + 3 &&
+      segments.length === inboxIndex + 3 &&
+      segments[inboxIndex + 1] === ingestionId &&
       !segments.some(segment => segment === '.' || segment === '..')
     );
   } catch {
@@ -53,6 +60,7 @@ export function isImportManifestV1(value: unknown): value is ImportManifestV1 {
     return false;
   return (
     typeof value.ingestionId === 'string' &&
+    canonicalUuid.test(value.ingestionId) &&
     typeof value.createdAt === 'string' &&
     Number.isFinite(Date.parse(value.createdAt)) &&
     (value.source === 'ios-share-extension' ||
@@ -70,7 +78,7 @@ export function isImportManifestV1(value: unknown): value is ImportManifestV1 {
         ) &&
         Number.isSafeInteger(item.byteCount) &&
         (item.byteCount as number) >= 0 &&
-        isOwnedInboxFileUri(item.localUri) &&
+        isOwnedInboxFileUri(item.localUri, value.ingestionId as string) &&
         (item.status === 'copied' || item.status === 'failed'),
     )
   );

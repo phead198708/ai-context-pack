@@ -36,7 +36,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsMalformedManifestInsteadOfDroppingIt() {
-    File(inbox, "broken/manifest.json").apply {
+    File(inbox, "$validIngestionId/manifest.json").apply {
       parentFile?.mkdirs()
       writeText("{truncated")
     }
@@ -53,7 +53,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun returnsValidOwnedManifest() {
-    val item = File(inbox, "valid/item.bin").apply {
+    val item = File(inbox, "$validIngestionId/item.bin").apply {
       parentFile?.mkdirs()
       writeBytes(byteArrayOf(1, 2, 3))
     }
@@ -64,7 +64,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsCopiedFileWithMismatchedByteCount() {
-    val item = File(inbox, "valid/item.bin").apply {
+    val item = File(inbox, "$validIngestionId/item.bin").apply {
       parentFile?.mkdirs()
       writeBytes(byteArrayOf(1, 2, 3))
     }
@@ -75,10 +75,43 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsManifestThatReferencesAnotherIngestion() {
-    val other = File(inbox, "other/item.bin").apply {
+    val other = File(inbox, "$otherIngestionId/item.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
     }
-    writeManifest(other, manifestDirectory = File(inbox, "claimed"))
+    writeManifest(other, manifestDirectory = File(inbox, validIngestionId))
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+  }
+
+  @Test
+  fun rejectsManifestWhoseIdDoesNotMatchItsDirectory() {
+    val item = File(inbox, "$validIngestionId/item.bin").apply {
+      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, ingestionId = otherIngestionId)
+
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+  }
+
+  @Test
+  fun rejectsNestedManifest() {
+    val item = File(inbox, "$validIngestionId/item.bin").apply {
+      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item)
+    File(inbox, "$validIngestionId/nested/manifest.json").apply {
+      parentFile?.mkdirs(); writeText("{}")
+    }
+
+    assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+  }
+
+  @Test
+  fun rejectsInvalidIngestionDirectoryName() {
+    val item = File(inbox, "not-a-uuid/item.bin").apply {
+      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item, manifestDirectory = requireNotNull(item.parentFile), ingestionId = "not-a-uuid")
+
     assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
   }
 
@@ -261,7 +294,7 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsTraversalFailure() {
-    val blocked = File(inbox, "blocked").apply { mkdirs() }
+    val blocked = File(inbox, validIngestionId).apply { mkdirs() }
     val item = File(blocked, "item.bin").apply { writeBytes(byteArrayOf(1)) }
     writeManifest(item, manifestDirectory = blocked)
     Os.chmod(blocked.path, 0)
@@ -275,12 +308,13 @@ class InboxManifestScannerInstrumentedTest {
   private fun writeManifest(
     item: File,
     byteCount: Long = item.length(),
-    manifestDirectory: File = File(inbox, "valid"),
+    manifestDirectory: File = File(inbox, validIngestionId),
+    ingestionId: String = manifestDirectory.name,
   ) {
     val directory = manifestDirectory.apply { mkdirs() }
     val payload = JSONObject()
       .put("schemaVersion", 1)
-      .put("ingestionId", "valid")
+      .put("ingestionId", ingestionId)
       .put("createdAt", "2026-01-01T00:00:00Z")
       .put("source", "android-share-intent")
       .put("status", "complete")
@@ -296,5 +330,10 @@ class InboxManifestScannerInstrumentedTest {
         ),
       )
     File(directory, "manifest.json").writeText(payload.toString())
+  }
+
+  companion object {
+    private const val validIngestionId = "623e4567-e89b-42d3-a456-426614174000"
+    private const val otherIngestionId = "723e4567-e89b-42d3-a456-426614174000"
   }
 }

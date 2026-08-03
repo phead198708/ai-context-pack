@@ -43,7 +43,12 @@ export const createNativeAdapter = (
               throw new NativeBoundaryError('INBOX_RECOVERY_REQUIRED');
             throw error;
           }
-          if (!Array.isArray(value) || !value.every(isImportManifestV1))
+          if (
+            !Array.isArray(value) ||
+            !value.every(isImportManifestV1) ||
+            new Set(value.map(manifest => manifest.ingestionId)).size !==
+              value.length
+          )
             throw new NativeBoundaryError('NATIVE_MANIFEST_INVALID');
           return newestManifestsFirst(value);
         },

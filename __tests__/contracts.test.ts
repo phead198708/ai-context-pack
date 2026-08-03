@@ -12,11 +12,12 @@ import {
   ShareFailureLatch,
 } from '../src/domain/latestRequestGate';
 describe('versioned native contracts', () => {
+  const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
   test('accepts the shared minimal manifest fixture', () => {
     expect(
       isImportManifestV1({
         schemaVersion: 1,
-        ingestionId: 'synthetic-001',
+        ingestionId,
         createdAt: '2026-01-01T00:00:00Z',
         source: 'ios-share-extension',
         status: 'complete',
@@ -25,7 +26,7 @@ describe('versioned native contracts', () => {
             id: 'item-001',
             mediaType: 'image/png',
             byteCount: 128,
-            localUri: 'file:///internal/Inbox/synthetic-001/item-001.png',
+            localUri: `file:///internal/Inbox/${ingestionId}/item-001.png`,
             status: 'copied',
           },
         ],
@@ -43,7 +44,7 @@ describe('versioned native contracts', () => {
     expect(
       isImportManifestV1({
         schemaVersion: 1,
-        ingestionId: 'synthetic-001',
+        ingestionId,
         createdAt: '2026-01-01T00:00:00Z',
         source: 'android-share-intent',
         status: 'complete',
@@ -65,7 +66,7 @@ describe('versioned native contracts', () => {
       expect(
         isImportManifestV1({
           schemaVersion: 1,
-          ingestionId: 'synthetic-001',
+          ingestionId,
           createdAt: '2026-01-01T00:00:00Z',
           source: 'ios-share-extension',
           status: 'complete',
@@ -74,8 +75,7 @@ describe('versioned native contracts', () => {
               id: 'item-001',
               mediaType: 'image/png',
               byteCount,
-              localUri:
-                'file:///private/container/Inbox/synthetic-001/item-001.bin',
+              localUri: `file:///private/container/Inbox/${ingestionId}/item-001.bin`,
               status: 'copied',
             },
           ],
@@ -83,6 +83,39 @@ describe('versioned native contracts', () => {
       ).toBe(false);
     },
   );
+  test.each([
+    {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      uri: `file:///internal/Inbox/${ingestionId}/item.bin`,
+    },
+    {
+      id: ingestionId,
+      uri: `file:///internal/Inbox/${ingestionId}/nested/item.bin`,
+    },
+    {
+      id: 'not-a-uuid',
+      uri: 'file:///internal/Inbox/not-a-uuid/item.bin',
+    },
+  ])('rejects manifest directory identity mismatch %#', ({ id, uri }) => {
+    expect(
+      isImportManifestV1({
+        schemaVersion: 1,
+        ingestionId: id,
+        createdAt: '2026-01-01T00:00:00Z',
+        source: 'ios-share-extension',
+        status: 'complete',
+        items: [
+          {
+            id: 'item',
+            mediaType: 'image/png',
+            byteCount: 1,
+            localUri: uri,
+            status: 'copied',
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
   test('validates normalized OCR bounds', () => {
     expect(
       isOCRResultV1({

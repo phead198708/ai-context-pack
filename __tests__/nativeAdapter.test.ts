@@ -23,6 +23,31 @@ describe('native adapter runtime boundary', () => {
     );
   });
 
+  test('rejects duplicate ingestion IDs returned by native code', async () => {
+    const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
+    const manifest = {
+      schemaVersion: 1,
+      ingestionId,
+      createdAt: '2026-01-01T00:00:00Z',
+      source: 'android-share-intent',
+      status: 'complete',
+      items: [
+        {
+          id: 'item',
+          mediaType: 'image/png',
+          byteCount: 1,
+          localUri: `file:///data/Inbox/${ingestionId}/item.bin`,
+          status: 'copied',
+        },
+      ],
+    };
+    mockNativeModule.scanInbox.mockResolvedValue([manifest, manifest]);
+
+    await expect(adapter.scanInbox()).rejects.toMatchObject({
+      code: 'NATIVE_MANIFEST_INVALID',
+    });
+  });
+
   test('rejects invalid OCR and PDF DTOs', async () => {
     mockNativeModule.recognizeText.mockResolvedValue({ schemaVersion: 1 });
     mockNativeModule.probePdf.mockResolvedValue({ pageCount: 1 });

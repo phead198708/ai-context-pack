@@ -32,28 +32,8 @@ public final class ContextNativeModule: Module {
       var isDirectory: ObjCBool = false
       guard FileManager.default.fileExists(atPath: inbox.path, isDirectory: &isDirectory) else { return [] }
       guard isDirectory.boolValue else { throw NativeError("INBOX_SCAN_FAILED") }
-      var enumerationError: Error?
-      guard let enumerator = FileManager.default.enumerator(
-        at: inbox,
-        includingPropertiesForKeys: nil,
-        errorHandler: { _, error in enumerationError = error; return false }
-      ) else {
-        throw NativeError("INBOX_SCAN_FAILED")
-      }
-      let files = enumerator.compactMap { $0 as? URL }
-      if enumerationError != nil { throw NativeError("INBOX_SCAN_FAILED") }
-      return try files.filter { $0.lastPathComponent == "manifest.json" }.map { url in
-        do {
-          let data = try Data(contentsOf: url)
-          guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw NativeError("INBOX_MANIFEST_INVALID")
-          }
-          try validateOwnedManifest(manifest, ingestion: url.deletingLastPathComponent())
-          return manifest
-        } catch {
-          throw NativeError("INBOX_MANIFEST_INVALID")
-        }
-      }
+      do { return try InboxManifestValidator.read(inbox: inbox) }
+      catch { throw NativeError("INBOX_MANIFEST_INVALID") }
     }
 
     AsyncFunction("getPendingShareEvents") { () -> [[String: Any]] in [] }
@@ -130,30 +110,6 @@ private func imageOrientation(source: CGImageSource) -> CGImagePropertyOrientati
   guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
         let rawValue = properties[kCGImagePropertyOrientation] as? NSNumber else { return .up }
   return CGImagePropertyOrientation(rawValue: rawValue.uint32Value) ?? .up
-}
-
-private func validateOwnedManifest(_ manifest: [String: Any], ingestion: URL) throws {
-  guard let items = manifest["items"] as? [[String: Any]] else {
-    throw NativeError("INBOX_MANIFEST_INVALID")
-  }
-  let ingestionPath = ingestion.resolvingSymlinksInPath().standardizedFileURL.path + "/"
-  for item in items {
-    guard let value = item["localUri"] as? String,
-          let url = URL(string: value),
-          url.isFileURL,
-          url.host == nil,
-          url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(ingestionPath) else {
-      throw NativeError("INBOX_MANIFEST_INVALID")
-    }
-    if item["status"] as? String == "copied" {
-      guard let byteCount = item["byteCount"] as? NSNumber,
-            FileManager.default.fileExists(atPath: url.path),
-            let actualBytes = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-            actualBytes == byteCount.intValue else {
-        throw NativeError("INBOX_MANIFEST_INVALID")
-      }
-    }
-  }
 }
 
 private func controlledFileURL(_ value: String) throws -> URL {

@@ -125,6 +125,74 @@ final class InboxRecoverySupportTests: XCTestCase {
     XCTAssertTrue(FileManager.default.fileExists(atPath: events.appendingPathComponent("broken.invalid").path))
   }
 
+  func testManifestIdentityMatchesItsSingleLayerDirectory() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id)
+
+    let manifests = try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+
+    XCTAssertEqual(manifests.count, 1)
+    XCTAssertEqual(manifests.first?["ingestionId"] as? String, id)
+  }
+
+  func testManifestIdentityMismatchIsRejected() throws {
+    try writeManifest(
+      directoryId: UUID().uuidString.lowercased(),
+      manifestId: UUID().uuidString.lowercased()
+    )
+
+    XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
+  }
+
+  func testNestedManifestIsRejected() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id)
+    let nested = root.appendingPathComponent("Inbox/\(id)/nested", isDirectory: true)
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: nested.appendingPathComponent("manifest.json"))
+
+    XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
+  }
+
+  func testInvalidIngestionDirectoryNameIsRejected() throws {
+    try writeManifest(directoryId: "not-a-uuid", manifestId: "not-a-uuid")
+
+    XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
+  }
+
+  func testManifestItemCannotClaimAnotherIngestionDirectory() throws {
+    let id = UUID().uuidString.lowercased()
+    let otherId = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: otherId, manifestId: otherId)
+    let otherItem = root.appendingPathComponent("Inbox/\(otherId)/item.bin")
+    try writeManifest(directoryId: id, manifestId: id, itemURL: otherItem)
+
+    XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
+  }
+
+  private func writeManifest(directoryId: String, manifestId: String, itemURL externalItem: URL? = nil) throws {
+    let directory = root.appendingPathComponent("Inbox/\(directoryId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let item = externalItem ?? directory.appendingPathComponent("item.bin")
+    if externalItem == nil { try Data([1, 2, 3]).write(to: item) }
+    let manifest: [String: Any] = [
+      "schemaVersion": 1,
+      "ingestionId": manifestId,
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "source": "ios-share-extension",
+      "status": "complete",
+      "items": [[
+        "id": "item",
+        "mediaType": "image/png",
+        "byteCount": 3,
+        "localUri": item.absoluteString,
+        "status": "copied"
+      ]]
+    ]
+    let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+    try data.write(to: directory.appendingPathComponent("manifest.json"))
+  }
+
   private func createLock(id: String) throws -> URL {
     let directory = root.appendingPathComponent("InboxWriterLocks", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

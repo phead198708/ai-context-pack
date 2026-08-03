@@ -91,6 +91,9 @@ class ContextNativeModule : Module() {
 }
 
 internal object InboxManifestScanner {
+  private val ingestionIdPattern =
+    Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
   fun scan(inbox: File): List<Map<String, Any?>> {
     if (MetadataEventStore.read(requireNotNull(inbox.parentFile), "RecoveryEvents").isNotEmpty()) {
       throw NativeException("INBOX_RECOVERY_REQUIRED")
@@ -118,32 +121,36 @@ internal object InboxManifestScanner {
 
   private fun manifestFiles(root: File): List<File> {
     val rootPath = root.canonicalPath + File.separator
-    val manifests = mutableListOf<File>()
-    fun visit(directory: File) {
-      val children = directory.listFiles() ?: error("INBOX_SCAN_FAILED")
-      children.forEach { child ->
-        check(child.canonicalPath.startsWith(rootPath))
-        when {
-          child.isDirectory -> visit(child)
-          child.isFile && child.name == "manifest.json" -> manifests += child
-        }
-      }
+    val ids = mutableSetOf<String>()
+    return (root.listFiles() ?: error("INBOX_SCAN_FAILED")).mapNotNull { ingestion ->
+      check(ingestion.isDirectory && ingestion.parentFile?.canonicalFile == root.canonicalFile)
+      check(ingestion.canonicalPath.startsWith(rootPath))
+      val id = ingestion.name
+      check(ingestionIdPattern.matches(id) && UUID.fromString(id).toString() == id && ids.add(id))
+      val children = ingestion.listFiles() ?: error("INBOX_SCAN_FAILED")
+      check(children.none { it.isDirectory })
+      File(ingestion, "manifest.json").takeIf { it.isFile }
     }
-    visit(root)
-    return manifests
   }
 
   private fun validateOwnedManifest(manifest: JSONObject, ingestion: File) {
-    val ingestionPath = ingestion.canonicalPath + File.separator
+    val ingestionId = manifest.getString("ingestionId")
+    check(ingestionIdPattern.matches(ingestionId) && UUID.fromString(ingestionId).toString() == ingestionId)
+    check(ingestionId == ingestion.name)
+    val ownedDirectory = ingestion.canonicalFile
     val items = manifest.getJSONArray("items")
     for (index in 0 until items.length()) {
       val item = items.getJSONObject(index)
       val uri = Uri.parse(item.getString("localUri"))
-      check(uri.scheme == "file" && uri.authority.isNullOrEmpty())
-      val path = File(requireNotNull(uri.path)).canonicalPath
-      check(path.startsWith(ingestionPath))
+      check(
+        uri.scheme == "file" &&
+          uri.authority.isNullOrEmpty() &&
+          uri.query == null &&
+          uri.fragment == null
+      )
+      val copiedFile = File(requireNotNull(uri.path)).canonicalFile
+      check(copiedFile.parentFile == ownedDirectory)
       if (item.getString("status") == "copied") {
-        val copiedFile = File(path)
         check(copiedFile.isFile && copiedFile.length() == item.getLong("byteCount"))
       }
     }
