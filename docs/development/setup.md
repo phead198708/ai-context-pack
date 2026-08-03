@@ -35,6 +35,14 @@ xcodebuild -workspace ios/AIContextPack.xcworkspace -scheme AIContextPack -confi
 
 Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go.
 
-The placeholder identifiers `com.example.aicontextpack` and `group.com.example.aicontextpack` intentionally do not contain a team ID. Replace them only through an approved release configuration; never commit certificates, profiles, keystores, or private team values.
+After installing the Android development build, verify its committed native URL registration with:
+
+```sh
+adb shell am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d 'aicontextpack://' -p com.aicontextpack
+```
+
+Package resolution must select `com.aicontextpack/.MainActivity`; after that handoff, a Debug build may report Expo's `DevLauncherActivity` as the displayed development-client activity. The `aicontextpack` filter intentionally has no host or path wildcard.
+
+The iOS placeholder identifiers `com.example.aicontextpack` and `group.com.example.aicontextpack` intentionally do not contain a team ID. Replace them only through an approved release configuration; never commit certificates, profiles, keystores, or private team values.
 
 Do not run `expo prebuild --clean`. The Swift/Kotlin projects, Share Extension, entitlements, and native module are maintained source.
