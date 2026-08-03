@@ -1,6 +1,5 @@
 import UIKit
 import UniformTypeIdentifiers
-import Darwin
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
 private let maximumImageBytes = 52_428_800
@@ -38,7 +37,7 @@ final class ShareViewController: UIViewController {
     let ingestionId = UUID().uuidString.lowercased(), itemId = UUID().uuidString.lowercased()
     let directory = container.appendingPathComponent("InboxStaging/\(ingestionId)", isDirectory: true)
     let publishedDirectory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
-    let writerLock = try TransactionWriterLock(container: container, ingestionId: ingestionId)
+    let writerLock = try InboxWriterOwnership.acquire(container: container, ingestionId: ingestionId)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     var committed = false
     defer {
@@ -84,37 +83,6 @@ final class ShareViewController: UIViewController {
   private func finish(message: String, error: Bool) {
     DispatchQueue.main.async { self.statusLabel.text = message; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { error ? self.extensionContext?.cancelRequest(withError: ShareError.importFailed) : self.extensionContext?.completeRequest(returningItems: nil) } }
   }
-}
-
-private final class TransactionWriterLock {
-  private var descriptor: Int32
-
-  private let lockURL: URL
-
-  init(container: URL, ingestionId: String) throws {
-    let lockDirectory = container.appendingPathComponent("InboxWriterLocks", isDirectory: true)
-    try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true)
-    lockURL = lockDirectory.appendingPathComponent("\(ingestionId).lock")
-    descriptor = Darwin.open(
-      lockURL.path,
-      O_CREAT | O_RDWR,
-      S_IRUSR | S_IWUSR
-    )
-    guard descriptor >= 0, Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
-      if descriptor >= 0 { Darwin.close(descriptor) }
-      throw ShareError.writerLockUnavailable
-    }
-  }
-
-  func release() {
-    guard descriptor >= 0 else { return }
-    Darwin.lockf(descriptor, F_ULOCK, 0)
-    Darwin.close(descriptor)
-    descriptor = -1
-    try? FileManager.default.removeItem(at: lockURL)
-  }
-
-  deinit { release() }
 }
 
 private enum ShareError: Error { case appGroupUnavailable, copyFailed, imageTooLarge, importFailed, writerLockUnavailable }

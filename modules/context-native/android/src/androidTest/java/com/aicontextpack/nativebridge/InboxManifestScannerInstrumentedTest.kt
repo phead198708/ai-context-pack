@@ -11,6 +11,10 @@ import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 class InboxManifestScannerInstrumentedTest {
   private lateinit var inbox: File
@@ -113,6 +117,58 @@ class InboxManifestScannerInstrumentedTest {
       }
     }
     assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
+    assertEquals(false, lockFile.exists())
+  }
+
+  @Test
+  fun scannerCannotObserveUnlockedVisibleWriterOwnership() {
+    val id = "423e4567-e89b-42d3-a456-426614174000"
+    val published = CountDownLatch(1)
+    val allowOwnership = CountDownLatch(1)
+    val ownershipAcquired = CountDownLatch(1)
+    val releaseWriter = CountDownLatch(1)
+    val scannerAttempted = CountDownLatch(1)
+    val scannerFinished = CountDownLatch(1)
+    val failure = AtomicReference<Throwable?>()
+
+    val writer = thread(name = "writer-registration-barrier") {
+      try {
+        InboxWriterOwnership.acquire(requireNotNull(inbox.parentFile), id) {
+          published.countDown()
+          check(allowOwnership.await(5, TimeUnit.SECONDS))
+        }.use {
+          ownershipAcquired.countDown()
+          check(releaseWriter.await(5, TimeUnit.SECONDS))
+        }
+      } catch (error: Throwable) {
+        failure.compareAndSet(null, error)
+      }
+    }
+
+    assertEquals(true, published.await(5, TimeUnit.SECONDS))
+    val lockFile = File(inbox.parentFile, "InboxWriterLocks/$id.lock")
+    assertEquals(true, lockFile.isFile)
+    val scanner = thread(name = "scanner-registration-barrier") {
+      try {
+        IncompleteTransactionRecovery.recover(inbox) { scannerAttempted.countDown() }
+      } catch (error: Throwable) {
+        failure.compareAndSet(null, error)
+      } finally {
+        scannerFinished.countDown()
+      }
+    }
+    assertEquals(true, scannerAttempted.await(5, TimeUnit.SECONDS))
+    assertEquals(true, lockFile.isFile)
+
+    allowOwnership.countDown()
+    assertEquals(true, ownershipAcquired.await(5, TimeUnit.SECONDS))
+    assertEquals(true, scannerFinished.await(5, TimeUnit.SECONDS))
+    assertEquals(true, lockFile.isFile)
+
+    releaseWriter.countDown()
+    writer.join(5_000)
+    scanner.join(5_000)
+    failure.get()?.let { throw it }
     assertEquals(false, lockFile.exists())
   }
 

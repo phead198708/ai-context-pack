@@ -15,8 +15,6 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.File
-import java.io.RandomAccessFile
-import java.nio.channels.OverlappingFileLockException
 import java.util.UUID
 
 class ContextNativeModule : Module() {
@@ -157,9 +155,9 @@ internal object InboxManifestScanner {
 }
 
 internal object IncompleteTransactionRecovery {
-  fun recover(inbox: File): Boolean {
+  fun recover(inbox: File, beforeLockRegistryScan: () -> Unit = {}): Boolean {
     val filesDir = requireNotNull(inbox.parentFile)
-    recoverOrphanLocks(filesDir)
+    recoverOrphanLocks(filesDir, beforeLockRegistryScan)
     val staging = File(filesDir, "InboxStaging")
     var recovered = recoverCandidates(staging, filesDir) { true }
     recovered = recoverCandidates(inbox, filesDir) { directory ->
@@ -168,23 +166,23 @@ internal object IncompleteTransactionRecovery {
     return recovered
   }
 
-  private fun recoverOrphanLocks(filesDir: File) {
+  private fun recoverOrphanLocks(filesDir: File, beforeLockRegistryScan: () -> Unit) {
     val lockDirectory = File(filesDir, "InboxWriterLocks")
     if (!lockDirectory.exists()) return
-    check(lockDirectory.isDirectory && lockDirectory.canRead())
-    val lockName = Regex("^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.lock$", RegexOption.IGNORE_CASE)
-    (lockDirectory.listFiles() ?: error("INBOX_LOCK_SCAN_FAILED")).forEach { lockFile ->
-      val match = lockName.matchEntire(lockFile.name)
-      check(lockFile.isFile && match != null)
-      val id = requireNotNull(match).groupValues[1]
-      if (File(filesDir, "InboxStaging/$id").exists() || File(filesDir, "Inbox/$id").exists()) return@forEach
-      RandomAccessFile(lockFile, "rw").use { file ->
-        val lock = try { file.channel.tryLock() }
-        catch (_: OverlappingFileLockException) { null }
-        if (lock != null) {
-          lock.release()
-          check(lockFile.delete() || !lockFile.exists())
-        }
+    beforeLockRegistryScan()
+    InboxWriterOwnership.withRegistry(filesDir) {
+      check(lockDirectory.isDirectory && lockDirectory.canRead())
+      val lockName = Regex("^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.lock$", RegexOption.IGNORE_CASE)
+      (lockDirectory.listFiles() ?: error("INBOX_LOCK_SCAN_FAILED")).forEach { lockFile ->
+        if (lockFile.name == InboxWriterOwnership.registryFileName) return@forEach
+        val match = lockName.matchEntire(lockFile.name)
+        check(lockFile.isFile && match != null)
+        val id = requireNotNull(match).groupValues[1]
+        val staging = File(filesDir, "InboxStaging/$id")
+        val published = File(filesDir, "Inbox/$id")
+        val incompletePublished = published.exists() && !File(published, "manifest.json").isFile
+        if (staging.exists() || incompletePublished) return@forEach
+        InboxWriterOwnership.removeAbandonedLockWhileCoordinated(lockFile)
       }
     }
   }
@@ -202,7 +200,7 @@ internal object IncompleteTransactionRecovery {
       .filter { directory -> directory.isDirectory && isIncomplete(directory) }
       .forEach { directory ->
         check(directory.canonicalPath.startsWith(rootPath))
-        acquireAbandonedWriterLock(directory, filesDir)?.use {
+        InboxWriterOwnership.acquireForRecovery(filesDir, directory)?.use {
           MetadataEventStore.persistRecovery(requireNotNull(root.parentFile))
           check(directory.deleteRecursively() && !directory.exists())
           recovered = true
@@ -211,20 +209,6 @@ internal object IncompleteTransactionRecovery {
     return recovered
   }
 
-  private fun acquireAbandonedWriterLock(directory: File, filesDir: File): AutoCloseable? {
-    val external = File(File(filesDir, "InboxWriterLocks"), "${directory.name}.lock")
-    val lockFile = if (external.exists()) external else File(directory, ".writer.lock")
-    if (!lockFile.exists()) return AutoCloseable {}
-    val file = RandomAccessFile(lockFile, "rw")
-    val lock = try { file.channel.tryLock() }
-    catch (_: OverlappingFileLockException) { null }
-    if (lock == null) { file.close(); return null }
-    return AutoCloseable {
-      lock.release()
-      file.close()
-      if (lockFile == external) external.delete()
-    }
-  }
 }
 
 object MetadataEventStore {

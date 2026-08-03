@@ -20,32 +20,38 @@ enum InboxRecoverySupport {
     var isDirectory: ObjCBool = false
     guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) else { return }
     guard isDirectory.boolValue else { throw InboxRecoverySupportError.invalidState }
-    let locks = try FileManager.default.contentsOfDirectory(
-      at: directory,
-      includingPropertiesForKeys: [.isRegularFileKey],
-      options: [.skipsHiddenFiles]
-    )
-    for lockURL in locks {
-      let values = try lockURL.resourceValues(forKeys: [.isRegularFileKey])
-      let id = lockURL.deletingPathExtension().lastPathComponent
-      guard values.isRegularFile == true,
-            lockURL.pathExtension == "lock",
-            UUID(uuidString: id) != nil else { throw InboxRecoverySupportError.invalidState }
-      let staging = container.appendingPathComponent("InboxStaging/\(id)")
-      let published = container.appendingPathComponent("Inbox/\(id)")
-      guard !FileManager.default.fileExists(atPath: staging.path),
-            !FileManager.default.fileExists(atPath: published.path) else { continue }
-      let descriptor = Darwin.open(lockURL.path, O_RDWR)
-      guard descriptor >= 0 else { throw InboxRecoverySupportError.invalidState }
-      if Darwin.lockf(descriptor, F_TLOCK, 0) == 0 {
-        Darwin.lockf(descriptor, F_ULOCK, 0)
-        Darwin.close(descriptor)
-        try FileManager.default.removeItem(at: lockURL)
-      } else {
-        let lockError = errno
-        Darwin.close(descriptor)
-        guard lockError == EWOULDBLOCK || lockError == EAGAIN else {
-          throw InboxRecoverySupportError.invalidState
+    try InboxWriterRegistry.withLock(container: container) { _ in
+      let locks = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+      )
+      for lockURL in locks {
+        if lockURL.lastPathComponent == InboxWriterRegistry.fileName { continue }
+        let values = try lockURL.resourceValues(forKeys: [.isRegularFileKey])
+        let id = lockURL.deletingPathExtension().lastPathComponent
+        guard values.isRegularFile == true,
+              lockURL.pathExtension == "lock",
+              UUID(uuidString: id) != nil else { throw InboxRecoverySupportError.invalidState }
+        let staging = container.appendingPathComponent("InboxStaging/\(id)")
+        let published = container.appendingPathComponent("Inbox/\(id)")
+        let manifest = published.appendingPathComponent("manifest.json")
+        if InboxWriterRegistry.isLocallyOwned(id) { continue }
+        if FileManager.default.fileExists(atPath: staging.path) ||
+            (FileManager.default.fileExists(atPath: published.path) &&
+             !FileManager.default.fileExists(atPath: manifest.path)) { continue }
+        let descriptor = Darwin.open(lockURL.path, O_RDWR)
+        guard descriptor >= 0 else { throw InboxRecoverySupportError.invalidState }
+        if Darwin.lockf(descriptor, F_TLOCK, 0) == 0 {
+          try FileManager.default.removeItem(at: lockURL)
+          Darwin.lockf(descriptor, F_ULOCK, 0)
+          Darwin.close(descriptor)
+        } else {
+          let lockError = errno
+          Darwin.close(descriptor)
+          guard lockError == EWOULDBLOCK || lockError == EAGAIN else {
+            throw InboxRecoverySupportError.invalidState
+          }
         }
       }
     }
@@ -82,35 +88,57 @@ enum InboxRecoverySupport {
 final class TransactionRecoveryLock {
   private var descriptor: Int32
   private let removableURL: URL?
-  private init(descriptor: Int32, removableURL: URL? = nil) {
+  private let container: URL?
+  private init(descriptor: Int32, removableURL: URL? = nil, container: URL? = nil) {
     self.descriptor = descriptor
     self.removableURL = removableURL
+    self.container = container
   }
 
   static func acquire(directory: URL, container: URL) throws -> TransactionRecoveryLock? {
-    let external = container.appendingPathComponent("InboxWriterLocks/\(directory.lastPathComponent).lock")
-    let legacy = directory.appendingPathComponent(".writer.lock")
-    let lockURL = FileManager.default.fileExists(atPath: external.path) ? external : legacy
-    guard FileManager.default.fileExists(atPath: lockURL.path) else {
-      return TransactionRecoveryLock(descriptor: -1)
+    try InboxWriterRegistry.withLock(container: container) { _ in
+      let external = container.appendingPathComponent("InboxWriterLocks/\(directory.lastPathComponent).lock")
+      let legacy = directory.appendingPathComponent(".writer.lock")
+      if InboxWriterRegistry.isLocallyOwned(directory.lastPathComponent) { return nil }
+      let lockURL = FileManager.default.fileExists(atPath: external.path) ? external : legacy
+      guard FileManager.default.fileExists(atPath: lockURL.path) else {
+        return TransactionRecoveryLock(descriptor: -1)
+      }
+      let descriptor = Darwin.open(lockURL.path, O_RDWR)
+      guard descriptor >= 0 else { throw InboxRecoverySupportError.invalidState }
+      guard Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
+        let lockError = errno
+        Darwin.close(descriptor)
+        if lockError == EWOULDBLOCK || lockError == EAGAIN { return nil }
+        throw InboxRecoverySupportError.invalidState
+      }
+      return TransactionRecoveryLock(
+        descriptor: descriptor,
+        removableURL: lockURL == external ? external : nil,
+        container: container
+      )
     }
-    let descriptor = Darwin.open(lockURL.path, O_RDWR)
-    guard descriptor >= 0 else { throw InboxRecoverySupportError.invalidState }
-    guard Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
-      let lockError = errno
-      Darwin.close(descriptor)
-      if lockError == EWOULDBLOCK || lockError == EAGAIN { return nil }
-      throw InboxRecoverySupportError.invalidState
-    }
-    return TransactionRecoveryLock(descriptor: descriptor, removableURL: lockURL == external ? external : nil)
   }
 
   func release() {
     guard descriptor >= 0 else { return }
-    Darwin.lockf(descriptor, F_ULOCK, 0)
-    Darwin.close(descriptor)
+    let ownedDescriptor = descriptor
     descriptor = -1
-    if let removableURL { try? FileManager.default.removeItem(at: removableURL) }
+    guard let removableURL, let container else {
+      Darwin.lockf(ownedDescriptor, F_ULOCK, 0)
+      Darwin.close(ownedDescriptor)
+      return
+    }
+    do {
+      try InboxWriterRegistry.withLock(container: container) { _ in
+        try? FileManager.default.removeItem(at: removableURL)
+        Darwin.lockf(ownedDescriptor, F_ULOCK, 0)
+        Darwin.close(ownedDescriptor)
+      }
+    } catch {
+      Darwin.lockf(ownedDescriptor, F_ULOCK, 0)
+      Darwin.close(ownedDescriptor)
+    }
   }
 
   deinit { release() }

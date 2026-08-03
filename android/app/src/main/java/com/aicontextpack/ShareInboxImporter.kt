@@ -3,10 +3,10 @@ package com.aicontextpack
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import com.aicontextpack.nativebridge.InboxWriterOwnership
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -53,18 +53,14 @@ object ShareInboxImporter {
   ): Result {
     val itemId = UUID.randomUUID().toString()
     val directory = File(context.filesDir, "InboxStaging/$ingestionId")
-    val lockDirectory = File(context.filesDir, "InboxWriterLocks")
     val publishedDirectory = File(context.filesDir, "Inbox/$ingestionId")
     val partial = File(directory, "$itemId.partial")
     val destination = File(directory, "$itemId.bin")
     val manifest = File(directory, "manifest.json")
-    var lockFile: RandomAccessFile? = null
-    var writerLock: java.nio.channels.FileLock? = null
+    var writerOwnership: InboxWriterOwnership? = null
     return try {
       require(selectConcreteImageMediaType(mediaType, null) != null) { "SHARE_MIME_INVALID" }
-      check(lockDirectory.mkdirs() || lockDirectory.isDirectory) { "SHARE_LOCK_DIRECTORY_CREATE_FAILED" }
-      lockFile = RandomAccessFile(File(lockDirectory, "$ingestionId.lock"), "rw")
-      writerLock = lockFile.channel.lock()
+      writerOwnership = InboxWriterOwnership.acquire(context.filesDir, ingestionId)
       check(directory.mkdirs()) { "SHARE_DIRECTORY_CREATE_FAILED" }
       context.contentResolver.openInputStream(source).use { input ->
         requireNotNull(input) { "SHARE_URI_UNREADABLE" }
@@ -87,9 +83,7 @@ object ShareInboxImporter {
       directory.deleteRecursively()
       Result.FAILED
     } finally {
-      runCatching { writerLock?.release() }
-      runCatching { lockFile?.close() }
-      runCatching { File(lockDirectory, "$ingestionId.lock").delete() }
+      runCatching { writerOwnership?.close() }
     }
   }
 

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import XCTest
+@testable import ContextNativeRecovery
 
 final class InboxRecoverySupportTests: XCTestCase {
   private var root: URL!
@@ -40,6 +41,56 @@ final class InboxRecoverySupportTests: XCTestCase {
     try InboxRecoverySupport.recoverOrphanLocks(container: root)
 
     XCTAssertTrue(FileManager.default.fileExists(atPath: lock.path))
+  }
+
+  func testScannerCannotObserveUnlockedVisibleWriterOwnership() throws {
+    let id = UUID().uuidString.lowercased()
+    let published = DispatchSemaphore(value: 0)
+    let allowOwnership = DispatchSemaphore(value: 0)
+    let ownershipAcquired = DispatchSemaphore(value: 0)
+    let releaseWriter = DispatchSemaphore(value: 0)
+    let writerFinished = DispatchSemaphore(value: 0)
+    let scannerAttempted = DispatchSemaphore(value: 0)
+    let scannerFinished = DispatchSemaphore(value: 0)
+    let lock = root.appendingPathComponent("InboxWriterLocks/\(id).lock")
+
+    DispatchQueue.global().async {
+      defer { writerFinished.signal() }
+      do {
+        let ownership = try InboxWriterOwnership.acquire(container: self.root, ingestionId: id) {
+          published.signal()
+          _ = allowOwnership.wait(timeout: .now() + 5)
+        }
+        ownershipAcquired.signal()
+        _ = releaseWriter.wait(timeout: .now() + 5)
+        ownership.release()
+      } catch {
+        XCTFail("writer failed: \(error)")
+      }
+    }
+
+    XCTAssertEqual(published.wait(timeout: .now() + 5), .success)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: lock.path))
+    DispatchQueue.global().async {
+      scannerAttempted.signal()
+      do {
+        try InboxRecoverySupport.recoverOrphanLocks(container: self.root)
+      } catch {
+        XCTFail("scanner failed: \(error)")
+      }
+      scannerFinished.signal()
+    }
+    XCTAssertEqual(scannerAttempted.wait(timeout: .now() + 5), .success)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: lock.path))
+
+    allowOwnership.signal()
+    XCTAssertEqual(ownershipAcquired.wait(timeout: .now() + 5), .success)
+    XCTAssertEqual(scannerFinished.wait(timeout: .now() + 5), .success)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: lock.path))
+
+    releaseWriter.signal()
+    XCTAssertEqual(writerFinished.wait(timeout: .now() + 5), .success)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: lock.path))
   }
 
   func testMalformedLockRegistryFailsClosed() throws {
