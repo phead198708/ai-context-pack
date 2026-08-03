@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workflowRoot = join(repositoryRoot, '.github', 'workflows');
+const rubyVersion = readFileSync(
+  join(repositoryRoot, '.ruby-version'),
+  'utf8',
+).trim();
 const workflows = readdirSync(workflowRoot)
   .filter(name => name.endsWith('.yml') || name.endsWith('.yaml'))
   .sort();
@@ -15,12 +19,27 @@ if (JSON.stringify(workflows) !== JSON.stringify(['linux.yml', 'macos.yml'])) {
 const all = workflows
   .map(name => readFileSync(join(workflowRoot, name), 'utf8'))
   .join('\n');
-for (const forbidden of [
+const forbiddenPatterns = [
   /pull_request_target\s*:/,
-  /\bsecrets\s*\./,
+  /\bsecrets\s*\./i,
+  /\bsecrets\s*\[/i,
+  /\bsecrets\s*:\s*inherit\b/i,
   /permissions:\s*write-all/,
   /permissions:[\s\S]*?\b(?:actions|checks|contents|deployments|id-token|issues|packages|pages|pull-requests|security-events|statuses):\s*write\b/,
-]) {
+];
+const secretPolicyExamples = [
+  '${{ secrets.TOKEN }}',
+  "${{ secrets['TOKEN'] }}",
+  'secrets: inherit',
+];
+if (
+  secretPolicyExamples.some(
+    example => !forbiddenPatterns.some(pattern => pattern.test(example)),
+  )
+) {
+  throw new Error('WORKFLOW_SECRET_POLICY_SELF_TEST_FAILED');
+}
+for (const forbidden of forbiddenPatterns) {
   if (forbidden.test(all))
     throw new Error(`WORKFLOW_PRIVILEGE_INVALID:${forbidden.source}`);
 }
@@ -60,6 +79,17 @@ if (
   )
 ) {
   throw new Error('WORKFLOW_NATIVE_CACHE_KEY_INVALID');
+}
+if (!all.includes('run: npm test -- --ci')) {
+  throw new Error('WORKFLOW_MACOS_SHARED_TEST_MISSING');
+}
+if (
+  rubyVersion !== '3.4.9' ||
+  !/^\s+ruby-version:\s+3\.4\.9$/m.test(
+    readFileSync(join(workflowRoot, 'macos.yml'), 'utf8'),
+  )
+) {
+  throw new Error('WORKFLOW_RUBY_PIN_INVALID');
 }
 
 console.info(
