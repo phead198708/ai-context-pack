@@ -208,6 +208,31 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun terminalEventPublicationIsIdempotentAndRejectsConflicts() {
+    val filesDir = requireNotNull(inbox.parentFile)
+    val id = "523e4567-e89b-42d3-a456-426614174000"
+    val first = MetadataEventStore.persistShareResult(
+      filesDir,
+      "failed",
+      id,
+      id,
+      "SHARE_IMPORT_FAILED",
+    )
+    val repeated = MetadataEventStore.persistShareResult(
+      filesDir,
+      "failed",
+      id,
+      id,
+      "SHARE_IMPORT_FAILED",
+    )
+
+    assertEquals(first, repeated)
+    assertThrows(MetadataEventException::class.java) {
+      MetadataEventStore.persistShareResult(filesDir, "complete", id, id)
+    }
+  }
+
+  @Test
   fun cleansPartialEventWhenAtomicRenameFails() {
     val id = "423e4567-e89b-42d3-a456-426614174000"
     val directory = File(inbox.parentFile, "PendingShareEvents").apply { mkdirs() }

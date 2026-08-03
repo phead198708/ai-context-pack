@@ -33,25 +33,15 @@ class MainActivity : ReactActivity() {
 
   private fun importSharedImage(intent: Intent?, restored: Boolean) {
     if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return
+    if (restored) return
     val transactionStore = ShareIntentTransactionStore(applicationContext.filesDir)
-    val transaction = if (restored) transactionStore.restored() ?: transactionStore.acceptNew()
-      else transactionStore.acceptNew()
-    when (transaction.state) {
-      ShareIntentTransactionStore.State.PUBLISHED_NEEDS_EVENT -> {
-        publishTerminalResult(transaction.id, ShareInboxImporter.Result.COMPLETE, transactionStore)
-        return
-      }
-      ShareIntentTransactionStore.State.COMPLETE,
-      ShareIntentTransactionStore.State.FAILED,
-      ShareIntentTransactionStore.State.RECOVERY_REQUIRED -> return
-      else -> Unit
-    }
+    val transaction = transactionStore.acceptNew()
     setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
     ShareInboxImporter.importIfSupportedAsync(
       applicationContext,
       intent,
       transaction.id,
-      started = { transactionStore.transition(transaction.id, ShareIntentTransactionStore.State.IN_PROGRESS) },
+      started = { transactionStore.markInProgress(transaction.id) },
     ) { result ->
       publishTerminalResult(transaction.id, result, transactionStore)
     }
@@ -62,15 +52,29 @@ class MainActivity : ReactActivity() {
     result: ShareInboxImporter.Result,
     transactionStore: ShareIntentTransactionStore,
   ) {
-    val event = ShareResultEventPublisher.persistOrFallback(transactionId, result.wireValue) { value ->
-      MetadataEventStore.persistShareResult(applicationContext.filesDir, value, transactionId, transactionId)
+    val terminalResult = if (result == ShareInboxImporter.Result.COMPLETE)
+      ShareIntentTransactionStore.TerminalResult.COMPLETE
+    else ShareIntentTransactionStore.TerminalResult.FAILED
+    val prepared = transactionStore.prepareTerminal(
+      transactionId,
+      terminalResult,
+      if (terminalResult == ShareIntentTransactionStore.TerminalResult.FAILED) "SHARE_IMPORT_FAILED" else null,
+    )
+    val event = ShareResultEventPublisher.persistOrFallback(
+      transactionId,
+      requireNotNull(prepared.terminalResult).wireValue,
+      prepared.terminalCode,
+    ) { value, code ->
+      MetadataEventStore.persistShareResult(
+        applicationContext.filesDir,
+        value,
+        transactionId,
+        transactionId,
+        code,
+      )
     }
     if (event["durable"] == true) {
-      transactionStore.transition(
-        transactionId,
-        if (result == ShareInboxImporter.Result.COMPLETE) ShareIntentTransactionStore.State.COMPLETE
-        else ShareIntentTransactionStore.State.FAILED,
-      )
+      transactionStore.markEventPublished(transactionId)
     }
     EphemeralShareEventStore.publishIfEphemeral(event)
     runOnUiThread {
@@ -131,18 +135,23 @@ internal object ShareResultEventPublisher {
   fun persistOrFallback(
     transactionId: String,
     result: String,
-    persist: (String) -> Map<String, Any>,
+    code: String? = null,
+    persist: (String, String?) -> Map<String, Any>,
   ): Map<String, Any> = try {
-    persist(result) + ("durable" to true)
+    persist(result, code) + ("durable" to true)
   } catch (_: Exception) {
     mapOf(
       "schemaVersion" to 1,
-      "id" to transactionId,
+      "id" to stableFallbackId(transactionId),
       "result" to "failed",
       "durable" to false,
       "code" to "SHARE_RESULT_PERSIST_FAILED",
     )
   }
+
+  private fun stableFallbackId(transactionId: String): String = java.util.UUID.nameUUIDFromBytes(
+    "ai-context-pack:share-result-persist:$transactionId".toByteArray(),
+  ).toString()
 }
 
 internal object ReactContextResolver {

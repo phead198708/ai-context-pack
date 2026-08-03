@@ -219,9 +219,11 @@ object MetadataEventStore {
     result: String,
     transactionId: String? = null,
     eventId: String = UUID.randomUUID().toString(),
+    code: String? = null,
   ): Map<String, Any> =
     persist(filesDir, "PendingShareEvents", mapOf("result" to result) +
-      (transactionId?.let { mapOf("transactionId" to it) } ?: emptyMap()), eventId)
+      (transactionId?.let { mapOf("transactionId" to it) } ?: emptyMap()) +
+      (code?.let { mapOf("code" to it) } ?: emptyMap()), eventId)
 
   fun persistRecovery(filesDir: File): Map<String, Any> =
     persist(filesDir, "RecoveryEvents", mapOf("code" to "INBOX_RECOVERY_REQUIRED"), UUID.randomUUID().toString())
@@ -274,6 +276,18 @@ object MetadataEventStore {
     fields.forEach { (key, value) -> payload.put(key, value) }
     val partial = File(directory, "$id.partial")
     val published = File(directory, "$id.json")
+    if (published.exists()) {
+      val existing = try { JSONObject(published.readText()) }
+      catch (_: Exception) { throw MetadataEventException("NATIVE_EVENT_CONFLICT") }
+      try {
+        check(existing.getInt("schemaVersion") == 1 && existing.getString("id") == id)
+        fields.forEach { (key, value) -> check(existing.getString(key) == value) }
+        val existingCreatedAt = existing.getLong("createdAtMs")
+        return mapOf("schemaVersion" to 1, "id" to id, "createdAtMs" to existingCreatedAt) + fields
+      } catch (_: Exception) {
+        throw MetadataEventException("NATIVE_EVENT_CONFLICT")
+      }
+    }
     try {
       partial.writeText(payload.toString())
       check(partial.renameTo(published))
