@@ -48,7 +48,9 @@ final class ShareViewController: UIViewController {
     try FileManager.default.moveItem(at: partial, to: destination)
     let bytes = (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
     let publishedDestination = publishedDirectory.appendingPathComponent(destination.lastPathComponent)
-    let manifest: [String: Any] = ["schemaVersion": 1, "ingestionId": ingestionId, "createdAt": ISO8601DateFormatter().string(from: Date()), "source": "ios-share-extension", "status": "complete", "items": [["id": itemId, "mediaType": mediaType, "byteCount": bytes, "localUri": publishedDestination.absoluteString, "status": "copied"]]]
+    let timestamp = ISO8601DateFormatter()
+    timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let manifest: [String: Any] = ["schemaVersion": 1, "ingestionId": ingestionId, "createdAt": timestamp.string(from: Date()), "source": "ios-share-extension", "status": "complete", "items": [["id": itemId, "mediaType": mediaType, "byteCount": bytes, "localUri": publishedDestination.absoluteString, "status": "copied"]]]
     let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     let manifestPartial = directory.appendingPathComponent("manifest.partial"), manifestURL = directory.appendingPathComponent("manifest.json")
     try data.write(to: manifestPartial, options: .atomic)
