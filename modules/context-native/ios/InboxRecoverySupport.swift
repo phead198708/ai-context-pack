@@ -172,6 +172,8 @@ final class TransactionRecoveryLock {
 
 enum RecoveryMetadataEventStore {
   typealias OperationHook = (RecoveryMetadataOperation) throws -> Void
+  private static let canonicalEventIdPattern =
+    #"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#
 
   static func persistRecovery(
     container: URL,
@@ -269,7 +271,8 @@ enum RecoveryMetadataEventStore {
   }
 
   private static func canonicalEventId(_ value: String) -> Bool {
-    guard let uuid = UUID(uuidString: value) else { return false }
+    guard value.range(of: canonicalEventIdPattern, options: .regularExpression) != nil,
+          let uuid = UUID(uuidString: value) else { return false }
     return uuid.uuidString.lowercased() == value
   }
 }

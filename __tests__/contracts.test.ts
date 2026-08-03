@@ -5,7 +5,11 @@ import {
 } from '../src/domain/validation';
 import { newestManifestsFirst } from '../src/domain/importOrdering';
 import type { ImportManifestV1 } from '../src/domain/contracts';
-import { shareImportErrorCode } from '../src/domain/shareImportResult';
+import {
+  isPendingShareEvent,
+  isRecoveryEvent,
+  shareImportErrorCode,
+} from '../src/domain/shareImportResult';
 import {
   LatestRequestGate,
   runLatestRequest,
@@ -215,6 +219,22 @@ describe('versioned native contracts', () => {
         result: 'failed',
       }),
     ).toBe('SHARE_IMPORT_FAILED');
+  });
+  test.each([
+    '00000000-0000-0000-0000-000000000000',
+    '00000000-0000-0000-8000-000000000000',
+    '00000000-0000-4000-0000-000000000000',
+  ])('rejects non-RFC metadata event ID %s', id => {
+    expect(
+      isPendingShareEvent({ schemaVersion: 1, id, result: 'complete' }),
+    ).toBe(false);
+    expect(
+      isRecoveryEvent({
+        schemaVersion: 1,
+        id,
+        code: 'INBOX_RECOVERY_REQUIRED',
+      }),
+    ).toBe(false);
   });
   test('does not let a deferred scan overwrite an invalidating failure', async () => {
     const gate = new LatestRequestGate();

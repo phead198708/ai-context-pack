@@ -274,6 +274,57 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun quarantinesEqualNonRfcIdsAndRejectsAcknowledgementInBothEventStores() {
+    val filesDir = requireNotNull(inbox.parentFile)
+    val invalidIds = listOf(
+      "00000000-0000-0000-0000-000000000000",
+      "00000000-0000-0000-8000-000000000000",
+      "00000000-0000-4000-0000-000000000000",
+    )
+    val cases = listOf(
+      "PendingShareEvents" to mapOf("result" to "complete"),
+      "RecoveryEvents" to mapOf("code" to "INBOX_RECOVERY_REQUIRED"),
+    )
+
+    cases.forEach { (folder, fields) ->
+      val directory = File(filesDir, folder).apply { mkdirs() }
+      invalidIds.forEach { id ->
+        val event = File(directory, "$id.json")
+        val payload = JSONObject()
+          .put("schemaVersion", 1)
+          .put("id", id)
+          .put("createdAtMs", 1L)
+        fields.forEach { (key, value) -> payload.put(key, value) }
+        event.writeText(payload.toString())
+
+        val readError = assertThrows(MetadataEventException::class.java) {
+          MetadataEventStore.read(filesDir, folder)
+        }
+
+        assertEquals("NATIVE_EVENT_SCHEMA_INVALID", readError.stableCode)
+        assertEquals(false, event.exists())
+        assertEquals(true, directory.listFiles().orEmpty().any {
+          it.name.startsWith("$id.json.") && it.name.endsWith(".invalid")
+        })
+        assertEquals(emptyList<Map<String, Any>>(), MetadataEventStore.read(filesDir, folder))
+        val ackError = assertThrows(MetadataEventException::class.java) {
+          MetadataEventStore.ack(filesDir, folder, id)
+        }
+        assertEquals("METADATA_EVENT_ID_INVALID", ackError.stableCode)
+      }
+    }
+
+    val persistError = assertThrows(MetadataEventException::class.java) {
+      MetadataEventStore.persistShareResult(
+        filesDir,
+        "complete",
+        eventId = invalidIds.first(),
+      )
+    }
+    assertEquals("METADATA_EVENT_ID_INVALID", persistError.stableCode)
+  }
+
+  @Test
   fun classifiesInvalidAndMissingRecoveryAcknowledgements() {
     val filesDir = requireNotNull(inbox.parentFile)
     val invalid = assertThrows(MetadataEventException::class.java) {

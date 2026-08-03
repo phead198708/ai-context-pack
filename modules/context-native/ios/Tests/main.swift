@@ -137,6 +137,46 @@ final class InboxRecoverySupportTests: XCTestCase {
     }
   }
 
+  func testEqualNonRfcRecoveryIdsAreQuarantinedAndCannotBeAcknowledged() throws {
+    let invalidIds = [
+      "00000000-0000-0000-0000-000000000000",
+      "00000000-0000-0000-8000-000000000000",
+      "00000000-0000-4000-0000-000000000000"
+    ]
+    let events = root.appendingPathComponent("RecoveryEvents", isDirectory: true)
+    try FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
+
+    for id in invalidIds {
+      let event = events.appendingPathComponent("\(id).json")
+      let payload: [String: Any] = [
+        "schemaVersion": 1,
+        "id": id,
+        "code": "INBOX_RECOVERY_REQUIRED",
+        "createdAtMs": 1
+      ]
+      try JSONSerialization.data(withJSONObject: payload).write(to: event)
+
+      assertMetadataError(.schemaInvalid) {
+        _ = try RecoveryMetadataEventStore.read(container: root, folder: "RecoveryEvents")
+      }
+      XCTAssertFalse(FileManager.default.fileExists(atPath: event.path))
+      XCTAssertTrue(FileManager.default.fileExists(
+        atPath: events.appendingPathComponent("\(id).invalid").path
+      ))
+      XCTAssertEqual(
+        try RecoveryMetadataEventStore.read(container: root, folder: "RecoveryEvents").count,
+        0
+      )
+      assertMetadataError(.invalidId) {
+        _ = try RecoveryMetadataEventStore.ack(
+          container: root,
+          folder: "RecoveryEvents",
+          id: id
+        )
+      }
+    }
+  }
+
   func testMissingRecoveryEventAcknowledgementIsIdempotent() throws {
     let id = UUID().uuidString.lowercased()
     XCTAssertTrue(try RecoveryMetadataEventStore.ack(
