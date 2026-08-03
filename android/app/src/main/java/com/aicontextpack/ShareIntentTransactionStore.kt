@@ -107,12 +107,22 @@ internal class ShareIntentTransactionStore(
   @Synchronized
   fun acceptNew(id: String = UUID.randomUUID().toString()): Transaction {
     requireCanonicalUuid(id)
-    ensureDirectory()
+    try {
+      ensureDirectory()
+    } catch (error: Exception) {
+      throw ShareTransactionException("SHARE_TRANSACTION_STORE_WRITE_FAILED", id, error)
+    }
     val current = snapshot()
     if (current.issues.isNotEmpty()) {
       throw ShareTransactionException(current.issues.first().code, current.issues.first().id)
     }
-    val order = (allValidTransactions().maxOfOrNull { it.order } ?: 0L) + 1L
+    val order = try {
+      (allValidTransactions().maxOfOrNull { it.order } ?: 0L) + 1L
+    } catch (error: IOException) {
+      throw ShareTransactionException("SHARE_TRANSACTION_STORE_READ_FAILED", id, error)
+    } catch (error: Exception) {
+      throw ShareTransactionException("SHARE_TRANSACTION_SCHEMA_INVALID", id, error)
+    }
     val transaction = Transaction(id, State.ACCEPTED, order)
     writeNew(transaction)
     try {

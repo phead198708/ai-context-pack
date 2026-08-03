@@ -7,6 +7,8 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.aicontextpack.nativebridge.MetadataEventStore
 import com.aicontextpack.nativebridge.EphemeralShareEventStore
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
@@ -22,66 +24,101 @@ class MainActivity : ReactActivity() {
     // This is required for expo-splash-screen.
     setTheme(R.style.AppTheme);
     super.onCreate(null)
-    importSharedImage(intent, restored = savedInstanceState != null)
+    handleLaunch(intent, restored = savedInstanceState != null)
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
-    importSharedImage(intent, restored = false)
+    handleLaunch(intent, restored = false)
   }
 
-  private fun importSharedImage(intent: Intent?, restored: Boolean) {
-    if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return
-    if (restored) return
+  private fun handleLaunch(intent: Intent?, restored: Boolean) {
     val transactionStore = ShareIntentTransactionStore(applicationContext.filesDir)
-    val transaction = transactionStore.acceptNew()
+    val coordinator = lifecycleCoordinator(transactionStore)
+    coordinator.reconcile(activeWorkerIds.toSet())
+    if (intent?.action != Intent.ACTION_SEND) return
     setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
-    ShareInboxImporter.importIfSupportedAsync(
-      applicationContext,
-      intent,
-      transaction.id,
-      started = { transactionStore.markInProgress(transaction.id) },
-    ) { result ->
-      publishTerminalResult(transaction.id, result, transactionStore)
+    if (restored || intent.type?.startsWith("image/") != true) return
+
+    val id = UUID.randomUUID().toString()
+    val transaction = coordinator.acceptNew(id) ?: return
+    activeWorkerIds += transaction.id
+    try {
+      ShareInboxImporter.importIfSupportedAsync(
+        applicationContext,
+        intent,
+        transaction.id,
+        started = { coordinator.markInProgress(transaction.id) },
+      ) { result ->
+        try {
+          coordinator.completeWorker(transaction.id, result)
+        } finally {
+          activeWorkerIds -= transaction.id
+        }
+      }
+    } catch (_: Exception) {
+      activeWorkerIds -= transaction.id
+      coordinator.completeWorker(transaction.id, ShareInboxImporter.Result.FAILED)
     }
   }
 
-  private fun publishTerminalResult(
-    transactionId: String,
-    result: ShareInboxImporter.Result,
+  private fun lifecycleCoordinator(
     transactionStore: ShareIntentTransactionStore,
-  ) {
-    val terminalResult = if (result == ShareInboxImporter.Result.COMPLETE)
-      ShareIntentTransactionStore.TerminalResult.COMPLETE
-    else ShareIntentTransactionStore.TerminalResult.FAILED
-    val prepared = transactionStore.prepareTerminal(
-      transactionId,
-      terminalResult,
-      if (terminalResult == ShareIntentTransactionStore.TerminalResult.FAILED) "SHARE_IMPORT_FAILED" else null,
-    )
+  ) = ShareIntentLifecycleCoordinator(
+    transactionStore,
+    artifactState = { id ->
+      ShareIntentLifecycleCoordinator.inspectArtifacts(applicationContext.filesDir, id)
+    },
+    publishTerminal = { transaction ->
+      val event = publishEvent(
+        eventId = transaction.id,
+        transactionId = transaction.id,
+        result = requireNotNull(transaction.terminalResult).wireValue,
+        code = transaction.terminalCode,
+      )
+      event["durable"] == true
+    },
+    publishIssue = { issue ->
+      publishEvent(issue.eventId, issue.transactionId, "failed", issue.code)
+    },
+  )
+
+  private fun publishEvent(
+    eventId: String,
+    transactionId: String,
+    result: String,
+    code: String?,
+  ): Map<String, Any> {
     val event = ShareResultEventPublisher.persistOrFallback(
       transactionId,
-      requireNotNull(prepared.terminalResult).wireValue,
-      prepared.terminalCode,
-    ) { value, code ->
+      result,
+      code,
+      eventId,
+    ) { value, stableCode ->
       MetadataEventStore.persistShareResult(
         applicationContext.filesDir,
         value,
         transactionId,
-        transactionId,
-        code,
+        eventId,
+        stableCode,
       )
     }
-    if (event["durable"] == true) {
-      transactionStore.markEventPublished(transactionId)
-    }
     EphemeralShareEventStore.publishIfEphemeral(event)
+    deliverEvent(event)
+    return event
+  }
+
+  private fun deliverEvent(event: Map<String, Any>) {
     runOnUiThread {
       currentReactContextOrNull()
         ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
         ?.emit("AIContextPackInboxChanged", Arguments.makeNativeMap(event))
     }
+  }
+
+  companion object {
+    private val activeWorkerIds = ConcurrentHashMap.newKeySet<String>()
   }
 
   private fun currentReactContextOrNull() =
@@ -136,16 +173,18 @@ internal object ShareResultEventPublisher {
     transactionId: String,
     result: String,
     code: String? = null,
+    eventId: String = transactionId,
     persist: (String, String?) -> Map<String, Any>,
   ): Map<String, Any> = try {
     persist(result, code) + ("durable" to true)
   } catch (_: Exception) {
     mapOf(
       "schemaVersion" to 1,
-      "id" to stableFallbackId(transactionId),
+      "id" to stableFallbackId(eventId),
+      "transactionId" to transactionId,
       "result" to "failed",
       "durable" to false,
-      "code" to "SHARE_RESULT_PERSIST_FAILED",
+      "code" to (code ?: "SHARE_RESULT_PERSIST_FAILED"),
     )
   }
 
