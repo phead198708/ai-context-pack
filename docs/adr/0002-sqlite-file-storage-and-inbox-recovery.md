@@ -44,17 +44,18 @@ App Group and app-private Inbox files remain immutable sources until database co
 1. The native Inbox writer owns a per-ingestion cross-process lock.
 2. It copies provider bytes to staging partial files, synchronizes them, validates size/hash, writes a partial manifest, and publishes the ingestion only by atomic rename.
 3. The main app rescans and semantically validates the published manifest.
-4. Native handoff checks `sum(byteCount for destinations not yet published) + 16 MiB headroom` against available storage before creating a destination. Replay never budgets already-published bytes again.
-5. Native code creates the `Packs/<pack-id>/originals` hierarchy one level at a time and synchronizes every new directory plus its parent before it can return artifacts. Each artifact is streamed to `<item-id>.bin.partial`, synchronized, size/hash checked, atomically renamed, and followed by a destination-directory synchronization. On replay, an existing destination is accepted only when its computed SHA-256 matches the current source, even if the manifest omitted an expected hash.
-6. The same native call returns the validated manifest, SHA-256 of its exact bytes, and the bound artifact list. JavaScript cannot supply or substitute the fingerprint.
-7. The repository commits the import, items, artifacts, references, and journal removal in one exclusive SQLite transaction. An existing import replays only when pack, exact manifest fingerprint, and the canonical artifact set (IDs, item IDs, relative paths, media types, byte counts, and SHA-256 values) all match.
-8. Only after commit does the app ACK the ingestion. Under the writer registry lock, ACK atomically renames the live ingestion into the same-volume, scanner-invisible `InboxAckTombstones` sibling, synchronizes both parent directories, then removes the tombstone as best-effort cleanup. Missing live targets are idempotent success and retry leftover tombstone cleanup.
+4. Handoff snapshots and validates only the requested immutable ingestion while holding the writer registry lock. It does not rescan unrelated Inbox directories, so another ingestion's ACK rename cannot invalidate the snapshot.
+5. Native handoff checks `sum(byteCount for destinations not yet published) + 16 MiB headroom` against available storage before creating a destination. Replay never budgets already-published bytes again.
+6. Native code creates the complete owned hierarchy one level at a time and synchronizes every directory plus its parent before it can return artifacts. On iOS this includes a missing `Library/Application Support` entry and `AIContextPack` root; no multi-level precreation bypasses the durability helper. Each artifact is streamed to `<item-id>.bin.partial`, synchronized, size/hash checked, atomically renamed, and followed by a destination-directory synchronization. On replay, an existing destination is accepted only when its computed SHA-256 matches the current source, even if the manifest omitted an expected hash.
+7. The same native call returns the validated manifest, SHA-256 of its exact bytes, and the bound artifact list. JavaScript cannot supply or substitute the fingerprint.
+8. The repository commits the import, items, artifacts, references, and journal removal in one exclusive SQLite transaction. An existing import replays only when pack, exact manifest fingerprint, and the canonical artifact set (IDs, item IDs, relative paths, media types, byte counts, and SHA-256 values) all match.
+9. Only after commit does the app ACK the ingestion. Under the writer registry lock, ACK atomically renames the live ingestion into the same-volume, scanner-invisible `InboxAckTombstones` sibling, synchronizes both parent directories, then removes the tombstone as best-effort cleanup. Missing live targets are idempotent success and retry leftover tombstone cleanup. Every native-module start also sweeps canonical tombstones on a utility thread under the same registry lock, so cleanup no longer depends on an ingestion event surviving ACK.
 
-If the app stops before step 7, the published owned file and original Inbox both remain. Replay revalidates an existing destination without requiring its bytes as free space and commits once. If it stops after step 7 but before step 8, the unique ingestion ID and matching manifest/artifact identities produce `replayed`, then ACK removes the source. If ACK stops after its rename, scanners cannot observe a partial deletion and a later ACK removes the tombstone. Any fingerprint or artifact-set mismatch fails as `ARTIFACT_INTEGRITY_FAILED` without ACK.
+If the app stops before step 8, the published owned file and original Inbox both remain. Replay revalidates an existing destination without requiring its bytes as free space and commits once. If it stops after step 8 but before step 9, the unique ingestion ID and matching manifest/artifact identities produce `replayed`, then ACK removes the source. If ACK stops after its rename, scanners cannot observe a partial deletion and native-start maintenance removes the tombstone independently. Any fingerprint or artifact-set mismatch fails as `ARTIFACT_INTEGRITY_FAILED` without ACK.
 
 ## iOS coordination decision
 
-Keep the existing stable registry file plus per-ingestion POSIX advisory locks for the App Group. Do not add `NSFileCoordinator` for v0.1. Writers publish only immutable ingestion directories; scanners and ACK take the same registry lock; the durable destination is outside the App Group. This removes concurrent mutable-file coordination from the protocol while still preventing a scanner or cleanup pass from treating an active writer as abandoned.
+Keep the existing stable registry file plus per-ingestion POSIX advisory locks for the App Group. Do not add `NSFileCoordinator` for v0.1. Writers publish only immutable ingestion directories; targeted handoff snapshots, ACK rename, and tombstone sweep take the same registry lock; the durable destination is outside the App Group. This removes concurrent mutable-file coordination from the protocol while still preventing a snapshot or cleanup pass from racing a registry-coordinated rename.
 
 ## Cleanup and quarantine policy
 
@@ -82,9 +83,11 @@ Keep the existing stable registry file plus per-ingestion POSIX advisory locks f
 | Cleanup races recovery              | Transactional reference recheck wins; file retained                         | shared cleanup race test                                      |
 | Replay with low free space          | Existing artifacts require only fixed headroom and remain replayable        | Swift/Kotlin published-destination budget tests               |
 | New destination hierarchy           | Every new directory and parent is synchronized before handoff returns       | Swift/Kotlin injected directory-sync tests                    |
+| Fresh iOS Application Support       | Missing ancestor and owned root are created one level at a time and synced  | Swift fresh-install ancestor test                             |
 | Replay artifact hash mismatch       | Exact fingerprint alone is insufficient; journal retained and no ACK occurs | shared coordinator and SQLite repository tests                |
 | ACK stops after atomic rename       | Live Inbox is absent; tombstone is scanner-invisible and retryable          | Swift/Kotlin acknowledgement interruption tests               |
-| ACK tombstone deletion stops        | ACK remains successful; later ACK completes best-effort cleanup             | Swift/Kotlin tombstone deletion tests                         |
+| ACK tombstone deletion stops        | ACK remains successful; native-start sweep retries without an ingestion     | Swift/Kotlin startup sweep interruption/deletion/fsync tests  |
+| Handoff races another ingestion ACK | Target snapshot is registry-serialized; unrelated ACK waits, then succeeds  | Swift/Kotlin two-ingestion concurrency tests                  |
 
 ## Spike benchmarks
 
@@ -92,8 +95,8 @@ Synthetic filenames and bytes only; no OCR or PDF rendering was invoked.
 
 | Harness                                                | 20 image artifacts (5 MiB total) | application/pdf artifact (49 MiB) | OCR runs |
 | ------------------------------------------------------ | -------------------------------: | --------------------------------: | -------: |
-| Swift Foundation/CryptoKit host harness, Apple Silicon |                            20 ms |                             82 ms |        0 |
-| Pixel 9 Pro AVD, Android API 35                        |                           182 ms |                            150 ms |        0 |
+| Swift Foundation/CryptoKit host harness, Apple Silicon |                            27 ms |                            194 ms |        0 |
+| Pixel 9 Pro AVD, Android API 35                        |                           123 ms |                            131 ms |        0 |
 
 These are Phase 0 correctness/baseline measurements, not release performance claims. Issue #5 still requires representative physical-device evidence because it carries `test:device-required`.
 

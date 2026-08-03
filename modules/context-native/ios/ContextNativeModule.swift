@@ -10,6 +10,15 @@ public final class ContextNativeModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ContextNative")
 
+    OnCreate {
+      guard let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      ) else { return }
+      DispatchQueue.global(qos: .utility).async {
+        InboxArtifactHandoff.runStartupMaintenance(container: container)
+      }
+    }
+
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
         throw NativeError("APP_GROUP_UNAVAILABLE")
@@ -72,7 +81,6 @@ public final class ContextNativeModule: Module {
       }
       let ownedRoot = applicationSupport.appendingPathComponent("AIContextPack", isDirectory: true)
       do {
-        try FileManager.default.createDirectory(at: ownedRoot, withIntermediateDirectories: true)
         return try InboxArtifactHandoff.handoff(
           container: container,
           applicationSupport: ownedRoot,

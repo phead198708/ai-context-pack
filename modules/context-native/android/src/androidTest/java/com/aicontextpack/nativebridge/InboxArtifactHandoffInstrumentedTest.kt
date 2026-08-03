@@ -4,6 +4,9 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -238,6 +241,120 @@ class InboxArtifactHandoffInstrumentedTest {
     assertTrue(tombstones.listFiles()?.isEmpty() == true)
   }
 
+  @Test fun startupSweepResumesAfterInterruption() {
+    leaveAcknowledgementTombstone()
+    leaveAcknowledgementTombstone()
+    val tombstones = File(root, "InboxAckTombstones")
+    var removals = 0
+
+    assertThrows(IllegalStateException::class.java) {
+      InboxArtifactHandoff.sweepAcknowledgementTombstones(
+        root,
+        operationHook = { point ->
+          if (point == InboxArtifactHandoff.TombstoneSweepPoint.AFTER_REMOVAL) {
+            removals += 1
+            if (removals == 1) throw IllegalStateException("SIMULATED_INTERRUPTION")
+          }
+        },
+      )
+    }
+    assertEquals(1, removals)
+    assertEquals(1, tombstones.listFiles()?.size)
+
+    InboxArtifactHandoff.runStartupMaintenance(root)
+    assertTrue(tombstones.listFiles()?.isEmpty() == true)
+  }
+
+  @Test fun startupSweepRetriesDeletionFailure() {
+    leaveAcknowledgementTombstone()
+    val tombstones = File(root, "InboxAckTombstones")
+
+    assertEquals(
+      InboxArtifactHandoff.TombstoneSweepResult(scanned = 1, removed = 0, failed = 1),
+      InboxArtifactHandoff.sweepAcknowledgementTombstones(
+        root,
+        tombstoneRemover = { false },
+      ),
+    )
+    assertEquals(1, tombstones.listFiles()?.size)
+
+    InboxArtifactHandoff.runStartupMaintenance(root)
+    assertTrue(tombstones.listFiles()?.isEmpty() == true)
+  }
+
+  @Test fun startupSweepContainsParentSynchronizationFailure() {
+    leaveAcknowledgementTombstone()
+    val tombstones = File(root, "InboxAckTombstones")
+
+    assertEquals(
+      InboxArtifactHandoff.TombstoneSweepResult(scanned = 1, removed = 0, failed = 1),
+      InboxArtifactHandoff.sweepAcknowledgementTombstones(
+        root,
+        directorySynchronizer = { directory ->
+          if (directory.canonicalFile == tombstones.canonicalFile) {
+            throw IllegalStateException("SIMULATED_SYNC_FAILURE")
+          }
+        },
+      ),
+    )
+    assertTrue(tombstones.listFiles()?.isEmpty() == true)
+    InboxArtifactHandoff.runStartupMaintenance(root)
+  }
+
+  @Test fun requestedManifestSnapshotSerializesConcurrentAckOfOtherIngestion() {
+    val requestedId = uuid()
+    val acknowledgedId = uuid()
+    writeManifest(requestedId, listOf(Item(uuid(), "image/png", byteArrayOf(1))))
+    writeManifest(acknowledgedId, listOf(Item(uuid(), "image/png", byteArrayOf(2))))
+    val snapshotEntered = CountDownLatch(1)
+    val releaseSnapshot = CountDownLatch(1)
+    val handoffFinished = CountDownLatch(1)
+    val ackAttempted = CountDownLatch(1)
+    val ackFinished = CountDownLatch(1)
+    val handoffError = AtomicReference<Throwable?>()
+    val acknowledgementError = AtomicReference<Throwable?>()
+
+    Thread {
+      try {
+        InboxArtifactHandoff.handoff(
+          root,
+          requestedId,
+          uuid(),
+          0,
+          availableBytes = { Long.MAX_VALUE },
+          snapshotHook = {
+            snapshotEntered.countDown()
+            releaseSnapshot.await(5, TimeUnit.SECONDS)
+          },
+        )
+      } catch (error: Throwable) {
+        handoffError.set(error)
+      } finally {
+        handoffFinished.countDown()
+      }
+    }.start()
+    assertTrue(snapshotEntered.await(5, TimeUnit.SECONDS))
+    Thread {
+      ackAttempted.countDown()
+      try {
+        InboxArtifactHandoff.acknowledge(root, acknowledgedId)
+      } catch (error: Throwable) {
+        acknowledgementError.set(error)
+      } finally {
+        ackFinished.countDown()
+      }
+    }.start()
+    assertTrue(ackAttempted.await(5, TimeUnit.SECONDS))
+    assertFalse(ackFinished.await(100, TimeUnit.MILLISECONDS))
+    releaseSnapshot.countDown()
+    assertTrue(handoffFinished.await(5, TimeUnit.SECONDS))
+    assertTrue(ackFinished.await(5, TimeUnit.SECONDS))
+    assertEquals(null, handoffError.get())
+    assertEquals(null, acknowledgementError.get())
+    assertTrue(File(root, "Inbox/$requestedId").isDirectory)
+    assertFalse(File(root, "Inbox/$acknowledgedId").exists())
+  }
+
   @Test fun manifestMutationDuringHandoffFailsExactByteBinding() {
     val ingestionId = uuid()
     val packId = uuid()
@@ -346,6 +463,23 @@ class InboxArtifactHandoffInstrumentedTest {
         .put("items", payloadItems)
         .toString(),
     )
+  }
+
+  private fun leaveAcknowledgementTombstone(): String {
+    val ingestionId = uuid()
+    writeManifest(ingestionId, listOf(Item(uuid(), "image/png", byteArrayOf(1))))
+    assertThrows(IllegalStateException::class.java) {
+      InboxArtifactHandoff.acknowledge(
+        root,
+        ingestionId,
+        operationHook = { point ->
+          if (point == InboxArtifactHandoff.AcknowledgementPoint.AFTER_TOMBSTONE_RENAME) {
+            throw IllegalStateException("SIMULATED_INTERRUPTION")
+          }
+        },
+      )
+    }
+    return ingestionId
   }
 
   private fun uuid(): String = UUID.randomUUID().toString()

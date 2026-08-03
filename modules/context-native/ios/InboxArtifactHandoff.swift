@@ -33,6 +33,16 @@ enum InboxAcknowledgementPoint {
   case duringTombstoneDeletion
 }
 
+enum InboxTombstoneSweepPoint {
+  case afterRemoval
+}
+
+struct InboxTombstoneSweepResult: Equatable {
+  let scanned: Int
+  let removed: Int
+  let failed: Int
+}
+
 enum InboxArtifactHandoff {
   static func handoff(
     container: URL,
@@ -42,7 +52,8 @@ enum InboxArtifactHandoff {
     requiredHeadroomBytes: Int64,
     availableBytes: (URL) throws -> Int64 = availableCapacity,
     operationHook: (InboxArtifactHandoffPoint) throws -> Void = { _ in },
-    directorySynchronizer: (URL) throws -> Void = synchronizeDirectory
+    directorySynchronizer: (URL) throws -> Void = synchronizeDirectory,
+    snapshotHook: () throws -> Void = {}
   ) throws -> [String: Any] {
     try requireCanonicalUUID(ingestionId)
     try requireCanonicalUUID(packId)
@@ -50,19 +61,32 @@ enum InboxArtifactHandoff {
     let inbox = container.appendingPathComponent("Inbox", isDirectory: true)
     let sourceDirectory = inbox.appendingPathComponent(ingestionId, isDirectory: true)
     let manifestURL = sourceDirectory.appendingPathComponent("manifest.json")
-    let originalManifestData: Data
-    do { originalManifestData = try Data(contentsOf: manifestURL, options: [.mappedIfSafe]) }
-    catch { throw InboxArtifactHandoffError.manifestMissing }
-    let fingerprint = SHA256.hash(data: originalManifestData)
-      .map { String(format: "%02x", $0) }.joined()
-    let manifests: [[String: Any]]
-    do { manifests = try InboxManifestValidator.read(inbox: inbox) }
-    catch let error as InboxManifestValidationError {
+    let snapshot: (Data, [String: Any])
+    do {
+      snapshot = try InboxWriterRegistry.withLock(container: container) { _ in
+        try snapshotHook()
+        let data = try Data(contentsOf: manifestURL, options: [.mappedIfSafe])
+        let manifest = try InboxManifestValidator.readPublished(
+          inbox: inbox,
+          ingestionId: ingestionId
+        )
+        return (data, manifest)
+      }
+    } catch let error as InboxManifestValidationError {
       if error == .artifactIntegrityFailed { throw InboxArtifactHandoffError.integrityFailed }
       throw error
+    } catch let error as InboxWriterOwnershipError {
+      throw error
+    } catch let error as InboxArtifactHandoffError {
+      throw error
+    } catch {
+      throw InboxArtifactHandoffError.manifestMissing
     }
-    guard let manifest = manifests.first(where: { $0["ingestionId"] as? String == ingestionId }),
-          let items = manifest["items"] as? [[String: Any]] else {
+    let originalManifestData = snapshot.0
+    let manifest = snapshot.1
+    let fingerprint = SHA256.hash(data: originalManifestData)
+      .map { String(format: "%02x", $0) }.joined()
+    guard let items = manifest["items"] as? [[String: Any]] else {
       throw InboxArtifactHandoffError.manifestMissing
     }
     let destinationDirectory = applicationSupport
@@ -84,7 +108,7 @@ enum InboxArtifactHandoff {
       }
       requiredFreeBytes += byteCount
     }
-    if try availableBytes(applicationSupport) < requiredFreeBytes {
+    if try availableBytes(existingDirectory(atOrAbove: applicationSupport)) < requiredFreeBytes {
       throw InboxArtifactHandoffError.lowDisk
     }
     try ensureDestinationHierarchy(
@@ -195,6 +219,52 @@ enum InboxArtifactHandoff {
     }
   }
 
+  static func runStartupMaintenance(container: URL) {
+    _ = try? sweepAcknowledgementTombstones(container: container)
+  }
+
+  static func sweepAcknowledgementTombstones(
+    container: URL,
+    operationHook: (InboxTombstoneSweepPoint) throws -> Void = { _ in },
+    directorySynchronizer: (URL) throws -> Void = synchronizeDirectory,
+    tombstoneRemover: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+  ) throws -> InboxTombstoneSweepResult {
+    let root = container.appendingPathComponent("InboxAckTombstones", isDirectory: true)
+    return try InboxWriterRegistry.withLock(container: container) { _ in
+      var isDirectory: ObjCBool = false
+      guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else {
+        return InboxTombstoneSweepResult(scanned: 0, removed: 0, failed: 0)
+      }
+      guard isDirectory.boolValue else { throw InboxArtifactHandoffError.writeFailed }
+      let candidates = try FileManager.default.contentsOfDirectory(
+        at: root,
+        includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+      ).filter { validAcknowledgementTombstone($0, root: root) }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+      var removed = 0
+      var failed = 0
+      for tombstone in candidates {
+        do {
+          try tombstoneRemover(tombstone)
+          guard !FileManager.default.fileExists(atPath: tombstone.path) else {
+            throw InboxArtifactHandoffError.writeFailed
+          }
+          try directorySynchronizer(root)
+          removed += 1
+        } catch {
+          failed += 1
+          continue
+        }
+        try operationHook(.afterRemoval)
+      }
+      return InboxTombstoneSweepResult(
+        scanned: candidates.count,
+        removed: removed,
+        failed: failed
+      )
+    }
+  }
+
   private static func publish(
     source: URL,
     partial: URL,
@@ -254,6 +324,10 @@ enum InboxArtifactHandoff {
     packId: String,
     directorySynchronizer: (URL) throws -> Void
   ) throws {
+    try ensureDurableDirectory(
+      applicationSupport.deletingLastPathComponent(),
+      directorySynchronizer: directorySynchronizer
+    )
     try ensureDurableDirectory(applicationSupport, directorySynchronizer: directorySynchronizer)
     let packs = applicationSupport.appendingPathComponent("Packs", isDirectory: true)
     try ensureDurableDirectory(packs, directorySynchronizer: directorySynchronizer)
@@ -268,6 +342,22 @@ enum InboxArtifactHandoff {
   private static func atomicMove(from source: URL, to destination: URL) throws {
     guard Darwin.rename(source.path, destination.path) == 0 else {
       throw InboxArtifactHandoffError.writeFailed
+    }
+  }
+
+  private static func existingDirectory(atOrAbove url: URL) throws -> URL {
+    var candidate = url.standardizedFileURL
+    while true {
+      var isDirectory: ObjCBool = false
+      if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory) {
+        guard isDirectory.boolValue else { throw InboxArtifactHandoffError.writeFailed }
+        return candidate
+      }
+      let parent = candidate.deletingLastPathComponent()
+      guard parent.path != candidate.path else {
+        throw InboxArtifactHandoffError.writeFailed
+      }
+      candidate = parent
     }
   }
 
@@ -317,6 +407,21 @@ enum InboxArtifactHandoff {
         tombstoneRemover: tombstoneRemover
       )
     }
+  }
+
+  private static func validAcknowledgementTombstone(_ url: URL, root: URL) -> Bool {
+    guard url.pathExtension == "ack",
+          url.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
+          let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+          values.isDirectory == true,
+          values.isSymbolicLink != true else { return false }
+    let name = url.deletingPathExtension().lastPathComponent
+    guard name.count == 73 else { return false }
+    let separator = name.index(name.startIndex, offsetBy: 36)
+    guard name[separator] == "-" else { return false }
+    let suffixStart = name.index(after: separator)
+    return canonicalUUID(String(name[..<separator]))
+      && canonicalUUID(String(name[suffixStart...]))
   }
 
   private static func cleanupTombstone(
@@ -379,9 +484,13 @@ enum InboxArtifactHandoff {
   }
 
   private static func requireCanonicalUUID(_ value: String) throws {
-    guard let identifier = UUID(uuidString: value),
-          identifier.uuidString.lowercased() == value else {
+    guard canonicalUUID(value) else {
       throw InboxArtifactHandoffError.invalidIdentifier
     }
+  }
+
+  private static func canonicalUUID(_ value: String) -> Bool {
+    guard let identifier = UUID(uuidString: value) else { return false }
+    return identifier.uuidString.lowercased() == value
   }
 }

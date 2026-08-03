@@ -13,6 +13,8 @@ internal class InboxArtifactHandoffException(val stableCode: String) : Exception
 internal object InboxArtifactHandoff {
   enum class Point { BEFORE_COPY, DURING_COPY, AFTER_FILE_CLOSE, BEFORE_PUBLISH_RENAME }
   enum class AcknowledgementPoint { AFTER_TOMBSTONE_RENAME, DURING_TOMBSTONE_DELETION }
+  enum class TombstoneSweepPoint { AFTER_REMOVAL }
+  data class TombstoneSweepResult(val scanned: Int, val removed: Int, val failed: Int)
 
   fun handoff(
     filesDir: File,
@@ -22,6 +24,7 @@ internal object InboxArtifactHandoff {
     availableBytes: (File) -> Long = { it.usableSpace },
     operationHook: (Point) -> Unit = {},
     directorySynchronizer: (File) -> Unit = ::syncDirectory,
+    snapshotHook: () -> Unit = {},
   ): Map<String, Any> {
     requireCanonicalUuid(ingestionId)
     requireCanonicalUuid(packId)
@@ -31,12 +34,25 @@ internal object InboxArtifactHandoff {
     val inbox = File(filesDir, "Inbox")
     val sourceDirectory = File(inbox, ingestionId)
     val manifestFile = File(sourceDirectory, "manifest.json")
-    val originalManifestBytes = try { manifestFile.readBytes() }
-    catch (_: Exception) { throw InboxArtifactHandoffException("SCHEMA_INVALID") }
+    val snapshot = try {
+      InboxWriterOwnership.withRegistry(filesDir) {
+        snapshotHook()
+        val bytes = try { manifestFile.readBytes() }
+        catch (_: Exception) { throw InboxArtifactHandoffException("SCHEMA_INVALID") }
+        val manifest = try { InboxManifestScanner.readPublished(inbox, ingestionId) }
+        catch (error: NativeException) {
+          throw InboxArtifactHandoffException(error.code)
+        }
+        bytes to manifest
+      }
+    } catch (error: InboxArtifactHandoffException) {
+      throw error
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    }
+    val originalManifestBytes = snapshot.first
     val manifestFingerprint = sha256(originalManifestBytes)
-    val manifest = InboxManifestScanner.scan(inbox)
-      .firstOrNull { it["ingestionId"] == ingestionId }
-      ?: throw InboxArtifactHandoffException("SCHEMA_INVALID")
+    val manifest = snapshot.second
     @Suppress("UNCHECKED_CAST")
     val items = manifest["items"] as? List<Map<String, Any?>>
       ?: throw InboxArtifactHandoffException("SCHEMA_INVALID")
@@ -149,6 +165,42 @@ internal object InboxArtifactHandoff {
       )
       true
     }
+  }
+
+  fun runStartupMaintenance(filesDir: File) {
+    runCatching { sweepAcknowledgementTombstones(filesDir) }
+  }
+
+  fun sweepAcknowledgementTombstones(
+    filesDir: File,
+    operationHook: (TombstoneSweepPoint) -> Unit = {},
+    directorySynchronizer: (File) -> Unit = ::syncDirectory,
+    tombstoneRemover: (File) -> Boolean = { it.deleteRecursively() },
+  ): TombstoneSweepResult = InboxWriterOwnership.withRegistry(filesDir) {
+    val root = File(filesDir, "InboxAckTombstones")
+    if (!root.exists()) return@withRegistry TombstoneSweepResult(0, 0, 0)
+    if (!root.isDirectory) throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    val candidates = (root.listFiles()
+      ?: throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED"))
+      .filter { validAcknowledgementTombstone(it, root) }
+      .sortedBy { it.name }
+    var removed = 0
+    var failed = 0
+    candidates.forEach { tombstone ->
+      val failure = runCatching {
+        if (!tombstoneRemover(tombstone) || tombstone.exists()) {
+          throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+        }
+        directorySynchronizer(root)
+      }.exceptionOrNull()
+      if (failure != null) {
+        failed += 1
+        return@forEach
+      }
+      removed += 1
+      operationHook(TombstoneSweepPoint.AFTER_REMOVAL)
+    }
+    TombstoneSweepResult(candidates.size, removed, failed)
   }
 
   private fun publish(
@@ -270,6 +322,20 @@ internal object InboxArtifactHandoff {
       }
   }
 
+  private fun validAcknowledgementTombstone(candidate: File, root: File): Boolean =
+    runCatching {
+      val name = candidate.name
+      if (!name.endsWith(".ack")) return@runCatching false
+      val stem = name.removeSuffix(".ack")
+      if (stem.length != 73 || stem[36] != '-') return@runCatching false
+      if (!canonicalUuid(stem.substring(0, 36)) || !canonicalUuid(stem.substring(37))) {
+        return@runCatching false
+      }
+      candidate.isDirectory &&
+        !OsConstants.S_ISLNK(Os.lstat(candidate.path).st_mode) &&
+        candidate.parentFile?.canonicalFile == root.canonicalFile
+    }.getOrDefault(false)
+
   private fun cleanupTombstone(
     tombstone: File,
     operationHook: (AcknowledgementPoint) -> Unit,
@@ -321,12 +387,14 @@ internal object InboxArtifactHandoff {
   }
 
   private fun requireCanonicalUuid(value: String) {
-    try {
-      if (UUID.fromString(value).toString() != value) {
-        throw InboxArtifactHandoffException("SCHEMA_INVALID")
-      }
-    } catch (_: IllegalArgumentException) {
+    if (!canonicalUuid(value)) {
       throw InboxArtifactHandoffException("SCHEMA_INVALID")
     }
+  }
+
+  private fun canonicalUuid(value: String): Boolean = try {
+    UUID.fromString(value).toString() == value
+  } catch (_: IllegalArgumentException) {
+    false
   }
 }

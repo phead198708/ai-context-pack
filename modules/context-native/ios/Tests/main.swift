@@ -682,6 +682,55 @@ final class InboxArtifactHandoffTests: XCTestCase {
     }
   }
 
+  func testFreshInstallCreatesAndSynchronizesApplicationSupportAncestors() throws {
+    let root = container.deletingLastPathComponent()
+    let library = root.appendingPathComponent("Library", isDirectory: true)
+    try FileManager.default.createDirectory(at: library, withIntermediateDirectories: false)
+    let applicationSupportDirectory = library.appendingPathComponent(
+      "Application Support",
+      isDirectory: true
+    )
+    applicationSupport = applicationSupportDirectory.appendingPathComponent(
+      "AIContextPack",
+      isDirectory: true
+    )
+    XCTAssertFalse(FileManager.default.fileExists(atPath: applicationSupportDirectory.path))
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(ingestionId: ingestionId, items: [(itemId, "image/png", Data([1]))])
+    var synchronized: [String] = []
+    var capacityProbe: URL?
+
+    _ = try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { directory in
+        capacityProbe = directory
+        return Int64.max
+      },
+      directorySynchronizer: { synchronized.append($0.standardizedFileURL.path) }
+    )
+
+    XCTAssertEqual(capacityProbe?.standardizedFileURL, library.standardizedFileURL)
+    let packs = applicationSupport.appendingPathComponent("Packs")
+    let pack = packs.appendingPathComponent(packId)
+    let originals = pack.appendingPathComponent("originals")
+    for directory in [
+      library,
+      applicationSupportDirectory,
+      applicationSupport!,
+      packs,
+      pack,
+      originals,
+    ] {
+      XCTAssertTrue(synchronized.contains(directory.standardizedFileURL.path))
+    }
+  }
+
   func testDirectorySynchronizationFailureFailsBeforePublishingArtifacts() throws {
     let ingestionId = UUID().uuidString.lowercased()
     let packId = UUID().uuidString.lowercased()
@@ -790,6 +839,127 @@ final class InboxArtifactHandoffTests: XCTestCase {
       ingestionId: ingestionId
     ))
     XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+  }
+
+  func testStartupSweepResumesAfterInterruption() throws {
+    _ = try leaveAcknowledgementTombstone()
+    _ = try leaveAcknowledgementTombstone()
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+    var removals = 0
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.sweepAcknowledgementTombstones(
+      container: container,
+      operationHook: { point in
+        if case .afterRemoval = point {
+          removals += 1
+          if removals == 1 { throw TestIOError.injected }
+        }
+      }
+    ))
+    XCTAssertEqual(removals, 1)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path).count, 1)
+
+    InboxArtifactHandoff.runStartupMaintenance(container: container)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+  }
+
+  func testStartupSweepRetriesDeletionFailure() throws {
+    _ = try leaveAcknowledgementTombstone()
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+
+    let failed = try InboxArtifactHandoff.sweepAcknowledgementTombstones(
+      container: container,
+      tombstoneRemover: { _ in throw TestIOError.injected }
+    )
+    XCTAssertEqual(failed, InboxTombstoneSweepResult(scanned: 1, removed: 0, failed: 1))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path).count, 1)
+
+    InboxArtifactHandoff.runStartupMaintenance(container: container)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+  }
+
+  func testStartupSweepContainsParentSynchronizationFailure() throws {
+    _ = try leaveAcknowledgementTombstone()
+    let tombstones = container.appendingPathComponent("InboxAckTombstones")
+
+    let failed = try InboxArtifactHandoff.sweepAcknowledgementTombstones(
+      container: container,
+      directorySynchronizer: { directory in
+        if directory.standardizedFileURL == tombstones.standardizedFileURL {
+          throw TestIOError.injected
+        }
+      }
+    )
+    XCTAssertEqual(failed, InboxTombstoneSweepResult(scanned: 1, removed: 0, failed: 1))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
+    InboxArtifactHandoff.runStartupMaintenance(container: container)
+  }
+
+  func testRequestedManifestSnapshotSerializesConcurrentAckOfOtherIngestion() throws {
+    let requestedId = UUID().uuidString.lowercased()
+    let acknowledgedId = UUID().uuidString.lowercased()
+    let requestedItem = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: requestedId,
+      items: [(requestedItem, "image/png", Data([1]))]
+    )
+    try writeManifest(
+      ingestionId: acknowledgedId,
+      items: [(UUID().uuidString.lowercased(), "image/png", Data([2]))]
+    )
+    let snapshotEntered = DispatchSemaphore(value: 0)
+    let releaseSnapshot = DispatchSemaphore(value: 0)
+    let handoffFinished = DispatchSemaphore(value: 0)
+    let ackAttempted = DispatchSemaphore(value: 0)
+    let ackFinished = DispatchSemaphore(value: 0)
+    var handoffError: Error?
+    var acknowledgementError: Error?
+
+    DispatchQueue.global().async {
+      defer { handoffFinished.signal() }
+      do {
+        _ = try InboxArtifactHandoff.handoff(
+          container: self.container,
+          applicationSupport: self.applicationSupport,
+          ingestionId: requestedId,
+          packId: UUID().uuidString.lowercased(),
+          requiredHeadroomBytes: 0,
+          availableBytes: { _ in Int64.max },
+          snapshotHook: {
+            snapshotEntered.signal()
+            _ = releaseSnapshot.wait(timeout: .now() + 5)
+          }
+        )
+      } catch {
+        handoffError = error
+      }
+    }
+    XCTAssertEqual(snapshotEntered.wait(timeout: .now() + 5), .success)
+    DispatchQueue.global().async {
+      ackAttempted.signal()
+      do {
+        _ = try InboxArtifactHandoff.acknowledge(
+          container: self.container,
+          ingestionId: acknowledgedId
+        )
+      } catch {
+        acknowledgementError = error
+      }
+      ackFinished.signal()
+    }
+    XCTAssertEqual(ackAttempted.wait(timeout: .now() + 5), .success)
+    XCTAssertEqual(ackFinished.wait(timeout: .now() + 0.1), .timedOut)
+    releaseSnapshot.signal()
+    XCTAssertEqual(handoffFinished.wait(timeout: .now() + 5), .success)
+    XCTAssertEqual(ackFinished.wait(timeout: .now() + 5), .success)
+    XCTAssertNil(handoffError)
+    XCTAssertNil(acknowledgementError)
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(requestedId)").path
+    ))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(acknowledgedId)").path
+    ))
   }
 
   func testManifestMutationDuringHandoffFailsExactByteBinding() throws {
@@ -928,6 +1098,22 @@ final class InboxArtifactHandoffTests: XCTestCase {
     ]
     try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
       .write(to: directory.appendingPathComponent("manifest.json"))
+  }
+
+  private func leaveAcknowledgementTombstone() throws -> String {
+    let ingestionId = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: ingestionId,
+      items: [(UUID().uuidString.lowercased(), "image/png", Data([1]))]
+    )
+    XCTAssertThrowsError(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId,
+      operationHook: { point in
+        if case .afterTombstoneRename = point { throw TestIOError.injected }
+      }
+    ))
+    return ingestionId
   }
 }
 
