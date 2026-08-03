@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="23504" targetRuntime="iOS.CocoaTouch" useAutolayout="YES" initialViewController="ShareController">
+  <device id="retina6_12" orientation="portrait" appearance="light"/>
+  <scenes><scene sceneID="ShareScene"><objects>
+    <viewController id="ShareController" customClass="ShareViewController" customModule="ShareExtension" sceneMemberID="viewController">
+      <view key="view" contentMode="scaleToFill" id="ShareView"><rect key="frame" x="0.0" y="0.0" width="393" height="852"/><color key="backgroundColor" systemColor="systemBackgroundColor"/></view>
+    </viewController><placeholder placeholderIdentifier="IBFirstResponder" id="FirstResponder" sceneMemberID="firstResponder"/>
+  </objects></scene></scenes>
+</document>

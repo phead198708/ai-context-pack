@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "text": "Synthetic fixture",
+  "blocks": [
+    {
+      "text": "Synthetic fixture",
+      "bounds": { "x": 0.1, "y": 0.2, "width": 0.5, "height": 0.1 },
+      "confidence": 0.99,
+      "language": "en"
+    }
+  ],
+  "durationMs": 4,
+  "engine": "apple-vision",
+  "revision": "1"
+}

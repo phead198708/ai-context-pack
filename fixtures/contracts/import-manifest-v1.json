@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "ingestionId": "synthetic-001",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "source": "android-share-intent",
+  "status": "complete",
+  "items": [
+    {
+      "id": "item-001",
+      "mediaType": "image/png",
+      "byteCount": 128,
+      "localUri": "file:///internal/Inbox/synthetic-001/item-001.png",
+      "status": "copied"
+    }
+  ]
+}

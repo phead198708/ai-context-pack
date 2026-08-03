@@ -24,3 +24,7 @@ Incoming sharing is implemented with a native iOS Share Extension and Android sh
 - [Implementation roadmap](docs/wiki/Roadmap.md)
 - [Issue label taxonomy](docs/wiki/Labels.md)
 - [ADR-0001: React Native cross-platform architecture](docs/adr/0001-react-native-cross-platform.md)
+
+## Development
+
+See [local development setup](docs/development/setup.md). Native projects are committed production source; use development builds and never Expo Go.
