@@ -3,6 +3,75 @@ import Foundation
 import XCTest
 @testable import ContextNativeRecovery
 
+final class PrivacySafeLoggerTests: XCTestCase {
+  func testForbiddenContentFieldsNeverReachSink() throws {
+    let forbidden = [
+      "text",
+      "ocrText",
+      "filename",
+      "url",
+      "fileBytes",
+      "detectorMatch",
+    ]
+    for key in forbidden {
+      var serialized: [String] = []
+      let logger = PrivacySafeLogger { serialized.append($0) }
+      XCTAssertThrowsError(try logger.log(
+        event: "import_completed",
+        fields: [key: .string("synthetic-private-value")]
+      )) { error in
+        XCTAssertEqual(error as? PrivacySafeLogError, .unsafeField)
+      }
+      XCTAssertTrue(serialized.isEmpty)
+    }
+  }
+
+  func testApprovedKeysRejectUserControlledValues() throws {
+    let invalid: [[String: PrivacySafeLogValue]] = [
+      ["code": .string("secret text")],
+      ["engine": .string("private-engine")],
+      ["version": .string("private/path")],
+      ["anonymousId": .string("fixture.png")],
+      ["count": .decimal(1.5)],
+      ["bytes": .integer(-1)],
+      ["durationMs": .decimal(.infinity)],
+    ]
+    for fields in invalid {
+      XCTAssertThrowsError(try PrivacySafeLogger.serialize(
+        event: "ocr_completed",
+        fields: fields
+      )) { error in
+        XCTAssertEqual(error as? PrivacySafeLogError, .unsafeValue)
+      }
+    }
+  }
+
+  func testUnknownEventIsRejected() throws {
+    XCTAssertThrowsError(try PrivacySafeLogger.serialize(event: "private event")) { error in
+      XCTAssertEqual(error as? PrivacySafeLogError, .unsafeEvent)
+    }
+  }
+
+  func testAllowlistedMetadataSerializesDeterministically() throws {
+    let serialized = try PrivacySafeLogger.serialize(
+      event: "ocr_completed",
+      fields: [
+        "engine": .string("apple-vision"),
+        "durationMs": .decimal(12.5),
+        "version": .string("3.0.0"),
+        "anonymousId": .string(String(repeating: "f", count: 64)),
+      ]
+    )
+    let object = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(serialized.utf8)) as? [String: Any]
+    )
+    XCTAssertEqual(object["event"] as? String, "ocr_completed")
+    XCTAssertEqual(object["engine"] as? String, "apple-vision")
+    XCTAssertEqual(object["durationMs"] as? Double, 12.5)
+    XCTAssertNil(object["text"])
+  }
+}
+
 final class InboxRecoverySupportTests: XCTestCase {
   private var root: URL!
 

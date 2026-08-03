@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "syntheticOnly": true,
+  "files": [
+    {
+      "path": "contracts/export-manifest-v1.json",
+      "sha256": "e9589a0700b0dae32e40d25348f1ec45536a6b6bb189a605b0c5f0b58a945e1c",
+      "kind": "contract",
+      "purpose": "canonical ExportManifestV1 parity payload",
+      "source": "project-authored fake UUID/content payload",
+      "license": "MIT"
+    },
+    {
+      "path": "contracts/import-manifest-v1.json",
+      "sha256": "5c828e44c5a366361c42ed9608e0fc163f5160a07661fdc6e870cff6f80fab9e",
+      "kind": "contract",
+      "purpose": "canonical ImportManifestV1 parity payload",
+      "source": "project-authored fake UUID/content payload",
+      "license": "MIT"
+    },
+    {
+      "path": "contracts/ocr-result-v1.json",
+      "sha256": "ef1d166ce3a475c52a5c7f29088f367188f1fd2d290ca714355d2885c41b63b8",
+      "kind": "contract",
+      "purpose": "canonical OCRResultV1 parity payload",
+      "source": "project-authored synthetic OCR payload",
+      "license": "MIT"
+    },
+    {
+      "path": "contracts/pdf-page-extraction-v1.json",
+      "sha256": "ce0c7dd445830ef7fa94954adf348224c8f40a635a425a688c7f46df0697a390",
+      "kind": "contract",
+      "purpose": "canonical PDFPageExtractionV1 parity payload",
+      "source": "project-authored synthetic text payload",
+      "license": "MIT"
+    },
+    {
+      "path": "contracts/pipeline-checkpoint-v1.json",
+      "sha256": "a7fdef19276169fa269457d8c6c0bdff56104f7ebf569ddaf6f64036b3530e79",
+      "kind": "contract",
+      "purpose": "canonical PipelineCheckpointV1 parity payload",
+      "source": "project-authored fake UUID payload",
+      "license": "MIT"
+    },
+    {
+      "path": "contracts/risk-finding-v1.json",
+      "sha256": "1de23ff5e68b83af43bed7cda0b4e5d74f921a0fc9194522700e2a44c950b5e4",
+      "kind": "contract",
+      "purpose": "canonical RiskFindingV1 parity payload without matched text",
+      "source": "project-authored fake UUID payload",
+      "license": "MIT"
+    },
+    {
+      "path": "corpus/archive-path-cases.json",
+      "sha256": "9a690997eaeb57451d2c159a243317bcf50a5fcf04bd387f0b2972518604efaf",
+      "kind": "security-corpus",
+      "purpose": "archive traversal and malformed path cases",
+      "source": "project-authored attack strings",
+      "license": "MIT"
+    },
+    {
+      "path": "corpus/import-manifest-cases.json",
+      "sha256": "9fec1c79c687cb2a5d5fa7d5468dc3871e50857ee54fc0d8b56e90e0bc480925",
+      "kind": "contract-corpus",
+      "purpose": "valid partial and invalid provider-URI manifests",
+      "source": "project-authored fake UUID/content payloads",
+      "license": "MIT"
+    },
+    {
+      "path": "corpus/privacy-detector-corpus.json",
+      "sha256": "5284b8604ab1b0625e4d9a3b96ae1354e4d66d35bfe5486d1e767650c466da96",
+      "kind": "privacy-corpus",
+      "purpose": "positive and negative secret/PII detector cases",
+      "source": "project-authored fake/reserved test values",
+      "license": "MIT"
+    },
+    {
+      "path": "corpus/state-machine-transitions.json",
+      "sha256": "c8546d759ffddd68dc1819d4eb515f498f5d280286817a4a90ab0ba1f20b25cc",
+      "kind": "domain-corpus",
+      "purpose": "allowed and rejected recovery/review transitions",
+      "source": "project-authored domain examples",
+      "license": "MIT"
+    },
+    {
+      "path": "corpus/text-url-cases.json",
+      "sha256": "dd340c31aa7be2b3460fdbae9b7b66a50c6a7d8196d42b194c3da253936d12cf",
+      "kind": "input-corpus",
+      "purpose": "Unicode text, URL, control, and malicious filename cases",
+      "source": "project-authored reserved-domain strings",
+      "license": "MIT"
+    },
+    {
+      "path": "malformed/import-manifest-path-traversal.json",
+      "sha256": "3ebc4e9ced9837358f620106c0ecdea2b9526173c2917964a2cc66eced15d230",
+      "kind": "malformed-contract",
+      "purpose": "semantic traversal rejection",
+      "source": "project-authored invalid payload",
+      "license": "MIT"
+    },
+    {
+      "path": "malformed/import-manifest-unknown-version.json",
+      "sha256": "9898534f2f1b530eb27cc1ce114a8014ffa8728d5d2c321449484eec0eb4baf0",
+      "kind": "malformed-contract",
+      "purpose": "breaking schema version rejection",
+      "source": "project-authored invalid payload",
+      "license": "MIT"
+    },
+    {
+      "path": "malformed/truncated.json.invalid",
+      "sha256": "59a67857b665cc89b271a6fd30eecc89101c8496fd69d7d1e7a69a25270272ff",
+      "kind": "malformed-contract",
+      "purpose": "truncated JSON parser rejection",
+      "source": "project-authored invalid payload",
+      "license": "MIT"
+    },
+    {
+      "path": "media/corrupt-truncated.pdf",
+      "sha256": "1f0e4a94f702d6682e4ee7752bcdc6ef0a6497a568a893113eb3ee40e7a8b7e9",
+      "kind": "pdf",
+      "purpose": "corrupt PDF rejection",
+      "source": "scripts/generate_fixtures.swift literal bytes",
+      "license": "MIT"
+    },
+    {
+      "path": "media/mixed-two-page.pdf",
+      "sha256": "d07749471113839edb85c9f5f82a2d51fe110d8b2592cdefdfebf57e08d7452a",
+      "kind": "pdf",
+      "purpose": "mixed embedded-text and scanned-page extraction",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/ocr-chinese.png",
+      "sha256": "38fad1e5ddd0dd48880fd95452ca1985e51195611db35904a2db9a78415f6297",
+      "kind": "ocr-image",
+      "purpose": "Simplified Chinese OCR adapter check",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/ocr-english.png",
+      "sha256": "f7e5e4eba5c47f00b8e03dd4d5ec01a573ac0e2c25704fc675bb16dd801f7e98",
+      "kind": "ocr-image",
+      "purpose": "English OCR adapter check",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/scanned-one-page.pdf",
+      "sha256": "cedf50ab8c308fbade6dd8b807aa95a73b59fa82818ea1bbc5d2de2084499a11",
+      "kind": "pdf",
+      "purpose": "scanned PDF fallback extraction",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/text-one-page.pdf",
+      "sha256": "35c857cd8a27afc079d2cb16fa2aaae5c8ed18c734be680db6ce0316e1da3002",
+      "kind": "pdf",
+      "purpose": "embedded-text PDF extraction",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    }
+  ]
+}

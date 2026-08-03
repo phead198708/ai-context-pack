@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "syntheticOnly": true,
+  "positive": [
+    {
+      "category": "api-key",
+      "value": "sk_test_FAKE_000000000000000000000000",
+      "provenance": "explicit fake test prefix"
+    },
+    {
+      "category": "bearer-token",
+      "value": "Bearer FAKE_TOKEN_FOR_TESTING_ONLY_0000",
+      "provenance": "explicit FAKE marker"
+    },
+    {
+      "category": "jwt",
+      "value": "eyJmYWtlIjp0cnVlfQ.eyJzdWIiOiJ0ZXN0LW9ubHkifQ.FAKE_SIGNATURE",
+      "provenance": "synthetic payload and fake signature"
+    },
+    {
+      "category": "private-key-header",
+      "value": "-----BEGIN PRIVATE KEY-----\nFAKE_TEST_DATA_ONLY\n-----END PRIVATE KEY-----",
+      "provenance": "not valid base64 key material"
+    },
+    {
+      "category": "url-credential",
+      "value": "https://fake-user:FAKE_PASSWORD@example.invalid/path",
+      "provenance": "reserved .invalid domain"
+    },
+    {
+      "category": "email",
+      "value": "person@example.invalid",
+      "provenance": "reserved .invalid domain"
+    },
+    {
+      "category": "phone",
+      "value": "+1 202-555-0100",
+      "provenance": "reserved North American 555-01xx range"
+    },
+    {
+      "category": "ipv4",
+      "value": "192.0.2.10",
+      "provenance": "RFC documentation range"
+    },
+    {
+      "category": "ipv6",
+      "value": "2001:db8::10",
+      "provenance": "RFC documentation prefix"
+    },
+    {
+      "category": "card-candidate",
+      "value": "4242 4242 4242 4242",
+      "provenance": "published payment test number"
+    }
+  ],
+  "negative": [
+    { "id": "code-identifier", "value": "const bearerTokenLabel = true;" },
+    { "id": "ordinary-number", "value": "Build 20260803 completed in 4242 ms" },
+    {
+      "id": "localhost-doc",
+      "value": "Open http://localhost:8081 for the synthetic dev server"
+    },
+    { "id": "redaction-placeholder", "value": "[REDACTED_API_KEY]" }
+  ]
+}

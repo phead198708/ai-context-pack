@@ -18,6 +18,7 @@ let package = Package(
         "InboxManifestValidator.swift",
         "InboxRecoverySupport.swift",
         "InboxWriterOwnership.swift",
+        "PrivacySafeLogger.swift",
       ]
     ),
     .testTarget(

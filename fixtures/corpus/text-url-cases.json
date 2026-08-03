@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "unicode-code-and-cjk",
+      "text": "const greeting = \"你好，world 👩🏽‍💻\";\n  return greeting;\nCafe\u0301",
+      "url": "https://example.invalid/%E8%B7%AF%E5%BE%84?q=FAKE_VALUE#%E7%89%87%E6%AE%B5"
+    },
+    {
+      "id": "line-endings-and-controls",
+      "text": "first\r\nsecond\tcolumn\nemoji: 🧪",
+      "url": "https://xn--fsqu00a.example.invalid/a%20b"
+    }
+  ],
+  "maliciousFilenames": [
+    "../../private.txt",
+    "..\\..\\private.txt",
+    "/absolute/private.txt",
+    "CON.txt",
+    "safe\u202Egnp.exe",
+    "nul\u0000suffix.txt",
+    "%2e%2e%2fprivate.txt",
+    "ＡＩ／context?.txt"
+  ]
+}

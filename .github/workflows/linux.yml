@@ -1,0 +1,168 @@
+name: CI / Linux
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 22.13.1
+  NPM_VERSION: 10.9.2
+  JAVA_VERSION: 17.0.19+10
+  NODE_ENV: development
+
+jobs:
+  shared:
+    name: Shared
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Verify Node and npm pins
+        run: |
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "${NPM_VERSION}"
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Check formatting
+        run: npm run format:check
+      - name: Run shared tests with synthetic coverage
+        run: npm test -- --ci --coverage
+      - name: Verify persistence migrations
+        run: npm run test:persistence-migrations
+      - name: Run Expo Doctor
+        run: npx expo-doctor
+      - name: Audit high-severity npm findings
+        run: npm audit --audit-level=high
+      - name: Upload synthetic shared reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shared-synthetic-reports
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  contracts-privacy:
+    name: Contracts & privacy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Verify Node and npm pins
+        run: |
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "${NPM_VERSION}"
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Verify fixture provenance and hashes
+        run: npm run test:fixtures
+      - name: Verify workflow least privilege and immutable actions
+        run: npm run test:workflows
+      - name: Run contract, state, fixture, and logging rejection tests
+        run: >-
+          npm test -- --ci --runTestsByPath
+          __tests__/contracts.test.ts
+          __tests__/versionedContracts.test.ts
+          __tests__/stateMachines.test.ts
+          __tests__/fixtureCorpus.test.ts
+          __tests__/safeLogger.test.ts
+
+  android:
+    name: Android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Set up pinned JDK and Gradle cache
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
+            modules/context-native/android/build.gradle
+            package-lock.json
+      - name: Verify Node, npm, and JDK pins
+        run: |
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "${NPM_VERSION}"
+          java -version 2>&1 | grep '17.0.19'
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run Android unit tests, lint, and debug build
+        run: >-
+          ./android/gradlew -p android --no-daemon
+          :app:testDebugUnitTest
+          :context-native:testDebugUnitTest
+          :app:lintDebug
+          :context-native:lintDebug
+          :app:assembleDebug
+      - name: Upload synthetic Android reports and unsigned debug APK
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-synthetic-reports
+          path: |
+            android/app/build/reports/
+            modules/context-native/android/build/reports/
+            android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: warn
+          retention-days: 7
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Review dependency and license changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          config-file: ./.github/dependency-review-config.yml

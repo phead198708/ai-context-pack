@@ -1,0 +1,42 @@
+# CI, merge checks, and local equivalents
+
+Issue #6 establishes two least-privilege GitHub Actions workflows. They run on every pull request and on pushes to `main`; neither workflow uses `pull_request_target`, repository secrets, signing credentials, or write permissions.
+
+## Stable required checks
+
+Configure the `main` branch ruleset to require these exact check names after the first PR run creates them:
+
+| Required check                           | Workflow                                                                    | Local equivalent                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CI / Linux / Shared`                    | TypeScript, lint, format, all Jest, migrations, Expo Doctor, npm audit      | `npm run typecheck && npm run lint && npm run format:check && npm test && npm run test:persistence-migrations && npx expo-doctor && npm audit --audit-level=high`                                                                                                                                    |
+| `CI / Linux / Contracts & privacy`       | Fixture provenance, workflow policy, contract/state/logging rejection tests | `npm run test:fixtures && npm run test:workflows && npm test -- --runTestsByPath __tests__/contracts.test.ts __tests__/versionedContracts.test.ts __tests__/stateMachines.test.ts __tests__/fixtureCorpus.test.ts __tests__/safeLogger.test.ts`                                                      |
+| `CI / Linux / Android`                   | App/native JVM tests, app/native lint, unsigned debug APK                   | `./android/gradlew -p android --no-daemon :app:testDebugUnitTest :context-native:testDebugUnitTest :app:lintDebug :context-native:lintDebug :app:assembleDebug`                                                                                                                                      |
+| `CI / macOS / iOS app & Share Extension` | Swift XCTest package and unsigned workspace build containing both targets   | `bundle exec pod install --project-directory=ios --deployment && swift test --package-path modules/context-native/ios && xcodebuild -workspace ios/AIContextPack.xcworkspace -scheme AIContextPack -configuration Debug -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` |
+| `CI / Linux / Dependency review`         | New vulnerability/license review on pull requests                           | GitHub dependency graph comparison plus the PR dependency checklist                                                                                                                                                                                                                                  |
+
+Enable “Require branches to be up to date before merging,” require conversation resolution and independent approval, block force pushes/deletion, and do not permit bypass for implementation PRs. The repository administrator must apply the ruleset after the first workflow run because GitHub only offers check names that have already reported.
+
+## Pinned toolchains and caches
+
+- Node `22.13.1` comes from `.nvmrc`; npm `10.9.2` comes from `package.json#packageManager`. Workflows assert both exact versions before install.
+- Android uses Eclipse Temurin `17.0.19+10` and the committed Gradle `9.3.1` wrapper. Node/npm and Gradle caches are keyed by their lock/build inputs and toolchain selected by the setup actions.
+- macOS uses the `macos-15` image with Xcode `26.3`, Ruby `3.4.9`, Bundler `2.6.9`, `Gemfile.lock`, and `ios/Podfile.lock`. The CocoaPods cache key includes Xcode/Ruby plus all JavaScript/Ruby/Pod locks; DerivedData is never cached.
+- Every third-party action is pinned to a full commit SHA and annotated with the reviewed release version.
+
+## Fixtures and artifacts
+
+`fixtures/README.md` and `fixtures/provenance.json` are authoritative. CI verifies an exact inventory and SHA-256 for every synthetic fixture. Reports, unsigned debug products, and coverage are retained for seven days. CI must never upload Inbox/Application Support content, provider URIs, device captures, signing values, or any fixture derived from a user.
+
+## Dependency gate
+
+The dependency-review action fails newly introduced high/critical vulnerabilities and denies AGPL/GPL licenses. Every dependency diff must also complete the PR template's New Architecture/Expo compatibility, maintenance, license, privacy/network, binary-size, and platform-impact review. Run Expo Doctor after JavaScript/native dependency changes; do not force dependency fixes across locked React Native/Expo ranges.
+
+## Intentional-regression proof
+
+Before Phase 0 promotion, record a temporary, uncommitted regression for each platform and prove its required check fails:
+
+1. Shared/contracts/privacy: alter a fixture byte or add `filename` to a safe logger record; `npm run test:fixtures` or the logging tests must fail before any sink is called.
+2. Android: make one `PrivacySafeLoggerTest` assertion false; `:context-native:testDebugUnitTest` must fail.
+3. iOS: make one `PrivacySafeLoggerTests` assertion false; `swift test --package-path modules/context-native/ios` must fail.
+
+Restore the temporary edit, rerun the clean command, and include both expected-failure and clean-pass results in the PR. Never commit the intentional regression.

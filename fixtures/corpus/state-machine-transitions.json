@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "pack": [
+    { "from": "draft", "command": "start-processing", "to": "processing" },
+    {
+      "from": "processing",
+      "command": "require-review",
+      "to": "review-required"
+    },
+    { "from": "failed", "command": "start-recovery", "to": "recovering" },
+    { "from": "recovering", "command": "resume-recovery", "to": "processing" }
+  ],
+  "item": [
+    { "from": "received", "command": "mark-imported", "to": "imported" },
+    {
+      "from": "analyzed",
+      "command": "require-review",
+      "to": "review-required"
+    },
+    { "from": "failed", "command": "retry", "to": "received" },
+    { "from": "recovering", "command": "resume-recovery", "to": "received" }
+  ],
+  "rejected": [
+    { "kind": "pack", "from": "draft", "command": "complete-export" },
+    { "kind": "item", "from": "received", "command": "mark-packaged" }
+  ]
+}

@@ -1,0 +1,67 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const workflowRoot = join(repositoryRoot, '.github', 'workflows');
+const workflows = readdirSync(workflowRoot)
+  .filter(name => name.endsWith('.yml') || name.endsWith('.yaml'))
+  .sort();
+
+if (JSON.stringify(workflows) !== JSON.stringify(['linux.yml', 'macos.yml'])) {
+  throw new Error('WORKFLOW_INVENTORY_INVALID');
+}
+
+const all = workflows
+  .map(name => readFileSync(join(workflowRoot, name), 'utf8'))
+  .join('\n');
+for (const forbidden of [
+  /pull_request_target\s*:/,
+  /\bsecrets\s*\./,
+  /permissions:\s*write-all/,
+  /permissions:[\s\S]*?\b(?:actions|checks|contents|deployments|id-token|issues|packages|pages|pull-requests|security-events|statuses):\s*write\b/,
+]) {
+  if (forbidden.test(all))
+    throw new Error(`WORKFLOW_PRIVILEGE_INVALID:${forbidden.source}`);
+}
+
+for (const name of workflows) {
+  const workflow = readFileSync(join(workflowRoot, name), 'utf8');
+  if (!/^permissions:\n  contents: read$/m.test(workflow)) {
+    throw new Error(`WORKFLOW_PERMISSION_MISSING:${name}`);
+  }
+  if (!/^  pull_request:$/m.test(workflow) || !/^  push:$/m.test(workflow)) {
+    throw new Error(`WORKFLOW_TRIGGER_MISSING:${name}`);
+  }
+  const uses = [...workflow.matchAll(/uses:\s+([^\s#]+)/g)].map(
+    match => match[1],
+  );
+  if (uses.length === 0 || uses.some(value => !/@[0-9a-f]{40}$/.test(value))) {
+    throw new Error(`WORKFLOW_ACTION_NOT_SHA_PINNED:${name}`);
+  }
+}
+
+for (const stableCheck of [
+  'name: Shared',
+  'name: Contracts & privacy',
+  'name: Android',
+  'name: Dependency review',
+  'name: iOS app & Share Extension',
+]) {
+  if (!all.includes(stableCheck))
+    throw new Error(`WORKFLOW_CHECK_MISSING:${stableCheck}`);
+}
+if ((all.match(/retention-days:\s*7/g) ?? []).length !== 3) {
+  throw new Error('WORKFLOW_ARTIFACT_RETENTION_INVALID');
+}
+if (
+  !all.includes(
+    "hashFiles('Gemfile.lock', 'ios/Podfile.lock', 'package-lock.json')",
+  )
+) {
+  throw new Error('WORKFLOW_NATIVE_CACHE_KEY_INVALID');
+}
+
+console.info(
+  `WORKFLOW_POLICY files=${workflows.length} permissions=read actionPins=sha result=pass`,
+);

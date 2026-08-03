@@ -21,6 +21,8 @@ npm run typecheck
 npm run lint
 npm run format:check
 npm test
+npm run test:fixtures
+npm run test:workflows
 ```
 
 Build without committing signing data:
@@ -48,3 +50,5 @@ Package resolution must select `com.aicontextpack/.MainActivity`; after that han
 The iOS placeholder identifiers `com.example.aicontextpack` and `group.com.example.aicontextpack` intentionally do not contain a team ID. Replace them only through an approved release configuration; never commit certificates, profiles, keystores, or private team values.
 
 Do not run `expo prebuild --clean`. The Swift/Kotlin projects, Share Extension, entitlements, and native module are maintained source.
+
+CI check names, branch-protection settings, pinned toolchains, artifact retention, and local equivalents are documented in [CI and merge checks](ci.md).

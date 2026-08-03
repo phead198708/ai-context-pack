@@ -1,0 +1,85 @@
+name: CI / macOS
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 22.13.1
+  NPM_VERSION: 10.9.2
+  NODE_ENV: development
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+jobs:
+  ios:
+    name: iOS app & Share Extension
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Set up pinned Ruby and Bundler
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: .ruby-version
+          bundler: 2.6.9
+          bundler-cache: true
+      - name: Restore compatible CocoaPods cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-xcode-26.3-ruby-3.4.9-pods-${{ hashFiles('Gemfile.lock', 'ios/Podfile.lock', 'package-lock.json') }}
+      - name: Verify Node, npm, Ruby, Bundler, and Xcode pins
+        run: |
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "${NPM_VERSION}"
+          test "$(ruby --version | awk '{print $2}')" = "3.4.9"
+          test "$(bundle --version)" = "Bundler version 2.6.9"
+          xcodebuild -version | grep 'Xcode 26.3'
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+      - name: Resolve locked CocoaPods dependencies
+        run: bundle exec pod install --project-directory=ios --deployment
+      - name: Prove Pod resolution did not change the lockfile
+        run: git diff --exit-code -- ios/Podfile.lock
+      - name: Run Swift XCTest package
+        run: swift test --package-path modules/context-native/ios
+      - name: Build main app and embedded Share Extension without signing
+        run: >-
+          xcodebuild
+          -workspace ios/AIContextPack.xcworkspace
+          -scheme AIContextPack
+          -configuration Debug
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "${RUNNER_TEMP}/DerivedData"
+          -resultBundlePath "${RUNNER_TEMP}/AIContextPack.xcresult"
+          CODE_SIGNING_ALLOWED=NO
+          build
+      - name: Upload synthetic unsigned iOS build report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-synthetic-build-report
+          path: ${{ runner.temp }}/AIContextPack.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
