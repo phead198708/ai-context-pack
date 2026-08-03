@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "723e4567-e89b-42d3-a456-426614174000",
+  "itemId": "223e4567-e89b-42d3-a456-426614174000",
+  "detector": "synthetic-patterns",
+  "detectorVersion": "1.0.0",
+  "category": "api-key",
+  "severity": "high",
+  "confidence": 0.99,
+  "location": { "kind": "text-range", "start": 0, "length": 12 },
+  "decision": "pending"
+}

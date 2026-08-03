@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "423e4567-e89b-42d3-a456-426614174000",
+  "runId": "323e4567-e89b-42d3-a456-426614174000",
+  "packId": "523e4567-e89b-42d3-a456-426614174000",
+  "itemId": "223e4567-e89b-42d3-a456-426614174000",
+  "stage": "extract",
+  "reason": "recovery",
+  "resumeAction": "recover-stage",
+  "completedArtifactIds": ["623e4567-e89b-42d3-a456-426614174000"],
+  "processor": "context-pdf",
+  "processorVersion": "1.0.0",
+  "updatedAt": "2026-01-01T00:00:01Z",
+  "errorCode": "PIPELINE_RECOVERY_REQUIRED"
+}

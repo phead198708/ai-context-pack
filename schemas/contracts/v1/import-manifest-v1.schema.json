@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aicontextpack.local/schemas/contracts/v1/import-manifest-v1.schema.json",
+  "title": "ImportManifestV1",
+  "$comment": "Structural V1 schema. Cross-field semantic authority: src/domain/validation.ts#isImportManifestV1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "ingestionId",
+    "createdAt",
+    "source",
+    "status",
+    "items"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "ingestionId": { "$ref": "#/$defs/uuid" },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d{1,9})?Z$"
+    },
+    "source": {
+      "enum": ["ios-share-extension", "android-share-intent"]
+    },
+    "status": { "enum": ["complete", "partial", "failed"] },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/copiedItem" },
+          { "$ref": "#/$defs/failedItem" }
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "complete" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "type": "array",
+            "contains": { "$ref": "#/$defs/copiedItem" },
+            "minContains": 1,
+            "not": { "contains": { "$ref": "#/$defs/failedItem" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "partial" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "type": "array",
+            "allOf": [
+              {
+                "type": "array",
+                "contains": { "$ref": "#/$defs/copiedItem" },
+                "minContains": 1
+              },
+              {
+                "type": "array",
+                "contains": { "$ref": "#/$defs/failedItem" },
+                "minContains": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "failed" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "type": "array",
+            "contains": { "$ref": "#/$defs/failedItem" },
+            "minContains": 1,
+            "not": { "contains": { "$ref": "#/$defs/copiedItem" } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "mediaType": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+    },
+    "errorCode": {
+      "enum": [
+        "DOMAIN_INVALID_TRANSITION",
+        "SCHEMA_INVALID",
+        "SCHEMA_VERSION_UNSUPPORTED",
+        "ARTIFACT_INTEGRITY_FAILED",
+        "IMPORT_PROVIDER_PERMISSION_EXPIRED",
+        "IMPORT_TYPE_UNSUPPORTED",
+        "IMPORT_COPY_FAILED",
+        "IMPORT_PARTIAL_FAILURE",
+        "PIPELINE_STAGE_FAILED",
+        "PROCESSOR_OUTPUT_INVALID",
+        "PIPELINE_RECOVERY_REQUIRED",
+        "PRIVACY_REVIEW_REQUIRED",
+        "PRIVACY_EXPORT_BLOCKED",
+        "RESOURCE_LOW_DISK",
+        "RESOURCE_MEMORY_PRESSURE",
+        "STORAGE_WRITE_FAILED"
+      ]
+    },
+    "copiedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "order",
+        "mediaType",
+        "status",
+        "byteCount",
+        "relativePath"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "mediaType": { "$ref": "#/$defs/mediaType" },
+        "status": { "const": "copied" },
+        "byteCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "relativePath": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.bin$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "failedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "order",
+        "mediaType",
+        "status",
+        "byteCount",
+        "errorCode"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "mediaType": { "$ref": "#/$defs/mediaType" },
+        "status": { "const": "failed" },
+        "byteCount": { "const": 0 },
+        "errorCode": { "$ref": "#/$defs/errorCode" }
+      }
+    }
+  }
+}

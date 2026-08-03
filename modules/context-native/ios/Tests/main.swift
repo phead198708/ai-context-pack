@@ -259,6 +259,24 @@ final class InboxRecoverySupportTests: XCTestCase {
     )
   }
 
+  func testSwiftEncodersMatchEverySharedV1Fixture() throws {
+    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let repository = testDirectory
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let fixtures = repository.appendingPathComponent("fixtures/contracts", isDirectory: true)
+
+    for (name, payload) in ContractFixtureEncoder.payloads {
+      let expectedData = try Data(contentsOf: fixtures.appendingPathComponent(name))
+      let expected = try JSONSerialization.jsonObject(with: expectedData)
+      let canonicalExpected = try JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys])
+      let canonicalPayload = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+      XCTAssertEqual(canonicalPayload, canonicalExpected, name)
+    }
+  }
+
   func testManifestIdentityMatchesItsSingleLayerDirectory() throws {
     let id = UUID().uuidString.lowercased()
     try writeManifest(directoryId: id, manifestId: id)
@@ -276,6 +294,117 @@ final class InboxRecoverySupportTests: XCTestCase {
     )
 
     XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
+  }
+
+  func testUnknownManifestSchemaVersionIsExplicitlyRejected() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id, schemaVersion: 2)
+
+    XCTAssertThrowsError(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    ) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
+      XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_VERSION_UNSUPPORTED")
+    }
+  }
+
+  func testMalformedCurrentVersionManifestIsSchemaInvalid() throws {
+    let id = UUID().uuidString.lowercased()
+    let directory = root.appendingPathComponent("Inbox/\(id)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("{truncated".utf8).write(to: directory.appendingPathComponent("manifest.json"))
+
+    XCTAssertThrowsError(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    ) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+      XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
+    }
+  }
+
+  func testCalendarInvalidTimestampsAreSchemaInvalid() throws {
+    for timestamp in [
+      "2026-02-29T00:00:00Z",
+      "2026-01-01T24:00:00Z",
+      "2026-04-31T00:00:00Z"
+    ] {
+      let id = UUID().uuidString.lowercased()
+      try writeManifest(directoryId: id, manifestId: id, createdAt: timestamp)
+
+      XCTAssertThrowsError(
+        try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+      ) { error in
+        XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+        XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
+      }
+
+      try FileManager.default.removeItem(at: root.appendingPathComponent("Inbox"))
+    }
+  }
+
+  func testRealLeapDayWithNanosecondPrecisionIsAccepted() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(
+      directoryId: id,
+      manifestId: id,
+      createdAt: "2024-02-29T23:59:59.123456789Z"
+    )
+
+    XCTAssertEqual(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")).count,
+      1
+    )
+  }
+
+  func testMissingCopiedFileIsArtifactIntegrityFailure() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id)
+    let item = root.appendingPathComponent("Inbox/\(id)/\(manifestItemId).bin")
+    try FileManager.default.removeItem(at: item)
+
+    assertArtifactIntegrityFailure {
+      _ = try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    }
+  }
+
+  func testSizeMismatchedCopiedFileIsArtifactIntegrityFailure() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id)
+    let item = root.appendingPathComponent("Inbox/\(id)/\(manifestItemId).bin")
+    try Data([1, 2, 3, 4]).write(to: item)
+
+    assertArtifactIntegrityFailure {
+      _ = try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    }
+  }
+
+  func testEqualLengthDigestMismatchIsArtifactIntegrityFailure() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(
+      directoryId: id,
+      manifestId: id,
+      sha256: originalItemSHA256
+    )
+    let item = root.appendingPathComponent("Inbox/\(id)/\(manifestItemId).bin")
+    try Data([3, 2, 1]).write(to: item)
+
+    assertArtifactIntegrityFailure {
+      _ = try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    }
+  }
+
+  func testMatchingCopiedFileDigestIsAccepted() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(
+      directoryId: id,
+      manifestId: id,
+      sha256: originalItemSHA256
+    )
+
+    XCTAssertEqual(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")).count,
+      1
+    )
   }
 
   func testNestedManifestIsRejected() throws {
@@ -298,30 +427,40 @@ final class InboxRecoverySupportTests: XCTestCase {
     let id = UUID().uuidString.lowercased()
     let otherId = UUID().uuidString.lowercased()
     try writeManifest(directoryId: otherId, manifestId: otherId)
-    let otherItem = root.appendingPathComponent("Inbox/\(otherId)/item.bin")
+    let otherItem = root.appendingPathComponent("Inbox/\(otherId)/823e4567-e89b-42d3-a456-426614174000.bin")
     try writeManifest(directoryId: id, manifestId: id, itemURL: otherItem)
 
     XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
   }
 
-  private func writeManifest(directoryId: String, manifestId: String, itemURL externalItem: URL? = nil) throws {
+  private func writeManifest(
+    directoryId: String,
+    manifestId: String,
+    itemURL externalItem: URL? = nil,
+    schemaVersion: Int = 1,
+    createdAt: String = "2026-01-01T00:00:00.000Z",
+    sha256: String? = nil
+  ) throws {
     let directory = root.appendingPathComponent("Inbox/\(directoryId)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let item = externalItem ?? directory.appendingPathComponent("item.bin")
+    let item = externalItem ?? directory.appendingPathComponent("\(manifestItemId).bin")
     if externalItem == nil { try Data([1, 2, 3]).write(to: item) }
+    var copiedItem: [String: Any] = [
+      "id": manifestItemId,
+      "order": 0,
+      "mediaType": "image/png",
+      "byteCount": 3,
+      "relativePath": item.lastPathComponent,
+      "status": "copied"
+    ]
+    if let sha256 { copiedItem["sha256"] = sha256 }
     let manifest: [String: Any] = [
-      "schemaVersion": 1,
+      "schemaVersion": schemaVersion,
       "ingestionId": manifestId,
-      "createdAt": "2026-01-01T00:00:00.000Z",
+      "createdAt": createdAt,
       "source": "ios-share-extension",
       "status": "complete",
-      "items": [[
-        "id": "item",
-        "mediaType": "image/png",
-        "byteCount": 3,
-        "localUri": item.absoluteString,
-        "status": "copied"
-      ]]
+      "items": [copiedItem]
     ]
     let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     try data.write(to: directory.appendingPathComponent("manifest.json"))
@@ -344,6 +483,20 @@ final class InboxRecoverySupportTests: XCTestCase {
       XCTAssertFalse(expected.stableCode.isEmpty)
     }
   }
+
+  private func assertArtifactIntegrityFailure(operation: () throws -> Void) {
+    XCTAssertThrowsError(try operation()) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .artifactIntegrityFailed)
+      XCTAssertEqual(
+        (error as? InboxManifestValidationError)?.stableCode,
+        "ARTIFACT_INTEGRITY_FAILED"
+      )
+    }
+  }
+
+  private let manifestItemId = "823e4567-e89b-42d3-a456-426614174000"
+  private let originalItemSHA256 =
+    "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
 }
 
 private enum TestIOError: Error {

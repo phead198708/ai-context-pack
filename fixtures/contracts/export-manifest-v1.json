@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "exportId": "823e4567-e89b-42d3-a456-426614174000",
+  "packId": "523e4567-e89b-42d3-a456-426614174000",
+  "createdAt": "2026-01-01T00:00:02Z",
+  "format": "attachment-bundle",
+  "artifacts": [
+    {
+      "id": "923e4567-e89b-42d3-a456-426614174000",
+      "kind": "attachment",
+      "relativePath": "attachments/923e4567-e89b-42d3-a456-426614174000.bin",
+      "mediaType": "image/png",
+      "byteCount": 128,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "privacyReview": {
+    "status": "complete",
+    "decisionSetSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }
+}

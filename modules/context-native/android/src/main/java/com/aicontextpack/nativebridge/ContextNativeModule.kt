@@ -4,6 +4,8 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.JsonReader
+import android.util.JsonToken
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
@@ -15,6 +17,9 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
+import java.io.StringReader
+import java.security.MessageDigest
 import java.util.UUID
 
 class ContextNativeModule : Module() {
@@ -95,6 +100,38 @@ class ContextNativeModule : Module() {
 internal object InboxManifestScanner {
   private val ingestionIdPattern =
     Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+  private val mediaTypePattern =
+    Regex("^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$")
+  private val isoDateTimePattern =
+    Regex("^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d{1,9})?Z$")
+  private val sha256Pattern = Regex("^[0-9a-f]{64}$")
+  private val manifestKeys = setOf(
+    "schemaVersion", "ingestionId", "createdAt", "source", "status", "items",
+  )
+  private val copiedItemKeys = setOf(
+    "id", "order", "mediaType", "status", "byteCount", "relativePath", "sha256",
+  )
+  private val failedItemKeys = setOf(
+    "id", "order", "mediaType", "status", "byteCount", "errorCode",
+  )
+  private val stableErrorCodes = setOf(
+    "DOMAIN_INVALID_TRANSITION",
+    "SCHEMA_INVALID",
+    "SCHEMA_VERSION_UNSUPPORTED",
+    "ARTIFACT_INTEGRITY_FAILED",
+    "IMPORT_PROVIDER_PERMISSION_EXPIRED",
+    "IMPORT_TYPE_UNSUPPORTED",
+    "IMPORT_COPY_FAILED",
+    "IMPORT_PARTIAL_FAILURE",
+    "PIPELINE_STAGE_FAILED",
+    "PROCESSOR_OUTPUT_INVALID",
+    "PIPELINE_RECOVERY_REQUIRED",
+    "PRIVACY_REVIEW_REQUIRED",
+    "PRIVACY_EXPORT_BLOCKED",
+    "RESOURCE_LOW_DISK",
+    "RESOURCE_MEMORY_PRESSURE",
+    "STORAGE_WRITE_FAILED",
+  )
 
   fun scan(inbox: File): List<Map<String, Any?>> {
     if (MetadataEventStore.read(requireNotNull(inbox.parentFile), "RecoveryEvents").isNotEmpty()) {
@@ -112,11 +149,17 @@ internal object InboxManifestScanner {
     catch (_: Exception) { throw NativeException("INBOX_SCAN_FAILED") }
     return files.map { file ->
       try {
-        val manifest = JSONObject(file.readText())
+        val manifest = strictJsonObject(file.readText())
         validateOwnedManifest(manifest, requireNotNull(file.parentFile))
         jsonObjectToMap(manifest)
+      } catch (error: InboxManifestValidationException) {
+        throw NativeException(error.stableCode)
+      } catch (_: IOException) {
+        throw NativeException("INBOX_SCAN_FAILED")
+      } catch (_: SecurityException) {
+        throw NativeException("INBOX_SCAN_FAILED")
       } catch (_: Exception) {
-        throw NativeException("INBOX_MANIFEST_INVALID")
+        throw NativeException("SCHEMA_INVALID")
       }
     }
   }
@@ -136,24 +179,148 @@ internal object InboxManifestScanner {
   }
 
   private fun validateOwnedManifest(manifest: JSONObject, ingestion: File) {
+    val schemaVersion = manifest.opt("schemaVersion")
+    check(schemaVersion is Number)
+    if (schemaVersion.toDouble() != 1.0) {
+      throw InboxManifestValidationException("SCHEMA_VERSION_UNSUPPORTED")
+    }
+    check(manifest.keys().asSequence().toSet() == manifestKeys)
     val ingestionId = manifest.getString("ingestionId")
     check(ingestionIdPattern.matches(ingestionId) && UUID.fromString(ingestionId).toString() == ingestionId)
     check(ingestionId == ingestion.name)
+    check(isIsoDateTime(manifest.getString("createdAt")))
+    check(manifest.getString("source") in setOf("ios-share-extension", "android-share-intent"))
+    val manifestStatus = manifest.getString("status")
+    check(manifestStatus in setOf("complete", "partial", "failed"))
     val ownedDirectory = ingestion.canonicalFile
     val items = manifest.getJSONArray("items")
+    check(items.length() > 0)
+    val ids = mutableSetOf<String>()
+    var copied = 0
+    var failed = 0
     for (index in 0 until items.length()) {
       val item = items.getJSONObject(index)
-      val uri = Uri.parse(item.getString("localUri"))
-      check(
-        uri.scheme == "file" &&
-          uri.authority.isNullOrEmpty() &&
-          uri.query == null &&
-          uri.fragment == null
-      )
-      val copiedFile = File(requireNotNull(uri.path)).canonicalFile
-      check(copiedFile.parentFile == ownedDirectory)
-      if (item.getString("status") == "copied") {
-        check(copiedFile.isFile && copiedFile.length() == item.getLong("byteCount"))
+      val itemId = item.getString("id")
+      check(ingestionIdPattern.matches(itemId) && UUID.fromString(itemId).toString() == itemId)
+      check(ids.add(itemId) && nonNegativeInteger(item.opt("order")) == index.toLong())
+      check(mediaTypePattern.matches(item.getString("mediaType")))
+      when (item.getString("status")) {
+        "copied" -> {
+          val keys = item.keys().asSequence().toSet()
+          check(keys.all(copiedItemKeys::contains))
+          check(keys.containsAll(copiedItemKeys - "sha256"))
+          val relativePath = item.getString("relativePath")
+          check(relativePath == "$itemId.bin" && '/' !in relativePath && '\\' !in relativePath)
+          check(!item.has("localUri") && !item.has("providerUri"))
+          if (item.has("sha256")) check(sha256Pattern.matches(item.getString("sha256")))
+          val copiedFile = File(ownedDirectory, relativePath).canonicalFile
+          check(copiedFile.parentFile == ownedDirectory)
+          val byteCount = requireNotNull(nonNegativeInteger(item.opt("byteCount")))
+          if (!copiedFile.isFile || copiedFile.length() != byteCount) {
+            throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+          }
+          if (item.has("sha256") && sha256(copiedFile) != item.getString("sha256")) {
+            throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+          }
+          copied += 1
+        }
+        "failed" -> {
+          check(item.keys().asSequence().toSet() == failedItemKeys)
+          check(nonNegativeInteger(item.opt("byteCount")) == 0L)
+          check(item.getString("errorCode") in stableErrorCodes)
+          failed += 1
+        }
+        else -> throw InboxManifestValidationException("SCHEMA_INVALID")
+      }
+    }
+    check(
+      (manifestStatus == "complete" && copied > 0 && failed == 0) ||
+        (manifestStatus == "partial" && copied > 0 && failed > 0) ||
+        (manifestStatus == "failed" && copied == 0 && failed > 0)
+    )
+  }
+
+  private fun nonNegativeInteger(value: Any?): Long? {
+    val number = (value as? Number)?.toDouble() ?: return null
+    if (!number.isFinite() || number < 0 || number % 1.0 != 0.0 || number > 9_007_199_254_740_991.0) {
+      return null
+    }
+    return number.toLong()
+  }
+
+  private fun isIsoDateTime(value: String): Boolean {
+    if (!isoDateTimePattern.matches(value)) return false
+    val year = value.substring(0, 4).toInt()
+    val month = value.substring(5, 7).toInt()
+    val day = value.substring(8, 10).toInt()
+    val maximumDay = when (month) {
+      2 -> if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) 29 else 28
+      4, 6, 9, 11 -> 30
+      else -> 31
+    }
+    return day <= maximumDay
+  }
+
+  private fun strictJsonObject(text: String): JSONObject {
+    try {
+      JsonReader(StringReader(text)).use { reader ->
+        reader.isLenient = false
+        check(reader.peek() == JsonToken.BEGIN_OBJECT)
+        consumeJsonValue(reader)
+        check(reader.peek() == JsonToken.END_DOCUMENT)
+      }
+      return JSONObject(text)
+    } catch (error: InboxManifestValidationException) {
+      throw error
+    } catch (_: Exception) {
+      throw InboxManifestValidationException("SCHEMA_INVALID")
+    }
+  }
+
+  private fun consumeJsonValue(reader: JsonReader) {
+    when (reader.peek()) {
+      JsonToken.BEGIN_OBJECT -> {
+        reader.beginObject()
+        while (reader.hasNext()) {
+          reader.nextName()
+          consumeJsonValue(reader)
+        }
+        reader.endObject()
+      }
+      JsonToken.BEGIN_ARRAY -> {
+        reader.beginArray()
+        while (reader.hasNext()) consumeJsonValue(reader)
+        reader.endArray()
+      }
+      JsonToken.STRING, JsonToken.NUMBER -> reader.nextString()
+      JsonToken.BOOLEAN -> reader.nextBoolean()
+      JsonToken.NULL -> reader.nextNull()
+      else -> error("SCHEMA_INVALID")
+    }
+  }
+
+  private fun sha256(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    try {
+      file.inputStream().buffered().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+          val count = input.read(buffer)
+          if (count < 0) break
+          digest.update(buffer, 0, count)
+        }
+      }
+    } catch (_: IOException) {
+      throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+    } catch (_: SecurityException) {
+      throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    val hexadecimal = "0123456789abcdef"
+    return buildString(64) {
+      digest.digest().forEach { byte ->
+        val value = byte.toInt() and 0xff
+        append(hexadecimal[value ushr 4])
+        append(hexadecimal[value and 0x0f])
       }
     }
   }
@@ -392,4 +559,6 @@ internal object PdfProbe {
   }
 }
 
-internal class NativeException(code: String) : CodedException(code)
+internal class NativeException(code: String) : CodedException(code, code, null)
+
+private class InboxManifestValidationException(val stableCode: String) : Exception(stableCode)
