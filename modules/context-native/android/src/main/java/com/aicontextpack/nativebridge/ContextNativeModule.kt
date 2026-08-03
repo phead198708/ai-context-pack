@@ -35,7 +35,8 @@ class ContextNativeModule : Module() {
 
     AsyncFunction("ackPendingShareEvent") { id: String ->
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
-      MetadataEventStore.ack(context.filesDir, "PendingShareEvents", id)
+      try { MetadataEventStore.ack(context.filesDir, "PendingShareEvents", id) }
+      catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
     }
 
     AsyncFunction("ackEphemeralShareEvent") { id: String ->
@@ -50,7 +51,8 @@ class ContextNativeModule : Module() {
 
     AsyncFunction("ackRecoveryEvent") { id: String ->
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
-      MetadataEventStore.ack(context.filesDir, "RecoveryEvents", id)
+      try { MetadataEventStore.ack(context.filesDir, "RecoveryEvents", id) }
+      catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
     }
 
     AsyncFunction("recognizeText") { fileUri: String, script: String, promise: Promise ->
@@ -269,9 +271,15 @@ object MetadataEventStore {
   }
 
   fun ack(filesDir: File, folder: String, id: String): Boolean {
-    require(idPattern.matches(id))
+    if (!idPattern.matches(id) || runCatching { UUID.fromString(id).toString() }.getOrNull() != id)
+      throw MetadataEventException("METADATA_EVENT_ID_INVALID")
     val event = File(File(filesDir, folder), "$id.json")
-    return !event.exists() || event.delete()
+    if (!event.exists()) return true
+    if (!event.delete()) {
+      val code = if (folder == "RecoveryEvents") "NATIVE_RECOVERY_ACK_FAILED" else "NATIVE_SHARE_ACK_FAILED"
+      throw MetadataEventException(code)
+    }
+    return true
   }
 
   private fun persist(filesDir: File, folder: String, fields: Map<String, String>, id: String): Map<String, Any> {

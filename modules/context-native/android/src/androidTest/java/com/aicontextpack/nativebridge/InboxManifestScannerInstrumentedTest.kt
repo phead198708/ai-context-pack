@@ -241,6 +241,32 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun classifiesInvalidAndMissingRecoveryAcknowledgements() {
+    val filesDir = requireNotNull(inbox.parentFile)
+    val invalid = assertThrows(MetadataEventException::class.java) {
+      MetadataEventStore.ack(filesDir, "RecoveryEvents", "not-a-uuid")
+    }
+    assertEquals("METADATA_EVENT_ID_INVALID", invalid.stableCode)
+    assertEquals(true, MetadataEventStore.ack(filesDir, "RecoveryEvents", validIngestionId))
+  }
+
+  @Test
+  fun classifiesRecoveryAcknowledgementDeleteFailure() {
+    val filesDir = requireNotNull(inbox.parentFile)
+    val event = File(filesDir, "RecoveryEvents/$validIngestionId.json").apply {
+      mkdirs()
+      File(this, "child").writeText("prevents File.delete")
+    }
+
+    val error = assertThrows(MetadataEventException::class.java) {
+      MetadataEventStore.ack(filesDir, "RecoveryEvents", validIngestionId)
+    }
+
+    assertEquals("NATIVE_RECOVERY_ACK_FAILED", error.stableCode)
+    assertEquals(true, event.exists())
+  }
+
+  @Test
   fun terminalEventPublicationIsIdempotentAndRejectsConflicts() {
     val filesDir = requireNotNull(inbox.parentFile)
     val id = "523e4567-e89b-42d3-a456-426614174000"

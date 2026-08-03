@@ -22,11 +22,14 @@ public final class ContextNativeModule: Module {
         }
       } catch let error as NativeError {
         throw error
+      } catch let error as RecoveryMetadataEventError {
+        throw NativeError(error.stableCode)
       } catch {
-        throw NativeError("RECOVERY_EVENT_INVALID")
+        throw NativeError("NATIVE_EVENT_STORE_READ_FAILED")
       }
       let recovered: Bool
       do { recovered = try InboxRecoverySupport.recoverIncompleteTransactions(inbox: inbox, staging: staging, container: container) }
+      catch let error as RecoveryMetadataEventError { throw NativeError(error.stableCode) }
       catch { throw NativeError("INBOX_SCAN_FAILED") }
       if recovered { throw NativeError("INBOX_RECOVERY_REQUIRED") }
       var isDirectory: ObjCBool = false
@@ -44,14 +47,16 @@ public final class ContextNativeModule: Module {
         throw NativeError("APP_GROUP_UNAVAILABLE")
       }
       do { return try RecoveryMetadataEventStore.read(container: container, folder: "RecoveryEvents").first }
-      catch { throw NativeError("RECOVERY_EVENT_INVALID") }
+      catch let error as RecoveryMetadataEventError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("NATIVE_EVENT_STORE_READ_FAILED") }
     }
     AsyncFunction("ackRecoveryEvent") { (id: String) throws -> Bool in
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
         throw NativeError("APP_GROUP_UNAVAILABLE")
       }
       do { return try RecoveryMetadataEventStore.ack(container: container, folder: "RecoveryEvents", id: id) }
-      catch { throw NativeError("METADATA_EVENT_ID_INVALID") }
+      catch let error as RecoveryMetadataEventError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("NATIVE_RECOVERY_ACK_FAILED") }
     }
 
     AsyncFunction("recognizeText") { (fileUri: String, script: String) async throws -> [String: Any] in

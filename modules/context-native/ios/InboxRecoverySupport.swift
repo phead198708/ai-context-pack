@@ -5,6 +5,32 @@ enum InboxRecoverySupportError: Error {
   case invalidState
 }
 
+enum RecoveryMetadataEventError: Error, Equatable {
+  case invalidId
+  case schemaInvalid
+  case readFailed
+  case writeFailed
+  case acknowledgmentFailed
+
+  var stableCode: String {
+    switch self {
+    case .invalidId: "METADATA_EVENT_ID_INVALID"
+    case .schemaInvalid: "NATIVE_EVENT_SCHEMA_INVALID"
+    case .readFailed: "NATIVE_EVENT_STORE_READ_FAILED"
+    case .writeFailed: "NATIVE_EVENT_STORE_WRITE_FAILED"
+    case .acknowledgmentFailed: "NATIVE_RECOVERY_ACK_FAILED"
+    }
+  }
+}
+
+enum RecoveryMetadataOperation {
+  case write
+  case list
+  case read
+  case quarantine
+  case acknowledge
+}
+
 enum InboxRecoverySupport {
   static func recoverIncompleteTransactions(inbox: URL, staging: URL, container: URL) throws -> Bool {
     try recoverOrphanLocks(container: container)
@@ -145,7 +171,12 @@ final class TransactionRecoveryLock {
 }
 
 enum RecoveryMetadataEventStore {
-  static func persistRecovery(container: URL) throws {
+  typealias OperationHook = (RecoveryMetadataOperation) throws -> Void
+
+  static func persistRecovery(
+    container: URL,
+    operationHook: OperationHook = { _ in }
+  ) throws {
     let id = UUID().uuidString.lowercased()
     let event: [String: Any] = [
       "schemaVersion": 1,
@@ -154,45 +185,91 @@ enum RecoveryMetadataEventStore {
       "createdAtMs": Int64(Date().timeIntervalSince1970 * 1_000)
     ]
     let directory = container.appendingPathComponent("RecoveryEvents", isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
-    try data.write(to: directory.appendingPathComponent("\(id).json"), options: [.atomic])
+    do {
+      try operationHook(.write)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+      try data.write(to: directory.appendingPathComponent("\(id).json"), options: [.atomic])
+    } catch {
+      throw RecoveryMetadataEventError.writeFailed
+    }
   }
 
-  static func read(container: URL, folder: String) throws -> [[String: Any]] {
+  static func read(
+    container: URL,
+    folder: String,
+    operationHook: OperationHook = { _ in }
+  ) throws -> [[String: Any]] {
     let directory = container.appendingPathComponent(folder, isDirectory: true)
     var isDirectory: ObjCBool = false
     guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) else { return [] }
-    guard isDirectory.boolValue else { throw InboxRecoverySupportError.invalidState }
-    return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-      .filter { $0.pathExtension == "json" }
-      .map { url in
-        do {
-          let data = try Data(contentsOf: url)
-          guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                event["schemaVersion"] as? Int == 1,
-                let id = event["id"] as? String,
-                UUID(uuidString: id) != nil,
-                event["code"] as? String == "INBOX_RECOVERY_REQUIRED",
-                event["createdAtMs"] is NSNumber else {
-            throw InboxRecoverySupportError.invalidState
-          }
-          return event
-        } catch {
-          let quarantined = url.deletingPathExtension().appendingPathExtension("invalid")
-          try? FileManager.default.removeItem(at: quarantined)
-          try FileManager.default.moveItem(at: url, to: quarantined)
-          throw InboxRecoverySupportError.invalidState
-        }
+    guard isDirectory.boolValue else { throw RecoveryMetadataEventError.readFailed }
+    let files: [URL]
+    do {
+      try operationHook(.list)
+      files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+    } catch {
+      throw RecoveryMetadataEventError.readFailed
+    }
+    let events = try files.filter { $0.pathExtension == "json" }.map { url in
+      let data: Data
+      do {
+        try operationHook(.read)
+        data = try Data(contentsOf: url)
+      } catch {
+        throw RecoveryMetadataEventError.readFailed
       }
-      .sorted { ($0["createdAtMs"] as? NSNumber)?.int64Value ?? 0 < ($1["createdAtMs"] as? NSNumber)?.int64Value ?? 0 }
+      do {
+        guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              event["schemaVersion"] as? Int == 1,
+              let id = event["id"] as? String,
+              canonicalEventId(id),
+              url.deletingPathExtension().lastPathComponent == id,
+              event["code"] as? String == "INBOX_RECOVERY_REQUIRED",
+              event["createdAtMs"] is NSNumber else {
+          throw RecoveryMetadataEventError.schemaInvalid
+        }
+        return event
+      } catch {
+        let quarantined = url.deletingPathExtension().appendingPathExtension("invalid")
+        do {
+          try operationHook(.quarantine)
+          if FileManager.default.fileExists(atPath: quarantined.path) {
+            try FileManager.default.removeItem(at: quarantined)
+          }
+          try FileManager.default.moveItem(at: url, to: quarantined)
+        } catch {
+          throw RecoveryMetadataEventError.writeFailed
+        }
+        throw RecoveryMetadataEventError.schemaInvalid
+      }
+    }
+    return events.sorted {
+      ($0["createdAtMs"] as? NSNumber)?.int64Value ?? 0 <
+        ($1["createdAtMs"] as? NSNumber)?.int64Value ?? 0
+    }
   }
 
-  static func ack(container: URL, folder: String, id: String) throws -> Bool {
-    guard UUID(uuidString: id) != nil else { throw InboxRecoverySupportError.invalidState }
-    let url = container.appendingPathComponent(folder, isDirectory: true).appendingPathComponent("\(id.lowercased()).json")
+  static func ack(
+    container: URL,
+    folder: String,
+    id: String,
+    operationHook: OperationHook = { _ in }
+  ) throws -> Bool {
+    guard canonicalEventId(id) else { throw RecoveryMetadataEventError.invalidId }
+    let url = container.appendingPathComponent(folder, isDirectory: true).appendingPathComponent("\(id).json")
     guard FileManager.default.fileExists(atPath: url.path) else { return true }
-    try FileManager.default.removeItem(at: url)
+    do {
+      try operationHook(.acknowledge)
+      try FileManager.default.removeItem(at: url)
+    } catch {
+      throw RecoveryMetadataEventError.acknowledgmentFailed
+    }
     return true
+  }
+
+  private static func canonicalEventId(_ value: String) -> Bool {
+    guard let uuid = UUID(uuidString: value) else { return false }
+    return uuid.uuidString.lowercased() == value
   }
 }

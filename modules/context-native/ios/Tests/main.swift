@@ -120,9 +120,103 @@ final class InboxRecoverySupportTests: XCTestCase {
     let event = events.appendingPathComponent("broken.json")
     try Data("private-content-must-not-be-returned".utf8).write(to: event)
 
-    XCTAssertThrowsError(try RecoveryMetadataEventStore.read(container: root, folder: "RecoveryEvents"))
+    assertMetadataError(.schemaInvalid) {
+      _ = try RecoveryMetadataEventStore.read(container: root, folder: "RecoveryEvents")
+    }
     XCTAssertFalse(FileManager.default.fileExists(atPath: event.path))
     XCTAssertTrue(FileManager.default.fileExists(atPath: events.appendingPathComponent("broken.invalid").path))
+  }
+
+  func testInvalidRecoveryEventIdHasStableCode() throws {
+    assertMetadataError(.invalidId) {
+      _ = try RecoveryMetadataEventStore.ack(
+        container: root,
+        folder: "RecoveryEvents",
+        id: "not-a-uuid"
+      )
+    }
+  }
+
+  func testMissingRecoveryEventAcknowledgementIsIdempotent() throws {
+    let id = UUID().uuidString.lowercased()
+    XCTAssertTrue(try RecoveryMetadataEventStore.ack(
+      container: root,
+      folder: "RecoveryEvents",
+      id: id
+    ))
+  }
+
+  func testRecoveryEventRemoveFailureHasStableCode() throws {
+    let id = UUID().uuidString.lowercased()
+    let events = root.appendingPathComponent("RecoveryEvents", isDirectory: true)
+    try FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
+    try Data("event".utf8).write(to: events.appendingPathComponent("\(id).json"))
+
+    assertMetadataError(.acknowledgmentFailed) {
+      _ = try RecoveryMetadataEventStore.ack(
+        container: root,
+        folder: "RecoveryEvents",
+        id: id,
+        operationHook: { operation in
+          if case .acknowledge = operation { throw TestIOError.injected }
+        }
+      )
+    }
+  }
+
+  func testUnreadableRecoveryDirectoryHasStableCode() throws {
+    let events = root.appendingPathComponent("RecoveryEvents", isDirectory: true)
+    try FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
+
+    assertMetadataError(.readFailed) {
+      _ = try RecoveryMetadataEventStore.read(
+        container: root,
+        folder: "RecoveryEvents",
+        operationHook: { operation in
+          if case .list = operation { throw TestIOError.injected }
+        }
+      )
+    }
+  }
+
+  func testRecoveryEventQuarantineFailureHasStableCode() throws {
+    let events = root.appendingPathComponent("RecoveryEvents", isDirectory: true)
+    try FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
+    let event = events.appendingPathComponent("broken.json")
+    try Data("malformed".utf8).write(to: event)
+
+    assertMetadataError(.writeFailed) {
+      _ = try RecoveryMetadataEventStore.read(
+        container: root,
+        folder: "RecoveryEvents",
+        operationHook: { operation in
+          if case .quarantine = operation { throw TestIOError.injected }
+        }
+      )
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: event.path))
+  }
+
+  func testRecoveryEventWriteFailureHasStableCode() throws {
+    assertMetadataError(.writeFailed) {
+      try RecoveryMetadataEventStore.persistRecovery(
+        container: root,
+        operationHook: { operation in
+          if case .write = operation { throw TestIOError.injected }
+        }
+      )
+    }
+  }
+
+  func testRecoveryMetadataErrorCodesRemainStable() {
+    XCTAssertEqual(RecoveryMetadataEventError.invalidId.stableCode, "METADATA_EVENT_ID_INVALID")
+    XCTAssertEqual(RecoveryMetadataEventError.schemaInvalid.stableCode, "NATIVE_EVENT_SCHEMA_INVALID")
+    XCTAssertEqual(RecoveryMetadataEventError.readFailed.stableCode, "NATIVE_EVENT_STORE_READ_FAILED")
+    XCTAssertEqual(RecoveryMetadataEventError.writeFailed.stableCode, "NATIVE_EVENT_STORE_WRITE_FAILED")
+    XCTAssertEqual(
+      RecoveryMetadataEventError.acknowledgmentFailed.stableCode,
+      "NATIVE_RECOVERY_ACK_FAILED"
+    )
   }
 
   func testManifestIdentityMatchesItsSingleLayerDirectory() throws {
@@ -200,4 +294,18 @@ final class InboxRecoverySupportTests: XCTestCase {
     XCTAssertTrue(FileManager.default.createFile(atPath: lock.path, contents: Data()))
     return lock
   }
+
+  private func assertMetadataError(
+    _ expected: RecoveryMetadataEventError,
+    operation: () throws -> Void
+  ) {
+    XCTAssertThrowsError(try operation()) { error in
+      XCTAssertEqual(error as? RecoveryMetadataEventError, expected)
+      XCTAssertFalse(expected.stableCode.isEmpty)
+    }
+  }
+}
+
+private enum TestIOError: Error {
+  case injected
 }
