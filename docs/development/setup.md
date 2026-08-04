@@ -5,7 +5,7 @@ AI Context Pack uses committed native projects. Expo Go and destructive native r
 ## Required tools
 
 - Node 22.13.x-compatible pinned Node 22 (`.nvmrc` is 22.13.1).
-- Xcode 26 or newer (Swift tools 6.2+) with an iOS 16.4+ simulator runtime and CocoaPods. Expo SDK 57's `expo-modules-jsi` package cannot build with Xcode 16 / Swift 6.0.
+- Xcode 26.6 (the verified toolchain; ADR minimum is 26.4) with Swift tools 6.2+, an iOS 16.4+ simulator runtime, and CocoaPods. Xcode 26.3 cannot compile the locked Expo SDK 57 `expo-modules-jsi` package.
 - JDK 17 or 22, Android SDK Platform 36, Build Tools 36.0.0, NDK 27.1.12297006, and an API 24+ emulator/device.
 - Ruby and Bundler for the pinned CocoaPods toolchain.
 

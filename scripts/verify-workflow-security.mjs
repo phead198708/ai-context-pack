@@ -17,6 +17,14 @@ const androidNativeBuild = readFileSync(
   join(repositoryRoot, 'modules/context-native/android/build.gradle'),
   'utf8',
 );
+const developmentSetup = readFileSync(
+  join(repositoryRoot, 'docs/development/setup.md'),
+  'utf8',
+);
+const architectureDecision = readFileSync(
+  join(repositoryRoot, 'docs/adr/0001-react-native-cross-platform.md'),
+  'utf8',
+);
 const rubyVersion = readFileSync(
   join(repositoryRoot, '.ruby-version'),
   'utf8',
@@ -471,7 +479,11 @@ if (
     macosWorkflow,
   ) ||
   !macosWorkflow.includes('-xcode-26.6-ruby-3.4.9-cocoapods-download-v1-') ||
-  !macosWorkflow.includes("xcodebuild -version | grep -Fx 'Xcode 26.6'")
+  !macosWorkflow.includes("xcodebuild -version | grep -Fx 'Xcode 26.6'") ||
+  !developmentSetup.includes(
+    'Xcode 26.6 (the verified toolchain; ADR minimum is 26.4)',
+  ) ||
+  !architectureDecision.includes('- Xcode 26.4+')
 ) {
   throw new Error('WORKFLOW_XCODE_PIN_INVALID');
 }
