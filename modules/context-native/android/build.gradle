@@ -34,6 +34,13 @@ android {
   }
 }
 
+// AGP 8.12 exposes testedAbi on the managed-device DSL but does not copy it into
+// ManagedDeviceInstrumentationTestSetupTask. Keep the setup task pinned too, or
+// AGP 9 will silently change this x86_64 CI device to arm64-v8a.
+tasks.matching { task -> task.name == "ciApi35Setup" }.configureEach { task ->
+  task.testedAbi.set("x86_64")
+}
+
 dependencies {
   implementation 'com.google.mlkit:text-recognition:16.0.1'
   implementation 'com.google.mlkit:text-recognition-chinese:16.0.1'

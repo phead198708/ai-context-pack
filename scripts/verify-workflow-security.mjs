@@ -253,6 +253,7 @@ if (
   !androidNativeBuild.includes('apiLevel = 35') ||
   !androidNativeBuild.includes('systemImageSource = "aosp"') ||
   !androidNativeBuild.includes('testedAbi = "x86_64"') ||
+  !androidNativeBuild.includes('task.testedAbi.set("x86_64")') ||
   !linuxWorkflow.includes(':context-native:ciApi35DebugAndroidTest') ||
   !linuxWorkflow.includes('sudo chown "$(id -u):$(id -g)" /dev/kvm')
 ) {
