@@ -117,6 +117,9 @@ if (
 ) {
   throw new Error('WORKFLOW_RUBY_PIN_INVALID');
 }
+if (!/^  RUBYOPT: -rlogger$/m.test(macosWorkflow)) {
+  throw new Error('WORKFLOW_COCOAPODS_LOGGER_BOOT_INVALID');
+}
 if (
   !/^\s+runs-on:\s+macos-26$/m.test(macosWorkflow) ||
   !/^\s+DEVELOPER_DIR:\s+\/Applications\/Xcode_26\.6\.app\/Contents\/Developer$/m.test(

@@ -19,6 +19,7 @@ env:
   NPM_VERSION: 10.9.2
   NODE_ENV: development
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  RUBYOPT: -rlogger
 
 jobs:
   ios:
