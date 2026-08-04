@@ -17,6 +17,10 @@ const androidNativeBuild = readFileSync(
   join(repositoryRoot, 'modules/context-native/android/build.gradle'),
   'utf8',
 );
+const androidGradleProperties = readFileSync(
+  join(repositoryRoot, 'android/gradle.properties'),
+  'utf8',
+);
 const rubyVersion = readFileSync(
   join(repositoryRoot, '.ruby-version'),
   'utf8',
@@ -221,6 +225,23 @@ function assertWorkflowActions(source, name) {
   }
 }
 
+function assertWorkflowCheckNames(source, name, expectedNames) {
+  const workflow = parseWorkflow(source, name);
+  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
+  }
+  const actualNames = Object.values(workflow.jobs)
+    .map(job => (isRecord(job) ? job.name : undefined))
+    .sort();
+  const sortedExpectedNames = [...expectedNames].sort();
+  if (
+    actualNames.some(jobName => typeof jobName !== 'string') ||
+    JSON.stringify(actualNames) !== JSON.stringify(sortedExpectedNames)
+  ) {
+    throw new Error(`WORKFLOW_CHECK_NAMES_INVALID:${name}`);
+  }
+}
+
 const permissionPolicyRejectedExamples = [
   'permissions: { contents: "write" }\njobs: { test: { runs-on: ubuntu-latest } }',
   "permissions: 'write-all'\njobs: { test: { runs-on: ubuntu-latest } }",
@@ -314,23 +335,43 @@ assertWorkflowActions(
   'self-test-allowed',
 );
 
+const expectedWorkflowCheckNames = {
+  'linux.yml': [
+    'Shared',
+    'Contracts & privacy',
+    'Android',
+    'Dependency review',
+  ],
+  'macos.yml': ['iOS app & Share Extension'],
+};
+let renamedCheckRejected = false;
+try {
+  assertWorkflowCheckNames(
+    'jobs:\n  shared:\n    name: Shared checks # name: Shared\n    runs-on: ubuntu-latest\n',
+    'self-test-rejected',
+    ['Shared'],
+  );
+} catch (error) {
+  renamedCheckRejected =
+    error instanceof Error &&
+    error.message === 'WORKFLOW_CHECK_NAMES_INVALID:self-test-rejected';
+}
+if (!renamedCheckRejected) {
+  throw new Error('WORKFLOW_CHECK_NAMES_SELF_TEST_FAILED');
+}
+assertWorkflowCheckNames(
+  'jobs:\n  shared:\n    "name": Shared\n    runs-on: ubuntu-latest\n',
+  'self-test-allowed',
+  ['Shared'],
+);
+
 for (const name of workflows) {
   const workflow = readFileSync(join(workflowRoot, name), 'utf8');
   assertWorkflowSecrets(workflow, name);
   assertWorkflowPermissions(workflow, name);
   assertWorkflowTriggers(workflow, name);
   assertWorkflowActions(workflow, name);
-}
-
-for (const stableCheck of [
-  'name: Shared',
-  'name: Contracts & privacy',
-  'name: Android',
-  'name: Dependency review',
-  'name: iOS app & Share Extension',
-]) {
-  if (!all.includes(stableCheck))
-    throw new Error(`WORKFLOW_CHECK_MISSING:${stableCheck}`);
+  assertWorkflowCheckNames(workflow, name, expectedWorkflowCheckNames[name]);
 }
 if ((all.match(/retention-days:\s*7/g) ?? []).length !== 3) {
   throw new Error('WORKFLOW_ARTIFACT_RETENTION_INVALID');
@@ -402,11 +443,18 @@ if (
   throw new Error('WORKFLOW_YAML_PARSER_PIN_INVALID');
 }
 if (
+  !androidNativeBuild.includes('ciApi24 {') ||
+  !androidNativeBuild.includes('apiLevel = 24') ||
   !androidNativeBuild.includes('ciApi35 {') ||
   !androidNativeBuild.includes('apiLevel = 35') ||
   !androidNativeBuild.includes('systemImageSource = "aosp"') ||
   !androidNativeBuild.includes('testedAbi = "x86_64"') ||
+  !androidNativeBuild.includes('"ciApi24Setup", "ciApi35Setup"') ||
   !androidNativeBuild.includes('task.testedAbi.set("x86_64")') ||
+  !androidGradleProperties.includes(
+    'android.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true',
+  ) ||
+  !linuxWorkflow.includes(':context-native:ciApi24DebugAndroidTest') ||
   !linuxWorkflow.includes(':context-native:ciApi35DebugAndroidTest') ||
   !linuxWorkflow.includes('sudo chown "$(id -u):$(id -g)" /dev/kvm')
 ) {
