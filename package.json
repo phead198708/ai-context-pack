@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.86.2",
-    "expo": "57.0.9",
+    "expo": "57.0.10",
     "expo-dev-client": "57.0.10",
     "expo-sqlite": "~57.0.1",
     "expo-status-bar": "57.0.1",
