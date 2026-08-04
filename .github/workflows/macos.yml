@@ -56,6 +56,11 @@ jobs:
           xcodebuild -version | grep -Fx 'Xcode 26.6'
       - name: Install locked JavaScript dependencies
         run: npm ci
+      - name: Verify the supported iOS entry point resolves locked CocoaPods
+        run: |
+          locked_version="$(bundle exec ruby -rlogger -S pod --version)"
+          entry_point_version="$(PATH="${GITHUB_WORKSPACE}/scripts/cocoapods-bin:${PATH}" pod --version)"
+          test "${entry_point_version}" = "${locked_version}"
       - name: Run shared tests on macOS
         run: npm test -- --ci
       - name: Verify workspace-independent podspec checksums

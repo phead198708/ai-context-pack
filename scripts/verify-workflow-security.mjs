@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -21,6 +21,13 @@ const rubyVersion = readFileSync(
   join(repositoryRoot, '.ruby-version'),
   'utf8',
 ).trim();
+const cocoaPodsShimPath = join(
+  repositoryRoot,
+  'scripts',
+  'cocoapods-bin',
+  'pod',
+);
+const cocoaPodsShim = readFileSync(cocoaPodsShimPath, 'utf8');
 const workflows = readdirSync(workflowRoot)
   .filter(name => name.endsWith('.yml') || name.endsWith('.yaml'))
   .sort();
@@ -187,7 +194,18 @@ if (!all.includes('run: npm test -- --ci')) {
 }
 if (
   packageManifest.scripts?.ios !==
-    'BUNDLE_GEMFILE="$PWD/Gemfile" RUBYOPT=-rlogger expo run:ios' ||
+    'PATH="$PWD/scripts/cocoapods-bin:$PATH" BUNDLE_GEMFILE="$PWD/Gemfile" RUBYOPT=-rlogger expo run:ios' ||
+  (statSync(cocoaPodsShimPath).mode & 0o111) === 0 ||
+  !cocoaPodsShim.includes('export BUNDLE_GEMFILE="$repository_root/Gemfile"') ||
+  !cocoaPodsShim.includes(
+    `exec bundle exec ruby -rlogger -e 'load Gem.bin_path("cocoapods", "pod")' -- "$@"`,
+  ) ||
+  !macosWorkflow.includes(
+    '- name: Verify the supported iOS entry point resolves locked CocoaPods',
+  ) ||
+  !macosWorkflow.includes(
+    'entry_point_version="$(PATH="${GITHUB_WORKSPACE}/scripts/cocoapods-bin:${PATH}" pod --version)"',
+  ) ||
   !macosWorkflow.includes(
     "ruby -rfileutils -e \"FileUtils.remove_dir('ios/Pods') if Dir.exist?('ios/Pods')\"",
   ) ||

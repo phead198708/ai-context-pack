@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd)
+
+export BUNDLE_GEMFILE="$repository_root/Gemfile"
+exec bundle exec ruby -rlogger -e 'load Gem.bin_path("cocoapods", "pod")' -- "$@"
