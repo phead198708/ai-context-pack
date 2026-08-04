@@ -120,14 +120,14 @@ const allowedMacosWorkflowEnvironment = new Set([
   'NODE_ENV',
   'DEVELOPER_DIR',
 ]);
-const expectedGatedJobDigests = {
+const expectedGatedExecutionDigests = {
   'linux.yml': {
     jobId: 'android',
-    digest: '285c746c41d60d4af911bc7b1b9f3a4b3412b3bd8c862f04ead132f8a5eb10d4',
+    digest: 'b64bac1d872c9a52432d7fca81fcce8b23ae1b55b37ab8508fcbc4b0d2d02e46',
   },
   'macos.yml': {
     jobId: 'ios',
-    digest: '675fa77cc3594f718daee8c732c055974038c0d1569be4fe5f094d1f97a525f5',
+    digest: 'b39d8b1e7b596fd4ef08bbf372b209fd1b0521953098c9f5cec405772d09f5af',
   },
 };
 
@@ -149,7 +149,7 @@ function canonicalizeForDigest(value) {
   );
 }
 
-function assertGatedJobStructure(
+function assertGatedExecutionStructure(
   source,
   name,
   jobId,
@@ -164,8 +164,12 @@ function assertGatedJobStructure(
   if (!isRecord(job)) {
     throw new Error(`${gateError}:${name}:${jobId}:structure`);
   }
+  const executionStructure = {
+    workflowEnvironment: workflow.env ?? null,
+    job,
+  };
   const digest = createHash('sha256')
-    .update(JSON.stringify(canonicalizeForDigest(job)))
+    .update(JSON.stringify(canonicalizeForDigest(executionStructure)))
     .digest('hex');
   if (digest !== expectedDigest) {
     throw new Error(`${gateError}:${name}:${jobId}:structure`);
@@ -1004,13 +1008,13 @@ const gatedJobStructureCases = [
     source: linuxWorkflow,
     name: 'linux.yml',
     gateError: 'WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID',
-    ...expectedGatedJobDigests['linux.yml'],
+    ...expectedGatedExecutionDigests['linux.yml'],
   },
   {
     source: macosWorkflow,
     name: 'macos.yml',
     gateError: 'WORKFLOW_MACOS_SHARED_TEST_GATE_INVALID',
-    ...expectedGatedJobDigests['macos.yml'],
+    ...expectedGatedExecutionDigests['macos.yml'],
   },
 ];
 for (const {
@@ -1020,7 +1024,7 @@ for (const {
   digest,
   gateError,
 } of gatedJobStructureCases) {
-  assertGatedJobStructure(source, name, jobId, digest, gateError);
+  assertGatedExecutionStructure(source, name, jobId, digest, gateError);
   const mutatedWorkflow = parseWorkflow(source, `self-test-${name}`);
   const mutatedJob = isRecord(mutatedWorkflow?.jobs)
     ? mutatedWorkflow.jobs[jobId]
@@ -1031,7 +1035,7 @@ for (const {
   mutatedJob.steps.unshift(constructedRunnerEnvironmentStep);
   let constructedMutationRejected = false;
   try {
-    assertGatedJobStructure(
+    assertGatedExecutionStructure(
       JSON.stringify(mutatedWorkflow),
       `self-test-${name}`,
       jobId,
@@ -1044,6 +1048,33 @@ for (const {
       error.message === `${gateError}:self-test-${name}:${jobId}:structure`;
   }
   if (!constructedMutationRejected) {
+    throw new Error('WORKFLOW_GATED_JOB_STRUCTURE_SELF_TEST_FAILED');
+  }
+
+  const environmentMutatedWorkflow = parseWorkflow(
+    source,
+    `self-test-${name}-workflow-environment`,
+  );
+  if (!isRecord(environmentMutatedWorkflow?.env)) {
+    throw new Error('WORKFLOW_GATED_JOB_STRUCTURE_SELF_TEST_INVALID');
+  }
+  environmentMutatedWorkflow.env.NODE_VERSION = '22.13.2';
+  let inheritedEnvironmentMutationRejected = false;
+  try {
+    assertGatedExecutionStructure(
+      JSON.stringify(environmentMutatedWorkflow),
+      `self-test-${name}-workflow-environment`,
+      jobId,
+      digest,
+      gateError,
+    );
+  } catch (error) {
+    inheritedEnvironmentMutationRejected =
+      error instanceof Error &&
+      error.message ===
+        `${gateError}:self-test-${name}-workflow-environment:${jobId}:structure`;
+  }
+  if (!inheritedEnvironmentMutationRejected) {
     throw new Error('WORKFLOW_GATED_JOB_STRUCTURE_SELF_TEST_FAILED');
   }
 }
