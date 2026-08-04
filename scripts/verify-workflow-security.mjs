@@ -250,7 +250,7 @@ if (
   !/^\s+DEVELOPER_DIR:\s+\/Applications\/Xcode_26\.6\.app\/Contents\/Developer$/m.test(
     macosWorkflow,
   ) ||
-  !macosWorkflow.includes('-xcode-26.6-ruby-3.4.9-pods-') ||
+  !macosWorkflow.includes('-xcode-26.6-ruby-3.4.9-cocoapods-download-v1-') ||
   !macosWorkflow.includes("xcodebuild -version | grep -Fx 'Xcode 26.6'")
 ) {
   throw new Error('WORKFLOW_XCODE_PIN_INVALID');
