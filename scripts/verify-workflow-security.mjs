@@ -262,7 +262,12 @@ function normalizeRunCommand(command) {
   return command.trim().replace(/\s+/g, ' ');
 }
 
-function assertDefaultShellIsUnmodified(container, name, scope) {
+function assertDefaultShellIsUnmodified(
+  container,
+  name,
+  scope,
+  gateError = 'WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID',
+) {
   if (!Object.hasOwn(container, 'defaults')) return;
   if (!isRecord(container.defaults)) {
     throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}:${scope}:defaults`);
@@ -272,9 +277,7 @@ function assertDefaultShellIsUnmodified(container, name, scope) {
     throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}:${scope}:defaults:run`);
   }
   if (Object.hasOwn(container.defaults.run, 'shell')) {
-    throw new Error(
-      `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:${name}:${scope}:shell`,
-    );
+    throw new Error(`${gateError}:${name}:${scope}:shell`);
   }
 }
 
@@ -330,6 +333,62 @@ function assertAndroidInstrumentationSteps(source, name) {
           `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:${name}:${androidJobId}:steps:${stepIndex}:${property}`,
         );
       }
+    }
+  }
+}
+
+function assertMacosSharedTestStep(source, name) {
+  const workflow = parseWorkflow(source, name);
+  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
+  }
+  const gateError = 'WORKFLOW_MACOS_SHARED_TEST_GATE_INVALID';
+  assertDefaultShellIsUnmodified(workflow, name, 'workflow', gateError);
+  const iosJobs = Object.entries(workflow.jobs).filter(
+    ([, job]) => isRecord(job) && job.name === 'iOS app & Share Extension',
+  );
+  if (iosJobs.length !== 1) {
+    throw new Error(`WORKFLOW_MACOS_SHARED_TEST_MISSING:${name}:job`);
+  }
+  const [iosJobId, iosJob] = iosJobs[0];
+  for (const property of ['if', 'continue-on-error', 'needs']) {
+    if (Object.hasOwn(iosJob, property)) {
+      throw new Error(`${gateError}:${name}:${iosJobId}:${property}`);
+    }
+  }
+  assertDefaultShellIsUnmodified(iosJob, name, iosJobId, gateError);
+  if (!Array.isArray(iosJob.steps)) {
+    throw new Error(
+      `WORKFLOW_MACOS_SHARED_TEST_MISSING:${name}:${iosJobId}:steps`,
+    );
+  }
+  const matches = iosJob.steps
+    .map((step, stepIndex) => {
+      if (!isRecord(step)) {
+        throw new Error(
+          `WORKFLOW_STRUCTURE_INVALID:${name}:${iosJobId}:steps:${stepIndex}`,
+        );
+      }
+      if (!Object.hasOwn(step, 'run')) return undefined;
+      if (typeof step.run !== 'string') {
+        throw new Error(
+          `WORKFLOW_STRUCTURE_INVALID:${name}:${iosJobId}:steps:${stepIndex}:run`,
+        );
+      }
+      return { command: normalizeRunCommand(step.run), step, stepIndex };
+    })
+    .filter(runStep => runStep?.command === 'npm test -- --ci');
+  if (matches.length !== 1) {
+    throw new Error(
+      `WORKFLOW_MACOS_SHARED_TEST_MISSING:${name}:${iosJobId}:step`,
+    );
+  }
+  const [{ step, stepIndex }] = matches;
+  for (const property of ['if', 'continue-on-error', 'shell']) {
+    if (Object.hasOwn(step, property)) {
+      throw new Error(
+        `${gateError}:${name}:${iosJobId}:steps:${stepIndex}:${property}`,
+      );
     }
   }
 }
@@ -575,6 +634,108 @@ for (const [
   }
 }
 
+const macosSharedTestCommentOnlyExample = `
+jobs:
+  ios:
+    name: iOS app & Share Extension
+    runs-on: macos-latest
+    steps:
+      - run: echo no-shared-tests
+# run: npm test -- --ci
+`;
+const macosSharedTestWrongJobExample = JSON.stringify({
+  jobs: {
+    ios: {
+      name: 'iOS app & Share Extension',
+      runsOn: 'macos-latest',
+      steps: [{ run: 'echo no-shared-tests' }],
+    },
+    unrelated: {
+      name: 'Unrelated',
+      runsOn: 'ubuntu-latest',
+      steps: [{ run: 'npm test -- --ci' }],
+    },
+  },
+});
+for (const [index, example] of [
+  macosSharedTestCommentOnlyExample,
+  macosSharedTestWrongJobExample,
+].entries()) {
+  let missingMacosSharedTestRejected = false;
+  try {
+    assertMacosSharedTestStep(example, `self-test-macos-missing-${index}`);
+  } catch (error) {
+    missingMacosSharedTestRejected =
+      error instanceof Error &&
+      error.message.startsWith(
+        `WORKFLOW_MACOS_SHARED_TEST_MISSING:self-test-macos-missing-${index}:`,
+      );
+  }
+  if (!missingMacosSharedTestRejected) {
+    throw new Error('WORKFLOW_MACOS_SHARED_TEST_SELF_TEST_FAILED');
+  }
+}
+
+function macosSharedTestWorkflowWithMutation(mutate) {
+  const workflow = {
+    jobs: {
+      ios: {
+        name: 'iOS app & Share Extension',
+        runsOn: 'macos-latest',
+        steps: [{ run: 'npm test -- --ci' }],
+      },
+    },
+  };
+  mutate(workflow);
+  return JSON.stringify(workflow);
+}
+
+const macosSharedTestGateRejectedExamples = [
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.if = false;
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.needs = 'unrelated';
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios['continue-on-error'] = true;
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.defaults = { run: { shell: 'echo {0}' } };
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.defaults = { run: { shell: 'echo {0}' } };
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.steps[0].if = false;
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.steps[0]['continue-on-error'] = true;
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.steps[0].shell = 'echo {0}';
+  }),
+];
+for (const [index, example] of macosSharedTestGateRejectedExamples.entries()) {
+  let unsafeMacosSharedTestRejected = false;
+  try {
+    assertMacosSharedTestStep(example, `self-test-macos-gate-${index}`);
+  } catch (error) {
+    unsafeMacosSharedTestRejected =
+      error instanceof Error &&
+      error.message.startsWith(
+        `WORKFLOW_MACOS_SHARED_TEST_GATE_INVALID:self-test-macos-gate-${index}:`,
+      );
+  }
+  if (!unsafeMacosSharedTestRejected) {
+    throw new Error('WORKFLOW_MACOS_SHARED_TEST_GATE_SELF_TEST_FAILED');
+  }
+}
+assertMacosSharedTestStep(
+  macosSharedTestWorkflowWithMutation(() => undefined),
+  'self-test-macos-allowed',
+);
+
 for (const name of workflows) {
   const workflow = readFileSync(join(workflowRoot, name), 'utf8');
   assertWorkflowSecrets(workflow, name);
@@ -584,6 +745,7 @@ for (const name of workflows) {
   assertWorkflowCheckNames(workflow, name, expectedWorkflowCheckNames[name]);
 }
 assertAndroidInstrumentationSteps(linuxWorkflow, 'linux.yml');
+assertMacosSharedTestStep(macosWorkflow, 'macos.yml');
 if ((all.match(/retention-days:\s*7/g) ?? []).length !== 3) {
   throw new Error('WORKFLOW_ARTIFACT_RETENTION_INVALID');
 }
@@ -593,9 +755,6 @@ if (
   )
 ) {
   throw new Error('WORKFLOW_NATIVE_CACHE_KEY_INVALID');
-}
-if (!all.includes('run: npm test -- --ci')) {
-  throw new Error('WORKFLOW_MACOS_SHARED_TEST_MISSING');
 }
 if (
   packageManifest.scripts?.ios !==
