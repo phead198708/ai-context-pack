@@ -85,12 +85,26 @@ const allowedWorkflowTriggers = new Set([
   'push',
   'workflow_dispatch',
 ]);
+const immutableActionReferencePattern =
+  /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$/;
 
 function parseWorkflow(source, name) {
   try {
     return parse(source, { maxAliasCount: 0, uniqueKeys: true });
   } catch {
     throw new Error(`WORKFLOW_YAML_INVALID:${name}`);
+  }
+}
+
+function assertWorkflowSecrets(source, name) {
+  for (const forbidden of forbiddenPatterns) {
+    if (forbidden.test(source)) {
+      throw new Error(`WORKFLOW_PRIVILEGE_INVALID:${name}:${forbidden.source}`);
+    }
+  }
+  const decodedWorkflow = JSON.stringify(parseWorkflow(source, name));
+  if (/\bsecrets\b/i.test(decodedWorkflow)) {
+    throw new Error(`WORKFLOW_PRIVILEGE_INVALID:${name}:decoded-secrets`);
   }
 }
 
@@ -148,6 +162,63 @@ function assertWorkflowTriggers(source, name) {
       throw new Error(`WORKFLOW_TRIGGER_MISSING:${name}:${requiredTrigger}`);
     }
   }
+  const pullRequest = workflow.on.pull_request;
+  if (
+    pullRequest !== null &&
+    (!isRecord(pullRequest) || Object.keys(pullRequest).length !== 0)
+  ) {
+    throw new Error(`WORKFLOW_TRIGGER_SCOPE_INVALID:${name}:pull_request`);
+  }
+  const push = workflow.on.push;
+  if (
+    !isRecord(push) ||
+    Object.keys(push).length !== 1 ||
+    !Array.isArray(push.branches) ||
+    push.branches.length !== 1 ||
+    push.branches[0] !== 'main'
+  ) {
+    throw new Error(`WORKFLOW_TRIGGER_SCOPE_INVALID:${name}:push`);
+  }
+}
+
+function assertWorkflowActions(source, name) {
+  const workflow = parseWorkflow(source, name);
+  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
+  }
+  const actionReferences = [];
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    if (!isRecord(job)) {
+      throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}:${jobName}`);
+    }
+    if (Object.hasOwn(job, 'uses')) {
+      actionReferences.push(job.uses);
+    }
+    if (!Object.hasOwn(job, 'steps')) continue;
+    if (!Array.isArray(job.steps)) {
+      throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}:${jobName}:steps`);
+    }
+    for (const [stepIndex, step] of job.steps.entries()) {
+      if (!isRecord(step)) {
+        throw new Error(
+          `WORKFLOW_STRUCTURE_INVALID:${name}:${jobName}:steps:${stepIndex}`,
+        );
+      }
+      if (Object.hasOwn(step, 'uses')) {
+        actionReferences.push(step.uses);
+      }
+    }
+  }
+  if (
+    actionReferences.length === 0 ||
+    actionReferences.some(
+      value =>
+        typeof value !== 'string' ||
+        !immutableActionReferencePattern.test(value),
+    )
+  ) {
+    throw new Error(`WORKFLOW_ACTION_NOT_SHA_PINNED:${name}`);
+  }
 }
 
 const permissionPolicyRejectedExamples = [
@@ -175,8 +246,10 @@ assertWorkflowPermissions(
 );
 
 const triggerPolicyRejectedExamples = [
-  'on:\n  pull_request:\n  push:\n  "pull_request_target":\n',
+  'on:\n  pull_request:\n  push: { branches: [main] }\n  "pull_request_target":\n',
   'on:\n  pull_request:\n  workflow_dispatch:\n',
+  'on:\n  pull_request: { branches: [release-only] }\n  push: { branches: [main] }\n',
+  'on:\n  pull_request:\n  push: { branches: [release-only] }\n',
 ];
 for (const [index, example] of triggerPolicyRejectedExamples.entries()) {
   let rejectedByTriggerPolicy = false;
@@ -186,32 +259,67 @@ for (const [index, example] of triggerPolicyRejectedExamples.entries()) {
     rejectedByTriggerPolicy =
       error instanceof Error &&
       (error.message.startsWith('WORKFLOW_TRIGGER_INVALID:') ||
-        error.message.startsWith('WORKFLOW_TRIGGER_MISSING:'));
+        error.message.startsWith('WORKFLOW_TRIGGER_MISSING:') ||
+        error.message.startsWith('WORKFLOW_TRIGGER_SCOPE_INVALID:'));
   }
   if (!rejectedByTriggerPolicy) {
     throw new Error('WORKFLOW_TRIGGER_POLICY_SELF_TEST_FAILED');
   }
 }
 assertWorkflowTriggers(
-  'on:\n  pull_request:\n  push:\n  workflow_dispatch:\n',
+  'on:\n  pull_request:\n  push: { branches: [main] }\n  workflow_dispatch:\n',
   'self-test-allowed',
 );
 
-for (const forbidden of forbiddenPatterns) {
-  if (forbidden.test(all))
-    throw new Error(`WORKFLOW_PRIVILEGE_INVALID:${forbidden.source}`);
+const decodedSecretPolicyExample =
+  'jobs:\n  test:\n    steps:\n      - run: "${{ secr\\u0065ts.TOKEN }}"\n';
+if (
+  forbiddenPatterns.some(pattern => pattern.test(decodedSecretPolicyExample))
+) {
+  throw new Error('WORKFLOW_SECRET_DECODED_SELF_TEST_INVALID');
 }
+let decodedSecretRejected = false;
+try {
+  assertWorkflowSecrets(decodedSecretPolicyExample, 'self-test-rejected');
+} catch (error) {
+  decodedSecretRejected =
+    error instanceof Error &&
+    error.message ===
+      'WORKFLOW_PRIVILEGE_INVALID:self-test-rejected:decoded-secrets';
+}
+if (!decodedSecretRejected) {
+  throw new Error('WORKFLOW_SECRET_DECODED_SELF_TEST_FAILED');
+}
+
+const actionPolicyRejectedExamples = [
+  'jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - "uses": owner/action@main\n',
+  'jobs:\n  test:\n    uses: owner/action@main@0123456789abcdef0123456789abcdef01234567\n',
+];
+for (const [index, example] of actionPolicyRejectedExamples.entries()) {
+  let mutableActionRejected = false;
+  try {
+    assertWorkflowActions(example, `self-test-rejected-${index}`);
+  } catch (error) {
+    mutableActionRejected =
+      error instanceof Error &&
+      error.message ===
+        `WORKFLOW_ACTION_NOT_SHA_PINNED:self-test-rejected-${index}`;
+  }
+  if (!mutableActionRejected) {
+    throw new Error('WORKFLOW_ACTION_POLICY_SELF_TEST_FAILED');
+  }
+}
+assertWorkflowActions(
+  'jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - "uses": owner/action@0123456789abcdef0123456789abcdef01234567\n',
+  'self-test-allowed',
+);
 
 for (const name of workflows) {
   const workflow = readFileSync(join(workflowRoot, name), 'utf8');
+  assertWorkflowSecrets(workflow, name);
   assertWorkflowPermissions(workflow, name);
   assertWorkflowTriggers(workflow, name);
-  const uses = [...workflow.matchAll(/uses:\s+([^\s#]+)/g)].map(
-    match => match[1],
-  );
-  if (uses.length === 0 || uses.some(value => !/@[0-9a-f]{40}$/.test(value))) {
-    throw new Error(`WORKFLOW_ACTION_NOT_SHA_PINNED:${name}`);
-  }
+  assertWorkflowActions(workflow, name);
 }
 
 for (const stableCheck of [
