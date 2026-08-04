@@ -40,7 +40,6 @@ const all = workflows
   .map(name => readFileSync(join(workflowRoot, name), 'utf8'))
   .join('\n');
 const forbiddenPatterns = [
-  /pull_request_target\s*:/,
   /\bsecrets\s*\./i,
   /\bsecrets\s*\[/i,
   /\bsecrets\s*:\s*inherit\b/i,
@@ -81,6 +80,19 @@ const permissionScopes = new Set([
 ]);
 const isRecord = value =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+const allowedWorkflowTriggers = new Set([
+  'pull_request',
+  'push',
+  'workflow_dispatch',
+]);
+
+function parseWorkflow(source, name) {
+  try {
+    return parse(source, { maxAliasCount: 0, uniqueKeys: true });
+  } catch {
+    throw new Error(`WORKFLOW_YAML_INVALID:${name}`);
+  }
+}
 
 function assertPermissionMapping(permissions, location, root = false) {
   if (!isRecord(permissions)) {
@@ -106,12 +118,7 @@ function assertPermissionMapping(permissions, location, root = false) {
 }
 
 function assertWorkflowPermissions(source, name) {
-  let workflow;
-  try {
-    workflow = parse(source, { maxAliasCount: 0, uniqueKeys: true });
-  } catch {
-    throw new Error(`WORKFLOW_YAML_INVALID:${name}`);
-  }
+  const workflow = parseWorkflow(source, name);
   if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
     throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
   }
@@ -122,6 +129,23 @@ function assertWorkflowPermissions(source, name) {
     }
     if (Object.hasOwn(job, 'permissions')) {
       assertPermissionMapping(job.permissions, `${name}:${jobName}`);
+    }
+  }
+}
+
+function assertWorkflowTriggers(source, name) {
+  const workflow = parseWorkflow(source, name);
+  if (!isRecord(workflow) || !isRecord(workflow.on)) {
+    throw new Error(`WORKFLOW_TRIGGER_INVALID:${name}`);
+  }
+  for (const trigger of Object.keys(workflow.on)) {
+    if (!allowedWorkflowTriggers.has(trigger)) {
+      throw new Error(`WORKFLOW_TRIGGER_INVALID:${name}:${trigger}`);
+    }
+  }
+  for (const requiredTrigger of ['pull_request', 'push']) {
+    if (!Object.hasOwn(workflow.on, requiredTrigger)) {
+      throw new Error(`WORKFLOW_TRIGGER_MISSING:${name}:${requiredTrigger}`);
     }
   }
 }
@@ -150,6 +174,29 @@ assertWorkflowPermissions(
   'self-test-allowed',
 );
 
+const triggerPolicyRejectedExamples = [
+  'on:\n  pull_request:\n  push:\n  "pull_request_target":\n',
+  'on:\n  pull_request:\n  workflow_dispatch:\n',
+];
+for (const [index, example] of triggerPolicyRejectedExamples.entries()) {
+  let rejectedByTriggerPolicy = false;
+  try {
+    assertWorkflowTriggers(example, `self-test-rejected-${index}`);
+  } catch (error) {
+    rejectedByTriggerPolicy =
+      error instanceof Error &&
+      (error.message.startsWith('WORKFLOW_TRIGGER_INVALID:') ||
+        error.message.startsWith('WORKFLOW_TRIGGER_MISSING:'));
+  }
+  if (!rejectedByTriggerPolicy) {
+    throw new Error('WORKFLOW_TRIGGER_POLICY_SELF_TEST_FAILED');
+  }
+}
+assertWorkflowTriggers(
+  'on:\n  pull_request:\n  push:\n  workflow_dispatch:\n',
+  'self-test-allowed',
+);
+
 for (const forbidden of forbiddenPatterns) {
   if (forbidden.test(all))
     throw new Error(`WORKFLOW_PRIVILEGE_INVALID:${forbidden.source}`);
@@ -158,9 +205,7 @@ for (const forbidden of forbiddenPatterns) {
 for (const name of workflows) {
   const workflow = readFileSync(join(workflowRoot, name), 'utf8');
   assertWorkflowPermissions(workflow, name);
-  if (!/^  pull_request:$/m.test(workflow) || !/^  push:$/m.test(workflow)) {
-    throw new Error(`WORKFLOW_TRIGGER_MISSING:${name}`);
-  }
+  assertWorkflowTriggers(workflow, name);
   const uses = [...workflow.matchAll(/uses:\s+([^\s#]+)/g)].map(
     match => match[1],
   );
