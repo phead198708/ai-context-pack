@@ -6,7 +6,7 @@
   "scripts": {
     "android": "expo run:android",
     "doctor": "expo-doctor",
-    "ios": "expo run:ios",
+    "ios": "RUBYOPT=-rlogger expo run:ios",
     "lint": "eslint .",
     "test:fixtures": "node scripts/verify-fixtures.mjs",
     "test:persistence-migrations": "node scripts/verify-persistence-migrations.mjs",
@@ -48,7 +48,8 @@
     "jest": "29.7.0",
     "prettier": "2.8.8",
     "react-test-renderer": "19.2.3",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "yaml": "2.9.0"
   },
   "engines": {
     "node": "^22.13.0"

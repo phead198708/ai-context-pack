@@ -72,22 +72,26 @@ jobs:
           ios/AIContextPack/PrivacyInfo.xcprivacy
       - name: Run Swift XCTest package
         run: swift test --package-path modules/context-native/ios
-      - name: Build main app and embedded Share Extension without signing
+      - name: Remove Pods to exercise the supported clean-checkout entry point
+        run: |
+          ruby -rfileutils -e "FileUtils.remove_dir('ios/Pods') if Dir.exist?('ios/Pods')"
+          test ! -e ios/Pods
+      - name: Build main app and embedded Share Extension through npm run ios
         run: >-
-          xcodebuild
-          -workspace ios/AIContextPack.xcworkspace
-          -scheme AIContextPack
-          -configuration Debug
-          -destination 'generic/platform=iOS Simulator'
-          -derivedDataPath "${RUNNER_TEMP}/DerivedData"
-          -resultBundlePath "${RUNNER_TEMP}/AIContextPack.xcresult"
-          CODE_SIGNING_ALLOWED=NO
-          build
+          npm run ios --
+          --no-bundler
+          --no-build-cache
+          --device generic
+          --output "${RUNNER_TEMP}/expo-ios-build"
+      - name: Verify Expo build products
+        run: |
+          test -d "${RUNNER_TEMP}/expo-ios-build/AIContextPack.app"
+          test -d "${RUNNER_TEMP}/expo-ios-build/AIContextPack.app/PlugIns/ShareExtension.appex"
       - name: Upload synthetic unsigned iOS build report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ios-synthetic-build-report
-          path: ${{ runner.temp }}/AIContextPack.xcresult
+          path: ${{ runner.temp }}/expo-ios-build/
           if-no-files-found: ignore
           retention-days: 7

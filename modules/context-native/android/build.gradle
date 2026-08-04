@@ -19,6 +19,18 @@ android {
       file("${rootProject.projectDir}/../fixtures/contracts"),
     ]
   }
+  testOptions {
+    managedDevices {
+      localDevices {
+        ciApi35 {
+          device = "Pixel 2"
+          apiLevel = 35
+          systemImageSource = "aosp"
+          require64Bit = true
+        }
+      }
+    }
+  }
 }
 
 dependencies {

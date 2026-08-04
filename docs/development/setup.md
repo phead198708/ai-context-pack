@@ -28,14 +28,17 @@ npm run test:workflows
 Build without committing signing data:
 
 ```sh
-xcodebuild -workspace ios/AIContextPack.xcworkspace -scheme AIContextPack -configuration Debug -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build
+npm run ios -- --no-bundler --device generic --output ./build/ios
 ./android/gradlew -p android :app:testDebugUnitTest :context-native:testDebugUnitTest :app:assembleDebug
 
-# With an API 35+ emulator/device attached, execute the real text/scanned PDF fixtures.
+# Provision the CI-equivalent API 35 device automatically when host virtualization is available.
+./android/gradlew -p android -PreactNativeArchitectures=x86_64 :context-native:ciApi35DebugAndroidTest
+
+# Or use an attached API 35+ emulator/device.
 ./android/gradlew -p android :context-native:connectedDebugAndroidTest
 ```
 
-Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go.
+Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go. The iOS script preloads Ruby's standard `logger` library for every Expo/CocoaPods child process; do not replace it with a bare `expo run:ios` invocation while ActiveSupport 6.1 remains locked.
 
 Expo Doctor's app-config synchronization check is intentionally disabled in `package.json`: this repository commits and reviews its native projects, and every native field (including the URL scheme) must be mirrored explicitly instead of regenerated with Prebuild.
 
