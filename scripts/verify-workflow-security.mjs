@@ -186,7 +186,8 @@ if (!all.includes('run: npm test -- --ci')) {
   throw new Error('WORKFLOW_MACOS_SHARED_TEST_MISSING');
 }
 if (
-  packageManifest.scripts?.ios !== 'RUBYOPT=-rlogger expo run:ios' ||
+  packageManifest.scripts?.ios !==
+    'BUNDLE_GEMFILE="$PWD/Gemfile" RUBYOPT=-rlogger expo run:ios' ||
   !macosWorkflow.includes(
     "ruby -rfileutils -e \"FileUtils.remove_dir('ios/Pods') if Dir.exist?('ios/Pods')\"",
   ) ||

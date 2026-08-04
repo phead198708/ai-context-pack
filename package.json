@@ -6,7 +6,7 @@
   "scripts": {
     "android": "expo run:android",
     "doctor": "expo-doctor",
-    "ios": "RUBYOPT=-rlogger expo run:ios",
+    "ios": "BUNDLE_GEMFILE=\"$PWD/Gemfile\" RUBYOPT=-rlogger expo run:ios",
     "lint": "eslint .",
     "test:fixtures": "node scripts/verify-fixtures.mjs",
     "test:persistence-migrations": "node scripts/verify-persistence-migrations.mjs",

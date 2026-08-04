@@ -38,7 +38,7 @@ npm run ios -- --no-bundler --device generic --output ./build/ios
 ./android/gradlew -p android :context-native:connectedDebugAndroidTest
 ```
 
-Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go. The iOS script preloads Ruby's standard `logger` library for every Expo/CocoaPods child process; do not replace it with a bare `expo run:ios` invocation while ActiveSupport 6.1 remains locked.
+Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go. The iOS script gives every Expo/CocoaPods child process the repository's absolute `BUNDLE_GEMFILE` and preloads Ruby's standard `logger` library. This keeps Expo on the CocoaPods version in `Gemfile.lock` even after Expo changes its working directory to `ios/`; do not replace the script with a bare `expo run:ios` invocation while this toolchain remains locked.
 
 Expo Doctor's app-config synchronization check is intentionally disabled in `package.json`: this repository commits and reviews its native projects, and every native field (including the URL scheme) must be mirrored explicitly instead of regenerated with Prebuild.
 
