@@ -107,6 +107,18 @@ const expectedAndroidInstrumentationRunCommands = [
   'scripts/run-android-api24-instrumentation.sh',
   './android/gradlew -p android --no-daemon --stacktrace -PreactNativeArchitectures=x86_64 :context-native:ciApi34DebugAndroidTest :context-native:ciApi35DebugAndroidTest',
 ];
+const allowedLinuxWorkflowEnvironment = new Set([
+  'NODE_VERSION',
+  'NPM_VERSION',
+  'JAVA_VERSION',
+  'NODE_ENV',
+]);
+const allowedMacosWorkflowEnvironment = new Set([
+  'NODE_VERSION',
+  'NPM_VERSION',
+  'NODE_ENV',
+  'DEVELOPER_DIR',
+]);
 
 function parseWorkflow(source, name) {
   try {
@@ -283,12 +295,38 @@ function assertDefaultRunContextIsUnmodified(
   }
 }
 
+function assertRunEnvironmentIsSafe(
+  container,
+  name,
+  scope,
+  gateError,
+  allowedKeys = new Set(),
+) {
+  if (!Object.hasOwn(container, 'env')) return;
+  if (!isRecord(container.env)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}:${scope}:env`);
+  }
+  for (const key of Object.keys(container.env)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(`${gateError}:${name}:${scope}:env:${key}`);
+    }
+  }
+}
+
 function assertAndroidInstrumentationSteps(source, name) {
   const workflow = parseWorkflow(source, name);
   if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
     throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
   }
+  const gateError = 'WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID';
   assertDefaultRunContextIsUnmodified(workflow, name, 'workflow');
+  assertRunEnvironmentIsSafe(
+    workflow,
+    name,
+    'workflow',
+    gateError,
+    allowedLinuxWorkflowEnvironment,
+  );
   const androidJobs = Object.entries(workflow.jobs).filter(
     ([, job]) => isRecord(job) && job.name === 'Android',
   );
@@ -296,14 +334,23 @@ function assertAndroidInstrumentationSteps(source, name) {
     throw new Error(`WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:job`);
   }
   const [androidJobId, androidJob] = androidJobs[0];
-  for (const property of ['if', 'continue-on-error', 'needs']) {
+  if (androidJob['runs-on'] !== 'ubuntu-24.04') {
+    throw new Error(`${gateError}:${name}:${androidJobId}:runs-on`);
+  }
+  for (const property of [
+    'if',
+    'continue-on-error',
+    'needs',
+    'strategy',
+    'container',
+    'services',
+  ]) {
     if (Object.hasOwn(androidJob, property)) {
-      throw new Error(
-        `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:${name}:${androidJobId}:${property}`,
-      );
+      throw new Error(`${gateError}:${name}:${androidJobId}:${property}`);
     }
   }
   assertDefaultRunContextIsUnmodified(androidJob, name, androidJobId);
+  assertRunEnvironmentIsSafe(androidJob, name, androidJobId, gateError);
   if (!Array.isArray(androidJob.steps)) {
     throw new Error(
       `WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:${androidJobId}:steps`,
@@ -341,6 +388,12 @@ function assertAndroidInstrumentationSteps(source, name) {
         );
       }
     }
+    assertRunEnvironmentIsSafe(
+      step,
+      name,
+      `${androidJobId}:steps:${stepIndex}`,
+      gateError,
+    );
   }
 }
 
@@ -351,6 +404,13 @@ function assertMacosSharedTestStep(source, name) {
   }
   const gateError = 'WORKFLOW_MACOS_SHARED_TEST_GATE_INVALID';
   assertDefaultRunContextIsUnmodified(workflow, name, 'workflow', gateError);
+  assertRunEnvironmentIsSafe(
+    workflow,
+    name,
+    'workflow',
+    gateError,
+    allowedMacosWorkflowEnvironment,
+  );
   const iosJobs = Object.entries(workflow.jobs).filter(
     ([, job]) => isRecord(job) && job.name === 'iOS app & Share Extension',
   );
@@ -358,12 +418,23 @@ function assertMacosSharedTestStep(source, name) {
     throw new Error(`WORKFLOW_MACOS_SHARED_TEST_MISSING:${name}:job`);
   }
   const [iosJobId, iosJob] = iosJobs[0];
-  for (const property of ['if', 'continue-on-error', 'needs']) {
+  if (iosJob['runs-on'] !== 'macos-26') {
+    throw new Error(`${gateError}:${name}:${iosJobId}:runs-on`);
+  }
+  for (const property of [
+    'if',
+    'continue-on-error',
+    'needs',
+    'strategy',
+    'container',
+    'services',
+  ]) {
     if (Object.hasOwn(iosJob, property)) {
       throw new Error(`${gateError}:${name}:${iosJobId}:${property}`);
     }
   }
   assertDefaultRunContextIsUnmodified(iosJob, name, iosJobId, gateError);
+  assertRunEnvironmentIsSafe(iosJob, name, iosJobId, gateError);
   if (!Array.isArray(iosJob.steps)) {
     throw new Error(
       `WORKFLOW_MACOS_SHARED_TEST_MISSING:${name}:${iosJobId}:steps`,
@@ -403,6 +474,12 @@ function assertMacosSharedTestStep(source, name) {
       );
     }
   }
+  assertRunEnvironmentIsSafe(
+    step,
+    name,
+    `${iosJobId}:steps:${stepIndex}`,
+    gateError,
+  );
 }
 
 const permissionPolicyRejectedExamples = [
@@ -532,7 +609,7 @@ const androidInstrumentationCommentOnlyExample = `
 jobs:
   android:
     name: Android
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - run: echo no-instrumentation
 ${expectedAndroidInstrumentationRunCommands
@@ -543,7 +620,7 @@ const androidInstrumentationWrongJobExample = JSON.stringify({
   jobs: {
     android: {
       name: 'Android',
-      runsOn: 'ubuntu-latest',
+      'runs-on': 'ubuntu-24.04',
       steps: [{ run: 'echo no-instrumentation' }],
     },
     unrelated: {
@@ -576,7 +653,7 @@ assertAndroidInstrumentationSteps(
     jobs: {
       android: {
         name: 'Android',
-        runsOn: 'ubuntu-latest',
+        'runs-on': 'ubuntu-24.04',
         steps: expectedAndroidInstrumentationRunCommands.map(run => ({ run })),
       },
     },
@@ -589,7 +666,7 @@ function instrumentationWorkflowWithMutation(mutate) {
     jobs: {
       android: {
         name: 'Android',
-        runsOn: 'ubuntu-latest',
+        'runs-on': 'ubuntu-24.04',
         steps: expectedAndroidInstrumentationRunCommands.map(run => ({ run })),
       },
     },
@@ -600,6 +677,9 @@ function instrumentationWorkflowWithMutation(mutate) {
 
 const androidInstrumentationGateRejectedExamples = [
   instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android['runs-on'] = 'self-hosted';
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
     workflow.jobs.android.if = false;
   }),
   instrumentationWorkflowWithMutation(workflow => {
@@ -607,6 +687,23 @@ const androidInstrumentationGateRejectedExamples = [
   }),
   instrumentationWorkflowWithMutation(workflow => {
     workflow.jobs.android.needs = 'dependency-review';
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.strategy = { matrix: { include: [] } };
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.container = 'untrusted/image:latest';
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.services = { fake: { image: 'fake:latest' } };
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.env = { BASH_ENV: './nested/change-directory.sh' };
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.env = {
+      BASH_ENV: './nested/change-directory.sh',
+    };
   }),
   instrumentationWorkflowWithMutation(workflow => {
     workflow.defaults = { run: { shell: 'echo {0}' } };
@@ -633,6 +730,11 @@ const androidInstrumentationGateRejectedExamples = [
   }),
   instrumentationWorkflowWithMutation(workflow => {
     workflow.jobs.android.steps[0]['working-directory'] = 'nested';
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.steps[0].env = {
+      BASH_ENV: './nested/change-directory.sh',
+    };
   }),
 ];
 for (const [
@@ -661,7 +763,7 @@ const macosSharedTestCommentOnlyExample = `
 jobs:
   ios:
     name: iOS app & Share Extension
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - run: echo no-shared-tests
 # run: npm test -- --ci
@@ -670,7 +772,7 @@ const macosSharedTestWrongJobExample = JSON.stringify({
   jobs: {
     ios: {
       name: 'iOS app & Share Extension',
-      runsOn: 'macos-latest',
+      'runs-on': 'macos-26',
       steps: [{ run: 'echo no-shared-tests' }],
     },
     unrelated: {
@@ -704,7 +806,7 @@ function macosSharedTestWorkflowWithMutation(mutate) {
     jobs: {
       ios: {
         name: 'iOS app & Share Extension',
-        runsOn: 'macos-latest',
+        'runs-on': 'macos-26',
         steps: [{ run: 'npm test -- --ci' }],
       },
     },
@@ -715,6 +817,9 @@ function macosSharedTestWorkflowWithMutation(mutate) {
 
 const macosSharedTestGateRejectedExamples = [
   macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios['runs-on'] = 'self-hosted';
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
     workflow.jobs.ios.if = false;
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
@@ -722,6 +827,21 @@ const macosSharedTestGateRejectedExamples = [
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
     workflow.jobs.ios['continue-on-error'] = true;
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.strategy = { matrix: { include: [] } };
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.container = 'untrusted/image:latest';
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.services = { fake: { image: 'fake:latest' } };
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.env = { BASH_ENV: './nested/change-directory.sh' };
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.env = { BASH_ENV: './nested/change-directory.sh' };
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
     workflow.defaults = { run: { shell: 'echo {0}' } };
@@ -746,6 +866,11 @@ const macosSharedTestGateRejectedExamples = [
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
     workflow.jobs.ios.steps[0]['working-directory'] = 'nested';
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.steps[0].env = {
+      BASH_ENV: './nested/change-directory.sh',
+    };
   }),
 ];
 for (const [index, example] of macosSharedTestGateRejectedExamples.entries()) {
