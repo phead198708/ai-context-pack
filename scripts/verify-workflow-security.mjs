@@ -457,6 +457,7 @@ if (
   !linuxWorkflow.includes(
     '"${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"',
   ) ||
+  !linuxWorkflow.includes('"emulator"') ||
   !linuxWorkflow.includes('"system-images;android-24;default;x86_64"') ||
   !linuxWorkflow.includes(':context-native:ciApi24DebugAndroidTest') ||
   !linuxWorkflow.includes(':context-native:ciApi35DebugAndroidTest') ||
