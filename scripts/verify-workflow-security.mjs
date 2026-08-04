@@ -262,11 +262,28 @@ function normalizeRunCommand(command) {
   return command.trim().replace(/\s+/g, ' ');
 }
 
+function assertDefaultShellIsUnmodified(container, name, scope) {
+  if (!Object.hasOwn(container, 'defaults')) return;
+  if (!isRecord(container.defaults)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}:${scope}:defaults`);
+  }
+  if (!Object.hasOwn(container.defaults, 'run')) return;
+  if (!isRecord(container.defaults.run)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}:${scope}:defaults:run`);
+  }
+  if (Object.hasOwn(container.defaults.run, 'shell')) {
+    throw new Error(
+      `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:${name}:${scope}:shell`,
+    );
+  }
+}
+
 function assertAndroidInstrumentationSteps(source, name) {
   const workflow = parseWorkflow(source, name);
   if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
     throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
   }
+  assertDefaultShellIsUnmodified(workflow, name, 'workflow');
   const androidJobs = Object.entries(workflow.jobs).filter(
     ([, job]) => isRecord(job) && job.name === 'Android',
   );
@@ -274,12 +291,20 @@ function assertAndroidInstrumentationSteps(source, name) {
     throw new Error(`WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:job`);
   }
   const [androidJobId, androidJob] = androidJobs[0];
+  for (const property of ['if', 'continue-on-error']) {
+    if (Object.hasOwn(androidJob, property)) {
+      throw new Error(
+        `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:${name}:${androidJobId}:${property}`,
+      );
+    }
+  }
+  assertDefaultShellIsUnmodified(androidJob, name, androidJobId);
   if (!Array.isArray(androidJob.steps)) {
     throw new Error(
       `WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:${androidJobId}:steps`,
     );
   }
-  const runCommands = androidJob.steps.map((step, stepIndex) => {
+  const runSteps = androidJob.steps.map((step, stepIndex) => {
     if (!isRecord(step)) {
       throw new Error(
         `WORKFLOW_STRUCTURE_INVALID:${name}:${androidJobId}:steps:${stepIndex}`,
@@ -291,14 +316,21 @@ function assertAndroidInstrumentationSteps(source, name) {
         `WORKFLOW_STRUCTURE_INVALID:${name}:${androidJobId}:steps:${stepIndex}:run`,
       );
     }
-    return normalizeRunCommand(step.run);
+    return { command: normalizeRunCommand(step.run), step, stepIndex };
   });
-  if (
-    expectedAndroidInstrumentationRunCommands.some(
-      command => !runCommands.includes(command),
-    )
-  ) {
-    throw new Error(`WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:steps`);
+  for (const command of expectedAndroidInstrumentationRunCommands) {
+    const matches = runSteps.filter(runStep => runStep?.command === command);
+    if (matches.length !== 1) {
+      throw new Error(`WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:steps`);
+    }
+    const [{ step, stepIndex }] = matches;
+    for (const property of ['if', 'continue-on-error', 'shell']) {
+      if (Object.hasOwn(step, property)) {
+        throw new Error(
+          `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:${name}:${androidJobId}:steps:${stepIndex}:${property}`,
+        );
+      }
+    }
   }
 }
 
@@ -480,6 +512,65 @@ assertAndroidInstrumentationSteps(
   }),
   'self-test-allowed',
 );
+
+function instrumentationWorkflowWithMutation(mutate) {
+  const workflow = {
+    jobs: {
+      android: {
+        name: 'Android',
+        runsOn: 'ubuntu-latest',
+        steps: expectedAndroidInstrumentationRunCommands.map(run => ({ run })),
+      },
+    },
+  };
+  mutate(workflow);
+  return JSON.stringify(workflow);
+}
+
+const androidInstrumentationGateRejectedExamples = [
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.if = false;
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android['continue-on-error'] = true;
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.defaults = { run: { shell: 'echo {0}' } };
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.defaults = { run: { shell: 'echo {0}' } };
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.steps[0].if = false;
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.steps[0]['continue-on-error'] = true;
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.steps[0].shell = 'echo {0}';
+  }),
+];
+for (const [
+  index,
+  example,
+] of androidInstrumentationGateRejectedExamples.entries()) {
+  let unsafeGateRejected = false;
+  try {
+    assertAndroidInstrumentationSteps(
+      example,
+      `self-test-unsafe-gate-${index}`,
+    );
+  } catch (error) {
+    unsafeGateRejected =
+      error instanceof Error &&
+      error.message.startsWith(
+        `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:self-test-unsafe-gate-${index}:`,
+      );
+  }
+  if (!unsafeGateRejected) {
+    throw new Error('WORKFLOW_ANDROID_INSTRUMENTATION_GATE_SELF_TEST_FAILED');
+  }
+}
 
 for (const name of workflows) {
   const workflow = readFileSync(join(workflowRoot, name), 'utf8');
