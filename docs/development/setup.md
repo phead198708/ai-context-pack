@@ -16,7 +16,7 @@ Set `ANDROID_HOME` (and, if required by your shell, `ANDROID_SDK_ROOT`) to the i
 ```sh
 npm ci
 bundle install
-RUBYOPT=-rlogger bundle exec pod install --project-directory=ios
+bundle exec ruby -rlogger -S pod install --project-directory=ios
 npm run typecheck
 npm run lint
 npm run format:check

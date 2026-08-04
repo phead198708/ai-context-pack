@@ -98,10 +98,17 @@ if (!all.includes('run: npm test -- --ci')) {
 }
 if (
   !all.includes(
-    'run: bundle exec ruby -rcocoapods scripts/verify-podspec-checksum.rb',
+    'run: bundle exec ruby -rlogger -rcocoapods scripts/verify-podspec-checksum.rb',
   )
 ) {
   throw new Error('WORKFLOW_PODSPEC_CHECKSUM_TEST_MISSING');
+}
+if (
+  !all.includes(
+    'run: bundle exec ruby -rlogger -S pod install --project-directory=ios --deployment',
+  )
+) {
+  throw new Error('WORKFLOW_COCOAPODS_LOGGER_BOOT_INVALID');
 }
 if (
   packageManifest.devDependencies?.['expo-doctor'] !== '1.20.1' ||
@@ -116,9 +123,6 @@ if (
   !/^\s+ruby-version:\s+3\.4\.9$/m.test(macosWorkflow)
 ) {
   throw new Error('WORKFLOW_RUBY_PIN_INVALID');
-}
-if (!/^  RUBYOPT: -rlogger$/m.test(macosWorkflow)) {
-  throw new Error('WORKFLOW_COCOAPODS_LOGGER_BOOT_INVALID');
 }
 if (
   !/^\s+runs-on:\s+macos-26$/m.test(macosWorkflow) ||
