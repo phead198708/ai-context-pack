@@ -2431,7 +2431,7 @@ SPEC CHECKSUMS:
   ExpoFont: 17668fb7b4e06edf35e015183eb7bc09d83be637
   ExpoKeepAwake: 20a87dafdd9d84d68673e8eaf1a1c7eed8f92659
   ExpoLogBox: 40f17ecef6fcb296b5f5ee4d6ec85cc82ce6ba0f
-  ExpoModulesCore: e8bc7c713377f8a0f26b18f48a30a06768d2d02f
+  ExpoModulesCore: f6b86657d1ed7c738d9ab2432d125637a3e49690
   ExpoModulesJSI: 6cb6d299ace493e7dd20ba94c99e8c4799b07afd
   ExpoModulesWorklets: 9ea512d97f44f89ef40f647f1f332b4643cca62b
   ExpoSQLite: b4b265ea48e563c08cf40931587f4b962b4a8941
@@ -2511,7 +2511,7 @@ SPEC CHECKSUMS:
   ReactCodegen: bb259ec28a456704be0a3485e93096a497a29917
   ReactCommon: 00d8d68c7aa036745334d3a3844102ecd9bf099d
   ReactNativeDependencies: 2bd6854ade79bf1b60586d1ab7813a389df1b6bf
-  Yoga: 8cf9dd9fc7761e176a3361b4821d26d11cfbeab1
+  Yoga: 9891cfb1c680f64de9c41b09e7453dea33454d2b
 
 PODFILE CHECKSUM: 65de3cedd456b14038314c1cfc5f3a09bdbf6e72
 
