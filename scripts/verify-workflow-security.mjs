@@ -291,7 +291,7 @@ function assertAndroidInstrumentationSteps(source, name) {
     throw new Error(`WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:job`);
   }
   const [androidJobId, androidJob] = androidJobs[0];
-  for (const property of ['if', 'continue-on-error']) {
+  for (const property of ['if', 'continue-on-error', 'needs']) {
     if (Object.hasOwn(androidJob, property)) {
       throw new Error(
         `WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID:${name}:${androidJobId}:${property}`,
@@ -533,6 +533,9 @@ const androidInstrumentationGateRejectedExamples = [
   }),
   instrumentationWorkflowWithMutation(workflow => {
     workflow.jobs.android['continue-on-error'] = true;
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.needs = 'dependency-review';
   }),
   instrumentationWorkflowWithMutation(workflow => {
     workflow.defaults = { run: { shell: 'echo {0}' } };
