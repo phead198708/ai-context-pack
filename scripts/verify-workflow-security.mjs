@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -119,12 +120,55 @@ const allowedMacosWorkflowEnvironment = new Set([
   'NODE_ENV',
   'DEVELOPER_DIR',
 ]);
+const expectedGatedJobDigests = {
+  'linux.yml': {
+    jobId: 'android',
+    digest: '285c746c41d60d4af911bc7b1b9f3a4b3412b3bd8c862f04ead132f8a5eb10d4',
+  },
+  'macos.yml': {
+    jobId: 'ios',
+    digest: '675fa77cc3594f718daee8c732c055974038c0d1569be4fe5f094d1f97a525f5',
+  },
+};
 
 function parseWorkflow(source, name) {
   try {
     return parse(source, { maxAliasCount: 0, uniqueKeys: true });
   } catch {
     throw new Error(`WORKFLOW_YAML_INVALID:${name}`);
+  }
+}
+
+function canonicalizeForDigest(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeForDigest);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map(key => [key, canonicalizeForDigest(value[key])]),
+  );
+}
+
+function assertGatedJobStructure(
+  source,
+  name,
+  jobId,
+  expectedDigest,
+  gateError,
+) {
+  const workflow = parseWorkflow(source, name);
+  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
+  }
+  const job = workflow.jobs[jobId];
+  if (!isRecord(job)) {
+    throw new Error(`${gateError}:${name}:${jobId}:structure`);
+  }
+  const digest = createHash('sha256')
+    .update(JSON.stringify(canonicalizeForDigest(job)))
+    .digest('hex');
+  if (digest !== expectedDigest) {
+    throw new Error(`${gateError}:${name}:${jobId}:structure`);
   }
 }
 
@@ -943,6 +987,66 @@ assertMacosSharedTestStep(
   macosSharedTestWorkflowWithMutation(() => undefined),
   'self-test-macos-allowed',
 );
+
+const constructedRunnerEnvironmentStep = {
+  name: 'Construct runner environment names at runtime',
+  run: 'key=BASH; key="${key}_ENV"; file=GITHUB; file="${file}_ENV"; printf "%s=./nested/startup.sh\\n" "${key}" >> "${!file}"',
+};
+if (
+  /\b(?:BASH_ENV|GITHUB_ENV|GITHUB_PATH)\b/i.test(
+    JSON.stringify(constructedRunnerEnvironmentStep),
+  )
+) {
+  throw new Error('WORKFLOW_GATED_JOB_STRUCTURE_SELF_TEST_INVALID');
+}
+const gatedJobStructureCases = [
+  {
+    source: linuxWorkflow,
+    name: 'linux.yml',
+    gateError: 'WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID',
+    ...expectedGatedJobDigests['linux.yml'],
+  },
+  {
+    source: macosWorkflow,
+    name: 'macos.yml',
+    gateError: 'WORKFLOW_MACOS_SHARED_TEST_GATE_INVALID',
+    ...expectedGatedJobDigests['macos.yml'],
+  },
+];
+for (const {
+  source,
+  name,
+  jobId,
+  digest,
+  gateError,
+} of gatedJobStructureCases) {
+  assertGatedJobStructure(source, name, jobId, digest, gateError);
+  const mutatedWorkflow = parseWorkflow(source, `self-test-${name}`);
+  const mutatedJob = isRecord(mutatedWorkflow?.jobs)
+    ? mutatedWorkflow.jobs[jobId]
+    : undefined;
+  if (!isRecord(mutatedJob) || !Array.isArray(mutatedJob.steps)) {
+    throw new Error('WORKFLOW_GATED_JOB_STRUCTURE_SELF_TEST_INVALID');
+  }
+  mutatedJob.steps.unshift(constructedRunnerEnvironmentStep);
+  let constructedMutationRejected = false;
+  try {
+    assertGatedJobStructure(
+      JSON.stringify(mutatedWorkflow),
+      `self-test-${name}`,
+      jobId,
+      digest,
+      gateError,
+    );
+  } catch (error) {
+    constructedMutationRejected =
+      error instanceof Error &&
+      error.message === `${gateError}:self-test-${name}:${jobId}:structure`;
+  }
+  if (!constructedMutationRejected) {
+    throw new Error('WORKFLOW_GATED_JOB_STRUCTURE_SELF_TEST_FAILED');
+  }
+}
 
 for (const name of workflows) {
   const workflow = readFileSync(join(workflowRoot, name), 'utf8');
