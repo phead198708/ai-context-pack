@@ -17,10 +17,6 @@ const androidNativeBuild = readFileSync(
   join(repositoryRoot, 'modules/context-native/android/build.gradle'),
   'utf8',
 );
-const androidGradleProperties = readFileSync(
-  join(repositoryRoot, 'android/gradle.properties'),
-  'utf8',
-);
 const rubyVersion = readFileSync(
   join(repositoryRoot, '.ruby-version'),
   'utf8',
@@ -443,23 +439,21 @@ if (
   throw new Error('WORKFLOW_YAML_PARSER_PIN_INVALID');
 }
 if (
-  !androidNativeBuild.includes('ciApi24 {') ||
-  !androidNativeBuild.includes('apiLevel = 24') ||
+  !androidNativeBuild.includes('ciApi34 {') ||
+  !androidNativeBuild.includes('apiLevel = 34') ||
   !androidNativeBuild.includes('ciApi35 {') ||
   !androidNativeBuild.includes('apiLevel = 35') ||
   !androidNativeBuild.includes('systemImageSource = "aosp"') ||
   !androidNativeBuild.includes('testedAbi = "x86_64"') ||
-  !androidNativeBuild.includes('"ciApi24Setup", "ciApi35Setup"') ||
+  !androidNativeBuild.includes('"ciApi34Setup", "ciApi35Setup"') ||
   !androidNativeBuild.includes('task.testedAbi.set("x86_64")') ||
-  !androidGradleProperties.includes(
-    'android.experimental.testOptions.managedDevices.allowOldApiLevelDevices=true',
-  ) ||
   !linuxWorkflow.includes(
     '"${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"',
   ) ||
   !linuxWorkflow.includes('"emulator"') ||
-  !linuxWorkflow.includes('"system-images;android-24;default;x86_64"') ||
-  !linuxWorkflow.includes(':context-native:ciApi24DebugAndroidTest') ||
+  !linuxWorkflow.includes('"system-images;android-34;default;x86_64"') ||
+  !linuxWorkflow.includes('"system-images;android-35;default;x86_64"') ||
+  !linuxWorkflow.includes(':context-native:ciApi34DebugAndroidTest') ||
   !linuxWorkflow.includes(':context-native:ciApi35DebugAndroidTest') ||
   !linuxWorkflow.includes('sudo chown "$(id -u):$(id -g)" /dev/kvm')
 ) {

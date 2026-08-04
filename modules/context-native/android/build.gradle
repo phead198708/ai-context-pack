@@ -22,9 +22,9 @@ android {
   testOptions {
     managedDevices {
       localDevices {
-        ciApi24 {
+        ciApi34 {
           device = "Pixel 2"
-          apiLevel = 24
+          apiLevel = 34
           systemImageSource = "aosp"
           require64Bit = true
           testedAbi = "x86_64"
@@ -44,7 +44,7 @@ android {
 // AGP 8.12 exposes testedAbi on the managed-device DSL but does not copy it into
 // ManagedDeviceInstrumentationTestSetupTask. Keep both setup tasks pinned too,
 // or AGP 9 will silently change these x86_64 CI devices to arm64-v8a.
-tasks.matching { task -> ["ciApi24Setup", "ciApi35Setup"].contains(task.name) }.configureEach { task ->
+tasks.matching { task -> ["ciApi34Setup", "ciApi35Setup"].contains(task.name) }.configureEach { task ->
   task.testedAbi.set("x86_64")
 }
 

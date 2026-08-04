@@ -140,21 +140,22 @@ jobs:
           :app:lintDebug
           :context-native:lintDebug
           :app:assembleDebug
-      - name: Preinstall the emulator and API 24 managed-device image
+      - name: Preinstall the emulator and managed-device images
         run: >-
           "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
           "emulator"
-          "system-images;android-24;default;x86_64"
+          "system-images;android-34;default;x86_64"
+          "system-images;android-35;default;x86_64"
       - name: Grant the runner access to KVM
         run: |
           sudo chown "$(id -u):$(id -g)" /dev/kvm
           test -r /dev/kvm
           test -w /dev/kvm
-      - name: Run API 24 and API 35 Android instrumentation
+      - name: Run API 34 and API 35 Android instrumentation
         run: >-
           ./android/gradlew -p android --no-daemon --stacktrace
           -PreactNativeArchitectures=x86_64
-          :context-native:ciApi24DebugAndroidTest
+          :context-native:ciApi34DebugAndroidTest
           :context-native:ciApi35DebugAndroidTest
       - name: Upload synthetic Android reports and unsigned debug APK
         if: always()

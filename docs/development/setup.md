@@ -31,8 +31,8 @@ Build without committing signing data:
 npm run ios -- --no-bundler --device generic --output ./build/ios
 ./android/gradlew -p android :app:testDebugUnitTest :context-native:testDebugUnitTest :app:assembleDebug
 
-# Provision the CI-equivalent API 24 and API 35 devices automatically when host virtualization is available.
-./android/gradlew -p android -PreactNativeArchitectures=x86_64 :context-native:ciApi24DebugAndroidTest :context-native:ciApi35DebugAndroidTest
+# Provision the CI-equivalent API 34 and API 35 devices automatically when host virtualization is available.
+./android/gradlew -p android -PreactNativeArchitectures=x86_64 :context-native:ciApi34DebugAndroidTest :context-native:ciApi35DebugAndroidTest
 
 # Or use attached API 24 and API 35+ emulators/devices to cover both PDF paths.
 ./android/gradlew -p android :context-native:connectedDebugAndroidTest
