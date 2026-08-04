@@ -42,12 +42,10 @@ jobs:
           ruby-version: 3.4.9
           bundler: 2.6.9
           bundler-cache: true
-      - name: Restore compatible CocoaPods cache
+      - name: Restore compatible CocoaPods download cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ios/Pods
-            ~/Library/Caches/CocoaPods
+          path: ~/Library/Caches/CocoaPods
           key: ${{ runner.os }}-xcode-26.6-ruby-3.4.9-pods-${{ hashFiles('Gemfile.lock', 'ios/Podfile.lock', 'package-lock.json') }}
       - name: Verify Node, npm, Ruby, Bundler, and Xcode pins
         run: |
@@ -62,6 +60,8 @@ jobs:
         run: npm test -- --ci
       - name: Verify workspace-independent podspec checksums
         run: bundle exec ruby -rlogger -rcocoapods scripts/verify-podspec-checksum.rb
+      - name: Prove the deployment install starts without cached Pods
+        run: test ! -e ios/Pods
       - name: Resolve locked CocoaPods dependencies
         run: bundle exec ruby -rlogger -S pod install --project-directory=ios --deployment
       - name: Prove Pod resolution did not change tracked integration files
@@ -87,6 +87,12 @@ jobs:
         run: |
           test -d "${RUNNER_TEMP}/expo-ios-build/AIContextPack.app"
           test -d "${RUNNER_TEMP}/expo-ios-build/AIContextPack.app/PlugIns/ShareExtension.appex"
+      - name: Prove the Expo entry point did not rewrite tracked integration files
+        run: >-
+          git diff --exit-code --
+          ios/Podfile.lock
+          ios/AIContextPack.xcodeproj/project.pbxproj
+          ios/AIContextPack/PrivacyInfo.xcprivacy
       - name: Upload synthetic unsigned iOS build report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -190,9 +190,12 @@ if (
   !macosWorkflow.includes(
     "ruby -rfileutils -e \"FileUtils.remove_dir('ios/Pods') if Dir.exist?('ios/Pods')\"",
   ) ||
+  macosWorkflow.includes('            ios/Pods') ||
+  !macosWorkflow.includes('run: test ! -e ios/Pods') ||
   !macosWorkflow.includes('npm run ios --') ||
   !macosWorkflow.includes('--device generic') ||
-  !macosWorkflow.includes('--output "${RUNNER_TEMP}/expo-ios-build"')
+  !macosWorkflow.includes('--output "${RUNNER_TEMP}/expo-ios-build"') ||
+  (macosWorkflow.match(/git diff --exit-code --/g) ?? []).length !== 2
 ) {
   throw new Error('WORKFLOW_EXPO_IOS_CLEAN_SMOKE_MISSING');
 }
