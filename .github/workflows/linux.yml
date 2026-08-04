@@ -140,6 +140,10 @@ jobs:
           :app:lintDebug
           :context-native:lintDebug
           :app:assembleDebug
+      - name: Preinstall the API 24 managed-device image
+        run: >-
+          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          "system-images;android-24;default;x86_64"
       - name: Grant the runner access to KVM
         run: |
           sudo chown "$(id -u):$(id -g)" /dev/kvm
