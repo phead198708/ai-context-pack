@@ -31,12 +31,18 @@ Build without committing signing data:
 npm run ios -- --no-bundler --device generic --output ./build/ios
 ./android/gradlew -p android :app:testDebugUnitTest :context-native:testDebugUnitTest :app:assembleDebug
 
-# Provision the CI-equivalent API 34 and API 35 devices automatically when host virtualization is available.
+# Provision the minimum supported API 24 image, then run it without emulator snapshots.
+"${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "emulator" "system-images;android-24;default;x86_64"
+scripts/run-android-api24-instrumentation.sh
+
+# Run the CI-equivalent API 34 and API 35 managed devices when host virtualization is available.
 ./android/gradlew -p android -PreactNativeArchitectures=x86_64 :context-native:ciApi34DebugAndroidTest :context-native:ciApi35DebugAndroidTest
 
 # Or use attached API 24 and API 35+ emulators/devices to cover both PDF paths.
 ./android/gradlew -p android :context-native:connectedDebugAndroidTest
 ```
+
+The API 24 runner rejects pre-existing attached devices so Gradle cannot silently execute the minimum-version gate against the wrong target. It creates its AVD under a temporary directory, disables snapshot creation, waits for `sys.boot_completed`, runs the complete native instrumentation suite, and removes the emulator even when the task fails.
 
 Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go. The iOS script gives every Expo/CocoaPods child process the repository's absolute `BUNDLE_GEMFILE`, preloads Ruby's standard `logger` library, and puts the checked-in CocoaPods shim first on `PATH`. The shim loads the `pod` executable from the bundle, so Expo cannot silently fall back to a globally installed CocoaPods after changing its working directory to `ios/`; do not replace the script with a bare `expo run:ios` invocation while this toolchain remains locked.
 

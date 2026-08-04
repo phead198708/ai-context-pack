@@ -25,6 +25,12 @@ const architectureDecision = readFileSync(
   join(repositoryRoot, 'docs/adr/0001-react-native-cross-platform.md'),
   'utf8',
 );
+const api24InstrumentationPath = join(
+  repositoryRoot,
+  'scripts',
+  'run-android-api24-instrumentation.sh',
+);
+const api24Instrumentation = readFileSync(api24InstrumentationPath, 'utf8');
 const rubyVersion = readFileSync(
   join(repositoryRoot, '.ruby-version'),
   'utf8',
@@ -459,11 +465,21 @@ if (
     '"${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"',
   ) ||
   !linuxWorkflow.includes('"emulator"') ||
+  !linuxWorkflow.includes('"system-images;android-24;default;x86_64"') ||
   !linuxWorkflow.includes('"system-images;android-34;default;x86_64"') ||
   !linuxWorkflow.includes('"system-images;android-35;default;x86_64"') ||
+  !linuxWorkflow.includes(
+    'run: scripts/run-android-api24-instrumentation.sh',
+  ) ||
   !linuxWorkflow.includes(':context-native:ciApi34DebugAndroidTest') ||
   !linuxWorkflow.includes(':context-native:ciApi35DebugAndroidTest') ||
-  !linuxWorkflow.includes('sudo chown "$(id -u):$(id -g)" /dev/kvm')
+  !linuxWorkflow.includes('sudo chown "$(id -u):$(id -g)" /dev/kvm') ||
+  (statSync(api24InstrumentationPath).mode & 0o111) === 0 ||
+  !api24Instrumentation.includes('system-images;android-24;default;x86_64') ||
+  !api24Instrumentation.includes('-no-snapshot') ||
+  !api24Instrumentation.includes('-accel on') ||
+  !api24Instrumentation.includes('sys.boot_completed') ||
+  !api24Instrumentation.includes(':context-native:connectedDebugAndroidTest')
 ) {
   throw new Error('WORKFLOW_ANDROID_INSTRUMENTATION_MISSING');
 }
@@ -482,6 +498,9 @@ if (
   !macosWorkflow.includes("xcodebuild -version | grep -Fx 'Xcode 26.6'") ||
   !developmentSetup.includes(
     'Xcode 26.6 (the verified toolchain; ADR minimum is 26.4)',
+  ) ||
+  !developmentSetup.includes(
+    'Xcode 26.3 cannot compile the locked Expo SDK 57 `expo-modules-jsi` package.',
   ) ||
   !architectureDecision.includes('- Xcode 26.4+')
 ) {
