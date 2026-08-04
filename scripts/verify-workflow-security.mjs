@@ -101,6 +101,12 @@ const allowedWorkflowTriggers = new Set([
 ]);
 const immutableActionReferencePattern =
   /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$/;
+const expectedAndroidInstrumentationRunCommands = [
+  '"${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "emulator" "system-images;android-24;default;x86_64" "system-images;android-34;default;x86_64" "system-images;android-35;default;x86_64"',
+  'sudo chown "$(id -u):$(id -g)" /dev/kvm test -r /dev/kvm test -w /dev/kvm',
+  'scripts/run-android-api24-instrumentation.sh',
+  './android/gradlew -p android --no-daemon --stacktrace -PreactNativeArchitectures=x86_64 :context-native:ciApi34DebugAndroidTest :context-native:ciApi35DebugAndroidTest',
+];
 
 function parseWorkflow(source, name) {
   try {
@@ -252,6 +258,50 @@ function assertWorkflowCheckNames(source, name, expectedNames) {
   }
 }
 
+function normalizeRunCommand(command) {
+  return command.trim().replace(/\s+/g, ' ');
+}
+
+function assertAndroidInstrumentationSteps(source, name) {
+  const workflow = parseWorkflow(source, name);
+  if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
+    throw new Error(`WORKFLOW_STRUCTURE_INVALID:${name}`);
+  }
+  const androidJobs = Object.entries(workflow.jobs).filter(
+    ([, job]) => isRecord(job) && job.name === 'Android',
+  );
+  if (androidJobs.length !== 1) {
+    throw new Error(`WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:job`);
+  }
+  const [androidJobId, androidJob] = androidJobs[0];
+  if (!Array.isArray(androidJob.steps)) {
+    throw new Error(
+      `WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:${androidJobId}:steps`,
+    );
+  }
+  const runCommands = androidJob.steps.map((step, stepIndex) => {
+    if (!isRecord(step)) {
+      throw new Error(
+        `WORKFLOW_STRUCTURE_INVALID:${name}:${androidJobId}:steps:${stepIndex}`,
+      );
+    }
+    if (!Object.hasOwn(step, 'run')) return undefined;
+    if (typeof step.run !== 'string') {
+      throw new Error(
+        `WORKFLOW_STRUCTURE_INVALID:${name}:${androidJobId}:steps:${stepIndex}:run`,
+      );
+    }
+    return normalizeRunCommand(step.run);
+  });
+  if (
+    expectedAndroidInstrumentationRunCommands.some(
+      command => !runCommands.includes(command),
+    )
+  ) {
+    throw new Error(`WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:steps`);
+  }
+}
+
 const permissionPolicyRejectedExamples = [
   'permissions: { contents: "write" }\njobs: { test: { runs-on: ubuntu-latest } }',
   "permissions: 'write-all'\njobs: { test: { runs-on: ubuntu-latest } }",
@@ -375,6 +425,62 @@ assertWorkflowCheckNames(
   ['Shared'],
 );
 
+const androidInstrumentationCommentOnlyExample = `
+jobs:
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo no-instrumentation
+${expectedAndroidInstrumentationRunCommands
+  .map(command => `# run: ${command}`)
+  .join('\n')}
+`;
+const androidInstrumentationWrongJobExample = JSON.stringify({
+  jobs: {
+    android: {
+      name: 'Android',
+      runsOn: 'ubuntu-latest',
+      steps: [{ run: 'echo no-instrumentation' }],
+    },
+    unrelated: {
+      name: 'Unrelated',
+      runsOn: 'ubuntu-latest',
+      steps: expectedAndroidInstrumentationRunCommands.map(run => ({ run })),
+    },
+  },
+});
+for (const [index, example] of [
+  androidInstrumentationCommentOnlyExample,
+  androidInstrumentationWrongJobExample,
+].entries()) {
+  let missingInstrumentationRejected = false;
+  try {
+    assertAndroidInstrumentationSteps(example, `self-test-rejected-${index}`);
+  } catch (error) {
+    missingInstrumentationRejected =
+      error instanceof Error &&
+      error.message.startsWith(
+        `WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:self-test-rejected-${index}:`,
+      );
+  }
+  if (!missingInstrumentationRejected) {
+    throw new Error('WORKFLOW_ANDROID_INSTRUMENTATION_SELF_TEST_FAILED');
+  }
+}
+assertAndroidInstrumentationSteps(
+  JSON.stringify({
+    jobs: {
+      android: {
+        name: 'Android',
+        runsOn: 'ubuntu-latest',
+        steps: expectedAndroidInstrumentationRunCommands.map(run => ({ run })),
+      },
+    },
+  }),
+  'self-test-allowed',
+);
+
 for (const name of workflows) {
   const workflow = readFileSync(join(workflowRoot, name), 'utf8');
   assertWorkflowSecrets(workflow, name);
@@ -383,6 +489,7 @@ for (const name of workflows) {
   assertWorkflowActions(workflow, name);
   assertWorkflowCheckNames(workflow, name, expectedWorkflowCheckNames[name]);
 }
+assertAndroidInstrumentationSteps(linuxWorkflow, 'linux.yml');
 if ((all.match(/retention-days:\s*7/g) ?? []).length !== 3) {
   throw new Error('WORKFLOW_ARTIFACT_RETENTION_INVALID');
 }
@@ -461,19 +568,6 @@ if (
   !androidNativeBuild.includes('testedAbi = "x86_64"') ||
   !androidNativeBuild.includes('"ciApi34Setup", "ciApi35Setup"') ||
   !androidNativeBuild.includes('task.testedAbi.set("x86_64")') ||
-  !linuxWorkflow.includes(
-    '"${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"',
-  ) ||
-  !linuxWorkflow.includes('"emulator"') ||
-  !linuxWorkflow.includes('"system-images;android-24;default;x86_64"') ||
-  !linuxWorkflow.includes('"system-images;android-34;default;x86_64"') ||
-  !linuxWorkflow.includes('"system-images;android-35;default;x86_64"') ||
-  !linuxWorkflow.includes(
-    'run: scripts/run-android-api24-instrumentation.sh',
-  ) ||
-  !linuxWorkflow.includes(':context-native:ciApi34DebugAndroidTest') ||
-  !linuxWorkflow.includes(':context-native:ciApi35DebugAndroidTest') ||
-  !linuxWorkflow.includes('sudo chown "$(id -u):$(id -g)" /dev/kvm') ||
   (statSync(api24InstrumentationPath).mode & 0o111) === 0 ||
   !api24Instrumentation.includes('system-images;android-24;default;x86_64') ||
   !api24Instrumentation.includes('-no-snapshot') ||
