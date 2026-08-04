@@ -313,6 +313,18 @@ function assertRunEnvironmentIsSafe(
   }
 }
 
+function assertNoRunnerEnvironmentMutation(steps, name, scope, gateError) {
+  const decodedSteps = JSON.stringify(steps);
+  const forbidden = decodedSteps.match(
+    /\b(?:BASH_ENV|GITHUB_ENV|GITHUB_PATH)\b/i,
+  );
+  if (forbidden) {
+    throw new Error(
+      `${gateError}:${name}:${scope}:runner-environment:${forbidden[0].toUpperCase()}`,
+    );
+  }
+}
+
 function assertAndroidInstrumentationSteps(source, name) {
   const workflow = parseWorkflow(source, name);
   if (!isRecord(workflow) || !isRecord(workflow.jobs)) {
@@ -356,6 +368,12 @@ function assertAndroidInstrumentationSteps(source, name) {
       `WORKFLOW_ANDROID_INSTRUMENTATION_MISSING:${name}:${androidJobId}:steps`,
     );
   }
+  assertNoRunnerEnvironmentMutation(
+    androidJob.steps,
+    name,
+    androidJobId,
+    gateError,
+  );
   const runSteps = androidJob.steps.map((step, stepIndex) => {
     if (!isRecord(step)) {
       throw new Error(
@@ -440,6 +458,7 @@ function assertMacosSharedTestStep(source, name) {
       `WORKFLOW_MACOS_SHARED_TEST_MISSING:${name}:${iosJobId}:steps`,
     );
   }
+  assertNoRunnerEnvironmentMutation(iosJob.steps, name, iosJobId, gateError);
   const matches = iosJob.steps
     .map((step, stepIndex) => {
       if (!isRecord(step)) {
@@ -706,6 +725,22 @@ const androidInstrumentationGateRejectedExamples = [
     };
   }),
   instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.steps.unshift({
+      run: 'printf "BASH_ENV=./nested/startup.sh\\n" >> "$GITHUB_ENV"',
+    });
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.steps.unshift({
+      run: 'printf "./nested/bin\\n" >> "$GITHUB_PATH"',
+    });
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
+    workflow.jobs.android.steps.unshift({
+      run: 'echo harmless',
+      env: { BASH_ENV: './nested/startup.sh' },
+    });
+  }),
+  instrumentationWorkflowWithMutation(workflow => {
     workflow.defaults = { run: { shell: 'echo {0}' } };
   }),
   instrumentationWorkflowWithMutation(workflow => {
@@ -842,6 +877,22 @@ const macosSharedTestGateRejectedExamples = [
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
     workflow.jobs.ios.env = { BASH_ENV: './nested/change-directory.sh' };
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.steps.unshift({
+      run: 'printf "BASH_ENV=./nested/startup.sh\\n" >> "$GITHUB_ENV"',
+    });
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.steps.unshift({
+      run: 'printf "./nested/bin\\n" >> "$GITHUB_PATH"',
+    });
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs.ios.steps.unshift({
+      run: 'echo harmless',
+      env: { BASH_ENV: './nested/startup.sh' },
+    });
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
     workflow.defaults = { run: { shell: 'echo {0}' } };
