@@ -90,6 +90,7 @@ printf 'no\n' | "${avdmanager_path}" create avd \
   -accel on \
   -cores 2 \
   -memory 2048 \
+  -partition-size 4096 \
   -camera-back none \
   -camera-front none \
   >"${emulator_log}" 2>&1 &
@@ -121,10 +122,64 @@ fi
 "${adb_path}" -s "${emulator_serial}" shell settings put global animator_duration_scale 0
 "${adb_path}" -s "${emulator_serial}" shell input keyevent 82
 
+device_api="$("${adb_path}" -s "${emulator_serial}" shell getprop ro.build.version.sdk | tr -d '\r')"
+if [[ "${device_api}" != "24" ]]; then
+  echo "API24_DEVICE_VERSION_INVALID:${device_api}" >&2
+  exit 1
+fi
+
+test_apk="${repository_root}/modules/context-native/android/build/outputs/apk/androidTest/debug/context-native-debug-androidTest.apk"
+test_package="com.aicontextpack.nativebridge.test"
+test_runner="androidx.test.runner.AndroidJUnitRunner"
+instrumentation_component="${test_package}/${test_runner}"
+report_directory="${repository_root}/modules/context-native/android/build/reports/androidTests/api24"
+mkdir -p "${report_directory}"
+
 "${repository_root}/android/gradlew" \
   -p "${repository_root}/android" \
   --no-daemon \
   --stacktrace \
-  :context-native:connectedDebugAndroidTest
+  -PreactNativeArchitectures=x86_64 \
+  :context-native:assembleDebugAndroidTest
 
-echo "API24_INSTRUMENTATION device=${emulator_serial} snapshot=disabled result=pass"
+if [[ ! -f "${test_apk}" ]]; then
+  echo "API24_TEST_APK_MISSING:${test_apk}" >&2
+  exit 1
+fi
+
+# API 24's package manager can time out while ddmlib streams this large, self-contained
+# library test APK through a split-install session. Push it first so installation reads a
+# complete local file, then invoke the same configured AndroidX runner directly.
+"${adb_path}" -s "${emulator_serial}" install --no-streaming -r -g "${test_apk}"
+if ! "${adb_path}" -s "${emulator_serial}" shell pm path "${test_package}" |
+  grep -q '^package:'; then
+  echo "API24_TEST_PACKAGE_MISSING:${test_package}" >&2
+  exit 1
+fi
+
+run_instrumentation() {
+  local report_name="$1"
+  shift
+  local report_path="${report_directory}/${report_name}.txt"
+  local runner_status
+
+  set +e
+  "${adb_path}" -s "${emulator_serial}" shell am instrument -w "$@" \
+    "${instrumentation_component}" 2>&1 | tee "${report_path}"
+  runner_status="${PIPESTATUS[0]}"
+  set -e
+
+  if [[ "${runner_status}" -ne 0 ]] ||
+    grep -Eq 'FAILURES!!!|INSTRUMENTATION_(FAILED|ABORTED)|Process crashed' "${report_path}" ||
+    ! grep -Eq '^[[:space:]]*OK \([1-9][0-9]* tests?\)[[:space:]]*$' "${report_path}"; then
+    echo "API24_INSTRUMENTATION_FAILED:${report_name}" >&2
+    return 1
+  fi
+}
+
+run_instrumentation full-suite
+run_instrumentation pdf-fallback \
+  -e class \
+  'com.aicontextpack.nativebridge.PdfProbeInstrumentedTest#usesRenderedFallbackForAllPagesBeforeApi35'
+
+echo "API24_INSTRUMENTATION device=${emulator_serial} api=${device_api} snapshot=disabled fullSuite=pass pdfFallback=pass"

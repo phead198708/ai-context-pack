@@ -42,7 +42,7 @@ scripts/run-android-api24-instrumentation.sh
 ./android/gradlew -p android :context-native:connectedDebugAndroidTest
 ```
 
-The API 24 runner rejects pre-existing attached devices so Gradle cannot silently execute the minimum-version gate against the wrong target. It creates its AVD under a temporary directory, disables snapshot creation, waits for `sys.boot_completed`, runs the complete native instrumentation suite, and removes the emulator even when the task fails.
+The API 24 runner rejects pre-existing attached devices so the minimum-version gate cannot silently execute against the wrong target. It creates its AVD under a temporary directory, disables snapshot creation, waits for `sys.boot_completed`, verifies API level 24, builds the x86_64 instrumentation APK, installs it without ddmlib streaming, and invokes the configured AndroidX runner. It runs both the complete suite and the pre-35 PDF fallback explicitly, writes their output under the uploaded Android report tree, and removes the emulator even when the task fails.
 
 Run development builds with `npm run ios` or `npm run android`. These use Expo CLI and a custom development client, not Expo Go. The iOS script gives every Expo/CocoaPods child process the repository's absolute `BUNDLE_GEMFILE`, preloads Ruby's standard `logger` library, and puts the checked-in CocoaPods shim first on `PATH`. The shim loads the `pod` executable from the bundle, so Expo cannot silently fall back to a globally installed CocoaPods after changing its working directory to `ios/`; do not replace the script with a bare `expo run:ios` invocation while this toolchain remains locked.
 

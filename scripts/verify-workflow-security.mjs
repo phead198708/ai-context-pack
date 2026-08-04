@@ -478,8 +478,14 @@ if (
   !api24Instrumentation.includes('system-images;android-24;default;x86_64') ||
   !api24Instrumentation.includes('-no-snapshot') ||
   !api24Instrumentation.includes('-accel on') ||
+  !api24Instrumentation.includes('-partition-size 4096') ||
   !api24Instrumentation.includes('sys.boot_completed') ||
-  !api24Instrumentation.includes(':context-native:connectedDebugAndroidTest')
+  !api24Instrumentation.includes(':context-native:assembleDebugAndroidTest') ||
+  !api24Instrumentation.includes('install --no-streaming -r -g') ||
+  !api24Instrumentation.includes('shell am instrument -w') ||
+  !api24Instrumentation.includes(
+    'PdfProbeInstrumentedTest#usesRenderedFallbackForAllPagesBeforeApi35',
+  )
 ) {
   throw new Error('WORKFLOW_ANDROID_INSTRUMENTATION_MISSING');
 }
