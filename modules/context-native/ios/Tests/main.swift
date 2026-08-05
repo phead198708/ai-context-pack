@@ -397,18 +397,39 @@ final class InboxRecoverySupportTests: XCTestCase {
     }
   }
 
-  func testHighPrecisionNumericManifestSchemaVersionIsExplicitlyRejected() throws {
+  func testArbitraryPrecisionNumericManifestSchemaVersionIsExplicitlyRejected() throws {
+    for rawVersion in [
+      "1.0",
+      "1e0",
+      "1.0000000000000001",
+      "1.000000000000000000000000000000000000001"
+    ] {
+      let id = UUID().uuidString.lowercased()
+      try writeManifest(directoryId: id, manifestId: id)
+      try rewriteManifestSchemaVersion(directoryId: id, rawToken: rawVersion)
+
+      XCTAssertThrowsError(
+        try InboxManifestValidator.readPublished(
+          inbox: root.appendingPathComponent("Inbox"),
+          ingestionId: id
+        )
+      ) { error in
+        XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
+        XCTAssertEqual(
+          (error as? InboxManifestValidationError)?.stableCode,
+          "SCHEMA_VERSION_UNSUPPORTED"
+        )
+      }
+    }
+  }
+
+  func testEscapedDuplicateSchemaVersionKeyCannotHideUnsupportedToken() throws {
     let id = UUID().uuidString.lowercased()
     try writeManifest(directoryId: id, manifestId: id)
-    let manifestURL = root.appendingPathComponent("Inbox/\(id)/manifest.json")
-    let serialized = String(decoding: try Data(contentsOf: manifestURL), as: UTF8.self)
-    let currentVersion = "\"schemaVersion\":1"
-    XCTAssertTrue(serialized.contains(currentVersion))
-    let highPrecision = serialized.replacingOccurrences(
-      of: currentVersion,
-      with: "\"schemaVersion\":1.0000000000000001"
+    try rewriteManifestSchemaVersion(
+      directoryId: id,
+      rawToken: "1,\"\\u0073chemaVersion\":1.000000000000000000000000000000000000001"
     )
-    try Data(highPrecision.utf8).write(to: manifestURL)
 
     XCTAssertThrowsError(
       try InboxManifestValidator.readPublished(
@@ -416,11 +437,8 @@ final class InboxRecoverySupportTests: XCTestCase {
         ingestionId: id
       )
     ) { error in
-      XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
-      XCTAssertEqual(
-        (error as? InboxManifestValidationError)?.stableCode,
-        "SCHEMA_VERSION_UNSUPPORTED"
-      )
+      XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+      XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
     }
   }
 
@@ -598,6 +616,18 @@ final class InboxRecoverySupportTests: XCTestCase {
     ]
     let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     try data.write(to: directory.appendingPathComponent("manifest.json"))
+  }
+
+  private func rewriteManifestSchemaVersion(
+    directoryId: String,
+    rawToken: String
+  ) throws {
+    let manifestURL = root.appendingPathComponent("Inbox/\(directoryId)/manifest.json")
+    var serialized = String(decoding: try Data(contentsOf: manifestURL), as: UTF8.self)
+    let currentVersion = "\"schemaVersion\":1"
+    let range = try XCTUnwrap(serialized.range(of: currentVersion))
+    serialized.replaceSubrange(range, with: "\"schemaVersion\":\(rawToken)")
+    try Data(serialized.utf8).write(to: manifestURL)
   }
 
   private func createLock(id: String) throws -> URL {
