@@ -17,6 +17,14 @@ export interface InboxWorkflowView {
   showNewestImport(): void;
 }
 
+export interface InboxManifestProcessor {
+  process(manifests: readonly ImportManifestV1[]): Promise<void>;
+}
+
+const passthroughManifestProcessor: InboxManifestProcessor = {
+  process: async () => undefined,
+};
+
 /** Serializes cold/live/lifecycle inputs so event IDs have one owner and one ACK path. */
 export class InboxEventWorkflow {
   private chain = Promise.resolve();
@@ -28,11 +36,13 @@ export class InboxEventWorkflow {
   constructor(
     private readonly native: NativeAdapter,
     private readonly view: InboxWorkflowView,
+    private readonly manifestProcessor: InboxManifestProcessor = passthroughManifestProcessor,
   ) {}
 
   bootstrap(): Promise<void> {
     return this.enqueue(async () => {
       await this.refresh(false, false);
+      const bootstrapManifests = this.lastScannedManifests;
       let events: readonly PendingShareEvent[];
       try {
         events = await this.native.getPendingShareEvents();
@@ -44,7 +54,9 @@ export class InboxEventWorkflow {
         );
         return;
       }
-      for (const event of events) await this.process(event);
+      for (const event of events)
+        await this.process(event, false, bootstrapManifests);
+      this.lastScannedManifests = undefined;
     });
   }
 
@@ -58,7 +70,7 @@ export class InboxEventWorkflow {
         );
         return;
       }
-      await this.process(value);
+      await this.process(value, false, this.takeScannedManifests(value.id));
     });
   }
 
@@ -117,9 +129,16 @@ export class InboxEventWorkflow {
         return;
       }
 
-      for (const event of [...this.completes.values()])
+      let completedRefresh = false;
+      for (const event of [...this.completes.values()]) {
         if (!(await this.finishComplete(event, true))) return;
-      if (this.failures.size === 0 && this.completes.size === 0)
+        completedRefresh = true;
+      }
+      if (
+        !completedRefresh &&
+        this.failures.size === 0 &&
+        this.completes.size === 0
+      )
         await this.refresh(false, true);
     });
   }
@@ -140,6 +159,7 @@ export class InboxEventWorkflow {
   private async process(
     event: PendingShareEvent,
     retrying = false,
+    knownManifests?: readonly ImportManifestV1[],
   ): Promise<void> {
     if (this.seen.has(event.id)) return;
     this.seen.add(event.id);
@@ -154,14 +174,15 @@ export class InboxEventWorkflow {
     }
     this.completes.set(event.id, event);
     if (retrying || !this.hasOperationalBlocker())
-      await this.finishComplete(event, retrying);
+      await this.finishComplete(event, retrying, knownManifests);
   }
 
   private async finishComplete(
     event: PendingShareEvent,
     retrying: boolean,
+    knownManifests?: readonly ImportManifestV1[],
   ): Promise<boolean> {
-    const manifests = await this.scan(retrying);
+    const manifests = knownManifests ?? (await this.scan(retrying));
     if (!manifests) return false;
     try {
       if (event.durable === false)
@@ -211,12 +232,28 @@ export class InboxEventWorkflow {
         return null;
       }
       const manifests = await this.native.scanInbox();
+      await this.manifestProcessor.process(manifests);
+      this.lastScannedManifests = manifests;
       if (retrying) this.clear('scan');
       return manifests;
     } catch (error) {
       this.latch('scan', error, 'INBOX_SCAN_FAILED');
       return null;
     }
+  }
+
+  private lastScannedManifests: readonly ImportManifestV1[] | undefined;
+
+  private takeScannedManifests(
+    ingestionId: string,
+  ): readonly ImportManifestV1[] | undefined {
+    const manifests = this.lastScannedManifests;
+    if (!manifests?.some(manifest => manifest.ingestionId === ingestionId))
+      return undefined;
+    this.lastScannedManifests = manifests.filter(
+      manifest => manifest.ingestionId !== ingestionId,
+    );
+    return manifests;
   }
 
   private show(manifests: readonly ImportManifestV1[]): void {
@@ -247,13 +284,15 @@ export class InboxEventWorkflow {
 }
 
 function validEventId(value: unknown): string | null {
-  if (typeof value !== 'object' || value === null) return null;
-  const id = (value as { id?: unknown }).id;
-  return isCanonicalUuid(id) ? id : null;
+  if (!isRecord(value)) return null;
+  return isCanonicalUuid(value.id) ? value.id : null;
 }
 
 function workflowErrorCode(error: unknown, fallback: string): string {
-  if (typeof error !== 'object' || error === null) return fallback;
-  const candidate = error as { code?: unknown };
-  return typeof candidate.code === 'string' ? candidate.code : fallback;
+  if (!isRecord(error)) return fallback;
+  return typeof error.code === 'string' ? error.code : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

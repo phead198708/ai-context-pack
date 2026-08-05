@@ -1,9 +1,17 @@
-import { DomainError } from '../../domain/errors';
+import {
+  DomainError,
+  isDomainErrorCode,
+  type DomainErrorCode,
+} from '../../domain/errors';
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
 import type {
   NativeInboxHandoff,
   OwnedArtifactFileStore,
   PersistenceRepository,
+  PersistenceRecoveryPhase,
+  CleanupLeaseRepository,
+  QuarantineRepository,
+  RecoveryDiagnosticsRepository,
 } from './contracts';
 import {
   assertOwnedArtifactPath,
@@ -33,6 +41,7 @@ export class InboxPersistenceCoordinator {
     private readonly interruptionHook: (
       point: PersistenceInterruptionPoint,
     ) => Promise<void> = async () => undefined,
+    private readonly diagnostics?: RecoveryDiagnosticsRepository,
   ) {}
 
   async recover(
@@ -41,68 +50,98 @@ export class InboxPersistenceCoordinator {
     requireIdentifier(request.packId);
     requireIdentifier(request.ingestionId);
     await this.repository.initialize();
-    await this.repository.recordRecovery({
-      ingestionId: request.ingestionId,
-      packId: request.packId,
-      phase: 'discovered',
-      updatedAt: this.now(),
-    });
-    await this.interruptionHook('before-copy');
-    await this.repository.recordRecovery({
-      ingestionId: request.ingestionId,
-      packId: request.packId,
-      phase: 'handoff-started',
-      updatedAt: this.now(),
-    });
-    const handoff = await this.nativeHandoff.handoffInbox(
-      request.ingestionId,
-      request.packId,
-      DISK_HEADROOM_BYTES,
-    );
-    requireFingerprint(handoff.manifestFingerprint);
-    if (handoff.manifest.ingestionId !== request.ingestionId)
-      throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
-    const { artifacts } = handoff;
-    artifacts.forEach(artifact =>
-      assertOwnedArtifactPath(artifact.relativePath),
-    );
-    const copiedItems = handoff.manifest.items.filter(
-      item => item.status === 'copied',
-    );
-    const artifactIds = new Set(artifacts.map(artifact => artifact.itemId));
-    if (
-      artifacts.length !== copiedItems.length ||
-      artifactIds.size !== artifacts.length ||
-      artifacts.some(
-        artifact =>
-          artifact.relativePath !==
-            ownedOriginalPath(request.packId, artifact.itemId) ||
-          !copiedItems.some(
-            item =>
-              item.id === artifact.itemId &&
-              item.byteCount === artifact.byteCount &&
-              item.mediaType === artifact.mediaType &&
-              (item.sha256 === undefined || item.sha256 === artifact.sha256),
-          ),
-      ) ||
-      copiedItems.some(item => !artifactIds.has(item.id))
-    )
-      throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
-    await this.repository.recordRecovery({
-      ingestionId: request.ingestionId,
-      packId: request.packId,
-      phase: 'files-published',
-      updatedAt: this.now(),
-    });
-    await this.interruptionHook('before-db-commit');
-    const result = await this.repository.commitImport({
-      packId: request.packId,
-      manifest: handoff.manifest,
-      manifestFingerprint: handoff.manifestFingerprint,
-      artifacts,
-    });
-    await this.nativeHandoff.acknowledgeInbox(request.ingestionId);
-    return result;
+    let phase: PersistenceRecoveryPhase = 'discovered';
+    try {
+      await this.repository.recordRecovery({
+        ingestionId: request.ingestionId,
+        packId: request.packId,
+        phase,
+        updatedAt: this.now(),
+      });
+      await this.interruptionHook('before-copy');
+      phase = 'handoff-started';
+      await this.repository.recordRecovery({
+        ingestionId: request.ingestionId,
+        packId: request.packId,
+        phase,
+        updatedAt: this.now(),
+      });
+      const handoff = await this.nativeHandoff.handoffInbox(
+        request.ingestionId,
+        request.packId,
+        DISK_HEADROOM_BYTES,
+      );
+      requireFingerprint(handoff.manifestFingerprint);
+      if (handoff.manifest.ingestionId !== request.ingestionId)
+        throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
+      const { artifacts } = handoff;
+      artifacts.forEach(artifact =>
+        assertOwnedArtifactPath(artifact.relativePath),
+      );
+      const copiedItems = handoff.manifest.items.filter(
+        item => item.status === 'copied',
+      );
+      const artifactIds = new Set(artifacts.map(artifact => artifact.itemId));
+      if (
+        artifacts.length !== copiedItems.length ||
+        artifactIds.size !== artifacts.length ||
+        artifacts.some(
+          artifact =>
+            artifact.relativePath !==
+              ownedOriginalPath(request.packId, artifact.itemId) ||
+            !copiedItems.some(
+              item =>
+                item.id === artifact.itemId &&
+                item.byteCount === artifact.byteCount &&
+                item.mediaType === artifact.mediaType &&
+                (item.sha256 === undefined || item.sha256 === artifact.sha256),
+            ),
+        ) ||
+        copiedItems.some(item => !artifactIds.has(item.id))
+      )
+        throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
+      phase = 'files-published';
+      await this.repository.recordRecovery({
+        ingestionId: request.ingestionId,
+        packId: request.packId,
+        phase,
+        updatedAt: this.now(),
+      });
+      await this.interruptionHook('before-db-commit');
+      const result = await this.repository.commitImport({
+        packId: request.packId,
+        manifest: handoff.manifest,
+        manifestFingerprint: handoff.manifestFingerprint,
+        artifacts,
+      });
+      phase = 'database-committed';
+      await this.nativeHandoff.acknowledgeInbox(request.ingestionId);
+      return result;
+    } catch (error) {
+      const occurredAt = this.now();
+      const code = recoveryErrorCode(error);
+      try {
+        await this.repository.recordRecovery({
+          ingestionId: request.ingestionId,
+          packId: request.packId,
+          phase,
+          updatedAt: occurredAt,
+          errorCode: code,
+        });
+        await this.diagnostics?.recordRecoveryDiagnostic({
+          id: request.ingestionId,
+          scope: 'inbox',
+          anonymousId: request.ingestionId,
+          code,
+          phase,
+          occurredAt,
+        });
+      } catch {
+        // Preserve the causal error. Both durable Inbox and published owned
+        // files remain available for a later scan even if diagnostics fail.
+      }
+      throw error;
+    }
   }
 }
 
@@ -110,6 +149,9 @@ export class ReferenceAwareCleanup {
   constructor(
     private readonly repository: PersistenceRepository,
     private readonly files: OwnedArtifactFileStore,
+    private readonly quarantine?: QuarantineRepository,
+    private readonly now: () => string = () => new Date().toISOString(),
+    private readonly quarantineRetentionMs = 7 * 24 * 60 * 60 * 1_000,
   ) {}
 
   async run(olderThan: string): Promise<{
@@ -137,14 +179,105 @@ export class ReferenceAwareCleanup {
       this.repository.listRecoveringPackIds(),
     ]);
     let quarantined = 0;
-    for (const path of ownedFiles) {
+    for (const file of ownedFiles) {
+      const path = file.relativePath;
       if (known.has(path)) continue;
       const filePackId = ownedArtifactPackId(path);
       if (filePackId && recoveringPackIds.has(filePackId)) continue;
-      await this.files.quarantineOwnedFile(path);
+      const result = await this.files.quarantineOwnedFile(path);
+      if (!result) continue;
+      const createdAt = this.now();
+      await this.quarantine?.recordQuarantine({
+        id: result.quarantineId,
+        anonymousId: result.anonymousId,
+        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+        byteCount: result.byteCount,
+        createdAt,
+        purgeAfter: new Date(
+          Date.parse(createdAt) + this.quarantineRetentionMs,
+        ).toISOString(),
+      });
       quarantined += 1;
     }
     return { deleted, quarantined };
+  }
+}
+
+export interface ScheduledCleanupResult {
+  readonly status: 'completed' | 'lease-held';
+  readonly deleted: number;
+  readonly quarantined: number;
+  readonly purged: number;
+  readonly purgedBytes: number;
+}
+
+/** Serializes cleanup across callers and applies the explicit quarantine TTL. */
+export class ScheduledReferenceAwareCleanup {
+  constructor(
+    private readonly repository: PersistenceRepository &
+      CleanupLeaseRepository &
+      QuarantineRepository &
+      RecoveryDiagnosticsRepository,
+    private readonly files: OwnedArtifactFileStore,
+    private readonly ownerId: string,
+    private readonly now: () => string = () => new Date().toISOString(),
+    private readonly artifactRetentionMs = 24 * 60 * 60 * 1_000,
+    private readonly quarantineRetentionMs = 7 * 24 * 60 * 60 * 1_000,
+    private readonly leaseDurationMs = 5 * 60 * 1_000,
+  ) {
+    requireIdentifier(ownerId);
+  }
+
+  async run(): Promise<ScheduledCleanupResult> {
+    const acquiredAt = this.now();
+    const acquiredEpoch = Date.parse(acquiredAt);
+    const lease = await this.repository.acquireCleanupLease(
+      this.ownerId,
+      acquiredAt,
+      new Date(acquiredEpoch + this.leaseDurationMs).toISOString(),
+    );
+    if (!lease)
+      return {
+        status: 'lease-held',
+        deleted: 0,
+        quarantined: 0,
+        purged: 0,
+        purgedBytes: 0,
+      };
+    try {
+      const cleanup = await new ReferenceAwareCleanup(
+        this.repository,
+        this.files,
+        this.repository,
+        this.now,
+        this.quarantineRetentionMs,
+      ).run(new Date(acquiredEpoch - this.artifactRetentionMs).toISOString());
+      const purged = await this.files.purgeQuarantine(
+        acquiredEpoch - this.quarantineRetentionMs,
+      );
+      const marked = await this.repository.markQuarantinePurgedBefore(
+        acquiredAt,
+        acquiredAt,
+      );
+      if (marked !== purged.purgedCount) {
+        await this.repository.recordRecoveryDiagnostic({
+          id: this.ownerId,
+          scope: 'cleanup',
+          anonymousId: this.ownerId,
+          code: 'STORAGE_DIVERGENCE_DETECTED',
+          phase: 'quarantine-retention',
+          occurredAt: acquiredAt,
+        });
+      }
+      return {
+        status: 'completed',
+        ...cleanup,
+        purged: purged.purgedCount,
+        purgedBytes: purged.purgedBytes,
+      };
+    } finally {
+      await this.repository.releaseCleanupLease(this.ownerId);
+    }
   }
 }
 
@@ -154,4 +287,14 @@ function requireIdentifier(value: string): void {
 
 function requireFingerprint(value: string): void {
   if (!/^[0-9a-f]{64}$/.test(value)) throw new DomainError('SCHEMA_INVALID');
+}
+
+function recoveryErrorCode(error: unknown): DomainErrorCode {
+  if (error instanceof DomainError) return error.code;
+  if (isRecord(error) && isDomainErrorCode(error.code)) return error.code;
+  return 'PIPELINE_RECOVERY_REQUIRED';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

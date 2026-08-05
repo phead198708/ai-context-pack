@@ -231,4 +231,82 @@ describe('native adapter runtime boundary', () => {
       code: 'NATIVE_INBOX_ACK_FAILED',
     });
   });
+
+  test('validates ArtifactStore publication, quarantine, purge, and usage DTOs', async () => {
+    const packId = '423e4567-e89b-42d3-a456-426614174000';
+    const artifactId = '523e4567-e89b-42d3-a456-426614174000';
+    const quarantineId = '623e4567-e89b-42d3-a456-426614174000';
+    const relativePath = `Packs/${packId}/derived/${artifactId}.txt`;
+    const native = {
+      ...mockNativeModule,
+      publishArtifact: jest.fn().mockResolvedValue({
+        relativePath,
+        byteCount: 3,
+        sha256: 'a'.repeat(64),
+        created: true,
+      }),
+      verifyArtifact: jest.fn().mockResolvedValue({
+        relativePath,
+        status: 'verified',
+        byteCount: 3,
+        sha256: 'a'.repeat(64),
+      }),
+      listOwnedArtifacts: jest
+        .fn()
+        .mockResolvedValue([{ relativePath, byteCount: 3 }]),
+      removeOwnedArtifact: jest.fn().mockResolvedValue(true),
+      quarantineOwnedArtifact: jest.fn().mockResolvedValue({
+        quarantined: true,
+        quarantineId,
+        anonymousId: artifactId,
+        byteCount: 3,
+      }),
+      purgeArtifactQuarantine: jest
+        .fn()
+        .mockResolvedValue({ purgedCount: 1, purgedBytes: 3 }),
+      getArtifactStorageUsage: jest.fn().mockResolvedValue({
+        artifactCount: 1,
+        artifactBytes: 3,
+        quarantineCount: 0,
+        quarantineBytes: 0,
+      }),
+    };
+    const guarded = createNativeAdapter(native);
+
+    await expect(
+      guarded.publishArtifact(
+        'file:///synthetic.txt',
+        relativePath,
+        3,
+        'a'.repeat(64),
+      ),
+    ).resolves.toMatchObject({ created: true });
+    await expect(
+      guarded.quarantineOwnedArtifact(relativePath),
+    ).resolves.toEqual({
+      quarantined: true,
+      quarantineId,
+      anonymousId: artifactId,
+      byteCount: 3,
+    });
+    await expect(guarded.purgeArtifactQuarantine(1)).resolves.toEqual({
+      purgedCount: 1,
+      purgedBytes: 3,
+    });
+    await expect(guarded.getArtifactStorageUsage()).resolves.toMatchObject({
+      artifactCount: 1,
+      artifactBytes: 3,
+    });
+
+    native.quarantineOwnedArtifact.mockResolvedValue({
+      quarantined: true,
+      quarantineId: 'not-a-uuid',
+    });
+    await expect(
+      guarded.quarantineOwnedArtifact(relativePath),
+    ).rejects.toMatchObject({ code: 'NATIVE_ARTIFACT_RESULT_INVALID' });
+    await expect(guarded.purgeArtifactQuarantine(-1)).rejects.toMatchObject({
+      code: 'NATIVE_ARTIFACT_INPUT_INVALID',
+    });
+  });
 });

@@ -472,6 +472,24 @@ final class InboxRecoverySupportTests: XCTestCase {
       XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
       XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
     }
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(
+        at: root.appendingPathComponent("Inbox"),
+        includingPropertiesForKeys: nil
+      ).count,
+      0
+    )
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(
+        at: root.appendingPathComponent("InboxQuarantine"),
+        includingPropertiesForKeys: nil
+      ).count,
+      1
+    )
+    XCTAssertEqual(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")).count,
+      0
+    )
   }
 
   func testCalendarInvalidTimestampsAreSchemaInvalid() throws {

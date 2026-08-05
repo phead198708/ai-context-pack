@@ -1,17 +1,20 @@
 import CoreFoundation
 import CryptoKit
+import Darwin
 import Foundation
 
 enum InboxManifestValidationError: Error, Equatable {
   case invalidManifest
   case unsupportedVersion
   case artifactIntegrityFailed
+  case quarantineFailed
 
   var stableCode: String {
     switch self {
     case .invalidManifest: "SCHEMA_INVALID"
     case .unsupportedVersion: "SCHEMA_VERSION_UNSUPPORTED"
     case .artifactIntegrityFailed: "ARTIFACT_INTEGRITY_FAILED"
+    case .quarantineFailed: "STORAGE_WRITE_FAILED"
     }
   }
 }
@@ -59,13 +62,25 @@ enum InboxManifestValidator {
       options: [.skipsHiddenFiles]
     )
     var ids = Set<String>()
-    return try directories.compactMap { ingestion in
+    var manifests: [[String: Any]] = []
+    for ingestion in directories.sorted(by: {
+      $0.lastPathComponent < $1.lastPathComponent
+    }) {
       let id = ingestion.lastPathComponent
       guard ids.insert(id).inserted else {
         throw InboxManifestValidationError.invalidManifest
       }
-      return try readIngestion(root: root, ingestion: ingestion, id: id)
+      do {
+        if let manifest = try readIngestion(root: root, ingestion: ingestion, id: id) {
+          manifests.append(manifest)
+        }
+      } catch let error as InboxManifestValidationError {
+        do { try quarantineMalformed(root: root, ingestion: ingestion) }
+        catch { throw InboxManifestValidationError.quarantineFailed }
+        throw error
+      }
     }
+    return manifests
   }
 
   static func readPublished(inbox: URL, ingestionId: String) throws -> [String: Any] {
@@ -116,6 +131,41 @@ enum InboxManifestValidator {
     }
     try validate(manifest, rawData: data, ingestion: ingestion, id: id)
     return manifest
+  }
+
+  private static func quarantineMalformed(root: URL, ingestion: URL) throws {
+    let container = root.deletingLastPathComponent()
+    let quarantine = container.appendingPathComponent("InboxQuarantine", isDirectory: true)
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: quarantine.path, isDirectory: &isDirectory) {
+      let values = try quarantine.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+      guard isDirectory.boolValue, values.isSymbolicLink != true else {
+        throw InboxManifestValidationError.quarantineFailed
+      }
+    } else {
+      try FileManager.default.createDirectory(
+        at: quarantine,
+        withIntermediateDirectories: false
+      )
+      try synchronizeDirectory(container)
+    }
+    let target = quarantine.appendingPathComponent(
+      "\(UUID().uuidString.lowercased()).quarantine"
+    )
+    guard Darwin.rename(ingestion.path, target.path) == 0 else {
+      throw InboxManifestValidationError.quarantineFailed
+    }
+    try synchronizeDirectory(root)
+    try synchronizeDirectory(quarantine)
+  }
+
+  private static func synchronizeDirectory(_ directory: URL) throws {
+    let descriptor = Darwin.open(directory.path, O_RDONLY)
+    guard descriptor >= 0 else { throw InboxManifestValidationError.quarantineFailed }
+    defer { Darwin.close(descriptor) }
+    guard Darwin.fsync(descriptor) == 0 else {
+      throw InboxManifestValidationError.quarantineFailed
+    }
   }
 
   private static func validate(

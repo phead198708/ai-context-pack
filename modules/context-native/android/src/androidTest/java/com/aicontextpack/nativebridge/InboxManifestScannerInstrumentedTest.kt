@@ -35,7 +35,7 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
-  fun rejectsMalformedManifestInsteadOfDroppingIt() {
+  fun quarantinesMalformedManifestAndRetryCanContinue() {
     File(inbox, "$validIngestionId/manifest.json").apply {
       parentFile?.mkdirs()
       writeText("{truncated")
@@ -44,6 +44,9 @@ class InboxManifestScannerInstrumentedTest {
     val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
 
     assertEquals("SCHEMA_INVALID", error.code)
+    assertEquals(emptyList<File>(), inbox.listFiles()?.toList())
+    assertEquals(1, File(inbox.parentFile, "InboxQuarantine").listFiles()?.size)
+    assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
   }
 
   @Test
@@ -149,16 +152,16 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsInvalidCurrentVersionTimestampAsSchemaInvalid() {
-    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
-      parentFile?.mkdirs()
-      writeBytes(byteArrayOf(1, 2, 3))
-    }
     listOf(
       "not-a-timestamp",
       "2026-02-29T00:00:00Z",
       "2026-01-01T24:00:00Z",
       "2026-04-31T00:00:00Z",
     ).forEach { timestamp ->
+      val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+        parentFile?.mkdirs()
+        writeBytes(byteArrayOf(1, 2, 3))
+      }
       writeManifest(item, createdAt = timestamp)
 
       val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
@@ -237,9 +240,6 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsEveryNonCanonicalNumericSchemaVersionWithStableCode() {
-    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
-      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
-    }
     for (rawVersion in listOf(
       "-1",
       "1.5",
@@ -249,6 +249,9 @@ class InboxManifestScannerInstrumentedTest {
       "1.0000000000000001",
       "1.000000000000000000000000000000000000001",
     )) {
+      val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+        parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+      }
       writeManifest(item)
       rewriteManifestSchemaVersion(rawVersion)
 

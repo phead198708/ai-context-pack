@@ -1,8 +1,11 @@
 jest.mock('expo-sqlite', () => ({ openDatabaseAsync: jest.fn() }));
 
 import type { ImportManifestV1 } from '../src/domain/contracts';
+import type { Artifact } from '../src/domain/models';
 import type { CommitImportInput } from '../src/infrastructure/persistence/contracts';
+import { DEVELOPMENT_RESET_CONFIRMATION } from '../src/infrastructure/persistence/contracts';
 import { ExpoSqlitePersistenceRepository } from '../src/infrastructure/persistence/sqlite';
+import { ownedDerivedPath } from '../src/infrastructure/persistence/ownedPaths';
 
 type SqlValue = string | number | null;
 
@@ -70,7 +73,13 @@ function existingImportConnection(persistedSha256: string): {
         return {
           pack_id: packId,
           manifest_fingerprint: 'a'.repeat(64),
+          manifest_version: 1,
+          source: 'android-share-intent',
+          status: 'complete',
+          created_at: '2026-08-03T00:00:00Z',
         } as T;
+      if (source.includes('SELECT COUNT(*) AS count FROM context_items'))
+        return { count: 1 } as T;
       return null;
     },
     all: async <T>(source: string) => {
@@ -85,6 +94,20 @@ function existingImportConnection(persistedSha256: string): {
             sha256: persistedSha256,
           } as T,
         ];
+      if (source.includes('FROM import_items imported_item'))
+        return [
+          {
+            id: itemId,
+            import_order: 0,
+            import_status: 'copied',
+            import_error_code: null,
+            pack_id: packId,
+            source_type: 'image',
+            media_type: 'image/png',
+            original_sha256: persistedSha256,
+            original_relative_path: `Packs/${packId}/originals/${itemId}.bin`,
+          } as T,
+        ];
       return [];
     },
     exclusive: async task => task(connection),
@@ -93,6 +116,34 @@ function existingImportConnection(persistedSha256: string): {
 }
 
 describe('ExpoSqlitePersistenceRepository replay identity', () => {
+  test('applies the production migration through observable hooks', async () => {
+    const executed: string[] = [];
+    const events: string[] = [];
+    const connection = {
+      exec: async (source: string) => {
+        executed.push(source);
+      },
+      run: async () => ({ changes: 1 }),
+      first: async <T>(source: string) =>
+        source === 'PRAGMA user_version' ? ({ user_version: 2 } as T) : null,
+      all: async <T>() => [] as T[],
+      exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
+        task(connection),
+    };
+    const repository = new ExpoSqlitePersistenceRepository(
+      connection as never,
+      event => {
+        events.push(`${event.fromVersion}->${event.toVersion}:${event.phase}`);
+      },
+    );
+
+    await expect(repository.initialize()).resolves.toBe(undefined);
+
+    expect(events).toEqual(['2->3:starting', '2->3:applied']);
+    expect(executed[0]).toContain('PRAGMA foreign_keys = ON');
+    expect(executed[1]).toContain('PRAGMA user_version = 3');
+  });
+
   test('rejects a different artifact hash before deleting the recovery journal', async () => {
     const { connection, statements } = existingImportConnection('b'.repeat(64));
     const repository = new ExpoSqlitePersistenceRepository(connection as never);
@@ -113,5 +164,157 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
     expect(statements).toEqual([
       'DELETE FROM recovery_journal WHERE ingestion_id = ?',
     ]);
+  });
+
+  test('rejects a replay when its materialized context item is missing', async () => {
+    const { connection, statements } = existingImportConnection('b'.repeat(64));
+    const loadAll = connection.all;
+    connection.all = async <T>(source: string) => {
+      if (source.includes('FROM import_items imported_item')) return [];
+      return loadAll<T>(source);
+    };
+    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+
+    await expect(
+      repository.commitImport(replayInput('b'.repeat(64))),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    expect(statements).toEqual([]);
+  });
+
+  test('rejects replay when persisted import metadata diverges from its fingerprint-bound manifest', async () => {
+    const { connection, statements } = existingImportConnection('b'.repeat(64));
+    const loadFirst = connection.first;
+    connection.first = async <T>(
+      source: string,
+      params?: readonly SqlValue[],
+    ) => {
+      const value = await loadFirst<T>(source, params);
+      if (source.includes('SELECT pack_id, manifest_fingerprint') && value)
+        return { ...value, status: 'partial' } as T;
+      return value;
+    };
+    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+
+    await expect(
+      repository.commitImport(replayInput('b'.repeat(64))),
+    ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+    expect(statements).toEqual([]);
+  });
+
+  test('registers an exact verified derivative and rejects immutable replacement', async () => {
+    const artifactId = '423e4567-e89b-42d3-a456-426614174000';
+    const value: Artifact = {
+      id: artifactId,
+      itemId,
+      kind: 'ocr-text',
+      relativePath: ownedDerivedPath(packId, artifactId, 'txt'),
+      mediaType: 'text/plain',
+      byteCount: 3,
+      sha256: 'd'.repeat(64),
+      processorVersion: {
+        processor: 'fixture-ocr',
+        version: '1',
+        contractVersion: 1,
+      },
+      createdAt: '2026-08-05T00:00:00Z',
+      immutable: true,
+    };
+    const statements: { source: string; params: readonly SqlValue[] }[] = [];
+    let existing: Record<string, unknown> | null = null;
+    const connection = {
+      exec: async () => undefined,
+      run: async (source: string, params: readonly SqlValue[] = []) => {
+        statements.push({ source, params });
+        return { changes: 1 };
+      },
+      first: async <T>(source: string) => {
+        if (source.includes('FROM packs')) return { id: packId } as T;
+        if (source.includes('FROM context_items')) return { id: itemId } as T;
+        if (source.includes('FROM artifacts WHERE id')) return existing as T;
+        return null;
+      },
+      all: async <T>() => [] as T[],
+      exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
+        task(connection),
+    };
+    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+
+    await expect(
+      repository.registerPublishedArtifact({ packId, artifact: value }),
+    ).resolves.toBe('created');
+    expect(statements[0]?.params).toEqual([
+      artifactId,
+      itemId,
+      value.relativePath,
+      'text/plain',
+      3,
+      'd'.repeat(64),
+      '2026-08-05T00:00:00Z',
+      '2026-08-05T00:00:00Z',
+      'ocr-text',
+      JSON.stringify(value.processorVersion),
+    ]);
+
+    statements.length = 0;
+    existing = {
+      id: value.id,
+      item_id: value.itemId,
+      relative_path: value.relativePath,
+      media_type: value.mediaType,
+      byte_count: value.byteCount,
+      sha256: 'e'.repeat(64),
+      kind: value.kind,
+      processor_version_json: JSON.stringify(value.processorVersion),
+      created_at: value.createdAt,
+      last_verified_at: value.createdAt,
+    };
+    await expect(
+      repository.registerPublishedArtifact({ packId, artifact: value }),
+    ).rejects.toMatchObject({ code: 'STORAGE_ARTIFACT_IMMUTABLE' });
+    expect(statements).toEqual([]);
+  });
+
+  test('stores diagnostics with metadata-only parameter binding and forbids production reset', async () => {
+    const calls: { source: string; params: readonly SqlValue[] }[] = [];
+    const connection = {
+      exec: async () => undefined,
+      run: async (source: string, params: readonly SqlValue[] = []) => {
+        calls.push({ source, params });
+        return { changes: 1 };
+      },
+      first: async <T>() => null as T | null,
+      all: async <T>() => [] as T[],
+      exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
+        task(connection),
+    };
+    const repository = new ExpoSqlitePersistenceRepository(
+      connection as never,
+      undefined,
+      false,
+    );
+
+    await repository.recordRecoveryDiagnostic({
+      id: ingestionId,
+      scope: 'inbox',
+      anonymousId: ingestionId,
+      code: 'RESOURCE_LOW_DISK',
+      phase: 'handoff-started',
+      occurredAt: '2026-08-05T00:00:00Z',
+      byteCount: 3,
+    });
+    expect(calls[0]?.params).toEqual([
+      ingestionId,
+      'inbox',
+      ingestionId,
+      'RESOURCE_LOW_DISK',
+      'handoff-started',
+      '2026-08-05T00:00:00Z',
+      '2026-08-05T00:00:00Z',
+      3,
+    ]);
+    expect(JSON.stringify(calls[0]?.params)).not.toContain('file://');
+    await expect(
+      repository.resetForDevelopment(DEVELOPMENT_RESET_CONFIRMATION),
+    ).rejects.toMatchObject({ code: 'DEVELOPMENT_RESET_FORBIDDEN' });
   });
 });

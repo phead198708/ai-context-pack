@@ -52,6 +52,8 @@ jobs:
         run: npm test -- --ci --coverage
       - name: Verify persistence migrations
         run: npm run test:persistence-migrations
+      - name: Verify production persistence, concurrency, and recovery
+        run: npm run test:persistence-production
       - name: Run Expo Doctor
         run: npm run doctor
       - name: Audit high-severity npm findings

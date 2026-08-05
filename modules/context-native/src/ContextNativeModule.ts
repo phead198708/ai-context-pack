@@ -5,6 +5,14 @@ import type {
   PDFProbeResultV1,
 } from '../../../src/domain/contracts';
 import type {
+  NativeArtifactStorageUsage,
+  NativeArtifactVerification,
+  NativeOwnedArtifact,
+  NativePublishedArtifact,
+  NativeQuarantinePurgeResult,
+  NativeQuarantinedArtifact,
+} from '../../../src/domain/nativeAdapter';
+import type {
   PendingShareEvent,
   RecoveryEvent,
 } from '../../../src/domain/shareImportResult';
@@ -15,6 +23,32 @@ declare class ContextNativeModule extends NativeModule {
   ackEphemeralShareEvent(id: string): Promise<boolean>;
   getPendingRecoveryEvent(): Promise<RecoveryEvent | null>;
   ackRecoveryEvent(id: string): Promise<boolean>;
+  handoffInbox(
+    ingestionId: string,
+    packId: string,
+    requiredHeadroomBytes: number,
+  ): Promise<unknown>;
+  acknowledgeInbox(ingestionId: string): Promise<boolean>;
+  publishArtifact(
+    sourceFileUri: string,
+    relativePath: string,
+    expectedByteCount: number | null,
+    expectedSha256: string | null,
+  ): Promise<NativePublishedArtifact>;
+  verifyArtifact(
+    relativePath: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<NativeArtifactVerification>;
+  listOwnedArtifacts(): Promise<readonly NativeOwnedArtifact[]>;
+  removeOwnedArtifact(relativePath: string): Promise<boolean>;
+  quarantineOwnedArtifact(
+    relativePath: string,
+  ): Promise<NativeQuarantinedArtifact>;
+  purgeArtifactQuarantine(
+    olderThanEpochMs: number,
+  ): Promise<NativeQuarantinePurgeResult>;
+  getArtifactStorageUsage(): Promise<NativeArtifactStorageUsage>;
   recognizeText(
     fileUri: string,
     script: 'latin' | 'chinese',

@@ -106,6 +106,90 @@ public final class ContextNativeModule: Module {
       catch { throw NativeError("STORAGE_WRITE_FAILED") }
     }
 
+    AsyncFunction("publishArtifact") { (
+      sourceFileUri: String,
+      relativePath: String,
+      expectedByteCount: Int64?,
+      expectedSha256: String?
+    ) throws -> [String: Any] in
+      do {
+        return try OwnedArtifactStore.publish(
+          root: ownedApplicationSupportRoot(),
+          source: try controlledArtifactSourceURL(sourceFileUri),
+          relativePath: relativePath,
+          expectedByteCount: expectedByteCount,
+          expectedSha256: expectedSha256
+        )
+      } catch let error as OwnedArtifactStoreError {
+        throw NativeError(error.stableCode)
+      } catch let error as NativeError {
+        throw error
+      } catch {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("verifyArtifact") { (
+      relativePath: String,
+      expectedByteCount: Int64,
+      expectedSha256: String
+    ) throws -> [String: Any] in
+      do {
+        return try OwnedArtifactStore.verify(
+          root: ownedApplicationSupportRoot(),
+          relativePath: relativePath,
+          expectedByteCount: expectedByteCount,
+          expectedSha256: expectedSha256
+        )
+      } catch let error as OwnedArtifactStoreError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("listOwnedArtifacts") { () throws -> [[String: Any]] in
+      do { return try OwnedArtifactStore.list(root: ownedApplicationSupportRoot()) }
+      catch let error as OwnedArtifactStoreError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("removeOwnedArtifact") { (relativePath: String) throws -> Bool in
+      do {
+        return try OwnedArtifactStore.remove(
+          root: ownedApplicationSupportRoot(),
+          relativePath: relativePath
+        )
+      } catch let error as OwnedArtifactStoreError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("quarantineOwnedArtifact") { (relativePath: String) throws -> [String: Any] in
+      do {
+        return try OwnedArtifactStore.quarantine(
+          root: ownedApplicationSupportRoot(),
+          relativePath: relativePath
+        )
+      } catch let error as OwnedArtifactStoreError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("purgeArtifactQuarantine") { (olderThanEpochMs: Int64) throws -> [String: Any] in
+      do {
+        return try OwnedArtifactStore.purgeQuarantine(
+          root: ownedApplicationSupportRoot(),
+          olderThanEpochMs: olderThanEpochMs
+        )
+      } catch let error as OwnedArtifactStoreError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("getArtifactStorageUsage") { () throws -> [String: Any] in
+      do { return try OwnedArtifactStore.usage(root: ownedApplicationSupportRoot()) }
+      catch let error as OwnedArtifactStoreError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("STORAGE_WRITE_FAILED") }
+    }
+
     AsyncFunction("recognizeText") { (fileUri: String, script: String) async throws -> [String: Any] in
       let started = ContinuousClock.now
       let url = try controlledFileURL(fileUri)
@@ -167,6 +251,33 @@ private func imageOrientation(source: CGImageSource) -> CGImagePropertyOrientati
 private func controlledFileURL(_ value: String) throws -> URL {
   guard let url = URL(string: value), url.isFileURL else { throw NativeError("INVALID_LOCAL_FILE_URI") }
   return url.standardizedFileURL
+}
+
+private func controlledArtifactSourceURL(_ value: String) throws -> URL {
+  let source = try controlledFileURL(value)
+  let sourceValues: URLResourceValues
+  do { sourceValues = try source.resourceValues(forKeys: [.isSymbolicLinkKey]) }
+  catch { throw NativeError("INVALID_LOCAL_FILE_URI") }
+  guard sourceValues.isSymbolicLink != true else {
+    throw NativeError("INVALID_LOCAL_FILE_URI")
+  }
+  let candidate = source.resolvingSymlinksInPath().standardizedFileURL
+  let sandbox = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    .resolvingSymlinksInPath().standardizedFileURL
+  guard candidate.path.hasPrefix(sandbox.path + "/") else {
+    throw NativeError("INVALID_LOCAL_FILE_URI")
+  }
+  return candidate
+}
+
+private func ownedApplicationSupportRoot() throws -> URL {
+  guard let applicationSupport = FileManager.default.urls(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask
+  ).first else {
+    throw NativeError("STORAGE_WRITE_FAILED")
+  }
+  return applicationSupport.appendingPathComponent("AIContextPack", isDirectory: true)
 }
 
 private func durationMilliseconds(since start: ContinuousClock.Instant) -> Double {

@@ -71,6 +71,12 @@ Every import begins with an atomic, schema-versioned ImportManifestV1. Provider 
 
 Persistence, file ownership, migration, locking, cleanup, and replay details are fixed by [ADR-0002](../adr/0002-sqlite-file-storage-and-inbox-recovery.md).
 
+Production persistence uses one app-lifetime Expo SQLite connection at schema v3. Repository boundaries cover Pack graphs, ordered ContextItems, RiskFindings, ExportRecords, artifacts, recovery journals, diagnostics, quarantine records, and cleanup leases. Pack updates use optimistic revisions inside exclusive transactions; unknown newer schemas, stale revisions, relationship violations, and artifact-integrity mismatches fail closed with stable codes.
+
+Native `ArtifactStore` implementations own streaming file publication. They accept only sandbox-controlled `file://` sources and canonical internal relative destinations, write and synchronize a `.partial`, verify byte count and SHA-256, publish by same-volume atomic rename, and synchronize the destination directory. Domain-visible artifact metadata is committed only after native verification. Existing originals and their source/media identity are immutable, and replay succeeds only for identical bytes.
+
+At bootstrap and foreground recovery, validated Inbox manifests are processed oldest-first through one serialized production processor. SQLite commit happens before native ACK. A first app-lifetime integrity audit represents missing or mismatched files as recoverable storage divergence. Scheduled cleanup and derived/export publication share a database lifecycle lease; cleanup rechecks references transactionally, protects active recovery Pack IDs, moves unknown files to native quarantine, and purges them only after the explicit retention period. Diagnostics contain stable codes, counts, byte sizes, phases, and irreversible internal IDs—never content, filenames, provider URIs, or absolute paths.
+
 ## 5. Shared contracts
 
 Required versioned schemas:

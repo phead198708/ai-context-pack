@@ -1,9 +1,10 @@
 # ADR-0002: SQLite metadata, owned files, and dual-Inbox recovery
 
-- Status: Accepted for the Phase 0 persistence spike
+- Status: Accepted and implemented for production persistence
 - Date: 2026-08-03
+- Production implementation: 2026-08-05
 - Decision owners: repository maintainers
-- Scope: Issue #5; production wiring is owned by Issue #7
+- Scope: Issue #5 decision and Issue #7 production implementation
 
 ## Context
 
@@ -19,12 +20,14 @@ The database uses:
 
 - `foreign_keys=ON`, WAL journal mode, `synchronous=FULL`, and a 5-second busy timeout;
 - exclusive async transactions for migrations, import commits, and reference-aware deletes;
-- `PRAGMA user_version` migrations from empty → v1 → v2;
+- immutable `PRAGMA user_version` migrations from empty → v1 → v2 → v3;
 - a unique `imports.ingestion_id` idempotency key plus exact-byte manifest SHA-256 and complete persisted-artifact-set replay checks;
 - `artifact_references` rather than inferred liveness;
 - no `BLOB` content columns.
 
-The v1 schema creates packs, imports, ordered import items, artifacts, references, and recovery journal rows. The v2 migration adds `last_verified_at` and cleanup indexes. Unknown newer `user_version` values fail with `SCHEMA_VERSION_UNSUPPORTED`.
+The v1 schema creates packs, imports, ordered import items, artifacts, references, and recovery journal rows. The v2 migration adds `last_verified_at` and cleanup indexes. The v3 migration adds the production Pack graph and optimistic revision, nullable item ownership for Pack-level export/preview artifacts, a one-original-per-item index, ordered ContextItems, RiskFindings, ExportRecords, recovery diagnostics, quarantine metadata, and a cleanup lease. The v3 artifact-table rebuild preserves v1/v2 rows, references, processor metadata, and foreign-key integrity. Unknown newer `user_version` values fail with `SCHEMA_VERSION_UNSUPPORTED`; migration hooks expose only version/phase metadata.
+
+One app-lifetime `ExpoSqlitePersistenceRepository` instance owns the connection. It implements the `ContextPack`, `ContextItem`, `RiskFinding`, `ExportRecord`, artifact-record, recovery, diagnostic, quarantine, cleanup-lease, and development-reset repository boundaries. Pack graphs use monotonic optimistic revisions; a stale writer fails with `PERSISTENCE_CONFLICT`, and ordered items are replaced atomically within the winning revision transaction.
 
 ## File ownership and paths
 
@@ -65,6 +68,9 @@ Keep the existing stable registry file plus per-ingestion POSIX advisory locks f
 - Cleanup snapshots owned files before it reads all database-known paths and active recovery Pack IDs. Since recovery journals before publishing, files that are recent, referenced, or awaiting a recovery commit cannot be mistaken for orphans.
 - Files under an owned root that have no database record and no active recovery are moved to quarantine, not silently deleted. A later diagnostic/retention task may purge quarantine explicitly.
 - Inbox corruption and unknown versions remain diagnosable through stable codes and quarantine metadata; normal logging is limited to codes, counts, byte sizes, durations, and irreversible IDs.
+- Native owned-file mutations are serialized across app/worker instances with an in-process registry plus a cross-process file lock. Quarantine and retention purge share that lock, so a newly quarantined file cannot be purged before its recorded timestamp.
+- Production cleanup and derived/export publication share one database lifecycle lease, closing the verified-file/SQLite-registration orphan race. Cleanup uses a 24-hour unreferenced-artifact cutoff and a seven-day quarantine retention period. A lease holder releases in `finally` or expires after five minutes; another cleanup caller returns `lease-held`, while a publisher fails with retryable `PERSISTENCE_CONFLICT` before mutating files.
+- A first app-lifetime artifact audit hashes every database-known file. Missing or mismatched bytes are represented as `STORAGE_DIVERGENCE_DETECTED`, recorded with metadata-only diagnostics when possible, and surfaced for recovery instead of crashing.
 
 ## Interruption and failure matrix
 
@@ -79,7 +85,8 @@ Keep the existing stable registry file plus per-ingestion POSIX advisory locks f
 | Corrupt/unknown manifest            | Fail closed with stable schema code; no content log                         | native manifest suites                                        |
 | Expired Android provider permission | Successful files remain; failed item is explicit; no commit of a half-state | shared injected failure and Android importer tests            |
 | Low disk                            | `RESOURCE_LOW_DISK` before destination creation; Inbox retained             | shared, Swift, and Kotlin tests                               |
-| v1 app database update              | v2 applied with rows preserved                                              | `npm run test:persistence-migrations`                         |
+| v1/v2 app database update           | v3 applied with rows, references, processor metadata, and order preserved   | `npm run test:persistence-migrations`                         |
+| Empty/legacy/restart/concurrent DB  | 0→1→2→3, ordered restart, one-of-two CAS, rollback, backup/restore pass     | `npm run test:persistence-production`                         |
 | Cleanup races recovery              | Transactional reference recheck wins; file retained                         | shared cleanup race test                                      |
 | Replay with low free space          | Existing artifacts require only fixed headroom and remain replayable        | Swift/Kotlin published-destination budget tests               |
 | New destination hierarchy           | Every new directory and parent is synchronized before handoff returns       | Swift/Kotlin injected directory-sync tests                    |
@@ -102,7 +109,9 @@ These are Phase 0 correctness/baseline measurements, not physical-hardware relea
 
 ## Dependency review
 
-`expo-sqlite` 57.0.1 is pinned by Expo SDK 57 and is maintained in the Expo monorepo under the MIT license. It supports the existing Expo Modules/New Architecture setup on iOS and Android. It performs local database access and adds no network permission, analytics, account, or remote service. Native SQLite code and the Expo module add binary size; the exact release-size delta must be recorded in Issue #7 release builds. `await-lock` 2.2.2 is its small JavaScript transitive dependency and does not access content or the network.
+`expo-sqlite` 57.0.1 is pinned by Expo SDK 57 and is maintained in the Expo monorepo under the MIT license. It supports the existing Expo Modules/New Architecture setup on iOS and Android. It performs local database access and adds no network permission, analytics, account, or remote service. Native SQLite code and the Expo module add binary size; Issue #7 records the exact isolated Release delta below. `await-lock` 2.2.2 is its small JavaScript transitive dependency and does not access content or the network.
+
+Issue #7 measured the native autolink delta using identical source, production JavaScript bundle, architecture, and Release configuration; the comparison copy changed only `expo.autolinking.exclude: ["expo-sqlite"]`. On Apple Silicon with Xcode 26.6, Node 22.13.1, and the iOS Simulator arm64 Release target, the main executable increased from 2,915,808 to 5,899,664 bytes: **+2,983,856 bytes**. The uncompressed `.app` increased from 55,328 to 58,244 KiB: **+2,916 KiB (5.270%)**. The embedded Share Extension executable stayed 305,376 bytes: **0-byte delta**. With Android SDK 36, Gradle 9.3.1, JDK 22, Node 22.13.1, and an arm64-v8a Release AAB, the bundle increased from 26,405,826 to 27,333,723 bytes: **+927,897 bytes (3.514%)**. Of that AAB delta, `libexpo-sqlite.so` is 1,830,224 bytes uncompressed and 884,123 bytes compressed; the remainder is module registration/bytecode and bundle metadata. The Pixel 9 Pro/API 35 AVD was used for separate Android runtime verification, not to build the AAB. These are reproducible virtual-target build measurements, not physical-device performance evidence.
 
 No separate file-system wrapper is selected. Resource-sensitive handoff remains in the existing first-party `ContextNative` Swift/Kotlin module.
 
@@ -117,15 +126,19 @@ No separate file-system wrapper is selected. Resource-sensitive handoff remains 
 - **Age-only cleanup:** rejected because it can race recovery and delete live content.
 - **`NSFileCoordinator` for all App Group reads:** rejected for the immutable publish protocol; POSIX ownership locks and atomic rename are the smaller cross-process contract.
 
-## Production work explicitly deferred to Issue #7
+## Issue #7 production implementation
 
-1. Wire one app-lifetime repository instance during bootstrap and surface migration failures in the Pack UI.
-2. Invoke `InboxPersistenceCoordinator` for every validated Inbox ingestion and persist the production `ContextPack` fields required by Phase 1.
-3. Add production migrations for Pack titles/instructions/budgets, pipeline runs/checkpoints, risk decisions, exports, and lifecycle timestamps as their owning issues land; never edit an applied migration.
-4. Implement quarantine retention, user-visible diagnostics, storage totals, and a scheduled cleanup lease.
-5. Add cancellation/background checkpoint wiring and retry UI without expanding native Share Extension work.
-6. Add release database backup/restore/upgrade tests and measure SQLite/file size on pinned minimum/current Simulator and Emulator profiles, recording the host/toolchain and virtual-environment limitations required by ADR-0003.
-7. Record the `expo-sqlite` release binary-size delta and final license notice.
+Issue #7 completes the production work owned by this ADR:
+
+1. One retryable app-lifetime repository is wired during bootstrap; migration and recovery failures use stable UI error codes and the existing Retry interaction.
+2. Every validated Inbox manifest is processed oldest-first through `InboxPersistenceCoordinator`. SQLite commit precedes ACK, and duplicate exact replays are idempotent.
+3. Schema v3 persists production Pack fields, ordered items, risk decisions, exports, artifact identities, lifecycle timestamps, diagnostics, quarantine, and cleanup leases without editing v1/v2.
+4. Native `ArtifactStore` publishes through partial write, file synchronization, size/SHA-256 verification, atomic rename, directory synchronization, and immutable replay checks before SQLite registration.
+5. Reference-aware cleanup, seven-day quarantine retention, storage totals/divergence reporting, and a cross-caller lifecycle lease shared by publication and cleanup are implemented.
+6. Deterministic development reset requires both a development build and the literal `RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA`; it is never an automatic production recovery path.
+7. Real SQLite verification covers upgrade, repository restart, immutable-source rollback, concurrent compare-and-swap, Pack-append revisioning, risk/export round trips, corrupted-row mapping, interrupted transaction rollback, backup/restore, reference cleanup, and absence of BLOB/provider/absolute-path persistence. The release-size results and license review are recorded above.
+
+Cancellation/background pipeline checkpoints beyond Inbox recovery remain owned by their later processing issues. User-facing storage-management UI remains explicitly out of scope for Issue #7.
 
 ## Consequences
 

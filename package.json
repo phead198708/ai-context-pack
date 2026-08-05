@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "test:fixtures": "node scripts/verify-fixtures.mjs",
     "test:persistence-migrations": "node scripts/verify-persistence-migrations.mjs",
+    "test:persistence-production": "node scripts/verify-production-persistence.mjs",
     "test:v01-verification-policy": "node scripts/verify-v01-virtual-verification-policy.mjs",
     "test:workflows": "node scripts/verify-workflow-security.mjs && npm run test:v01-verification-policy",
     "start": "expo start --dev-client",

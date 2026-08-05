@@ -16,6 +16,7 @@ import {
   type InboxWorkflowState,
 } from './src/domain/inboxEventWorkflow';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
+import { persistenceInboxProcessor } from './src/infrastructure/persistence/runtime';
 import { colors, spacing, typography } from './src/ui/tokens';
 
 type Screen = 'inbox' | 'detail' | 'diagnostics';
@@ -30,10 +31,14 @@ function App(): React.JSX.Element {
   }, []);
   const workflow = useRef<InboxEventWorkflow | null>(null);
   if (!workflow.current)
-    workflow.current = new InboxEventWorkflow(nativeAdapter, {
-      setState: setWorkflowState,
-      showNewestImport: () => setScreen('detail'),
-    });
+    workflow.current = new InboxEventWorkflow(
+      nativeAdapter,
+      {
+        setState: setWorkflowState,
+        showNewestImport: () => setScreen('detail'),
+      },
+      persistenceInboxProcessor,
+    );
   useEffect(() => {
     workflow.current?.bootstrap();
     const subscription = AppState.addEventListener('change', next => {

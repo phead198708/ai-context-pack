@@ -8,11 +8,16 @@ import type {
   OwnedArtifactFileStore,
   PersistedImportSummary,
   PersistenceRepository,
+  QuarantineRecordInput,
+  RecoveryDiagnostic,
+  RecoveryDiagnosticInput,
   RecoveryJournalEntry,
+  StorageUsageSummary,
 } from '../src/infrastructure/persistence/contracts';
 import {
   InboxPersistenceCoordinator,
   ReferenceAwareCleanup,
+  ScheduledReferenceAwareCleanup,
   type PersistenceInterruptionPoint,
 } from '../src/infrastructure/persistence/recovery';
 import {
@@ -250,8 +255,11 @@ class MemoryFiles implements OwnedArtifactFileStore {
   readonly removed: string[] = [];
   readonly quarantined: string[] = [];
 
-  async listOwnedFiles(): Promise<readonly string[]> {
-    return [...this.files];
+  async listOwnedFiles() {
+    return [...this.files].map(relativePath => ({
+      relativePath,
+      byteCount: 1,
+    }));
   }
 
   async removeOwnedFile(relativePath: string): Promise<void> {
@@ -259,9 +267,65 @@ class MemoryFiles implements OwnedArtifactFileStore {
     this.files.delete(relativePath);
   }
 
-  async quarantineOwnedFile(relativePath: string): Promise<void> {
+  async quarantineOwnedFile(relativePath: string) {
     this.quarantined.push(relativePath);
     this.files.delete(relativePath);
+    return {
+      quarantineId: '623e4567-e89b-42d3-a456-426614174000',
+      anonymousId: relativePath.slice(-40, -4),
+      byteCount: 1,
+    };
+  }
+
+  async purgeQuarantine() {
+    return { purgedCount: 0, purgedBytes: 0 };
+  }
+}
+
+class ProductionCleanupRepository extends MemoryRepository {
+  readonly quarantineRecords: QuarantineRecordInput[] = [];
+  readonly diagnostics: RecoveryDiagnosticInput[] = [];
+  leaseAvailable = true;
+  released = 0;
+  markedPurged = 0;
+
+  async recordQuarantine(input: QuarantineRecordInput) {
+    this.quarantineRecords.push(input);
+  }
+
+  async markQuarantinePurgedBefore() {
+    return this.markedPurged;
+  }
+
+  async acquireCleanupLease() {
+    return this.leaseAvailable;
+  }
+
+  async releaseCleanupLease() {
+    this.released += 1;
+  }
+
+  async recordRecoveryDiagnostic(input: RecoveryDiagnosticInput) {
+    this.diagnostics.push(input);
+  }
+
+  async listRecoveryDiagnostics(): Promise<readonly RecoveryDiagnostic[]> {
+    return [];
+  }
+
+  async getStorageUsage(): Promise<StorageUsageSummary> {
+    return {
+      artifactCount: 0,
+      artifactBytes: 0,
+      referencedArtifactCount: 0,
+      referencedArtifactBytes: 0,
+      recoveryCount: 0,
+      quarantineCount: this.quarantineRecords.length,
+      quarantineBytes: this.quarantineRecords.reduce(
+        (total, value) => total + value.byteCount,
+        0,
+      ),
+    };
   }
 }
 
@@ -451,6 +515,69 @@ describe('persistence and dual-Inbox recovery spike', () => {
     ).resolves.toEqual({ deleted: 0, quarantined: 0 });
     expect(files.files).toEqual(new Set([recentPath, recoveringPath]));
   });
+
+  test('orphan quarantine records only internal IDs, byte counts, and retention metadata', async () => {
+    const repository = new ProductionCleanupRepository();
+    const files = new MemoryFiles();
+    const orphanPath = ownedOriginalPath(packId, itemId);
+    files.files.add(orphanPath);
+
+    await expect(
+      new ReferenceAwareCleanup(
+        repository,
+        files,
+        repository,
+        () => '2026-08-03T00:00:00Z',
+        1_000,
+      ).run('2026-08-02T00:00:00Z'),
+    ).resolves.toEqual({ deleted: 0, quarantined: 1 });
+
+    expect(repository.quarantineRecords).toEqual([
+      {
+        id: '623e4567-e89b-42d3-a456-426614174000',
+        anonymousId: itemId,
+        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+        byteCount: 1,
+        createdAt: '2026-08-03T00:00:00Z',
+        purgeAfter: '2026-08-03T00:00:01.000Z',
+      },
+    ]);
+    expect(JSON.stringify(repository.quarantineRecords)).not.toContain(
+      orphanPath,
+    );
+  });
+
+  test('scheduled cleanup honors its lease and releases it after retention work', async () => {
+    const repository = new ProductionCleanupRepository();
+    const files = new MemoryFiles();
+    files.purgeQuarantine = async () => ({ purgedCount: 1, purgedBytes: 4 });
+    repository.markedPurged = 1;
+    const cleanup = new ScheduledReferenceAwareCleanup(
+      repository,
+      files,
+      '723e4567-e89b-42d3-a456-426614174000',
+      () => '2026-08-03T00:00:00Z',
+    );
+
+    await expect(cleanup.run()).resolves.toEqual({
+      status: 'completed',
+      deleted: 0,
+      quarantined: 0,
+      purged: 1,
+      purgedBytes: 4,
+    });
+    expect(repository.released).toBe(1);
+
+    repository.leaseAvailable = false;
+    await expect(cleanup.run()).resolves.toEqual({
+      status: 'lease-held',
+      deleted: 0,
+      quarantined: 0,
+      purged: 0,
+      purgedBytes: 0,
+    });
+    expect(repository.released).toBe(1);
+  });
 });
 
 describe('persistence path and migration decisions', () => {
@@ -467,8 +594,8 @@ describe('persistence path and migration decisions', () => {
       expect(isOwnedArtifactPath(invalid)).toBe(false);
   });
 
-  test('schema migrates through v1 and v2 without BLOB content columns', () => {
-    expect(PERSISTENCE_MIGRATIONS).toHaveLength(2);
+  test('schema migrates through v1, v2, and production v3 without BLOB content columns', () => {
+    expect(PERSISTENCE_MIGRATIONS).toHaveLength(3);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
       'relative_path TEXT NOT NULL UNIQUE',
@@ -479,6 +606,12 @@ describe('persistence path and migration decisions', () => {
     expect(PERSISTENCE_MIGRATIONS[0]).not.toMatch(/\bBLOB\b/);
     expect(PERSISTENCE_MIGRATIONS[1]).toContain('PRAGMA user_version = 2');
     expect(PERSISTENCE_MIGRATIONS[1]).toContain('last_verified_at');
+    expect(PERSISTENCE_MIGRATIONS[2]).toContain('PRAGMA user_version = 3');
+    expect(PERSISTENCE_MIGRATIONS[2]).toContain('CREATE TABLE context_items');
+    expect(PERSISTENCE_MIGRATIONS[2]).toContain('CREATE TABLE risk_findings');
+    expect(PERSISTENCE_MIGRATIONS[2]).toContain('CREATE TABLE export_records');
+    for (const migration of PERSISTENCE_MIGRATIONS)
+      expect(migration).not.toMatch(/\bBLOB\b/);
   });
 
   test('20-image and near-limit PDF manifests benchmark metadata without allocating media bytes', () => {

@@ -21,6 +21,8 @@ npm run typecheck
 npm run lint
 npm run format:check
 npm test
+npm run test:persistence-migrations
+npm run test:persistence-production
 npm run test:fixtures
 npm run test:workflows
 ```

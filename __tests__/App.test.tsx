@@ -27,8 +27,20 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
     ackRecoveryEvent: jest.fn(),
     handoffInbox: jest.fn(),
     acknowledgeInbox: jest.fn(),
+    publishArtifact: jest.fn(),
+    verifyArtifact: jest.fn(),
+    listOwnedArtifacts: jest.fn(),
+    removeOwnedArtifact: jest.fn(),
+    quarantineOwnedArtifact: jest.fn(),
+    purgeArtifactQuarantine: jest.fn(),
+    getArtifactStorageUsage: jest.fn(),
     recognizeText: jest.fn(),
     probePdf: jest.fn(),
+  },
+}));
+jest.mock('../src/infrastructure/persistence/runtime', () => ({
+  persistenceInboxProcessor: {
+    process: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
