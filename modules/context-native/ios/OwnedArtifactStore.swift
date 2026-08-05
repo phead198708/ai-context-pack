@@ -170,9 +170,8 @@ enum OwnedArtifactStore {
           at: area,
           includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
         ).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-          if file.pathExtension == "partial" { continue }
           let relativePath = "Packs/\(pack.lastPathComponent)/\(area.lastPathComponent)/\(file.lastPathComponent)"
-          _ = try validate(relativePath)
+          _ = try validate(relativePath, allowPartial: true)
           let values = try resourceValues(file)
           guard values.isRegularFile == true,
                 values.isSymbolicLink != true,
@@ -188,7 +187,7 @@ enum OwnedArtifactStore {
   }
 
   static func remove(root: URL, relativePath: String) throws -> Bool {
-    let components = try validate(relativePath)
+    let components = try validate(relativePath, allowPartial: true)
     let destination = root.appendingPathComponent(relativePath)
     return try withArtifactLock(root: root, artifactId: components.artifactId) {
       guard FileManager.default.fileExists(atPath: destination.path) else { return true }
@@ -208,7 +207,7 @@ enum OwnedArtifactStore {
   }
 
   static func quarantine(root: URL, relativePath: String) throws -> [String: Any] {
-    let components = try validate(relativePath)
+    let components = try validate(relativePath, allowPartial: true)
     let source = root.appendingPathComponent(relativePath)
     return try withArtifactLock(root: root, artifactId: components.artifactId) {
       guard FileManager.default.fileExists(atPath: source.path) else {
@@ -320,7 +319,8 @@ enum OwnedArtifactStore {
   }
 
   private static func validate(
-    _ value: String
+    _ value: String,
+    allowPartial: Bool = false
   ) throws -> (packId: String, area: String, artifactId: String) {
     guard !value.isEmpty,
           !value.hasPrefix("/"),
@@ -337,8 +337,11 @@ enum OwnedArtifactStore {
       throw OwnedArtifactStoreError.invalidInput
     }
     let leaf = components[3]
-    let extensionValue = URL(fileURLWithPath: leaf).pathExtension
-    let identifier = String(leaf.dropLast(extensionValue.count + 1))
+    let partial = leaf.hasSuffix(".partial")
+    guard !partial || allowPartial else { throw OwnedArtifactStoreError.invalidInput }
+    let publishedLeaf = partial ? String(leaf.dropLast(".partial".count)) : leaf
+    let extensionValue = URL(fileURLWithPath: publishedLeaf).pathExtension
+    let identifier = String(publishedLeaf.dropLast(extensionValue.count + 1))
     guard canonicalUUID(identifier), extensions.contains(extensionValue) else {
       throw OwnedArtifactStoreError.invalidInput
     }

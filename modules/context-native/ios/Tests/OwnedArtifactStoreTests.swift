@@ -81,6 +81,44 @@ final class OwnedArtifactStoreTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: destination), Data([1, 2, 3, 4]))
   }
 
+  func testAbandonedPartialIsListedCountedQuarantinedAndPurged() throws {
+    let path = "Packs/\(packId)/derived/\(artifactId).txt"
+    let partialPath = "\(path).partial"
+    let partial = root.appendingPathComponent(partialPath)
+    try FileManager.default.createDirectory(
+      at: partial.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try Data([8, 8]).write(to: partial)
+
+    let listed = try OwnedArtifactStore.list(root: root)
+    XCTAssertEqual(listed.count, 1)
+    XCTAssertEqual(listed.first?["relativePath"] as? String, partialPath)
+    XCTAssertEqual(listed.first?["byteCount"] as? Int64, 2)
+    let initialUsage = try OwnedArtifactStore.usage(root: root)
+    XCTAssertEqual(initialUsage["artifactCount"] as? Int, 1)
+    XCTAssertEqual(initialUsage["artifactBytes"] as? Int64, 2)
+
+    let quarantined = try OwnedArtifactStore.quarantine(
+      root: root,
+      relativePath: partialPath
+    )
+    XCTAssertEqual(quarantined["quarantined"] as? Bool, true)
+    XCTAssertEqual(quarantined["anonymousId"] as? String, artifactId)
+    XCTAssertEqual(quarantined["byteCount"] as? Int64, 2)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+    let quarantinedUsage = try OwnedArtifactStore.usage(root: root)
+    XCTAssertEqual(quarantinedUsage["artifactCount"] as? Int, 0)
+    XCTAssertEqual(quarantinedUsage["quarantineCount"] as? Int, 1)
+
+    let purge = try OwnedArtifactStore.purgeQuarantine(
+      root: root,
+      olderThanEpochMs: Int64(Date().timeIntervalSince1970 * 1_000) + 1_000
+    )
+    XCTAssertEqual(purge["purgedCount"] as? Int, 1)
+    XCTAssertEqual(purge["purgedBytes"] as? Int64, 2)
+  }
+
   func testTwoStoreCallersSerializeTheSameImmutableDestination() throws {
     let path = "Packs/\(packId)/exports/\(artifactId).zip"
     let first = root.appendingPathComponent("first.bin")

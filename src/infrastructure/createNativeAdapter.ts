@@ -19,7 +19,10 @@ import {
   isRecoveryEvent,
 } from '../domain/shareImportResult';
 import { isCanonicalUuid } from '../domain/canonicalUuid';
-import { isOwnedArtifactPath } from './persistence/ownedPaths';
+import {
+  isOwnedArtifactPath,
+  isOwnedArtifactStorePath,
+} from './persistence/ownedPaths';
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
@@ -377,7 +380,7 @@ function isNativeOwnedArtifact(value: unknown): value is NativeOwnedArtifact {
   return (
     Object.keys(artifact).length === 2 &&
     typeof artifact.relativePath === 'string' &&
-    isOwnedArtifactPath(artifact.relativePath) &&
+    isOwnedArtifactStorePath(artifact.relativePath) &&
     isNonNegativeInteger(artifact.byteCount)
   );
 }

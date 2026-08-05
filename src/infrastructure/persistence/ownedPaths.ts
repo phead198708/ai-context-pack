@@ -15,6 +15,8 @@ const CONTROLLED_EXTENSIONS = new Set([
 ]);
 const SAFE_LEAF =
   /^[0-9a-f-]{36}\.(?:bin|heic|jpeg|jpg|json|md|pdf|png|txt|zip)$/;
+const SAFE_PARTIAL_LEAF =
+  /^[0-9a-f-]{36}\.(?:bin|heic|jpeg|jpg|json|md|pdf|png|txt|zip)\.partial$/;
 const INBOX_ITEM_LEAF = /^[0-9a-f-]{36}\.bin$/;
 
 export function ownedOriginalPath(packId: string, itemId: string): string {
@@ -75,6 +77,19 @@ export function isInboxPath(value: string): boolean {
 }
 
 export function isOwnedArtifactPath(value: string): boolean {
+  return isOwnedPathWithLeaf(value, SAFE_LEAF);
+}
+
+export function isOwnedArtifactPartialPath(value: string): boolean {
+  return isOwnedPathWithLeaf(value, SAFE_PARTIAL_LEAF);
+}
+
+/** Paths that the native store may enumerate for cleanup and reset. */
+export function isOwnedArtifactStorePath(value: string): boolean {
+  return isOwnedArtifactPath(value) || isOwnedArtifactPartialPath(value);
+}
+
+function isOwnedPathWithLeaf(value: string, leafPattern: RegExp): boolean {
   if (hasUnsafePathSyntax(value)) return false;
   const segments = value.split('/');
   if (segments.length !== 4 || segments[0] !== 'Packs') return false;
@@ -86,7 +101,7 @@ export function isOwnedArtifactPath(value: string): boolean {
   return (
     isCanonicalUuid(packId) &&
     OWNED_AREAS.has(area) &&
-    SAFE_LEAF.test(leaf) &&
+    leafPattern.test(leaf) &&
     isCanonicalUuid(leafId)
   );
 }
@@ -96,12 +111,12 @@ export function assertOwnedArtifactPath(value: string): void {
 }
 
 export function ownedArtifactPackId(value: string): string | null {
-  if (!isOwnedArtifactPath(value)) return null;
+  if (!isOwnedArtifactStorePath(value)) return null;
   return value.split('/')[1] ?? null;
 }
 
 export function ownedArtifactId(value: string): string | null {
-  if (!isOwnedArtifactPath(value)) return null;
+  if (!isOwnedArtifactStorePath(value)) return null;
   return value.split('/')[3]?.slice(0, 36) ?? null;
 }
 

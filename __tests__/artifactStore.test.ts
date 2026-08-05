@@ -157,7 +157,7 @@ class MemoryArtifactFiles implements AtomicArtifactFileStore {
   }
 
   async listOwnedFiles(): Promise<readonly OwnedArtifactFile[]> {
-    return this.owned;
+    return [...this.owned];
   }
 
   async removeOwnedFile(): Promise<void> {
@@ -333,6 +333,10 @@ describe('production ArtifactStore orchestration', () => {
   test('development reset is explicit and clears files before rebuilding SQLite', async () => {
     const files = new MemoryArtifactFiles();
     files.owned.push({ relativePath: artifact().relativePath, byteCount: 4 });
+    files.owned.push({
+      relativePath: `${artifact().relativePath}.partial`,
+      byteCount: 2,
+    });
     const calls: string[] = [];
     const resetRepository = {
       resetForDevelopment: async (
@@ -351,7 +355,10 @@ describe('production ArtifactStore orchestration', () => {
       undefined,
     );
 
-    expect(files.quarantined).toEqual([artifact().relativePath]);
+    expect(files.quarantined).toEqual([
+      artifact().relativePath,
+      `${artifact().relativePath}.partial`,
+    ]);
     expect(files.purgeCutoff).toBe(Number.MAX_SAFE_INTEGER);
     expect(calls).toEqual(['database']);
   });

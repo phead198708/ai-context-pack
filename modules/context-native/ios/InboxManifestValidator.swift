@@ -52,6 +52,10 @@ enum InboxManifestValidator {
     "RESOURCE_LOW_DISK",
     "RESOURCE_MEMORY_PRESSURE",
     "STORAGE_WRITE_FAILED",
+    "STORAGE_DIVERGENCE_DETECTED",
+    "STORAGE_ARTIFACT_IMMUTABLE",
+    "PERSISTENCE_CONFLICT",
+    "DEVELOPMENT_RESET_FORBIDDEN",
   ]
 
   static func read(inbox: URL) throws -> [[String: Any]] {

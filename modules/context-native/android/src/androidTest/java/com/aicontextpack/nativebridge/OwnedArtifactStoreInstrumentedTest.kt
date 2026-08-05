@@ -84,6 +84,34 @@ class OwnedArtifactStoreInstrumentedTest {
   }
 
   @Test
+  fun abandonedPartialIsListedCountedQuarantinedAndPurged() {
+    val path = "Packs/$packId/derived/$artifactId.txt"
+    val partialPath = "$path.partial"
+    val partial = File(root, partialPath)
+    assertTrue(requireNotNull(partial.parentFile).mkdirs())
+    partial.writeBytes(byteArrayOf(8, 8))
+
+    assertEquals(
+      listOf(mapOf("relativePath" to partialPath, "byteCount" to 2L)),
+      OwnedArtifactStore.list(root),
+    )
+    assertEquals(1, OwnedArtifactStore.usage(root)["artifactCount"])
+    assertEquals(2L, OwnedArtifactStore.usage(root)["artifactBytes"])
+
+    val quarantined = OwnedArtifactStore.quarantine(root, partialPath)
+    assertEquals(true, quarantined["quarantined"])
+    assertEquals(artifactId, quarantined["anonymousId"])
+    assertEquals(2L, quarantined["byteCount"])
+    assertFalse(partial.exists())
+    assertEquals(0, OwnedArtifactStore.usage(root)["artifactCount"])
+    assertEquals(1, OwnedArtifactStore.usage(root)["quarantineCount"])
+
+    val purge = OwnedArtifactStore.purgeQuarantine(root, System.currentTimeMillis() + 1_000)
+    assertEquals(1, purge["purgedCount"])
+    assertEquals(2L, purge["purgedBytes"])
+  }
+
+  @Test
   fun twoStoreCallersSerializeTheSameImmutableDestination() {
     val path = "Packs/$packId/exports/$artifactId.zip"
     val first = File(root, "first.bin").apply { writeBytes(ByteArray(128 * 1024) { 1 }) }

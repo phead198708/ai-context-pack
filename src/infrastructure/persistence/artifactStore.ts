@@ -20,6 +20,7 @@ import type {
 import { assertArtifact } from './modelCodec';
 import {
   isOwnedArtifactPath,
+  isOwnedArtifactStorePath,
   ownedArtifactId,
   ownedArtifactPackId,
   ownedOriginalPath,
@@ -350,7 +351,7 @@ function assertVerificationInput(
 }
 
 function assertOwnedPath(relativePath: string): void {
-  if (!isOwnedArtifactPath(relativePath))
+  if (!isOwnedArtifactStorePath(relativePath))
     throw new DomainError('SCHEMA_INVALID');
 }
 

@@ -237,6 +237,7 @@ describe('native adapter runtime boundary', () => {
     const artifactId = '523e4567-e89b-42d3-a456-426614174000';
     const quarantineId = '623e4567-e89b-42d3-a456-426614174000';
     const relativePath = `Packs/${packId}/derived/${artifactId}.txt`;
+    const partialPath = `${relativePath}.partial`;
     const native = {
       ...mockNativeModule,
       publishArtifact: jest.fn().mockResolvedValue({
@@ -251,9 +252,10 @@ describe('native adapter runtime boundary', () => {
         byteCount: 3,
         sha256: 'a'.repeat(64),
       }),
-      listOwnedArtifacts: jest
-        .fn()
-        .mockResolvedValue([{ relativePath, byteCount: 3 }]),
+      listOwnedArtifacts: jest.fn().mockResolvedValue([
+        { relativePath, byteCount: 3 },
+        { relativePath: partialPath, byteCount: 2 },
+      ]),
       removeOwnedArtifact: jest.fn().mockResolvedValue(true),
       quarantineOwnedArtifact: jest.fn().mockResolvedValue({
         quarantined: true,
@@ -265,8 +267,8 @@ describe('native adapter runtime boundary', () => {
         .fn()
         .mockResolvedValue({ purgedCount: 1, purgedBytes: 3 }),
       getArtifactStorageUsage: jest.fn().mockResolvedValue({
-        artifactCount: 1,
-        artifactBytes: 3,
+        artifactCount: 2,
+        artifactBytes: 5,
         quarantineCount: 0,
         quarantineBytes: 0,
       }),
@@ -289,13 +291,17 @@ describe('native adapter runtime boundary', () => {
       anonymousId: artifactId,
       byteCount: 3,
     });
+    await expect(guarded.listOwnedArtifacts()).resolves.toEqual([
+      { relativePath, byteCount: 3 },
+      { relativePath: partialPath, byteCount: 2 },
+    ]);
     await expect(guarded.purgeArtifactQuarantine(1)).resolves.toEqual({
       purgedCount: 1,
       purgedBytes: 3,
     });
     await expect(guarded.getArtifactStorageUsage()).resolves.toMatchObject({
-      artifactCount: 1,
-      artifactBytes: 3,
+      artifactCount: 2,
+      artifactBytes: 5,
     });
 
     native.quarantineOwnedArtifact.mockResolvedValue({

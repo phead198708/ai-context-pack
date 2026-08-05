@@ -133,9 +133,8 @@ internal object OwnedArtifactStore {
         val children = area.listFiles()
           ?: throw OwnedArtifactStoreException("STORAGE_WRITE_FAILED")
         children.sortedBy { it.name }.forEach { file ->
-          if (file.name.endsWith(".partial")) return@forEach
           val relativePath = "Packs/${pack.name}/${area.name}/${file.name}"
-          validate(root, relativePath)
+          validate(root, relativePath, allowPartial = true)
           requireRegularFile(file)
           results += mapOf("relativePath" to relativePath, "byteCount" to file.length())
         }
@@ -145,7 +144,7 @@ internal object OwnedArtifactStore {
   }
 
   fun remove(root: File, relativePath: String): Boolean {
-    val path = validate(root, relativePath)
+    val path = validate(root, relativePath, allowPartial = true)
     return withArtifactLock(root, path.artifactId) {
       if (!path.file.exists()) return@withArtifactLock true
       requireAncestorDirectories(root, requireNotNull(path.file.parentFile))
@@ -157,7 +156,7 @@ internal object OwnedArtifactStore {
   }
 
   fun quarantine(root: File, relativePath: String): Map<String, Any> {
-    val path = validate(root, relativePath)
+    val path = validate(root, relativePath, allowPartial = true)
     return withArtifactLock(root, path.artifactId) {
       if (!path.file.exists()) return@withArtifactLock mapOf("quarantined" to false)
       requireAncestorDirectories(root, requireNotNull(path.file.parentFile))
@@ -236,7 +235,11 @@ internal object OwnedArtifactStore {
 
   private data class ValidatedPath(val file: File, val artifactId: String)
 
-  private fun validate(root: File, relativePath: String): ValidatedPath {
+  private fun validate(
+    root: File,
+    relativePath: String,
+    allowPartial: Boolean = false,
+  ): ValidatedPath {
     if (
       relativePath.isEmpty() || relativePath.startsWith('/') || relativePath.contains('\\') ||
       relativePath.contains('%') || relativePath.contains('\u0000')
@@ -247,8 +250,13 @@ internal object OwnedArtifactStore {
       !canonicalUuid(components[1]) || !areas.contains(components[2])
     ) throw OwnedArtifactStoreException("SCHEMA_INVALID")
     val leaf = components[3]
-    val extension = leaf.substringAfterLast('.', "")
-    val artifactId = leaf.removeSuffix(if (extension.isEmpty()) "" else ".$extension")
+    val partial = leaf.endsWith(".partial")
+    if (partial && !allowPartial) throw OwnedArtifactStoreException("SCHEMA_INVALID")
+    val publishedLeaf = if (partial) leaf.removeSuffix(".partial") else leaf
+    val extension = publishedLeaf.substringAfterLast('.', "")
+    val artifactId = publishedLeaf.removeSuffix(
+      if (extension.isEmpty()) "" else ".$extension",
+    )
     if (!canonicalUuid(artifactId) || !extensions.contains(extension)) {
       throw OwnedArtifactStoreException("SCHEMA_INVALID")
     }

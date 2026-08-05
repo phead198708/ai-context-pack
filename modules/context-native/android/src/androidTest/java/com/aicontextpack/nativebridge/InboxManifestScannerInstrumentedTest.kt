@@ -208,6 +208,23 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun persistenceErrorCodesRemainValidFailedManifestValues() {
+    for (errorCode in listOf(
+      "STORAGE_DIVERGENCE_DETECTED",
+      "STORAGE_ARTIFACT_IMMUTABLE",
+      "PERSISTENCE_CONFLICT",
+      "DEVELOPMENT_RESET_FORBIDDEN",
+    )) {
+      writeFailedManifest(errorCode)
+      val manifests = InboxManifestScanner.scan(inbox)
+      assertEquals(errorCode, (manifests.single()["items"] as List<*>).single().let {
+        (it as Map<*, *>)["errorCode"]
+      })
+      File(inbox, validIngestionId).deleteRecursively()
+    }
+  }
+
+  @Test
   fun rejectsManifestThatReferencesAnotherIngestion() {
     val other = File(inbox, "$otherIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
@@ -631,6 +648,25 @@ class InboxManifestScannerInstrumentedTest {
         "items",
         JSONArray().put(copiedItem),
       )
+    File(directory, "manifest.json").writeText(payload.toString())
+  }
+
+  private fun writeFailedManifest(errorCode: String) {
+    val directory = File(inbox, validIngestionId).apply { mkdirs() }
+    val failedItem = JSONObject()
+      .put("id", validItemId)
+      .put("order", 0)
+      .put("mediaType", "application/octet-stream")
+      .put("byteCount", 0)
+      .put("status", "failed")
+      .put("errorCode", errorCode)
+    val payload = JSONObject()
+      .put("schemaVersion", 1)
+      .put("ingestionId", validIngestionId)
+      .put("createdAt", "2026-01-01T00:00:00Z")
+      .put("source", "android-share-intent")
+      .put("status", "failed")
+      .put("items", JSONArray().put(failedItem))
     File(directory, "manifest.json").writeText(payload.toString())
   }
 

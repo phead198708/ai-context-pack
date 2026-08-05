@@ -45,7 +45,7 @@ Malformed, corrupt, identity-mismatched, or unsupported published Inbox entries 
 
 ## Divergence, cleanup, and storage totals
 
-The first app-lifetime integrity audit hashes every database-known artifact. Missing or mismatched files produce `STORAGE_DIVERGENCE_DETECTED` and metadata-only diagnostics instead of a crash. Storage usage exposes database and native totals plus an explicit `divergent` flag.
+The first app-lifetime integrity audit hashes every database-known artifact. Missing or mismatched files produce `STORAGE_DIVERGENCE_DETECTED` and metadata-only diagnostics instead of a crash. Native owned-file enumeration includes strictly named `<artifact>.<ext>.partial` files, so interrupted publications contribute to storage usage and are quarantined by scheduled cleanup or removed by the explicit development reset. Storage usage exposes database and native totals plus an explicit `divergent` flag.
 
 Scheduled cleanup and derived/export publication are serialized by a five-minute database lifecycle lease. Cleanup applies a 24-hour unreferenced-artifact cutoff, rechecks references inside the delete transaction, protects Pack IDs with active recovery journals, quarantines unknown files, and purges quarantine after seven days. Native quarantine and purge share a cross-caller lock. Cleanup diagnostics contain stable codes, phases, byte counts, counts, and irreversible internal IDs only.
 

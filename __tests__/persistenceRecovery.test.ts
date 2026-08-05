@@ -21,7 +21,10 @@ import {
   type PersistenceInterruptionPoint,
 } from '../src/infrastructure/persistence/recovery';
 import {
+  isOwnedArtifactPartialPath,
   isOwnedArtifactPath,
+  isOwnedArtifactStorePath,
+  ownedArtifactId,
   ownedOriginalPath,
 } from '../src/infrastructure/persistence/ownedPaths';
 import { PERSISTENCE_MIGRATIONS } from '../src/infrastructure/persistence/migrations';
@@ -270,9 +273,11 @@ class MemoryFiles implements OwnedArtifactFileStore {
   async quarantineOwnedFile(relativePath: string) {
     this.quarantined.push(relativePath);
     this.files.delete(relativePath);
+    const anonymousId = ownedArtifactId(relativePath);
+    if (!anonymousId) throw new Error('SYNTHETIC_OWNED_PATH_INVALID');
     return {
       quarantineId: '623e4567-e89b-42d3-a456-426614174000',
-      anonymousId: relativePath.slice(-40, -4),
+      anonymousId,
       byteCount: 1,
     };
   }
@@ -483,15 +488,17 @@ describe('persistence and dual-Inbox recovery spike', () => {
     const files = new MemoryFiles();
     files.files.add(candidatePath);
     const orphanPath = ownedOriginalPath(packId, secondItemId);
+    const orphanPartialPath = `${orphanPath}.partial`;
     files.files.add(orphanPath);
+    files.files.add(orphanPartialPath);
 
     const result = await new ReferenceAwareCleanup(repository, files).run(
       '2026-08-03T00:00:00Z',
     );
-    expect(result).toEqual({ deleted: 0, quarantined: 1 });
+    expect(result).toEqual({ deleted: 0, quarantined: 2 });
     expect(files.removed).toEqual([]);
     expect(files.files).toContain(candidatePath);
-    expect(files.quarantined).toEqual([orphanPath]);
+    expect(files.quarantined).toEqual([orphanPath, orphanPartialPath]);
   });
 
   test('cleanup preserves recent database files and files published by active recovery', async () => {
@@ -500,6 +507,7 @@ describe('persistence and dual-Inbox recovery spike', () => {
     repository.knownPaths.add(recentPath);
     const recoveringPackId = '523e4567-e89b-42d3-a456-426614174000';
     const recoveringPath = ownedOriginalPath(recoveringPackId, secondItemId);
+    const recoveringPartialPath = `${recoveringPath}.partial`;
     repository.journals.set(ingestionId, {
       ingestionId,
       packId: recoveringPackId,
@@ -509,11 +517,14 @@ describe('persistence and dual-Inbox recovery spike', () => {
     const files = new MemoryFiles();
     files.files.add(recentPath);
     files.files.add(recoveringPath);
+    files.files.add(recoveringPartialPath);
 
     await expect(
       new ReferenceAwareCleanup(repository, files).run('2026-08-03T00:00:00Z'),
     ).resolves.toEqual({ deleted: 0, quarantined: 0 });
-    expect(files.files).toEqual(new Set([recentPath, recoveringPath]));
+    expect(files.files).toEqual(
+      new Set([recentPath, recoveringPath, recoveringPartialPath]),
+    );
   });
 
   test('orphan quarantine records only internal IDs, byte counts, and retention metadata', async () => {
@@ -583,7 +594,12 @@ describe('persistence and dual-Inbox recovery spike', () => {
 describe('persistence path and migration decisions', () => {
   test('owned paths contain only internal IDs and reject traversal/URI aliases', () => {
     const valid = ownedOriginalPath(packId, itemId);
+    const partial = `${valid}.partial`;
     expect(isOwnedArtifactPath(valid)).toBe(true);
+    expect(isOwnedArtifactPath(partial)).toBe(false);
+    expect(isOwnedArtifactPartialPath(partial)).toBe(true);
+    expect(isOwnedArtifactStorePath(partial)).toBe(true);
+    expect(ownedArtifactId(partial)).toBe(itemId);
     for (const invalid of [
       `/Packs/${packId}/originals/${itemId}.bin`,
       `Packs/${packId}/originals/../${itemId}.bin`,
