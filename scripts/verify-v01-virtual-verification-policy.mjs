@@ -38,7 +38,7 @@ const staleRequirementRules = [
   {
     id: 'hardware-tier-evidence',
     pattern:
-      /\bhardware[- ]tier(?:ed)?\b.{0,80}\b(?:benchmark|evidence|matrix|requirement)s?\b/i,
+      /\bhardware[- ]tier(?:s|ed)?\b.{0,80}\b(?:benchmark|evidence|matrix|requirement)s?\b/i,
   },
   {
     id: 'representative-physical-device',
@@ -112,9 +112,15 @@ if (argumentsList[0] === '--issues-stdin') {
 
   physicalGateLabels = 0;
   for (const issue of v01Issues) {
+    if (typeof issue.title !== 'string' || issue.title.trim().length === 0) {
+      throw new Error(
+        `V01_VIRTUAL_POLICY_ISSUE_TITLE_INVALID:github-issue-${issue.number}`,
+      );
+    }
+    assertNoStaleRequirement(issue.title, `github-issue-${issue.number}-title`);
     assertNoStaleRequirement(
       String(issue.body ?? ''),
-      `github-issue-${issue.number}`,
+      `github-issue-${issue.number}-body`,
     );
     if (!Array.isArray(issue.labels)) {
       throw new Error(
@@ -183,6 +189,7 @@ function assertRuleSelfTests() {
     'Cover iOS and Android host/device variations.',
     'Attach evidence from representative physical devices.',
     'Use hardware-tier benchmark evidence.',
+    'Compare hardware tiers benchmark and matrix results.',
     '必须提供真实设备证据。',
     '在低规格支持设备和当前旗舰设备上验证。',
   ];
