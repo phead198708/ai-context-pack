@@ -236,6 +236,44 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun rejectsEveryNonCanonicalNumericSchemaVersionWithStableCode() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+    }
+    for (rawVersion in listOf(
+      "-1",
+      "1.5",
+      "2",
+      "1.0",
+      "1e0",
+      "1.0000000000000001",
+      "1.000000000000000000000000000000000000001",
+    )) {
+      writeManifest(item)
+      rewriteManifestSchemaVersion(rawVersion)
+
+      val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+      assertEquals("SCHEMA_VERSION_UNSUPPORTED", error.code)
+    }
+  }
+
+  @Test
+  fun rejectsEscapedDuplicateSchemaVersionKeyAsInvalid() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(item)
+    rewriteManifestSchemaVersion(
+      "1,\"\\u0073chemaVersion\":1.000000000000000000000000000000000000001",
+    )
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
+  }
+
+  @Test
   fun rejectsNestedManifest() {
     val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
@@ -591,6 +629,14 @@ class InboxManifestScannerInstrumentedTest {
         JSONArray().put(copiedItem),
       )
     File(directory, "manifest.json").writeText(payload.toString())
+  }
+
+  private fun rewriteManifestSchemaVersion(rawToken: String) {
+    val manifest = File(inbox, "$validIngestionId/manifest.json")
+    val currentVersion = "\"schemaVersion\":1"
+    val serialized = manifest.readText()
+    check(currentVersion in serialized)
+    manifest.writeText(serialized.replaceFirst(currentVersion, "\"schemaVersion\":$rawToken"))
   }
 
   companion object {

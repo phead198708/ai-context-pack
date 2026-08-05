@@ -127,6 +127,12 @@ class ContextNativeModule : Module() {
 }
 
 internal object InboxManifestScanner {
+  private enum class ExactSchemaVersionResult {
+    SUPPORTED,
+    UNSUPPORTED,
+    INVALID,
+  }
+
   private val ingestionIdPattern =
     Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
   private val mediaTypePattern =
@@ -178,8 +184,9 @@ internal object InboxManifestScanner {
     catch (_: Exception) { throw NativeException("INBOX_SCAN_FAILED") }
     return files.map { file ->
       try {
-        val manifest = strictJsonObject(file.readText())
-        validateOwnedManifest(manifest, requireNotNull(file.parentFile))
+        val rawManifest = file.readText()
+        val manifest = strictJsonObject(rawManifest)
+        validateOwnedManifest(manifest, rawManifest, requireNotNull(file.parentFile))
         jsonObjectToMap(manifest)
       } catch (error: InboxManifestValidationException) {
         throw NativeException(error.stableCode)
@@ -211,8 +218,9 @@ internal object InboxManifestScanner {
       throw NativeException("INBOX_SCAN_FAILED")
     }
     return try {
-      val manifest = strictJsonObject(manifestFile.readText())
-      validateOwnedManifest(manifest, ingestion)
+      val rawManifest = manifestFile.readText()
+      val manifest = strictJsonObject(rawManifest)
+      validateOwnedManifest(manifest, rawManifest, ingestion)
       jsonObjectToMap(manifest)
     } catch (error: InboxManifestValidationException) {
       throw NativeException(error.stableCode)
@@ -239,11 +247,15 @@ internal object InboxManifestScanner {
     }
   }
 
-  private fun validateOwnedManifest(manifest: JSONObject, ingestion: File) {
+  private fun validateOwnedManifest(manifest: JSONObject, rawManifest: String, ingestion: File) {
     val schemaVersion = manifest.opt("schemaVersion")
     check(schemaVersion is Number)
-    if (schemaVersion.toDouble() != 1.0) {
-      throw InboxManifestValidationException("SCHEMA_VERSION_UNSUPPORTED")
+    when (exactSchemaVersion(rawManifest)) {
+      ExactSchemaVersionResult.SUPPORTED -> Unit
+      ExactSchemaVersionResult.UNSUPPORTED ->
+        throw InboxManifestValidationException("SCHEMA_VERSION_UNSUPPORTED")
+      ExactSchemaVersionResult.INVALID ->
+        throw InboxManifestValidationException("SCHEMA_INVALID")
     }
     check(manifest.keys().asSequence().toSet() == manifestKeys)
     val ingestionId = manifest.getString("ingestionId")
@@ -299,6 +311,37 @@ internal object InboxManifestScanner {
         (manifestStatus == "partial" && copied > 0 && failed > 0) ||
         (manifestStatus == "failed" && copied == 0 && failed > 0)
     )
+  }
+
+  private fun exactSchemaVersion(rawManifest: String): ExactSchemaVersionResult = try {
+    JsonReader(StringReader(rawManifest)).use { reader ->
+      reader.isLenient = false
+      reader.beginObject()
+      var foundVersion = false
+      var supportedVersion = false
+      while (reader.hasNext()) {
+        val key = reader.nextName()
+        if (key == "schemaVersion") {
+          if (foundVersion || reader.peek() != JsonToken.NUMBER) {
+            return ExactSchemaVersionResult.INVALID
+          }
+          foundVersion = true
+          supportedVersion = reader.nextString() == "1"
+        } else {
+          consumeJsonValue(reader)
+        }
+      }
+      reader.endObject()
+      if (reader.peek() != JsonToken.END_DOCUMENT || !foundVersion) {
+        ExactSchemaVersionResult.INVALID
+      } else if (supportedVersion) {
+        ExactSchemaVersionResult.SUPPORTED
+      } else {
+        ExactSchemaVersionResult.UNSUPPORTED
+      }
+    }
+  } catch (_: Exception) {
+    ExactSchemaVersionResult.INVALID
   }
 
   private fun nonNegativeInteger(value: Any?): Long? {

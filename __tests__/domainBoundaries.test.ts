@@ -7,16 +7,20 @@ const { join, relative } = jest.requireActual<{
   readonly join: (...parts: string[]) => string;
   readonly relative: (from: string, to: string) => string;
 }>('path');
+const { builtinModules } = jest.requireActual<{
+  readonly builtinModules: readonly string[];
+}>('module');
 const ts = jest.requireActual<typeof import('typescript')>('typescript');
 
 const domainRoot = join(process.cwd(), 'src', 'domain');
+const nonLiteralModuleSpecifier = '<non-literal import()/require()>';
+const bareNodeBuiltins = new Set(
+  builtinModules.map(name => name.replace(/^node:/, '').split('/')[0]),
+);
 const forbiddenImports = [
   /^react$/,
   /^react-native(?:\/|$)/,
   /^expo(?:\/|$|-)/,
-  /^node:/,
-  /^fs(?:\/|$)/,
-  /^path(?:\/|$)/,
   /(?:^|\/)infrastructure(?:\/|$)/,
   /(?:^|\/)repositor(?:y|ies)(?:\/|$)/,
   /(?:^|\/)ui(?:\/|$)/,
@@ -26,7 +30,13 @@ const forbiddenImports = [
 ];
 
 function isForbiddenDomainImport(specifier: string): boolean {
-  return forbiddenImports.some(pattern => pattern.test(specifier));
+  const bareRoot = specifier.split('/')[0];
+  return (
+    specifier === nonLiteralModuleSpecifier ||
+    specifier.startsWith('node:') ||
+    (bareRoot !== undefined && bareNodeBuiltins.has(bareRoot)) ||
+    forbiddenImports.some(pattern => pattern.test(specifier))
+  );
 }
 
 function importedSpecifiers(source: string): readonly string[] {
@@ -39,8 +49,15 @@ function importedSpecifiers(source: string): readonly string[] {
   );
   const specifiers: string[] = [];
 
-  function addStringLiteral(node: import('typescript').Expression): void {
-    if (ts.isStringLiteralLike(node)) specifiers.push(node.text);
+  function addModuleSpecifier(
+    node: import('typescript').Expression,
+    failClosedOnNonLiteral = false,
+  ): void {
+    if (ts.isStringLiteralLike(node)) {
+      specifiers.push(node.text);
+    } else if (failClosedOnNonLiteral) {
+      specifiers.push(nonLiteralModuleSpecifier);
+    }
   }
 
   function visit(node: import('typescript').Node): void {
@@ -48,13 +65,13 @@ function importedSpecifiers(source: string): readonly string[] {
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier !== undefined
     ) {
-      addStringLiteral(node.moduleSpecifier);
+      addModuleSpecifier(node.moduleSpecifier);
     } else if (
       ts.isImportEqualsDeclaration(node) &&
       ts.isExternalModuleReference(node.moduleReference) &&
       node.moduleReference.expression !== undefined
     ) {
-      addStringLiteral(node.moduleReference.expression);
+      addModuleSpecifier(node.moduleReference.expression);
     } else if (
       ts.isCallExpression(node) &&
       node.arguments.length >= 1 &&
@@ -63,7 +80,7 @@ function importedSpecifiers(source: string): readonly string[] {
           node.expression.text === 'require'))
     ) {
       const specifier = node.arguments[0];
-      if (specifier !== undefined) addStringLiteral(specifier);
+      if (specifier !== undefined) addModuleSpecifier(specifier, true);
     }
     ts.forEachChild(node, visit);
   }
@@ -104,6 +121,9 @@ describe('domain dependency boundary', () => {
     'fs/promises',
     'path',
     'path/posix',
+    'url',
+    'module',
+    'crypto',
     '../repository/contextPackRepository',
     '../repositories/contextPackRepository',
     '../../repository/contextPackRepository',
@@ -117,6 +137,11 @@ describe('domain dependency boundary', () => {
     ["const path = require('path/posix')", 'path/posix'],
     ["import fileSystem = require('fs')", 'fs'],
     ["export { readFile } from 'node:fs/promises'", 'node:fs/promises'],
+    ["import { fileURLToPath } from 'url'", 'url'],
+    ["import { createRequire } from 'module'", 'module'],
+    ["import crypto from 'crypto'", 'crypto'],
+    ["await import('node:' + 'fs')", nonLiteralModuleSpecifier],
+    ["require('fs' + '/promises')", nonLiteralModuleSpecifier],
   ])('rejects the actual source form %s', (source, specifier) => {
     expect(forbiddenDomainImports(source)).toEqual([specifier]);
   });
