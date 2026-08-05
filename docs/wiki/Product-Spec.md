@@ -8,6 +8,7 @@
 - 目标语言：首发 UI 支持英文和简体中文；OCR 使用系统支持的自动语言识别。
 - 主要分发：TestFlight 与 Google Play Internal Testing；验收通过后提交 App Store 与 Google Play。
 - 主要入口：iOS Share Extension 与 Android share intents；主 App 导入作为完整编辑入口。
+- v0.1 验收环境：iOS Simulator 与 Android Emulator/AVD；不要求物理 iPhone、iPad 或 Android 设备。虚拟环境证据规则见 [ADR-0003](../adr/0003-v0.1-virtual-device-verification.md)。
 
 ## 2. 用户故事
 
@@ -37,7 +38,7 @@
 - iOS 不使用从 Extension 自动打开主 App 的非官方 API。
 - 内存不足、超时、URI 权限失效或部分文件失败时，保留已成功项并提供可恢复错误。
 
-验收：从 iOS Photos/Files/Safari 与 Android Photos/Files/Chrome 分别完成端到端路径；一次分享 20 张图片不丢项；两端 manifest 均通过同一 contract test。
+验收：在对应 Simulator/Emulator 可用的 iOS Photos/Files/Safari 与 Android Photos/Files/Chrome 主机路径分别完成端到端测试；一次分享 20 张图片不丢项；两端 manifest 均通过同一 contract test。虚拟系统镜像缺少的主机 App 或 OS 集成必须记录为限制，不能静默算作通过。
 
 ### FR-003：主 App 导入
 
@@ -190,9 +191,10 @@
 
 ### NFR-002：性能
 
-- 10 张常见手机截图在目标设备上 15 秒内完成 OCR 与基础处理。
+- 10 张常见手机截图在固定的最低支持与当前 Simulator/Emulator 验收配置上 15 秒内完成 OCR 与基础处理，或取得明确 release-risk 决定。
 - 主线程不执行 OCR、PDF 渲染、hash 或压缩。
 - 大任务显示 item 级进度并支持取消。
+- 所有时间、内存和资源数据必须注明虚拟配置与宿主环境，不得作为物理硬件性能、热量、电池或兼容性声明。
 
 ### NFR-003：资源限制
 
@@ -257,5 +259,5 @@
 - 不引入用户内容日志或未声明网络请求。
 - 错误、空状态、取消和恢复路径已覆盖。
 - 更新文档、变更日志和必要的隐私说明。
-- 在至少一台低规格支持设备与当前旗舰设备验证。
-
+- 在最低支持与当前 iOS Simulator runtime，以及 Android API 24/35/36 Emulator/AVD 矩阵上验证；若 API 36 system image 尚不可用，必须记录工具链限制和 release-risk 决定。
+- 物理 iPhone、iPad 或 Android 设备不属于 v0.1 验收；虚拟环境不支持的主机 App、传感器、热量或 store-install 场景必须作为限制记录，不能标记为已通过。

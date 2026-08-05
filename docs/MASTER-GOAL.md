@@ -26,7 +26,7 @@ Apply the following precedence:
 
 1. This Master Goal.
 2. [Epic #2](https://github.com/phead198708/ai-context-pack/issues/2).
-3. [ADR-0001](adr/0001-react-native-cross-platform.md).
+3. Accepted ADRs, including [ADR-0001](adr/0001-react-native-cross-platform.md) and [ADR-0003](adr/0003-v0.1-virtual-device-verification.md).
 4. [Product Specification](wiki/Product-Spec.md).
 5. [Technical Architecture](wiki/Architecture.md).
 6. [Roadmap](wiki/Roadmap.md).
@@ -77,6 +77,19 @@ Do not implement an excluded feature because it appears convenient. Create or up
 - No user content leaves the device in the core flow.
 - Do not run `expo prebuild --clean` over maintained native targets without an approved migration ADR.
 
+## v0.1 verification environment
+
+The owner decision recorded in [Epic #2](https://github.com/phead198708/ai-context-pack/issues/2#issuecomment-5188083764) removes physical-device acceptance from the entire v0.1 scope. [ADR-0003](adr/0003-v0.1-virtual-device-verification.md) defines the evidence policy.
+
+- iOS acceptance uses named iOS Simulator runtimes; Android acceptance uses named Emulator/AVD API profiles.
+- CI, shared/native automation, signed or release artifacts, and App Store Connect/TestFlight or Google Play Internal upload/processing evidence remain required where applicable.
+- Functional, host-share, accessibility, localization, airplane-mode, lifecycle, interruption, low-memory, low-disk, install/upgrade/delete, and resource tests may use virtual devices when the virtual environment supports the scenario.
+- At least 20 real beta tasks must still cover iOS and Android with a completion rate of at least 80%; those tasks may run on Simulator and Emulator.
+- Every virtual-device result must name its runtime/API, virtual profile, host/toolchain, and unsupported capability. It must not be presented as proof of physical-hardware performance, thermal behavior, sensor behavior, or compatibility.
+- A scenario unavailable in the virtual environment requires an explicit documented limitation and release-risk decision. It does not silently pass and must never receive fabricated evidence.
+
+This policy changes only the verification environment. It does not waive product behavior, platform parity, privacy/integrity, clean/release builds, store readiness, beta metrics, P0/P1, independent review, or final user acceptance.
+
 ## Persistent execution model
 
 Work toward this Master Goal continuously across issues and PRs. A PR review pause does not clear or redefine the Goal.
@@ -112,7 +125,7 @@ Run every applicable local check:
 - iOS XCTest, main-app build, and Share Extension build as applicable.
 - Shared schema/contract tests.
 - Privacy/logging/security regression tests.
-- Performance, low-memory, low-disk, interruption, or physical-device tests required by labels.
+- Performance, low-memory, low-disk, interruption, and Simulator/Emulator tests required by the issue and ADR-0003.
 - Inspect the diff for scope drift, sensitive data, ignored errors, unchecked casts, `any`, disabled tests, placeholder behavior, or swallowed failures.
 
 A check that cannot be run must be named in the PR with the exact blocker and reproducible manual procedure. Never report an unrun check as passing.
@@ -233,24 +246,24 @@ The Master Goal is complete only when all of the following are true:
 
 - [ ] Clean checkout builds iOS main app, iOS Share Extension and Android app.
 - [ ] Required CI is green on the final commit.
-- [ ] Supported device/API matrix and physical-device share hosts pass.
+- [ ] Supported iOS Simulator runtime and Android Emulator/API matrix passes, including available host-share paths.
 - [ ] English/Simplified Chinese and VoiceOver/TalkBack requirements pass.
 - [ ] Airplane-mode core flow passes on both platforms.
-- [ ] Performance/resource budgets pass or have an explicit accepted release decision.
+- [ ] Virtual-environment performance/resource budgets pass or have an explicit accepted release decision; results identify their environment and make no physical-hardware claim.
 - [ ] No open priority:p0/p1 defect remains.
 
 ### Privacy and release
 
 - [ ] Log, network, dependency, license, permission and privacy audits pass.
-- [ ] TestFlight and Play Internal install/upgrade/delete/import/export paths pass.
-- [ ] At least 20 real beta tasks cover both platforms with completion rate ≥80%, or the Goal remains blocked.
+- [ ] TestFlight and Play Internal upload, processing, signing, metadata, policy, and track-readiness paths pass; separately built Release-configured Simulator/Emulator artifacts pass supported install/upgrade/delete/import/export paths.
+- [ ] At least 20 real beta tasks cover both platforms on Simulator/Emulator with completion rate ≥80%, or the Goal remains blocked.
 - [ ] App Store and Google Play metadata/privacy declarations match runtime behavior.
 - [ ] Release builds, rollback plan, known issues and support path are complete.
 - [ ] Public submission happens only after explicit go approval and available store credentials.
 
 ## Blockers and external actions
 
-Goal mode does not grant broader permissions. When credentials, signing, store accounts, physical devices, Wiki initialization, beta testers, policy decisions, or review approval are required:
+Goal mode does not grant broader permissions. When credentials, signing, store accounts, Wiki initialization, beta testers, policy decisions, or review approval are required:
 
 - Preserve completed work and test evidence.
 - Report the exact blocker and smallest required user action.
@@ -264,7 +277,7 @@ Do not replace a missing external requirement with fabricated evidence.
 Before declaring the Goal complete, post to Epic #2:
 
 - Requirement/issue/PR/evidence traceability.
-- Final supported platform and device matrix.
+- Final supported platform and Simulator/Emulator matrix, including virtual-environment limitations.
 - Test and CI summary.
 - Privacy/security/dependency/license audit results.
 - Performance results and accepted exceptions.

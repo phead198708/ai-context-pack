@@ -98,7 +98,7 @@ Synthetic filenames and bytes only; no OCR or PDF rendering was invoked.
 | Swift Foundation/CryptoKit host harness, Apple Silicon |                            27 ms |                            194 ms |        0 |
 | Pixel 9 Pro AVD, Android API 35                        |                           123 ms |                            131 ms |        0 |
 
-These are Phase 0 correctness/baseline measurements, not release performance claims. Issue #5 still requires representative physical-device evidence because it carries `test:device-required`.
+These are Phase 0 correctness/baseline measurements, not physical-hardware release performance claims. Under [ADR-0003](0003-v0.1-virtual-device-verification.md), the named host harness and Pixel 9 Pro AVD are accepted v0.1 evidence; Issue #5 no longer carries a physical-device acceptance gate.
 
 ## Dependency review
 
@@ -124,7 +124,7 @@ No separate file-system wrapper is selected. Resource-sensitive handoff remains 
 3. Add production migrations for Pack titles/instructions/budgets, pipeline runs/checkpoints, risk decisions, exports, and lifecycle timestamps as their owning issues land; never edit an applied migration.
 4. Implement quarantine retention, user-visible diagnostics, storage totals, and a scheduled cleanup lease.
 5. Add cancellation/background checkpoint wiring and retry UI without expanding native Share Extension work.
-6. Add release database backup/restore/upgrade tests and measure SQLite/file size on physical low-end and flagship devices.
+6. Add release database backup/restore/upgrade tests and measure SQLite/file size on pinned minimum/current Simulator and Emulator profiles, recording the host/toolchain and virtual-environment limitations required by ADR-0003.
 7. Record the `expo-sqlite` release binary-size delta and final license notice.
 
 ## Consequences

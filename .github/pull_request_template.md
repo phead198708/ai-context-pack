@@ -10,7 +10,7 @@
 - iOS app / Share Extension:
 - Android:
 - Contracts / privacy:
-- Manual or physical-device checks:
+- Manual / Simulator / Emulator / store checks:
 
 ## Dependency review
 

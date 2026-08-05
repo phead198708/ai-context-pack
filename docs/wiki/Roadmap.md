@@ -4,6 +4,8 @@
 
 先证明一条 iOS/Android 都可用、隐私安全、可恢复的完整路径，再扩展格式和自动化。每个 Phase 都有 promotion gate；共享功能只有在两端达到明确验收后才算完成。
 
+v0.1 的平台验收统一使用 iOS Simulator 和 Android Emulator/AVD，不要求物理设备。虚拟设备结果必须注明 runtime/API、profile、host/toolchain 与限制，不能当作物理硬件性能或兼容性声明；完整规则见 [ADR-0003](../adr/0003-v0.1-virtual-device-verification.md)。
+
 ## Phase 0 — Cross-platform foundation
 
 目标：得到可编译、可测试、可持续集成的 React Native 双端工程，并验证最危险的原生边界。
@@ -43,7 +45,7 @@ Promotion gate：
 
 Promotion gate：
 
-- iOS Photos/Files/Safari 与 Android Photos/Files/Chrome 导入通过。
+- iOS Simulator 上可用的 Photos/Files/Safari 与 Android Emulator 上可用的 Photos/Files/Chrome 导入通过；镜像缺失能力有显式限制记录。
 - 两端一次分享 20 张截图不丢项。
 - 文本/扫描/混合/损坏/超限 PDF 有确定结果。
 - API 24 与 API 35+ Android PDF 路径均验证。
@@ -64,7 +66,7 @@ Promotion gate：
 
 Promotion gate：
 
-- 典型 10 张截图在支持设备预算内完成，UI 保持可响应。
+- 典型 10 张截图在固定 Simulator/Emulator 配置预算内完成，UI 保持可响应，或有明确 release-risk 决定。
 - 两端 Markdown/manifest 相同 fixture 结果一致。
 - PDF、bundle/hash/path traversal 测试通过。
 - 高风险 finding 未决时，两端均默认阻止正常导出。
@@ -73,23 +75,23 @@ Promotion gate：
 
 ## Phase 3 — Beta and store readiness
 
-目标：通过真实任务、性能和隐私审查，达到 TestFlight、Google Play Internal Testing、App Store 与 Google Play 的发布质量。
+目标：通过真实任务、虚拟设备性能/资源基线和隐私审查，达到 TestFlight、Google Play Internal Testing、App Store 与 Google Play 的发布质量。
 
 交付：
 
 - 历史、删除、空间管理、迁移和生命周期清理。
 - onboarding、权限解释、空状态和错误恢复。
 - VoiceOver/TalkBack、Dynamic Type/font scaling、英文/中文。
-- 双端性能矩阵、崩溃、低内存、低磁盘与资源测试。
+- 双端 Simulator/Emulator 性能矩阵、崩溃、低内存、低磁盘与资源测试，并记录无法由虚拟环境证明的硬件限制。
 - 隐私政策、store privacy/data safety 回答、beta build、release checklist。
 
 Promotion gate：
 
-- 至少 20 个真实任务，并覆盖 iOS 与 Android；任务完成率 ≥80%。
+- 至少 20 个真实任务，并在 iOS Simulator 与 Android Emulator 上覆盖两个平台；任务完成率 ≥80%。
 - P0/P1 bug 为 0。
-- 两端飞行模式核心流程通过。
+- 两端在 Simulator/Emulator 的飞行模式或等效网络禁用配置下核心流程通过。
 - 隐私、日志、依赖/license 和平台权限审计通过。
-- TestFlight 与 Play Internal 安装、升级、删除和数据清理路径验证。
+- TestFlight 与 Play Internal 的签名、上传、处理、metadata/policy 和 track readiness 通过；单独构建的 Release 配置 Simulator/Emulator artifact 完成支持的安装、升级、删除、导入、导出和数据清理验证。
 
 ## Phase 4 — Post-MVP
 
