@@ -1,6 +1,9 @@
 import type { ImportManifestV1 } from '../../domain/contracts';
 import { DomainError } from '../../domain/errors';
-import type { InboxManifestProcessor } from '../../domain/inboxEventWorkflow';
+import type {
+  InboxManifestProcessor,
+  InboxPackSummary,
+} from '../../domain/inboxEventWorkflow';
 import type { NativeAdapter } from '../../domain/nativeAdapter';
 import { nativeAdapter } from '../nativeAdapter';
 import {
@@ -33,6 +36,20 @@ export class ProductionInboxManifestProcessor
     );
     this.chain = work.catch(() => undefined);
     return work;
+  }
+
+  async listPersistedPacks(): Promise<readonly InboxPackSummary[]> {
+    const repository = await this.getRepository();
+    const graphs = await repository.listPackGraphs();
+    return graphs.map(({ pack, items }) => ({
+      id: pack.id,
+      schemaVersion: pack.schemaVersion,
+      title: pack.title,
+      createdAt: pack.createdAt,
+      updatedAt: pack.updatedAt,
+      state: pack.state,
+      itemCount: items.length,
+    }));
   }
 
   private async processSerially(

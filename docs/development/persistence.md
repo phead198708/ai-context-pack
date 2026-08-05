@@ -5,7 +5,7 @@ Issue #7 promotes the Phase 0 persistence decision in [ADR-0002](../adr/0002-sql
 ## Runtime ownership
 
 - `productionRepository()` opens one retryable app-lifetime `ExpoSqlitePersistenceRepository` and one SQLite connection.
-- `ProductionInboxManifestProcessor` serializes bootstrap, AppState, and native-event scans, processes manifests oldest-first, performs the first app-lifetime artifact-integrity audit, and then runs scheduled cleanup.
+- `ProductionInboxManifestProcessor` serializes bootstrap, AppState, and native-event scans, processes manifests oldest-first, performs the first app-lifetime artifact-integrity audit, runs scheduled cleanup, and hydrates `listPackGraphs()` for the UI. Persisted Packs remain the display source of truth after native Inbox ACK and on cold restart.
 - Swift/Kotlin owns streaming file writes, cross-caller locks, free-space checks, hashing, `fsync`, atomic rename, and quarantine retention. TypeScript owns transaction ordering, idempotency, repositories, diagnostics, and recovery policy.
 - The bridge passes controlled `file://` URIs, internal relative paths, hashes, byte counts, and versioned DTOs. It never passes artifact bytes or persists provider URIs.
 
@@ -40,6 +40,7 @@ For each manifest:
 2. Native handoff validates the exact manifest bytes and copied artifact set, checks missing-byte budget plus 16 MiB headroom, and publishes immutable originals.
 3. Journal `files-published`; commit the import, Pack, items, artifacts, references, and journal removal in one exclusive transaction.
 4. ACK only after commit. Exact replay returns `replayed`; any manifest/artifact identity mismatch fails with `ARTIFACT_INTEGRITY_FAILED` and retains recovery material.
+5. Load the ordered persisted Pack graphs for display. A later empty native Inbox scan cannot hide an already committed Pack.
 
 Malformed, corrupt, identity-mismatched, or unsupported published Inbox entries are atomically moved to a scanner-invisible quarantine name generated from an internal UUID. The original stable error is surfaced, and later valid entries continue to be scanned. No provider or display filename is reused.
 

@@ -1,5 +1,6 @@
 import type { ImportManifestV1 } from './contracts';
 import { isCanonicalUuid } from './canonicalUuid';
+import type { ContextPack } from './models';
 import {
   isPendingShareEvent,
   type PendingShareEvent,
@@ -9,8 +10,23 @@ import type { NativeAdapter } from './nativeAdapter';
 export type InboxWorkflowState =
   | { readonly kind: 'loading' }
   | { readonly kind: 'empty' }
-  | { readonly kind: 'ready'; readonly manifests: readonly ImportManifestV1[] }
+  | {
+      readonly kind: 'ready';
+      readonly manifests: readonly ImportManifestV1[];
+      /** Present in production; persisted Packs are the display source of truth. */
+      readonly packs?: readonly InboxPackSummary[];
+    }
   | { readonly kind: 'error'; readonly code: string };
+
+export interface InboxPackSummary {
+  readonly id: string;
+  readonly schemaVersion: ContextPack['schemaVersion'];
+  readonly title: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly state: ContextPack['state'];
+  readonly itemCount: number;
+}
 
 export interface InboxWorkflowView {
   setState(state: InboxWorkflowState): void;
@@ -19,6 +35,8 @@ export interface InboxWorkflowView {
 
 export interface InboxManifestProcessor {
   process(manifests: readonly ImportManifestV1[]): Promise<void>;
+  /** Hydrates the durable product state after Inbox recovery and ACK. */
+  listPersistedPacks?(): Promise<readonly InboxPackSummary[]>;
 }
 
 const passthroughManifestProcessor: InboxManifestProcessor = {
@@ -233,6 +251,8 @@ export class InboxEventWorkflow {
       }
       const manifests = await this.native.scanInbox();
       await this.manifestProcessor.process(manifests);
+      this.lastPersistedPacks =
+        await this.manifestProcessor.listPersistedPacks?.();
       this.lastScannedManifests = manifests;
       if (retrying) this.clear('scan');
       return manifests;
@@ -243,6 +263,7 @@ export class InboxEventWorkflow {
   }
 
   private lastScannedManifests: readonly ImportManifestV1[] | undefined;
+  private lastPersistedPacks: readonly InboxPackSummary[] | undefined;
 
   private takeScannedManifests(
     ingestionId: string,
@@ -257,6 +278,18 @@ export class InboxEventWorkflow {
   }
 
   private show(manifests: readonly ImportManifestV1[]): void {
+    if (this.lastPersistedPacks !== undefined) {
+      this.view.setState(
+        this.lastPersistedPacks.length === 0
+          ? { kind: 'empty' }
+          : {
+              kind: 'ready',
+              manifests,
+              packs: this.lastPersistedPacks,
+            },
+      );
+      return;
+    }
     this.view.setState(
       manifests.length === 0 ? { kind: 'empty' } : { kind: 'ready', manifests },
     );

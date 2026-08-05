@@ -53,6 +53,7 @@ App Group and app-private Inbox files remain immutable sources until database co
 7. The same native call returns the validated manifest, SHA-256 of its exact bytes, and the bound artifact list. JavaScript cannot supply or substitute the fingerprint.
 8. The repository commits the import, items, artifacts, references, and journal removal in one exclusive SQLite transaction. An existing import replays only when pack, exact manifest fingerprint, and the canonical artifact set (IDs, item IDs, relative paths, media types, byte counts, and SHA-256 values) all match.
 9. Only after commit does the app ACK the ingestion. Under the writer registry lock, ACK atomically renames the live ingestion into the same-volume, scanner-invisible `InboxAckTombstones` sibling, synchronizes both parent directories, then removes the tombstone as best-effort cleanup. Missing live targets are idempotent success and retry leftover tombstone cleanup. Every native-module start also sweeps canonical tombstones on a utility thread under the same registry lock, so cleanup no longer depends on an ingestion event surviving ACK.
+10. Bootstrap and lifecycle refresh load the ordered persisted Pack graphs after recovery. The UI therefore treats SQLite as its source of truth; an empty post-ACK Inbox scan or cold restart cannot make a committed Pack disappear.
 
 If the app stops before step 8, the published owned file and original Inbox both remain. Replay revalidates an existing destination without requiring its bytes as free space and commits once. If it stops after step 8 but before step 9, the unique ingestion ID and matching manifest/artifact identities produce `replayed`, then ACK removes the source. If ACK stops after its rename, scanners cannot observe a partial deletion and native-start maintenance removes the tombstone independently. Any fingerprint or artifact-set mismatch fails as `ARTIFACT_INTEGRITY_FAILED` without ACK.
 
@@ -137,6 +138,7 @@ Issue #7 completes the production work owned by this ADR:
 5. Reference-aware cleanup, seven-day quarantine retention, storage totals/divergence reporting, and a cross-caller lifecycle lease shared by publication and cleanup are implemented.
 6. Deterministic development reset requires both a development build and the literal `RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA`; it is never an automatic production recovery path.
 7. Real SQLite verification covers upgrade, repository restart, immutable-source rollback, concurrent compare-and-swap, Pack-append revisioning, risk/export round trips, corrupted-row mapping, interrupted transaction rollback, backup/restore, reference cleanup, and absence of BLOB/provider/absolute-path persistence. The release-size results and license review are recorded above.
+8. Bootstrap, AppState refresh, and cold restart hydrate the persisted Pack projection after recovery, so the transient Inbox scan never replaces committed product state with an empty view.
 
 Cancellation/background pipeline checkpoints beyond Inbox recovery remain owned by their later processing issues. User-facing storage-management UI remains explicitly out of scope for Issue #7.
 

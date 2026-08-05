@@ -64,6 +64,33 @@ function manifest(
   };
 }
 
+function packGraph(id: string, createdAt: string): PersistedPackGraph {
+  return {
+    pack: {
+      id,
+      schemaVersion: 1,
+      title: 'Context Pack',
+      userInstruction: '',
+      createdAt,
+      updatedAt: createdAt,
+      state: 'draft',
+      budget: {
+        preset: 'balanced',
+        maxOutputBytes: 25 * 1024 * 1024,
+        minimumImageLongestEdge: 1_280,
+        imageQuality: 0.82,
+        estimatorVersion: '1',
+      },
+      estimatedTokens: 0,
+      orderedItemIds: [],
+      exportRecordIds: [],
+      warningCodes: [],
+    },
+    items: [],
+    revision: 1,
+  };
+}
+
 class RuntimeRepository implements ProductionPersistenceRepository {
   readonly imports = new Map<string, PersistedImportSummary>();
   readonly recoveries = new Map<string, RecoveryJournalEntry>();
@@ -71,6 +98,7 @@ class RuntimeRepository implements ProductionPersistenceRepository {
   readonly diagnostics: RecoveryDiagnosticInput[] = [];
   readonly commits: string[] = [];
   readonly quarantines: QuarantineRecordInput[] = [];
+  readonly packGraphs: PersistedPackGraph[] = [];
   createdCount = 0;
   leaseHeld = false;
 
@@ -143,7 +171,7 @@ class RuntimeRepository implements ProductionPersistenceRepository {
   }
 
   async listPackGraphs(): Promise<readonly PersistedPackGraph[]> {
-    return [];
+    return this.packGraphs;
   }
 
   async savePackGraph(_input: SavePackGraphInput) {
@@ -350,6 +378,29 @@ class RuntimeNative implements NativeAdapter {
 }
 
 describe('production Inbox persistence runtime', () => {
+  test('projects persisted Pack graphs for product hydration after Inbox ACK', async () => {
+    const repository = new RuntimeRepository();
+    repository.packGraphs.push(
+      packGraph(firstIngestion, '2026-08-05T00:00:00Z'),
+    );
+    const processor = new ProductionInboxManifestProcessor(
+      async () => repository,
+      new RuntimeNative(),
+    );
+
+    await expect(processor.listPersistedPacks()).resolves.toEqual([
+      {
+        id: firstIngestion,
+        schemaVersion: 1,
+        title: 'Context Pack',
+        createdAt: '2026-08-05T00:00:00Z',
+        updatedAt: '2026-08-05T00:00:00Z',
+        state: 'draft',
+        itemCount: 0,
+      },
+    ]);
+  });
+
   test('processes every manifest oldest-first and replays exactly once after app restart', async () => {
     const repository = new RuntimeRepository();
     const native = new RuntimeNative();
