@@ -397,6 +397,33 @@ final class InboxRecoverySupportTests: XCTestCase {
     }
   }
 
+  func testHighPrecisionNumericManifestSchemaVersionIsExplicitlyRejected() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id)
+    let manifestURL = root.appendingPathComponent("Inbox/\(id)/manifest.json")
+    let serialized = String(decoding: try Data(contentsOf: manifestURL), as: UTF8.self)
+    let currentVersion = "\"schemaVersion\":1"
+    XCTAssertTrue(serialized.contains(currentVersion))
+    let highPrecision = serialized.replacingOccurrences(
+      of: currentVersion,
+      with: "\"schemaVersion\":1.0000000000000001"
+    )
+    try Data(highPrecision.utf8).write(to: manifestURL)
+
+    XCTAssertThrowsError(
+      try InboxManifestValidator.readPublished(
+        inbox: root.appendingPathComponent("Inbox"),
+        ingestionId: id
+      )
+    ) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
+      XCTAssertEqual(
+        (error as? InboxManifestValidationError)?.stableCode,
+        "SCHEMA_VERSION_UNSUPPORTED"
+      )
+    }
+  }
+
   func testNonNumericManifestSchemaVersionsRemainSchemaInvalid() throws {
     let schemaVersions: [Any] = ["1", true]
     for schemaVersion in schemaVersions {

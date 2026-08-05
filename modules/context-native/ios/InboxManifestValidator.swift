@@ -17,6 +17,10 @@ enum InboxManifestValidationError: Error, Equatable {
 }
 
 enum InboxManifestValidator {
+  private struct SchemaVersionEnvelope: Decodable {
+    let schemaVersion: Decimal
+  }
+
   private static let manifestKeys: Set<String> = [
     "schemaVersion", "ingestionId", "createdAt", "source", "status", "items",
   ]
@@ -108,17 +112,25 @@ enum InboxManifestValidator {
     guard let manifest = decoded as? [String: Any] else {
       throw InboxManifestValidationError.invalidManifest
     }
-    try validate(manifest, ingestion: ingestion, id: id)
+    try validate(manifest, rawData: data, ingestion: ingestion, id: id)
     return manifest
   }
 
-  private static func validate(_ manifest: [String: Any], ingestion: URL, id: String) throws {
+  private static func validate(
+    _ manifest: [String: Any],
+    rawData: Data,
+    ingestion: URL,
+    id: String
+  ) throws {
     guard let schemaVersion = manifest["schemaVersion"] as? NSNumber,
           CFGetTypeID(schemaVersion) != CFBooleanGetTypeID() else {
       throw InboxManifestValidationError.invalidManifest
     }
-    guard schemaVersion.doubleValue.isFinite,
-          schemaVersion.doubleValue == 1 else {
+    guard let exactVersion = try? JSONDecoder().decode(
+      SchemaVersionEnvelope.self,
+      from: rawData
+    ).schemaVersion,
+          exactVersion == Decimal(1) else {
       throw InboxManifestValidationError.unsupportedVersion
     }
     guard Set(manifest.keys) == manifestKeys,
