@@ -1007,15 +1007,15 @@ export class ExpoSqlitePersistenceRepository
   }
 
   async markQuarantinePurgedBefore(
-    cutoff: string,
+    quarantinedBefore: string,
     purgedAt: string,
   ): Promise<number> {
-    requireIsoDateTime(cutoff);
+    requireIsoDateTime(quarantinedBefore);
     requireIsoDateTime(purgedAt);
     const result = await this.connection.run(
       `UPDATE quarantine_records SET purged_at = ?
-       WHERE purged_at IS NULL AND purge_after <= ?`,
-      [purgedAt, cutoff],
+       WHERE purged_at IS NULL AND created_at <= ?`,
+      [purgedAt, quarantinedBefore],
     );
     return result.changes;
   }

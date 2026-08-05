@@ -165,7 +165,11 @@ export interface QuarantineRecordInput {
 
 export interface QuarantineRepository {
   recordQuarantine(input: QuarantineRecordInput): Promise<void>;
-  markQuarantinePurgedBefore(cutoff: string, purgedAt: string): Promise<number>;
+  /** Marks records quarantined at or before the native mtime cutoff. */
+  markQuarantinePurgedBefore(
+    quarantinedBefore: string,
+    purgedAt: string,
+  ): Promise<number>;
 }
 
 export interface RecoveryDiagnosticsRepository {

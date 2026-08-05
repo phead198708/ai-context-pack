@@ -52,6 +52,8 @@ const exportId = '723e4567-e89b-42d3-a456-426614174000';
 const emptyPackId = '823e4567-e89b-42d3-a456-426614174000';
 const appendedIngestionId = '923e4567-e89b-42d3-a456-426614174000';
 const appendedItemId = 'a23e4567-e89b-42d3-a456-426614174000';
+const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
+const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
 const createdAt = '2026-08-05T00:00:00Z';
 
 class NodeSqlConnection {
@@ -412,6 +414,36 @@ describe('production repository against SQLite', () => {
 
     await expect(repository.findPackGraph(packId)).rejects.toMatchObject({
       code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
+  });
+
+  test('marks only quarantine records covered by the native mtime cutoff', async () => {
+    await repository.recordQuarantine({
+      id: oldQuarantineId,
+      anonymousId: firstItemId,
+      reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+      byteCount: 4,
+      createdAt: '2026-08-01T00:00:00Z',
+      purgeAfter: '2026-08-08T00:00:00Z',
+    });
+    await repository.recordQuarantine({
+      id: recentQuarantineId,
+      anonymousId: secondItemId,
+      reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+      byteCount: 8,
+      createdAt: '2026-08-05T00:00:00Z',
+      purgeAfter: '2026-08-12T00:00:00Z',
+    });
+
+    await expect(
+      repository.markQuarantinePurgedBefore(
+        '2026-08-03T00:00:00Z',
+        '2026-08-10T00:00:00Z',
+      ),
+    ).resolves.toBe(1);
+    await expect(repository.getStorageUsage()).resolves.toMatchObject({
+      quarantineCount: 1,
+      quarantineBytes: 8,
     });
   });
 });

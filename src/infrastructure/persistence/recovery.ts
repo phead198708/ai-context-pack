@@ -252,11 +252,11 @@ export class ScheduledReferenceAwareCleanup {
         this.now,
         this.quarantineRetentionMs,
       ).run(new Date(acquiredEpoch - this.artifactRetentionMs).toISOString());
-      const purged = await this.files.purgeQuarantine(
-        acquiredEpoch - this.quarantineRetentionMs,
-      );
+      const quarantineCutoffEpoch = acquiredEpoch - this.quarantineRetentionMs;
+      const quarantineCutoff = new Date(quarantineCutoffEpoch).toISOString();
+      const purged = await this.files.purgeQuarantine(quarantineCutoffEpoch);
       const marked = await this.repository.markQuarantinePurgedBefore(
-        acquiredAt,
+        quarantineCutoff,
         acquiredAt,
       );
       if (marked !== purged.purgedCount) {

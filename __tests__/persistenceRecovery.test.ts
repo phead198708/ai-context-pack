@@ -293,12 +293,20 @@ class ProductionCleanupRepository extends MemoryRepository {
   leaseAvailable = true;
   released = 0;
   markedPurged = 0;
+  readonly markPurgedCalls: {
+    readonly quarantinedBefore: string;
+    readonly purgedAt: string;
+  }[] = [];
 
   async recordQuarantine(input: QuarantineRecordInput) {
     this.quarantineRecords.push(input);
   }
 
-  async markQuarantinePurgedBefore() {
+  async markQuarantinePurgedBefore(
+    quarantinedBefore: string,
+    purgedAt: string,
+  ) {
+    this.markPurgedCalls.push({ quarantinedBefore, purgedAt });
     return this.markedPurged;
   }
 
@@ -578,6 +586,12 @@ describe('persistence and dual-Inbox recovery spike', () => {
       purgedBytes: 4,
     });
     expect(repository.released).toBe(1);
+    expect(repository.markPurgedCalls).toEqual([
+      {
+        quarantinedBefore: '2026-07-27T00:00:00.000Z',
+        purgedAt: '2026-08-03T00:00:00Z',
+      },
+    ]);
 
     repository.leaseAvailable = false;
     await expect(cleanup.run()).resolves.toEqual({
@@ -588,6 +602,7 @@ describe('persistence and dual-Inbox recovery spike', () => {
       purgedBytes: 0,
     });
     expect(repository.released).toBe(1);
+    expect(repository.markPurgedCalls).toHaveLength(1);
   });
 });
 
