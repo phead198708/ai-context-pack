@@ -10,7 +10,7 @@
 - No Expo Go. Development builds and release builds are required for native integration testing.
 - No developer backend, cloud OCR, remote LLM, or content analytics in MVP.
 
-Decision record: [ADR-0001](../adr/0001-react-native-cross-platform.md).
+Decision records: [ADR-0001](../adr/0001-react-native-cross-platform.md) and [ADR-0003](../adr/0003-v0.1-virtual-device-verification.md).
 
 ## 2. Architectural principle
 
@@ -161,19 +161,21 @@ Controls:
 
 - XCTest for Inbox/manifest, native adapters, redaction renderer, PDF and OCR fixtures.
 - Build main app and Share Extension on macOS CI.
-- Manual host matrix: Photos, Files, Safari.
+- Simulator host matrix: Photos, Files, Safari where available in the named runtime.
 
 ### Android
 
 - JUnit/instrumentation tests for Inbox/manifest, native adapters, URI permission loss, redaction, PDF and OCR fixtures.
 - Linux CI builds debug app and runs unit tests.
-- Manual host matrix: Photos/Google Photos, Files, Chrome.
+- Emulator host matrix: Photos/Google Photos, Files, Chrome where available in the named system image.
 
 ### End to end
 
 - One image, multiple images, PDF, text, URL, unsupported content, duplicate import, interruption/restart.
-- Device matrix includes iOS 16.4/current and Android API 24/35/36 plus representative physical devices.
-- Performance matrix records time, peak memory where available, output size, cancellation, low disk, and thermal behavior.
+- Virtual-device matrix includes iOS 16.4/current Simulator runtimes and Android API 24/35/36 Emulator/AVD profiles; v0.1 does not require physical hardware.
+- Performance matrix records time, peak memory where available, output size, cancellation, and low-disk behavior with the virtual profile and host identified. Thermal, battery, camera, sensor, unavailable host-app, and store-install limitations are reported explicitly rather than inferred from the virtual environment.
+- VoiceOver/TalkBack, font scaling, localization, airplane mode, lifecycle, interruption, install/upgrade/delete, and low-resource scenarios use Simulator/Emulator controls or deterministic injection when supported.
+- Store readiness uses signed store artifacts plus App Store Connect/TestFlight and Google Play upload, processing, metadata, policy, and track evidence. Separate Release-configured Simulator/Emulator artifacts cover supported install/upgrade/delete flows; a physical TestFlight or Play installation is outside v0.1 acceptance.
 
 ## 10. Dependency discipline
 

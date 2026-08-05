@@ -167,7 +167,7 @@
 
 - name: test:device-required
   color: "8250DF"
-  description: Requires physical-device validation evidence
+  description: Requires physical-device evidence outside the v0.1 scope
 - name: test:contract
   color: "1F6FEB"
   description: Both platforms must pass the same versioned contract fixtures
