@@ -377,6 +377,89 @@ final class InboxRecoverySupportTests: XCTestCase {
     }
   }
 
+  func testEveryNumericUnsupportedManifestSchemaVersionIsExplicitlyRejected() throws {
+    for schemaVersion in [NSNumber(value: -1), NSNumber(value: 1.5), NSNumber(value: 2)] {
+      let id = UUID().uuidString.lowercased()
+      try writeManifest(directoryId: id, manifestId: id, schemaVersion: schemaVersion)
+
+      XCTAssertThrowsError(
+        try InboxManifestValidator.readPublished(
+          inbox: root.appendingPathComponent("Inbox"),
+          ingestionId: id
+        )
+      ) { error in
+        XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
+        XCTAssertEqual(
+          (error as? InboxManifestValidationError)?.stableCode,
+          "SCHEMA_VERSION_UNSUPPORTED"
+        )
+      }
+    }
+  }
+
+  func testArbitraryPrecisionNumericManifestSchemaVersionIsExplicitlyRejected() throws {
+    for rawVersion in [
+      "1.0",
+      "1e0",
+      "1.0000000000000001",
+      "1.000000000000000000000000000000000000001"
+    ] {
+      let id = UUID().uuidString.lowercased()
+      try writeManifest(directoryId: id, manifestId: id)
+      try rewriteManifestSchemaVersion(directoryId: id, rawToken: rawVersion)
+
+      XCTAssertThrowsError(
+        try InboxManifestValidator.readPublished(
+          inbox: root.appendingPathComponent("Inbox"),
+          ingestionId: id
+        )
+      ) { error in
+        XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
+        XCTAssertEqual(
+          (error as? InboxManifestValidationError)?.stableCode,
+          "SCHEMA_VERSION_UNSUPPORTED"
+        )
+      }
+    }
+  }
+
+  func testEscapedDuplicateSchemaVersionKeyCannotHideUnsupportedToken() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(directoryId: id, manifestId: id)
+    try rewriteManifestSchemaVersion(
+      directoryId: id,
+      rawToken: "1,\"\\u0073chemaVersion\":1.000000000000000000000000000000000000001"
+    )
+
+    XCTAssertThrowsError(
+      try InboxManifestValidator.readPublished(
+        inbox: root.appendingPathComponent("Inbox"),
+        ingestionId: id
+      )
+    ) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+      XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
+    }
+  }
+
+  func testNonNumericManifestSchemaVersionsRemainSchemaInvalid() throws {
+    let schemaVersions: [Any] = ["1", true]
+    for schemaVersion in schemaVersions {
+      let id = UUID().uuidString.lowercased()
+      try writeManifest(directoryId: id, manifestId: id, schemaVersion: schemaVersion)
+
+      XCTAssertThrowsError(
+        try InboxManifestValidator.readPublished(
+          inbox: root.appendingPathComponent("Inbox"),
+          ingestionId: id
+        )
+      ) { error in
+        XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+        XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
+      }
+    }
+  }
+
   func testMalformedCurrentVersionManifestIsSchemaInvalid() throws {
     let id = UUID().uuidString.lowercased()
     let directory = root.appendingPathComponent("Inbox/\(id)", isDirectory: true)
@@ -506,7 +589,7 @@ final class InboxRecoverySupportTests: XCTestCase {
     directoryId: String,
     manifestId: String,
     itemURL externalItem: URL? = nil,
-    schemaVersion: Int = 1,
+    schemaVersion: Any = 1,
     createdAt: String = "2026-01-01T00:00:00.000Z",
     sha256: String? = nil
   ) throws {
@@ -533,6 +616,18 @@ final class InboxRecoverySupportTests: XCTestCase {
     ]
     let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     try data.write(to: directory.appendingPathComponent("manifest.json"))
+  }
+
+  private func rewriteManifestSchemaVersion(
+    directoryId: String,
+    rawToken: String
+  ) throws {
+    let manifestURL = root.appendingPathComponent("Inbox/\(directoryId)/manifest.json")
+    var serialized = String(decoding: try Data(contentsOf: manifestURL), as: UTF8.self)
+    let currentVersion = "\"schemaVersion\":1"
+    let range = try XCTUnwrap(serialized.range(of: currentVersion))
+    serialized.replaceSubrange(range, with: "\"schemaVersion\":\(rawToken)")
+    try Data(serialized.utf8).write(to: manifestURL)
   }
 
   private func createLock(id: String) throws -> URL {

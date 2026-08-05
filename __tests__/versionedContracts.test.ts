@@ -272,6 +272,30 @@ const negativeContractCorpus: readonly {
     }),
   },
   {
+    name: 'risk image region with zero width',
+    fixture: 'risk-finding-v1.json',
+    authority: 'structural-schema',
+    mutate: fixture => ({
+      ...fixture,
+      location: {
+        ...objectValue(fixture.location),
+        width: 0,
+      },
+    }),
+  },
+  {
+    name: 'risk image region with zero height',
+    fixture: 'risk-finding-v1.json',
+    authority: 'structural-schema',
+    mutate: fixture => ({
+      ...fixture,
+      location: {
+        ...objectValue(fixture.location),
+        height: 0,
+      },
+    }),
+  },
+  {
     name: 'export artifact with an unsafe relative path',
     fixture: 'export-manifest-v1.json',
     authority: 'structural-schema',

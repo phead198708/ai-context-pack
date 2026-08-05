@@ -17,6 +17,12 @@ enum InboxManifestValidationError: Error, Equatable {
 }
 
 enum InboxManifestValidator {
+  private enum ExactSchemaVersionResult {
+    case supported
+    case unsupported
+    case invalid
+  }
+
   private static let manifestKeys: Set<String> = [
     "schemaVersion", "ingestionId", "createdAt", "source", "status", "items",
   ]
@@ -108,16 +114,27 @@ enum InboxManifestValidator {
     guard let manifest = decoded as? [String: Any] else {
       throw InboxManifestValidationError.invalidManifest
     }
-    try validate(manifest, ingestion: ingestion, id: id)
+    try validate(manifest, rawData: data, ingestion: ingestion, id: id)
     return manifest
   }
 
-  private static func validate(_ manifest: [String: Any], ingestion: URL, id: String) throws {
-    guard let schemaVersion = nonNegativeInteger(manifest["schemaVersion"]) else {
+  private static func validate(
+    _ manifest: [String: Any],
+    rawData: Data,
+    ingestion: URL,
+    id: String
+  ) throws {
+    guard let schemaVersion = manifest["schemaVersion"] as? NSNumber,
+          CFGetTypeID(schemaVersion) != CFBooleanGetTypeID() else {
       throw InboxManifestValidationError.invalidManifest
     }
-    guard schemaVersion == 1 else {
+    switch exactSchemaVersion(in: rawData) {
+    case .supported:
+      break
+    case .unsupported:
       throw InboxManifestValidationError.unsupportedVersion
+    case .invalid:
+      throw InboxManifestValidationError.invalidManifest
     }
     guard Set(manifest.keys) == manifestKeys,
           manifest["ingestionId"] as? String == id,
@@ -198,6 +215,120 @@ enum InboxManifestValidator {
             || (status == "failed" && copied == 0 && failed > 0) else {
       throw InboxManifestValidationError.invalidManifest
     }
+  }
+
+  private static func exactSchemaVersion(in data: Data) -> ExactSchemaVersionResult {
+    // JSONSerialization already validated the structure; this pass preserves the
+    // numeric lexeme and rejects duplicate semantic version keys without rounding.
+    let bytes = Array(data)
+    var index = 0
+    skipJSONWhitespace(bytes, index: &index)
+    guard index < bytes.count, bytes[index] == 0x7B else { return .invalid }
+    index += 1
+    skipJSONWhitespace(bytes, index: &index)
+    guard index < bytes.count, bytes[index] != 0x7D else { return .invalid }
+
+    var foundVersion = false
+    var supportedVersion = false
+    while index < bytes.count {
+      guard let keyRange = jsonStringRange(bytes, index: &index),
+            let key = try? JSONDecoder().decode(
+              String.self,
+              from: Data(bytes[keyRange])
+            ) else { return .invalid }
+      skipJSONWhitespace(bytes, index: &index)
+      guard index < bytes.count, bytes[index] == 0x3A else { return .invalid }
+      index += 1
+      skipJSONWhitespace(bytes, index: &index)
+      let valueStart = index
+      guard skipJSONValue(bytes, index: &index) else { return .invalid }
+
+      if key == "schemaVersion" {
+        guard !foundVersion else { return .invalid }
+        foundVersion = true
+        supportedVersion = bytes[valueStart..<index].elementsEqual([0x31])
+      }
+
+      skipJSONWhitespace(bytes, index: &index)
+      guard index < bytes.count else { return .invalid }
+      if bytes[index] == 0x2C {
+        index += 1
+        skipJSONWhitespace(bytes, index: &index)
+        continue
+      }
+      guard bytes[index] == 0x7D else { return .invalid }
+      index += 1
+      skipJSONWhitespace(bytes, index: &index)
+      guard index == bytes.count, foundVersion else { return .invalid }
+      return supportedVersion ? .supported : .unsupported
+    }
+    return .invalid
+  }
+
+  private static func jsonStringRange(
+    _ bytes: [UInt8],
+    index: inout Int
+  ) -> Range<Int>? {
+    guard index < bytes.count, bytes[index] == 0x22 else { return nil }
+    let start = index
+    index += 1
+    while index < bytes.count {
+      if bytes[index] == 0x5C {
+        index += 2
+      } else if bytes[index] == 0x22 {
+        index += 1
+        return start..<index
+      } else {
+        index += 1
+      }
+    }
+    return nil
+  }
+
+  private static func skipJSONValue(_ bytes: [UInt8], index: inout Int) -> Bool {
+    skipJSONWhitespace(bytes, index: &index)
+    guard index < bytes.count else { return false }
+    if bytes[index] == 0x22 {
+      return jsonStringRange(bytes, index: &index) != nil
+    }
+    if bytes[index] == 0x7B || bytes[index] == 0x5B {
+      var closingTokens: [UInt8] = [bytes[index] == 0x7B ? 0x7D : 0x5D]
+      index += 1
+      while index < bytes.count {
+        if bytes[index] == 0x22 {
+          guard jsonStringRange(bytes, index: &index) != nil else { return false }
+        } else if bytes[index] == 0x7B || bytes[index] == 0x5B {
+          closingTokens.append(bytes[index] == 0x7B ? 0x7D : 0x5D)
+          index += 1
+        } else if bytes[index] == 0x7D || bytes[index] == 0x5D {
+          guard closingTokens.last == bytes[index] else { return false }
+          closingTokens.removeLast()
+          index += 1
+          if closingTokens.isEmpty { return true }
+        } else {
+          index += 1
+        }
+      }
+      return false
+    }
+
+    let start = index
+    while index < bytes.count,
+          !isJSONWhitespace(bytes[index]),
+          bytes[index] != 0x2C,
+          bytes[index] != 0x7D,
+          bytes[index] != 0x5D {
+      index += 1
+    }
+    return index > start
+  }
+
+  private static func skipJSONWhitespace(_ bytes: [UInt8], index: inout Int) {
+    while index < bytes.count, isJSONWhitespace(bytes[index]) { index += 1 }
+  }
+
+  private static func isJSONWhitespace(_ byte: UInt8) -> Bool {
+    byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
   }
 
   private static func canonicalUUID(_ value: String) -> Bool {

@@ -1,3 +1,11 @@
+const { builtinModules } = require('module');
+
+const bareNodeBuiltinPatterns = [
+  ...new Set(
+    builtinModules.map(name => name.replace(/^node:/, '').split('/')[0]),
+  ),
+].flatMap(name => [name, `${name}/*`]);
+
 module.exports = {
   root: true,
   extends: '@react-native',
@@ -17,8 +25,7 @@ module.exports = {
                   'expo',
                   'expo-*',
                   'node:*',
-                  'fs',
-                  'path',
+                  ...bareNodeBuiltinPatterns,
                   '../infrastructure/*',
                   '../repository/*',
                   '../repositories/*',

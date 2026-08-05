@@ -413,15 +413,14 @@ function isFindingLocationV1(value: unknown): boolean {
     );
   }
   if (value.kind !== 'image-region') return false;
-  return (
-    hasOnlyKeys(value, ['kind', 'x', 'y', 'width', 'height']) &&
-    isNormalizedBoundsV1({
-      x: value.x,
-      y: value.y,
-      width: value.width,
-      height: value.height,
-    })
-  );
+  if (!hasOnlyKeys(value, ['kind', 'x', 'y', 'width', 'height'])) return false;
+  const bounds: unknown = {
+    x: value.x,
+    y: value.y,
+    width: value.width,
+    height: value.height,
+  };
+  return isNormalizedBoundsV1(bounds) && bounds.width > 0 && bounds.height > 0;
 }
 
 export function isRiskFindingV1(value: unknown): value is RiskFindingV1 {
