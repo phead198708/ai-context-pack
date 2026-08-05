@@ -66,7 +66,7 @@ Infrastructure may resolve a validated relative path to a controlled file URL at
 
 ### Privacy shape
 
-- `RiskFindingV1` contains category, confidence, and coordinates/range only; it rejects matched secret text.
+- `RiskFindingV1` contains category, confidence, and coordinates/range only; it rejects matched secret text and requires image regions to have positive width and height so a redaction decision always covers pixels.
 - `ExportManifestV1` is an explicit relative-path artifact allowlist and requires a completed privacy-review hash.
 - Hashes are lowercase SHA-256. UUIDs are lowercase canonical versions 1–5 with RFC variant bits.
 

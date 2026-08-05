@@ -14,6 +14,8 @@ const forbiddenImports = [
   /^react-native(?:\/|$)/,
   /^expo(?:\/|$|-)/,
   /^node:/,
+  /^fs(?:\/|$)/,
+  /^path(?:\/|$)/,
   /(?:^|\/)infrastructure(?:\/|$)/,
   /(?:^|\/)repositor(?:y|ies)(?:\/|$)/,
   /(?:^|\/)ui(?:\/|$)/,
@@ -54,6 +56,10 @@ describe('domain dependency boundary', () => {
   });
 
   test.each([
+    'fs',
+    'fs/promises',
+    'path',
+    'path/posix',
     '../repository/contextPackRepository',
     '../repositories/contextPackRepository',
     '../../repository/contextPackRepository',

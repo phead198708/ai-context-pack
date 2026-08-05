@@ -113,10 +113,12 @@ enum InboxManifestValidator {
   }
 
   private static func validate(_ manifest: [String: Any], ingestion: URL, id: String) throws {
-    guard let schemaVersion = nonNegativeInteger(manifest["schemaVersion"]) else {
+    guard let schemaVersion = manifest["schemaVersion"] as? NSNumber,
+          CFGetTypeID(schemaVersion) != CFBooleanGetTypeID() else {
       throw InboxManifestValidationError.invalidManifest
     }
-    guard schemaVersion == 1 else {
+    guard schemaVersion.doubleValue.isFinite,
+          schemaVersion.doubleValue == 1 else {
       throw InboxManifestValidationError.unsupportedVersion
     }
     guard Set(manifest.keys) == manifestKeys,

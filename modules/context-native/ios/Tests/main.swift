@@ -377,6 +377,44 @@ final class InboxRecoverySupportTests: XCTestCase {
     }
   }
 
+  func testEveryNumericUnsupportedManifestSchemaVersionIsExplicitlyRejected() throws {
+    for schemaVersion in [NSNumber(value: -1), NSNumber(value: 1.5), NSNumber(value: 2)] {
+      let id = UUID().uuidString.lowercased()
+      try writeManifest(directoryId: id, manifestId: id, schemaVersion: schemaVersion)
+
+      XCTAssertThrowsError(
+        try InboxManifestValidator.readPublished(
+          inbox: root.appendingPathComponent("Inbox"),
+          ingestionId: id
+        )
+      ) { error in
+        XCTAssertEqual(error as? InboxManifestValidationError, .unsupportedVersion)
+        XCTAssertEqual(
+          (error as? InboxManifestValidationError)?.stableCode,
+          "SCHEMA_VERSION_UNSUPPORTED"
+        )
+      }
+    }
+  }
+
+  func testNonNumericManifestSchemaVersionsRemainSchemaInvalid() throws {
+    let schemaVersions: [Any] = ["1", true]
+    for schemaVersion in schemaVersions {
+      let id = UUID().uuidString.lowercased()
+      try writeManifest(directoryId: id, manifestId: id, schemaVersion: schemaVersion)
+
+      XCTAssertThrowsError(
+        try InboxManifestValidator.readPublished(
+          inbox: root.appendingPathComponent("Inbox"),
+          ingestionId: id
+        )
+      ) { error in
+        XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+        XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
+      }
+    }
+  }
+
   func testMalformedCurrentVersionManifestIsSchemaInvalid() throws {
     let id = UUID().uuidString.lowercased()
     let directory = root.appendingPathComponent("Inbox/\(id)", isDirectory: true)
@@ -506,7 +544,7 @@ final class InboxRecoverySupportTests: XCTestCase {
     directoryId: String,
     manifestId: String,
     itemURL externalItem: URL? = nil,
-    schemaVersion: Int = 1,
+    schemaVersion: Any = 1,
     createdAt: String = "2026-01-01T00:00:00.000Z",
     sha256: String? = nil
   ) throws {
