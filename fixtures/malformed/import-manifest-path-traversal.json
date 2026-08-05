@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "ingestionId": "123e4567-e89b-42d3-a456-426614174000",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "source": "ios-share-extension",
+  "status": "complete",
+  "items": [
+    {
+      "id": "223e4567-e89b-42d3-a456-426614174000",
+      "order": 0,
+      "mediaType": "image/png",
+      "byteCount": 1,
+      "relativePath": "../private.bin",
+      "status": "copied"
+    }
+  ]
+}

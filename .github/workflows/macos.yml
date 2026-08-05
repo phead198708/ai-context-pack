@@ -1,0 +1,108 @@
+name: CI / macOS
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 22.13.1
+  NPM_VERSION: 10.9.2
+  NODE_ENV: development
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+jobs:
+  ios:
+    name: iOS app & Share Extension
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Set up pinned Ruby and Bundler
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: 3.4.9
+          bundler: 2.6.9
+          bundler-cache: true
+      - name: Restore compatible CocoaPods download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-xcode-26.6-ruby-3.4.9-cocoapods-download-v1-${{ hashFiles('Gemfile.lock', 'ios/Podfile.lock', 'package-lock.json') }}
+      - name: Verify Node, npm, Ruby, Bundler, and Xcode pins
+        run: |
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(npm --version)" = "${NPM_VERSION}"
+          test "$(ruby --version | awk '{print $2}')" = "3.4.9"
+          test "$(bundle --version)" = "Bundler version 2.6.9"
+          xcodebuild -version | grep -Fx 'Xcode 26.6'
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+      - name: Verify the supported iOS entry point resolves locked CocoaPods
+        run: |
+          locked_version="$(bundle exec ruby -rlogger -S pod --version)"
+          entry_point_version="$(PATH="${GITHUB_WORKSPACE}/scripts/cocoapods-bin:${PATH}" pod --version)"
+          test "${entry_point_version}" = "${locked_version}"
+      - name: Run shared tests on macOS
+        run: npm test -- --ci
+      - name: Verify workspace-independent podspec checksums
+        run: bundle exec ruby -rlogger -rcocoapods scripts/verify-podspec-checksum.rb
+      - name: Prove the deployment install starts without cached Pods
+        run: test ! -e ios/Pods
+      - name: Resolve locked CocoaPods dependencies
+        run: bundle exec ruby -rlogger -S pod install --project-directory=ios --deployment
+      - name: Prove Pod resolution did not change tracked integration files
+        run: >-
+          git diff --exit-code --
+          ios/Podfile.lock
+          ios/AIContextPack.xcodeproj/project.pbxproj
+          ios/AIContextPack/PrivacyInfo.xcprivacy
+      - name: Run Swift XCTest package
+        run: swift test --package-path modules/context-native/ios
+      - name: Remove Pods to exercise the supported clean-checkout entry point
+        run: |
+          ruby -rfileutils -e "FileUtils.remove_dir('ios/Pods') if Dir.exist?('ios/Pods')"
+          test ! -e ios/Pods
+      - name: Build main app and embedded Share Extension through npm run ios
+        run: >-
+          npm run ios --
+          --no-bundler
+          --no-build-cache
+          --device generic
+          --output "${RUNNER_TEMP}/expo-ios-build"
+      - name: Verify Expo build products
+        run: |
+          test -d "${RUNNER_TEMP}/expo-ios-build/AIContextPack.app"
+          test -d "${RUNNER_TEMP}/expo-ios-build/AIContextPack.app/PlugIns/ShareExtension.appex"
+      - name: Prove the Expo entry point did not rewrite tracked integration files
+        run: >-
+          git diff --exit-code --
+          ios/Podfile.lock
+          ios/AIContextPack.xcodeproj/project.pbxproj
+          ios/AIContextPack/PrivacyInfo.xcprivacy
+      - name: Upload synthetic unsigned iOS build report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-synthetic-build-report
+          path: ${{ runner.temp }}/expo-ios-build/
+          if-no-files-found: ignore
+          retention-days: 7

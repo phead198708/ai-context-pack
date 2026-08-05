@@ -5,6 +5,7 @@ ios/build/
 ios/Pods/
 modules/context-native/android/build/
 modules/context-native/ios/.build/
+coverage/
 docs/wiki/
 .github/
 ios/**/Images.xcassets/

@@ -38,7 +38,38 @@ func scannedPdf(imageURL: URL) throws {
   context.beginPDFPage(nil); context.draw(image, in: CGRect(x: 36, y: 280, width: 540, height: 180)); context.endPDFPage(); context.closePDF()
 }
 
+func mixedPdf(imageURL: URL) throws {
+  guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+    throw FixtureError.renderFailed
+  }
+  let url = output.appendingPathComponent("mixed-two-page.pdf")
+  var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+  guard let context = CGContext(url as CFURL, mediaBox: &box, nil) else {
+    throw FixtureError.renderFailed
+  }
+  context.beginPDFPage(nil)
+  let graphics = NSGraphicsContext(cgContext: context, flipped: false)
+  NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = graphics
+  ("Synthetic embedded page" as NSString).draw(
+    at: NSPoint(x: 72, y: 650),
+    withAttributes: [.font: NSFont.systemFont(ofSize: 24), .foregroundColor: NSColor.black]
+  )
+  NSGraphicsContext.restoreGraphicsState(); context.endPDFPage()
+  context.beginPDFPage(nil)
+  context.draw(image, in: CGRect(x: 36, y: 280, width: 540, height: 180))
+  context.endPDFPage(); context.closePDF()
+}
+
+func corruptPdf() throws {
+  let bytes = Data("%PDF-1.7\n1 0 obj\n<< /Type /Catalog\n".utf8)
+  try bytes.write(to: output.appendingPathComponent("corrupt-truncated.pdf"))
+}
+
 enum FixtureError: Error { case renderFailed }
 let english = try png(named: "ocr-english.png", text: "Synthetic error: retry import")
 _ = try png(named: "ocr-chinese.png", text: "合成测试：重新导入")
-try textPdf(); try scannedPdf(imageURL: english)
+try textPdf()
+try scannedPdf(imageURL: english)
+try mixedPdf(imageURL: english)
+try corruptPdf()

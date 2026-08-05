@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "valid-partial-two-item",
+      "expectedValid": true,
+      "manifest": {
+        "schemaVersion": 1,
+        "ingestionId": "123e4567-e89b-42d3-a456-426614174000",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "source": "android-share-intent",
+        "status": "partial",
+        "items": [
+          {
+            "id": "223e4567-e89b-42d3-a456-426614174000",
+            "order": 0,
+            "mediaType": "image/png",
+            "byteCount": 128,
+            "relativePath": "223e4567-e89b-42d3-a456-426614174000.bin",
+            "status": "copied",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "id": "323e4567-e89b-42d3-a456-426614174000",
+            "order": 1,
+            "mediaType": "application/pdf",
+            "byteCount": 0,
+            "status": "failed",
+            "errorCode": "IMPORT_COPY_FAILED"
+          }
+        ]
+      }
+    },
+    {
+      "id": "invalid-provider-uri",
+      "expectedValid": false,
+      "manifest": {
+        "schemaVersion": 1,
+        "ingestionId": "123e4567-e89b-42d3-a456-426614174000",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "source": "android-share-intent",
+        "status": "complete",
+        "items": [
+          {
+            "id": "223e4567-e89b-42d3-a456-426614174000",
+            "order": 0,
+            "mediaType": "image/png",
+            "byteCount": 128,
+            "relativePath": "content://provider/private",
+            "status": "copied"
+          }
+        ]
+      }
+    }
+  ]
+}

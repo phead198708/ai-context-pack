@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "path": "attachments/123e4567-e89b-42d3-a456-426614174000.bin",
+      "accepted": true
+    },
+    { "path": "README.md", "accepted": true },
+    { "path": "../private.txt", "accepted": false },
+    { "path": "attachments/../../private.txt", "accepted": false },
+    { "path": "/absolute/private.txt", "accepted": false },
+    { "path": "C:\\private.txt", "accepted": false },
+    { "path": "attachments/%2e%2e%2fprivate.txt", "accepted": false },
+    { "path": "attachments\\private.txt", "accepted": false },
+    { "path": "attachments//double.bin", "accepted": false },
+    { "path": "attachments/nul\u0000suffix.bin", "accepted": false }
+  ]
+}
