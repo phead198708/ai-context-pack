@@ -74,7 +74,7 @@ const activityFinitePredicate = new RegExp(
 const openInflectedActivityPredicate =
   /^(?<predicate>\p{L}{2,}(?:ed|s|ies))\b/iu;
 const irregularReducedActivityModifier = String.raw`(?:begun|built|done|given|held|made|run|seen|taken|written)`;
-const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|failed|feed|happened|heed|need|occurred|persisted|proceeded|read|seed|speed|succeeded|waited|worked)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
+const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|feed|happened|heed|need|occurred|persisted|proceeded|read|seed|speed|succeeded|waited|worked)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
 const activityBoundaryOrAttachment =
   /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu;
 const outsideV01Qualifier =
@@ -810,6 +810,13 @@ function classifyPossibleRequirementSubject(source, followsCoordinator) {
   ) {
     return 'new';
   }
+  if (
+    /^\p{L}+(?:[-'’]\p{L}+)*(?:\s+\p{L}+(?:[-'’]\p{L}+)*){1,3}$/iu.test(
+      normalized,
+    )
+  ) {
+    return 'new';
+  }
   return followsCoordinator ? 'new' : 'unknown';
 }
 
@@ -968,7 +975,7 @@ function findResumedActivityPredicate(source, attachedEnd) {
       return false;
     }
     const beforePredicate = source.slice(attachedEnd, predicate.index);
-    return !/\bto\s+(?:(?:also|always|never|not|still|\p{L}+ly)\s+){0,3}$/iu.test(
+    return !/^\s*(?:in\s+order\s+)?to(?:\s+\p{L}+(?:[-'’]\p{L}+)*){0,3}\s*$/iu.test(
       beforePredicate,
     );
   });
@@ -1232,6 +1239,10 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing workflows scheduled before release are required for v0.1.',
     'Post-v0.1 physical-device testing workflows scheduled to run offline before release are required for v0.1.',
     'Post-v0.1 physical-device testing workflows scheduled to always run offline before release are required for v0.1.',
+    'Post-v0.1 physical-device testing workflows scheduled to just run offline before release are required for v0.1.',
+    'Post-v0.1 physical-device testing workflows scheduled to often run offline before release are required for v0.1.',
+    'Post-v0.1 physical-device testing workflows scheduled to sometimes run offline before release are required for v0.1.',
+    'Post-v0.1 physical-device tests failed deliberately before release are required for v0.1.',
     'Post-v0.1 physical-device validation plans before release are required for v0.1.',
     'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
     'Post-v0.1 physical-device testing that uses workflows before release is required for v0.1.',
@@ -1351,6 +1362,7 @@ function assertRuleSelfTests() {
     'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled offline proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled to run offline proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled to always run offline proceed.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled to just run offline proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device validation plans begin.',
     'v0.1 documentation is required before post-v0.1 physical-device testing procedures start.',
     'Post-v0.1 physical-device testing proceeds before v0.1 documentation is required.',
