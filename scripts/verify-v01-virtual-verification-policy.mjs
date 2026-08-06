@@ -30,9 +30,13 @@ const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
 );
 const negatedClauseGap = String.raw`(?:(?!\band\b|${policyRequirementTerm})[^\r\n.!?。！？;；]){0,80}`;
 const boundedModalModifier = String.raw`(?:(?:actually|again|always|automatically|ever|explicitly|independently|necessarily|normally|ordinarily|otherwise|still)\s+){0,3}`;
-const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:happen|occur|take\s+place)|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:required|mandatory|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
+const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:required|mandatory|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
 const modalNegatedRequirement = new RegExp(
   String.raw`\b(?:must|shall|should|will|would|can|could|need)\s+(?:not|never)\s+${boundedModalModifier}${modalNegatedComplement}`,
+  'i',
+);
+const needNegatedPhysicalActivityOccurrence = new RegExp(
+  String.raw`${physicalDeviceActivity}\s+(?:itself\s+)?need\s+(?:not|never)\s+${boundedModalModifier}(?:happen|occur|take\s+place)\b`,
   'i',
 );
 const auxiliaryNegatedRequirement = new RegExp(
@@ -934,11 +938,11 @@ function hasIndependentActivityPredicate(
   // A reduced passive followed by its own modifier remains attached even
   // without delimiting commas. A bare participle can still be finite (for
   // example, `testing completed before documentation is required`), so only
-  // consume it here when material follows the participle before the boundary.
+  // consume it here when a `by` agent supplies positive passive evidence.
   if (
     preferAttachedParticiple &&
     explicitBoundarySubject &&
-    new RegExp(`^${reducedActivityModifier}\\b\\s+\\S`, 'iu').test(predicate)
+    new RegExp(`^${reducedActivityModifier}\\b\\s+by\\b`, 'iu').test(predicate)
   ) {
     predicate = consumeLeadingAttachedActivityModifier(predicate, true);
     if (predicate.length === 0) {
@@ -1214,6 +1218,7 @@ function isExplicitlyNegatedRequirement(clause, matchedRule) {
   }
   const requirementEnd = requirement.index + requirement[0].length;
   const negations = [
+    needNegatedPhysicalActivityOccurrence,
     modalNegatedRequirement,
     auxiliaryNegatedRequirement,
     noLongerRequirement,
@@ -1309,6 +1314,8 @@ function assertRuleSelfTests() {
     'Physical-device testing must not fail even if documentation is required.',
     'Physical-device testing need not fail and is required for v0.1.',
     'Physical-device testing need not occur and is required for v0.1.',
+    'Documentation need not happen alongside physical-device testing on both platforms, which remains mandatory for v0.1.',
+    'Documentation need not occur alongside physical-device testing on both platforms, which remains mandatory for v0.1.',
     "Physical-device testing mustn't fail even if documentation is required.",
     'Physical-device testing mustn’t fail even if documentation is required.',
     "Physical-device testing mustn't ever fail even if documentation is required.",
@@ -1344,7 +1351,7 @@ function assertRuleSelfTests() {
     'The physical-device testing, completed offline before the final release, becomes required for v0.1.',
     'The physical-device testing, executed offline before the final release, becomes required for v0.1.',
     'The physical-device testing completed by QA before release is required for v0.1.',
-    'The physical-device testing executed offline before release is required for v0.1.',
+    'The physical-device testing executed by QA before release is required for v0.1.',
     'Post-v0.1 physical-device tests failed deliberately before release are required for v0.1.',
     'Post-v0.1 physical-device validation plans before release are required for v0.1.',
     'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
@@ -1517,6 +1524,9 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing uses devices before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing stopped before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing completed before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed all checks before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed successfully before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing executed all checks before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing proceeded before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing launched before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing proceeds, and v0.1 documentation is required.',
