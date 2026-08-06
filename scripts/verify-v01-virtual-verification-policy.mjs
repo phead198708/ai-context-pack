@@ -16,6 +16,32 @@ const policyPaths = [
   'docs/wiki/Product-Spec.md',
   'docs/wiki/Roadmap.md',
 ];
+const requirementClauseGap = String.raw`[^\r\n.!?。！？;；]{0,80}`;
+const physicalDeviceTerm = String.raw`\bphysical[- ]devices?\b`;
+const verificationActivityTerm = String.raw`\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b`;
+const requirementTerm = String.raw`\b(?:requires?|required|must|shall|mandatory)\b`;
+const physicalDeviceActivity = String.raw`(?:${physicalDeviceTerm}${requirementClauseGap}${verificationActivityTerm}|${verificationActivityTerm}${requirementClauseGap}${physicalDeviceTerm})`;
+const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
+  String.raw`\bno\b${requirementClauseGap}${physicalDeviceActivity}`,
+  'i',
+);
+const negatedClauseGap = String.raw`(?:(?!\band\b)[^\r\n.!?。！？;；]){0,80}`;
+const modalNegatedRequirement = new RegExp(
+  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\b${negatedClauseGap}(?:${requirementTerm}|${physicalDeviceActivity})`,
+  'i',
+);
+const auxiliaryNegatedRequirement = new RegExp(
+  String.raw`\b(?:does?|do|is|are|was|were|has|have|had)\s+(?:not|never)\b${negatedClauseGap}${requirementTerm}`,
+  'i',
+);
+const noLongerRequirement = new RegExp(
+  String.raw`\b(?:is|are|was|were)\s+no longer\b${negatedClauseGap}${requirementTerm}`,
+  'i',
+);
+const directNotRequirement = new RegExp(
+  String.raw`\bnot\b${negatedClauseGap}${requirementTerm}`,
+  'i',
+);
 const staleRequirementRules = [
   {
     id: 'low-end-device-tier',
@@ -58,13 +84,19 @@ const staleRequirementRules = [
   },
   {
     id: 'physical-device-requirement-leading',
-    pattern:
-      /(?![^\r\n.!?。！？]{0,200}\b(?:outside (?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b)\b(?:(?<!not )(?<!never )(?:requires?|required)|must|shall)\b(?!\s+(?:not|never)\b)[^\r\n.!?。！？]{0,80}(?:\bphysical[- ]devices?\b[^\r\n.!?。！？]{0,80}\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b|\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b[^\r\n.!?。！？]{0,80}\bphysical[- ]devices?\b)/i,
+    pattern: new RegExp(
+      `${requirementTerm}${requirementClauseGap}${physicalDeviceActivity}`,
+      'i',
+    ),
+    allowsExplicitScopeOrNegation: true,
   },
   {
     id: 'physical-device-requirement-trailing',
-    pattern:
-      /(?![^\r\n.!?。！？]{0,200}\b(?:outside (?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b)(?<!no )\bphysical[- ]devices?\b[^\r\n.!?。！？]{0,80}\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b[^\r\n.!?。！？]{0,80}\b(?:(?<!not )(?<!never )(?:requires?|required)|must|shall|mandatory)\b(?!\s+(?:not|never)\b)/i,
+    pattern: new RegExp(
+      `${physicalDeviceActivity}${requirementClauseGap}${requirementTerm}`,
+      'i',
+    ),
+    allowsExplicitScopeOrNegation: true,
   },
   {
     id: 'physical-share-hosts',
@@ -176,9 +208,7 @@ function assertIssueInventory(issues) {
 function assertNoStaleRequirement(source, sourceName) {
   const lines = source.split(/\r?\n/u);
   for (const [index, line] of lines.entries()) {
-    const matchedRule = staleRequirementRules.find(rule =>
-      rule.pattern.test(line),
-    );
+    const matchedRule = findMatchedRule(line);
     if (matchedRule) {
       throw new Error(
         `V01_VIRTUAL_POLICY_STALE_REQUIREMENT:${sourceName}:${index + 1}:${
@@ -188,14 +218,54 @@ function assertNoStaleRequirement(source, sourceName) {
     }
   }
   const normalized = source.replace(/\s+/gu, ' ');
-  const normalizedRule = staleRequirementRules.find(rule =>
-    rule.pattern.test(normalized),
-  );
+  const normalizedRule = findMatchedRule(normalized);
   if (normalizedRule) {
     throw new Error(
       `V01_VIRTUAL_POLICY_STALE_REQUIREMENT:${sourceName}:normalized:${normalizedRule.id}`,
     );
   }
+}
+
+function findMatchedRule(source) {
+  for (const clause of splitRequirementClauses(source)) {
+    for (const rule of staleRequirementRules) {
+      if (!rule.pattern.test(clause)) {
+        continue;
+      }
+      if (
+        rule.allowsExplicitScopeOrNegation &&
+        (isExplicitlyOutsideV01(clause) ||
+          isExplicitlyNegatedRequirement(clause))
+      ) {
+        continue;
+      }
+      return rule;
+    }
+  }
+  return undefined;
+}
+
+function splitRequirementClauses(source) {
+  return source
+    .split(/\.(?=\s|$)|[!?。！？;；]|\b(?:but|however)\b/iu)
+    .map(clause => clause.trim())
+    .filter(Boolean);
+}
+
+function isExplicitlyOutsideV01(clause) {
+  return /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu.test(
+    clause,
+  );
+}
+
+function isExplicitlyNegatedRequirement(clause) {
+  return (
+    modalNegatedRequirement.test(clause) ||
+    auxiliaryNegatedRequirement.test(clause) ||
+    noLongerRequirement.test(clause) ||
+    directNotRequirement.test(clause) ||
+    explicitlyAbsentPhysicalDeviceActivity.test(clause)
+  );
 }
 
 function parseIssuePayload(source) {
@@ -224,6 +294,11 @@ function assertRuleSelfTests() {
     'Teams must test on physical devices.',
     'Physical-device evidence must be attached.',
     'Physical-device verification is mandatory.',
+    'Validation on physical devices is required.',
+    'Post-v0.1 work requires physical-device evidence, but v0.1 requires physical-device testing.',
+    'Physical-device testing is not required, but physical-device evidence is required.',
+    'Physical-device testing must not fail and is required.',
+    'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
     'Requires physical-device\nvalidation evidence.',
     'Physical-device validation is\nrequired.',
     '必须提供真实设备证据。',
@@ -231,7 +306,7 @@ function assertRuleSelfTests() {
   ];
   for (const example of staleExamples) {
     const normalized = example.replace(/\s+/gu, ' ');
-    if (!staleRequirementRules.some(rule => rule.pattern.test(normalized))) {
+    if (!findMatchedRule(normalized)) {
       throw new Error('V01_VIRTUAL_POLICY_SELF_TEST_MISSED_STALE');
     }
   }
@@ -240,13 +315,20 @@ function assertRuleSelfTests() {
     'v0.1 does not require physical hardware.',
     'The physical-device label remains available outside v0.1.',
     'Post-v0.1 work may use physical-device validation evidence.',
+    'Post-v0.1 work requires physical-device validation evidence.',
+    'Outside v0.1, teams must test on physical devices.',
     'Physical-device validation is not required for v0.1.',
+    'Physical-device testing must not be required for v0.1.',
+    'Physical-device testing is no longer required for v0.1.',
+    'Physical-device testing not required for v0.1.',
+    'No physical-device evidence is required for v0.1.',
+    'No validation on physical devices is required for v0.1.',
     'v0.1 does not require physical-device testing.',
     'Use named minimum/current Simulator and Emulator profiles.',
     'Virtual results make no physical-hardware compatibility claim.',
   ];
   for (const example of allowedExamples) {
-    if (staleRequirementRules.some(rule => rule.pattern.test(example))) {
+    if (findMatchedRule(example)) {
       throw new Error('V01_VIRTUAL_POLICY_SELF_TEST_REJECTED_ALLOWED');
     }
   }
