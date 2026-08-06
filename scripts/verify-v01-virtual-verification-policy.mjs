@@ -74,7 +74,7 @@ const activityFinitePredicate = new RegExp(
 const openInflectedActivityPredicate =
   /^(?<predicate>\p{L}{2,}(?:ed|s|ies))\b/iu;
 const irregularReducedActivityModifier = String.raw`(?:begun|built|done|given|held|made|run|seen|taken|written)`;
-const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|feed|heed|need|proceed|read|seed|speed|succeed)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
+const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|failed|feed|happened|heed|need|occurred|persisted|proceeded|read|seed|speed|succeeded|waited|worked)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
 const activityBoundaryOrAttachment =
   /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu;
 const outsideV01Qualifier =
@@ -963,7 +963,15 @@ function consumeLeadingAttachedActivityModifier(
 function findResumedActivityPredicate(source, attachedEnd) {
   const resumedPredicates = Array.from(
     source.matchAll(new RegExp(activityFinitePredicate.source, 'giu')),
-  ).filter(predicate => predicate.index >= attachedEnd);
+  ).filter(predicate => {
+    if (predicate.index < attachedEnd) {
+      return false;
+    }
+    const beforePredicate = source.slice(attachedEnd, predicate.index);
+    return !/\bto\s+(?:(?:also|always|never|not|still|\p{L}+ly)\s+){0,3}$/iu.test(
+      beforePredicate,
+    );
+  });
   for (const resumedPredicate of resumedPredicates) {
     const beforeResumedPredicate = source.slice(
       attachedEnd,
@@ -1222,6 +1230,8 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing begins before release and is required for v0.1.',
     'Post-v0.1 physical-device testing workflows before release are required for v0.1.',
     'Post-v0.1 physical-device testing workflows scheduled before release are required for v0.1.',
+    'Post-v0.1 physical-device testing workflows scheduled to run offline before release are required for v0.1.',
+    'Post-v0.1 physical-device testing workflows scheduled to always run offline before release are required for v0.1.',
     'Post-v0.1 physical-device validation plans before release are required for v0.1.',
     'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
     'Post-v0.1 physical-device testing that uses workflows before release is required for v0.1.',
@@ -1339,6 +1349,8 @@ function assertRuleSelfTests() {
     'v0.1 documentation is required before post-v0.1 physical-device testing, which runs offline, proceeds.',
     'v0.1 documentation is required before post-v0.1 physical-device testing workflows proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled offline proceed.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled to run offline proceed.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled to always run offline proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device validation plans begin.',
     'v0.1 documentation is required before post-v0.1 physical-device testing procedures start.',
     'Post-v0.1 physical-device testing proceeds before v0.1 documentation is required.',
@@ -1348,6 +1360,9 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing reports results before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing measures latency before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing retries failures before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing workflows failed before release notes become mandatory in v0.1.',
+    'Post-v0.1 physical-device testing workflows happened before release notes become mandatory in v0.1.',
+    'Post-v0.1 physical-device testing workflows occurred before release notes become mandatory in v0.1.',
     'Post-v0.1 physical-device testing that runs offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing that can run offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing to run nightly proceeds before v0.1 documentation is required.',
