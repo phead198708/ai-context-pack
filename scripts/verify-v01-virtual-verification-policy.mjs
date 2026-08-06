@@ -71,6 +71,10 @@ const activityFinitePredicate = new RegExp(
   `(?:${activityFiniteFunctionalPredicate}|${activityFiniteLexicalPredicate}|${activityIrregularFinitePredicate})`,
   'iu',
 );
+const openInflectedActivityPredicate =
+  /^(?<predicate>\p{L}{2,}(?:ed|s|ies))\b/iu;
+const activityBoundaryOrAttachment =
+  /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu;
 const outsideV01Qualifier =
   /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
 const policyCoordinatorTerm = String.raw`(?:as well as|even though|nevertheless|nonetheless|however|whereas|although|while|though|because|but|yet|and|or|plus)`;
@@ -345,7 +349,10 @@ function assertNoStaleRequirement(source, sourceName) {
 }
 
 function findMarkdownListIndent(source) {
-  const listItem = /^(?<indent>\s*)(?:[-*+]\s+|\d+[.)]\s+)/u.exec(source);
+  const unquotedSource = stripMarkdownBlockquotePrefix(source);
+  const listItem = /^(?<indent>\s*)(?:[-*+]\s+|\d+[.)]\s+)/u.exec(
+    unquotedSource,
+  );
   return listItem === null
     ? undefined
     : (listItem.groups?.indent ?? '').replaceAll('\t', '  ').length;
@@ -369,7 +376,13 @@ function normalizeScopeHeading(source) {
 }
 
 function stripMarkdownListMarker(source) {
-  return source.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/u, '').trim();
+  return stripMarkdownBlockquotePrefix(source)
+    .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/u, '')
+    .trim();
+}
+
+function stripMarkdownBlockquotePrefix(source) {
+  return source.replace(/^(?:\s*>\s?)+/u, '');
 }
 
 function findMatchedRule(source) {
@@ -421,7 +434,15 @@ function splitCoordinatedRequirements(clause) {
       hasIndependentPolicyStatement(boundRight) &&
       (hasPhysicalDeviceActivity(left) ||
         hasPhysicalDeviceActivity(boundRight));
-    if (isHardBoundary || hasCoordinatedPolicies) {
+    const hasExplicitNewPolicySubject =
+      hasIndependentPhysicalActivityStatement(left) &&
+      hasIndependentPolicyStatement(right) &&
+      classifyPolicySubjectBeforeRequirement(right) === 'new';
+    if (
+      isHardBoundary ||
+      hasCoordinatedPolicies ||
+      hasExplicitNewPolicySubject
+    ) {
       const scopeOnlyHeading = isOutsideV01ScopeOnlyHeading(left);
       const scopedRight =
         ((!isHardBoundary && hasLeadingOutsideV01Qualifier(left)) ||
@@ -440,6 +461,17 @@ function splitCoordinatedRequirements(clause) {
 
 function hasPhysicalDeviceActivity(source) {
   return physicalDeviceActivityMatcher.test(source);
+}
+
+function hasIndependentPhysicalActivityStatement(source) {
+  const activity = physicalDeviceActivityMatcher.exec(source);
+  return (
+    activity !== null &&
+    hasIndependentActivityPredicate(
+      source.slice(activity.index + activity[0].length),
+      { activitySource: activity[0] },
+    )
+  );
 }
 
 function inheritPhysicalDeviceActivity(left, right) {
@@ -466,6 +498,22 @@ function isInsideAttachedPolicyModifier(source, predicateIndex) {
     /\b(?:that|which|who|whose)\b[^,;；:：—–]{0,80}$/iu.test(prefix) ||
     /\bto\b[^,;；:：—–]{0,48}$/iu.test(prefix)
   );
+}
+
+function classifyPolicySubjectBeforeRequirement(source) {
+  const requirement = independentPolicyPredicate.exec(source);
+  if (requirement === null) {
+    return 'unknown';
+  }
+  const subject = source
+    .slice(0, requirement.index)
+    .replace(/^\s*(?:although|and|but|or|though|whereas|while|yet)\b/iu, '')
+    .replace(
+      /\b(?:am|are|be|becomes?|became|can|could|is|may|might|must|remains?|remained|shall|should|was|were|will|would)\s*$/iu,
+      '',
+    )
+    .trim();
+  return classifyPossibleRequirementSubject(subject, true);
 }
 
 function hasLeadingOutsideV01Qualifier(source) {
@@ -678,8 +726,9 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
       return true;
     }
     return !(
-      hasIndependentActivityPredicate(source.slice(activityEnd)) &&
-      isPhysicalActivityExplicitlyOutsideV01(source, activity)
+      hasIndependentActivityPredicate(source.slice(activityEnd), {
+        activitySource: activity[0],
+      }) && isPhysicalActivityExplicitlyOutsideV01(source, activity)
     );
   }
   const between = source.slice(activityEnd, requirement.index);
@@ -698,8 +747,10 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
     return false;
   }
   return !(
-    hasIndependentActivityPredicate(between.slice(0, boundary.index)) &&
-    isPhysicalActivityExplicitlyOutsideV01(source, activity)
+    hasIndependentActivityPredicate(between.slice(0, boundary.index), {
+      activitySource: activity[0],
+      preferAttachedParticiple: true,
+    }) && isPhysicalActivityExplicitlyOutsideV01(source, activity)
   );
 }
 
@@ -715,25 +766,60 @@ function classifyRequirementSubjectAfterBoundary(source, boundary) {
     );
   if (coordinatedTail !== null) {
     const tail = coordinatedTail.groups?.tail.trim() ?? '';
-    return tail.length === 0 || isSubjectContinuationModifierPhrase(tail)
-      ? 'shared'
-      : 'new';
+    return classifyPossibleRequirementSubject(tail, true);
   }
-  const trailingModifiers = new RegExp(
-    String.raw`(?:^|\s)(?<tail>(?:(?:also|eventually|later|now|still|then|typically|usually|\p{L}+ly)\s*){1,3})$`,
-    'iu',
-  ).exec(afterBoundary);
-  return trailingModifiers !== null &&
-    isSubjectContinuationModifierPhrase(
-      trailingModifiers.groups?.tail.trim() ?? '',
+  const afterBoundaryWords = afterBoundary.split(/\s+/u);
+  for (
+    let modifierCount = 1;
+    modifierCount <= Math.min(4, afterBoundaryWords.length);
+    modifierCount += 1
+  ) {
+    if (
+      isSubjectContinuationModifierPhrase(
+        afterBoundaryWords.slice(-modifierCount).join(' '),
+      )
+    ) {
+      return 'shared';
+    }
+  }
+  return classifyPossibleRequirementSubject(afterBoundary, false);
+}
+
+function classifyPossibleRequirementSubject(source, followsCoordinator) {
+  const normalized = source.trim();
+  if (normalized.length === 0) {
+    return 'shared';
+  }
+  if (
+    /^(?:it|itself|that|this|these|they|those)(?:\s+(?:again|alone|itself|themselves))?$/iu.test(
+      normalized,
     )
-    ? 'shared'
-    : 'unknown';
+  ) {
+    return 'shared';
+  }
+  if (isSubjectContinuationModifierPhrase(normalized)) {
+    return 'shared';
+  }
+  if (
+    /\bv0\.1\b\s+\p{L}/iu.test(normalized) ||
+    /^(?:(?:a|an|another|any|each|either|every|its|my|neither|no|our|some|the|their|your)\s+|(?:these|this|those|that)\s+\p{L})/iu.test(
+      normalized,
+    )
+  ) {
+    return 'new';
+  }
+  return followsCoordinator ? 'new' : 'unknown';
 }
 
 function isSubjectContinuationModifierPhrase(source) {
-  return /^(?:(?:also|eventually|later|now|still|then|typically|usually|\p{L}+ly)\s*){1,3}$/iu.test(
-    source,
+  const words = source.split(/\s+/u);
+  return (
+    words.length <= 4 &&
+    words.every(word =>
+      /^(?:again|also|ever|later|never|now|once|still|then|yet|\p{L}+ly|\p{L}*(?:after|before|ward|wards))$/iu.test(
+        word,
+      ),
+    )
   );
 }
 
@@ -755,7 +841,10 @@ function isPhysicalActivityExplicitlyOutsideV01(source, activity) {
   );
 }
 
-function hasIndependentActivityPredicate(source) {
+function hasIndependentActivityPredicate(
+  source,
+  { activitySource = '', preferAttachedParticiple = false } = {},
+) {
   let predicate = source.trim();
 
   // Comma-delimited relative and conditional material modifies the activity;
@@ -776,29 +865,60 @@ function hasIndependentActivityPredicate(source) {
     return false;
   }
 
-  predicate = consumeLeadingAttachedActivityModifier(predicate);
+  const prepositionalRelative =
+    /^(?:by|with)\s+(?:(?!\b(?:that|which|who|whose)\b)[^,;；:：—–]){1,64}(?=(?:that|which|who|whose)\b)/iu.exec(
+      predicate,
+    );
+  if (prepositionalRelative !== null) {
+    predicate = predicate.slice(prepositionalRelative[0].length).trim();
+  }
+
+  predicate = consumeLeadingAttachedActivityModifier(
+    predicate,
+    preferAttachedParticiple,
+  );
   if (predicate.length === 0) {
     return false;
   }
 
   // Prepositional and subordinate material without a resumed predicate remains
   // attached to the physical activity rather than severing its requirement.
-  if (
-    /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu.test(
-      predicate,
-    )
-  ) {
+  if (activityBoundaryOrAttachment.test(predicate)) {
     return false;
   }
 
-  return new RegExp(`^${activityFinitePredicate.source}`, 'iu').test(predicate);
+  if (new RegExp(`^${activityFinitePredicate.source}`, 'iu').test(predicate)) {
+    return true;
+  }
+
+  const openInflectedPredicate = openInflectedActivityPredicate.exec(predicate);
+  if (openInflectedPredicate !== null) {
+    const remainder = predicate.slice(openInflectedPredicate[0].length).trim();
+    return (
+      remainder.length > 0 && !activityBoundaryOrAttachment.test(remainder)
+    );
+  }
+
+  // A plural activity subject admits an uninflected finite predicate. This is
+  // deliberately structural rather than a closed verb list: the governance
+  // scanner must not reject new, ordinary activity verbs merely because its
+  // corpus has not seen them before.
+  return (
+    /\b(?:devices|tests)\b/iu.test(activitySource) &&
+    /^(?!\b(?:and|or|plus)\b)\p{L}{2,}\b/iu.test(predicate)
+  );
 }
 
-function consumeLeadingAttachedActivityModifier(source) {
-  const reducedRelative =
-    /^(?<participle>(?:(?!(?:bleed|breed|feed|heed|need|proceed|read|seed|speed|succeed)\b)\p{L}+ed|begun|built|done|given|held|made|seen|taken|written))\b/iu.exec(
-      source,
-    );
+function consumeLeadingAttachedActivityModifier(
+  source,
+  preferAttachedParticiple,
+) {
+  const reducedRelative = new RegExp(
+    preferAttachedParticiple
+      ? String.raw`^(?<participle>(?:(?!(?:bleed|breed|feed|heed|need|proceed|read|seed|speed|succeed)\b)\p{L}+ed|begun|built|done|given|held|made|run|seen|taken|written))\b`
+      : String.raw`^(?<participle>(?:begun|built|done|given|held|made|run|seen|taken|written))\b`,
+    'iu',
+  ).exec(source);
   if (reducedRelative !== null) {
     return findResumedActivityPredicate(
       source,
@@ -912,7 +1032,7 @@ function isScopeBoundToRequirementPredicate(predicatePrefix) {
     return true;
   }
   if (
-    /^\s*(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:mandatory|required|requirements?)\s*$/iu.test(
+    /^\s*(?:(?:again|always|automatically|eventually|ever|explicitly|independently|necessarily|normally|ordinarily|otherwise|still|\p{L}+ly)\s+){0,3}(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:mandatory|required|requirements?)\s*$/iu.test(
       predicatePrefix,
     )
   ) {
@@ -1096,9 +1216,19 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing whose scheduler runs on devices before release is required for v0.1.',
     'Post-v0.1 physical-device validation done before release is required for v0.1.',
     'Post-v0.1 physical-device testing guaranteed before release is required for v0.1.',
+    'Post-v0.1 physical-device testing run offline before release is required for v0.1.',
     'Post-v0.1 physical-device testing begins before release and later is required for v0.1.',
     'Post-v0.1 physical-device testing begins before release then is required for v0.1.',
     'Post-v0.1 physical-device testing begins before release and must be required for v0.1.',
+    'Post-v0.1 physical-device testing begins before release and it is required for v0.1.',
+    'Post-v0.1 physical-device testing begins before release and this is required for v0.1.',
+    'Post-v0.1 physical-device testing begins before release and that is required for v0.1.',
+    'Physical-device testing begins before release and afterwards is required for v0.1.',
+    'Physical-device testing begins before release and once again is required for v0.1.',
+    'Physical-device testing begins before release and thereafter is required for v0.1.',
+    'Post-v0.1 physical-device testing must eventually be required for v0.1.',
+    'Post-v0.1 physical-device testing must still remain required for v0.1.',
+    'Post-v0.1 physical-device testing must automatically become required for v0.1.',
     'v0.1 requires physical-device testing before post-v0.1 documentation begins.',
     'v0.1 physical-device testing is required before post-v0.1 documentation begins.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
@@ -1195,7 +1325,16 @@ function assertRuleSelfTests() {
     'v0.1 documentation is required before post-v0.1 physical-device testing proceeds.',
     'v0.1 documentation is required before post-v0.1 physical-device tests proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device testing, which runs offline, proceeds.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing workflows proceed.',
+    'v0.1 documentation is required before post-v0.1 physical-device validation plans begin.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing procedures start.',
     'Post-v0.1 physical-device testing proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing scans logs before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing checks results before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing captures metrics before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing reports results before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing measures latency before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing retries failures before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing that runs offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing that can run offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing to run nightly proceeds before v0.1 documentation is required.',
@@ -1206,10 +1345,17 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing whose scheduler runs offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device validation done offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing guaranteed offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing by operators who work offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing with a workflow which runs offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing began before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing became available before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing ran before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing uses devices before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing stopped before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing proceeded before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing launched before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing proceeds, and v0.1 documentation is required.',
     'Physical-device testing begins before release and v0.1 documentation is required.',
     'Physical-device testing begins before release and documentation is required.',
     'Post-v0.1 physical-device testing begins before release and v0.1 documentation must be required.',
@@ -1244,6 +1390,7 @@ function assertRuleSelfTests() {
     'v0.1 release:\n- Physical-device testing is not required.',
     'Post-v0.1 requirements:\n- v0.1 release:\n  - Documentation is required.\n- Physical-device testing is required.',
     'For post-v0.1 work:\n- Documentation is required.\n\nPhysical-device testing is not required.',
+    '> Post-v0.1 requirements:\n> - Documentation is required.\n> - Physical-device testing is required.',
   ];
   for (const [index, example] of multilineAllowedSources.entries()) {
     try {
