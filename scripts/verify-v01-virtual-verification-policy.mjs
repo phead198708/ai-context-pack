@@ -42,6 +42,10 @@ const directNotRequirement = new RegExp(
   String.raw`\bnot\b${negatedClauseGap}${requirementTerm}`,
   'i',
 );
+const contractedNegatedRequirement = new RegExp(
+  String.raw`\b(?:(?:is|are|was|were|do|does|did|has|have|had|must|should|would|could)n['’]t|can['’]t|won['’]t|shan['’]t)\b${negatedClauseGap}(?:${requirementTerm}|${physicalDeviceActivity})`,
+  'i',
+);
 const staleRequirementRules = [
   {
     id: 'low-end-device-tier',
@@ -94,6 +98,14 @@ const staleRequirementRules = [
     id: 'physical-device-requirement-trailing',
     pattern: new RegExp(
       `${physicalDeviceActivity}${requirementClauseGap}${requirementTerm}`,
+      'i',
+    ),
+    allowsExplicitScopeOrNegation: true,
+  },
+  {
+    id: 'physical-device-requirement-interleaved',
+    pattern: new RegExp(
+      `(?:${verificationActivityTerm}${requirementClauseGap}${requirementTerm}${requirementClauseGap}${physicalDeviceTerm}|${physicalDeviceTerm}${requirementClauseGap}${requirementTerm}${requirementClauseGap}${verificationActivityTerm})`,
       'i',
     ),
     allowsExplicitScopeOrNegation: true,
@@ -249,7 +261,33 @@ function splitRequirementClauses(source) {
   return source
     .split(/\.(?=\s|$)|[!?。！？;；]|\b(?:but|however)\b/iu)
     .map(clause => clause.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .flatMap(splitCoordinatedRequirements);
+}
+
+function splitCoordinatedRequirements(clause) {
+  const separators = clause.matchAll(/(?:,\s+(?:and\s+)?|\s+and\s+)/giu);
+  for (const separator of separators) {
+    const separatorIndex = separator.index;
+    const left = clause.slice(0, separatorIndex).trim();
+    const right = clause.slice(separatorIndex + separator[0].length).trim();
+    if (
+      hasPhysicalDeviceRequirement(left) &&
+      hasPhysicalDeviceRequirement(right)
+    ) {
+      return [
+        ...splitCoordinatedRequirements(left),
+        ...splitCoordinatedRequirements(right),
+      ];
+    }
+  }
+  return [clause];
+}
+
+function hasPhysicalDeviceRequirement(source) {
+  return staleRequirementRules.some(
+    rule => rule.allowsExplicitScopeOrNegation && rule.pattern.test(source),
+  );
 }
 
 function isExplicitlyOutsideV01(clause) {
@@ -264,6 +302,7 @@ function isExplicitlyNegatedRequirement(clause) {
     auxiliaryNegatedRequirement.test(clause) ||
     noLongerRequirement.test(clause) ||
     directNotRequirement.test(clause) ||
+    contractedNegatedRequirement.test(clause) ||
     explicitlyAbsentPhysicalDeviceActivity.test(clause)
   );
 }
@@ -295,8 +334,13 @@ function assertRuleSelfTests() {
     'Physical-device evidence must be attached.',
     'Physical-device verification is mandatory.',
     'Validation on physical devices is required.',
+    'Validation is required on physical devices.',
+    'Physical devices are required for validation.',
+    'Testing must occur on physical devices.',
     'Post-v0.1 work requires physical-device evidence, but v0.1 requires physical-device testing.',
     'Physical-device testing is not required, but physical-device evidence is required.',
+    'Outside v0.1, testing on physical devices is required, and v0.1 physical-device evidence is required.',
+    'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required for v0.1.',
     'Physical-device testing must not fail and is required.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
     'Requires physical-device\nvalidation evidence.',
@@ -321,6 +365,10 @@ function assertRuleSelfTests() {
     'Physical-device testing must not be required for v0.1.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing not required for v0.1.',
+    "Physical-device testing isn't required for v0.1.",
+    'Physical-device testing isn’t required for v0.1.',
+    "v0.1 doesn't require testing on physical devices.",
+    'v0.1 doesn’t require testing on physical devices.',
     'No physical-device evidence is required for v0.1.',
     'No validation on physical devices is required for v0.1.',
     'v0.1 does not require physical-device testing.',
