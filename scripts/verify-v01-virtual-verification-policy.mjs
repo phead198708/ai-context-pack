@@ -56,7 +56,6 @@ const contractedModalNegatedRequirement = new RegExp(
   'i',
 );
 const independentRequirement = new RegExp(requirementTerm, 'i');
-const independentPolicyRequirement = new RegExp(policyRequirementTerm, 'i');
 const independentAllowance = new RegExp(allowancePredicateTerm, 'i');
 const independentPolicyPredicate = new RegExp(
   `(?:${policyRequirementTerm}|${allowancePredicateTerm})`,
@@ -65,6 +64,16 @@ const independentPolicyPredicate = new RegExp(
 const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
 const requirementToActivityBoundary =
   /\b(?:after|although|because|before|even\s+if|if|once|since|though|unless|until|when(?:ever)?|whereas|while)\b/iu;
+const activityFiniteFunctionalPredicate = String.raw`\b(?:am|are|can(?:not)?|could|did|do|does|had|has|have|is|may|might|must|shall|should|was|were|will|would)\b`;
+const activityFiniteLexicalShape = String.raw`\b\p{L}{2,}(?:ed|s)\b`;
+const activityFinitePredicate = new RegExp(
+  `(?:${activityFiniteFunctionalPredicate}|${activityFiniteLexicalShape})`,
+  'iu',
+);
+const activityAuxiliaryOrModal = new RegExp(
+  `^${activityFiniteFunctionalPredicate}$`,
+  'iu',
+);
 const outsideV01Qualifier =
   /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
 const policyCoordinatorTerm = String.raw`(?:as well as|even though|nevertheless|nonetheless|however|whereas|although|while|though|because|but|yet|and|or|plus)`;
@@ -261,8 +270,27 @@ function assertIssueInventory(issues) {
 
 function assertNoStaleRequirement(source, sourceName) {
   const lines = source.split(/\r?\n/u);
+  const contextualLines = [];
+  let activeOutsideScopeHeading;
   for (const [index, line] of lines.entries()) {
-    const matchedRule = findMatchedRule(line);
+    const outsideScopeHeading = findOutsideV01ScopeHeading(line);
+    if (outsideScopeHeading !== undefined) {
+      activeOutsideScopeHeading = outsideScopeHeading;
+      continue;
+    }
+    if (line.trim().length === 0) {
+      continue;
+    }
+    const isMarkdownListItem = /^\s*(?:[-*+]\s+|\d+[.)]\s+)/u.test(line);
+    if (/^\s*(?:>\s*)?#{1,6}\s+/u.test(line)) {
+      activeOutsideScopeHeading = undefined;
+    }
+    const contextualLine =
+      activeOutsideScopeHeading === undefined
+        ? stripMarkdownListMarker(line)
+        : `${activeOutsideScopeHeading}: ${stripMarkdownListMarker(line)}`;
+    contextualLines.push(contextualLine);
+    const matchedRule = findMatchedRule(contextualLine);
     if (matchedRule) {
       throw new Error(
         `V01_VIRTUAL_POLICY_STALE_REQUIREMENT:${sourceName}:${index + 1}:${
@@ -270,14 +298,30 @@ function assertNoStaleRequirement(source, sourceName) {
         }`,
       );
     }
+    if (!isMarkdownListItem) {
+      activeOutsideScopeHeading = undefined;
+    }
   }
-  const normalized = source.replace(/\s+/gu, ' ');
+  const normalized = contextualLines.join(' ').replace(/\s+/gu, ' ');
   const normalizedRule = findMatchedRule(normalized);
   if (normalizedRule) {
     throw new Error(
       `V01_VIRTUAL_POLICY_STALE_REQUIREMENT:${sourceName}:normalized:${normalizedRule.id}`,
     );
   }
+}
+
+function findOutsideV01ScopeHeading(source) {
+  const heading = source
+    .trim()
+    .replace(/^(?:>\s*)?(?:#{1,6}\s+)?/u, '')
+    .replace(/\s*[:：—–]\s*$/u, '')
+    .trim();
+  return isOutsideV01ScopeOnlyHeading(heading) ? heading : undefined;
+}
+
+function stripMarkdownListMarker(source) {
+  return source.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/u, '').trim();
 }
 
 function findMatchedRule(source) {
@@ -362,12 +406,18 @@ function inheritPhysicalDeviceActivity(left, right) {
   return activityMatch === null ? right : `${activityMatch[0]} ${right}`;
 }
 
-function hasIndependentRequirement(source) {
-  return independentPolicyRequirement.test(source);
+function hasIndependentPolicyStatement(source) {
+  return Array.from(
+    source.matchAll(new RegExp(independentPolicyPredicate.source, 'giu')),
+  ).some(predicate => !isInsideAttachedPolicyModifier(source, predicate.index));
 }
 
-function hasIndependentPolicyStatement(source) {
-  return hasIndependentRequirement(source) || independentAllowance.test(source);
+function isInsideAttachedPolicyModifier(source, predicateIndex) {
+  const prefix = source.slice(0, predicateIndex);
+  return (
+    /\b(?:that|which|who|whose)\b[^,;；:：—–]{0,80}$/iu.test(prefix) ||
+    /\bto\b[^,;；:：—–]{0,48}$/iu.test(prefix)
+  );
 }
 
 function hasLeadingOutsideV01Qualifier(source) {
@@ -381,21 +431,24 @@ function hasLeadingOutsideV01Qualifier(source) {
 }
 
 function isOutsideV01ScopeOnlyHeading(source) {
+  const normalizedSource = source
+    .trim()
+    .replace(/^(?:>\s*)?(?:#{1,6}\s+)?/u, '');
   if (
-    hasPhysicalDeviceActivity(source) ||
-    independentRequirement.test(source) ||
-    independentAllowance.test(source)
+    hasPhysicalDeviceActivity(normalizedSource) ||
+    independentRequirement.test(normalizedSource) ||
+    independentAllowance.test(normalizedSource)
   ) {
     return false;
   }
   const scopeNoun =
-    '(?:activities|items|milestone|phase|planning|release|roadmap|scope|tasks|verification|work)';
+    '(?:activities|items|milestone|phase|planning|release|requirements?|roadmap|scope|tasks|verification|work)';
   const outsideScope =
     '(?:outside (?:of )?(?:the )?v0\\.1(?: scope)?|post[- ]v0\\.1)';
   return new RegExp(
     `^\\s*(?:for\\s+(?:the\\s+)?)?(?:${outsideScope}(?:\\s+${scopeNoun})?|${scopeNoun}\\s+${outsideScope})\\s*$`,
     'iu',
-  ).test(source);
+  ).test(normalizedSource);
 }
 
 function hasExplicitV01Scope(source) {
@@ -559,9 +612,9 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
     if (!requirementToActivityBoundary.test(between)) {
       return true;
     }
-    return !hasIndependentActivityPredicate(
-      source.slice(activityEnd),
-      activity[0],
+    return !(
+      hasIndependentActivityPredicate(source.slice(activityEnd), activity[0]) &&
+      isPhysicalActivityExplicitlyOutsideV01(source, activity)
     );
   }
   const between = source.slice(activityEnd, requirement.index);
@@ -569,9 +622,39 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
   if (boundary === null) {
     return true;
   }
-  return !hasIndependentActivityPredicate(
-    between.slice(0, boundary.index),
-    activity[0],
+  if (hasCoordinatedSharedActivitySubject(between, boundary)) {
+    return true;
+  }
+  return !(
+    hasIndependentActivityPredicate(
+      between.slice(0, boundary.index),
+      activity[0],
+    ) && isPhysicalActivityExplicitlyOutsideV01(source, activity)
+  );
+}
+
+function hasCoordinatedSharedActivitySubject(source, boundary) {
+  const afterBoundary = source.slice(boundary.index + boundary[0].length);
+  return /\b(?:and|but|or|yet)\s+(?:(?:am|are|be|becomes?|is|remains?|was|were)\s*)?$/iu.test(
+    afterBoundary,
+  );
+}
+
+function isPhysicalActivityExplicitlyOutsideV01(source, activity) {
+  const prefix = source.slice(0, activity.index);
+  const qualifiers = Array.from(
+    prefix.matchAll(new RegExp(outsideV01Qualifier.source, 'giu')),
+  );
+  const qualifier = qualifiers.at(-1);
+  if (qualifier === undefined) {
+    return false;
+  }
+  const betweenQualifierAndActivity = prefix.slice(
+    qualifier.index + qualifier[0].length,
+  );
+  return (
+    betweenQualifierAndActivity.length <= 64 &&
+    !new RegExp(policyRequirementTerm, 'iu').test(betweenQualifierAndActivity)
   );
 }
 
@@ -596,34 +679,94 @@ function hasIndependentActivityPredicate(source, activitySource) {
     return false;
   }
 
-  // These markers introduce attached relative, infinitive, prepositional or
-  // subordinate modifiers. A verb inside such a modifier is not the physical
-  // activity subject's independent predicate.
+  predicate = consumeLeadingAttachedActivityModifier(predicate);
+  if (predicate.length === 0) {
+    return false;
+  }
+
+  // Prepositional and subordinate material without a resumed predicate remains
+  // attached to the physical activity rather than severing its requirement.
   if (
-    /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|that|though|to|under|unless|until|when(?:ever)?|whereas|which|while|who|whose|with|without|within)\b/iu.test(
+    /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu.test(
       predicate,
     )
   ) {
     return false;
   }
 
-  const finiteAuxiliaryOrModal =
-    /^(?:am|are|can(?:not)?|could|did|do|does|had|has|have|is|may|might|must|shall|should|was|were|will|would)\b/iu;
-  const finiteLexicalShape =
-    /^(?!(?:\p{L}*(?:ics|ness|ous|ss))\b)\p{L}{2,}(?:ed|s)\b/iu;
-  const irregularFinite =
-    /^(?:became|began|came|fell|got|grew|ran|rose|took|went)\b/iu;
-  const pluralActivityUsesBarePredicate =
-    /\btests\b/iu.test(activitySource) &&
-    /^(?!\p{L}*(?:ing|tion|ment|ness|ity|ics|ence|ance|al|ure)\b)\p{L}{2,}\b/iu.test(
-      predicate,
-    );
+  if (new RegExp(`^${activityFinitePredicate.source}`, 'iu').test(predicate)) {
+    return true;
+  }
   return (
-    finiteAuxiliaryOrModal.test(predicate) ||
-    finiteLexicalShape.test(predicate) ||
-    irregularFinite.test(predicate) ||
-    pluralActivityUsesBarePredicate
+    /\btests\b/iu.test(activitySource) &&
+    /^(?!\p{L}+(?:ing|tion|ment|ness|ity|ics|ence|ance|al|ure)\b)\p{L}{2,}\b/iu.test(
+      predicate,
+    )
   );
+}
+
+function consumeLeadingAttachedActivityModifier(source) {
+  const reducedRelative =
+    /^(?<participle>\p{L}+(?<!e)ed)\b(?<remainder>[\s\S]*)$/iu.exec(source);
+  if (reducedRelative !== null) {
+    const remainder = reducedRelative.groups?.remainder ?? '';
+    const resumedPredicate = activityFinitePredicate.exec(remainder);
+    if (resumedPredicate === null) {
+      return '';
+    }
+    const beforeResumedPredicate = remainder.slice(0, resumedPredicate.index);
+    return /\b(?:and|or|plus|as well as)\b/iu.test(beforeResumedPredicate)
+      ? ''
+      : remainder.slice(resumedPredicate.index).trim();
+  }
+  if (!/^(?:that|to|which|who|whose)\b/iu.test(source)) {
+    return source;
+  }
+  const infinitive = /^to\s+\p{L}+(?<remainder>[\s\S]*)$/iu.exec(source);
+  if (infinitive !== null) {
+    const remainder = infinitive.groups?.remainder ?? '';
+    const resumedPredicate = activityFinitePredicate.exec(remainder);
+    if (resumedPredicate === null) {
+      return '';
+    }
+    const beforeResumedPredicate = remainder.slice(0, resumedPredicate.index);
+    return /\b(?:and|or|plus|as well as)\b/iu.test(beforeResumedPredicate)
+      ? ''
+      : remainder.slice(resumedPredicate.index).trim();
+  }
+  const predicates = Array.from(
+    source.matchAll(new RegExp(activityFinitePredicate.source, 'giu')),
+  );
+  if (predicates.length < 2) {
+    return '';
+  }
+  const attachedPredicate = predicates[0];
+  let resumedPredicateIndex = 1;
+  const auxiliaryComplement = predicates[1];
+  if (activityAuxiliaryOrModal.test(attachedPredicate[0])) {
+    const betweenAuxiliaryAndComplement = source.slice(
+      attachedPredicate.index + attachedPredicate[0].length,
+      auxiliaryComplement.index,
+    );
+    if (
+      /^\s*(?:(?:not|never|\p{L}+ly)\s+){0,3}$/iu.test(
+        betweenAuxiliaryAndComplement,
+      )
+    ) {
+      resumedPredicateIndex += 1;
+    }
+  }
+  for (const resumedPredicate of predicates.slice(resumedPredicateIndex)) {
+    const betweenPredicates = source.slice(
+      attachedPredicate.index + attachedPredicate[0].length,
+      resumedPredicate.index,
+    );
+    if (/\b(?:and|or|plus|as well as)\b/iu.test(betweenPredicates)) {
+      return '';
+    }
+    return source.slice(resumedPredicate.index).trim();
+  }
+  return '';
 }
 
 function isIncidentalV01Reference(prefix) {
@@ -847,11 +990,21 @@ function assertRuleSelfTests() {
     'v0.1 requires, if available, physical-device testing.',
     'v0.1 requires, when possible, validation on physical devices.',
     'v0.1 requires, if available, physical-device testing that runs offline.',
+    'v0.1 requires, if available, physical-device testing that can run offline.',
     'v0.1 requires, if available, physical-device testing to run nightly.',
+    'v0.1 requires, if available, physical-device testing workflows.',
+    'v0.1 requires, if available, physical-device validation plans.',
+    'v0.1 requires, if available, physical-device testing results.',
+    'v0.1 requires, if available, physical-device testing procedures.',
     'Physical-device testing before release is required for v0.1.',
     'Physical-device testing that runs offline before release is required for v0.1.',
+    'Physical-device testing that can run offline before release is required for v0.1.',
     'Physical-device testing, which runs offline, before release is required for v0.1.',
     'Physical-device testing to begin before release is required for v0.1.',
+    'Physical-device testing performed before release is required.',
+    'Physical-device testing begins before release and is required for v0.1.',
+    'Post-v0.1 physical-device testing performed before release is required for v0.1.',
+    'Post-v0.1 physical-device testing begins before release and is required for v0.1.',
     'v0.1 requires physical-device testing before post-v0.1 documentation begins.',
     'v0.1 physical-device testing is required before post-v0.1 documentation begins.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
@@ -949,6 +1102,11 @@ function assertRuleSelfTests() {
     'v0.1 documentation is required before post-v0.1 physical-device tests proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device testing, which runs offline, proceeds.',
     'Post-v0.1 physical-device testing proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing that runs offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing that can run offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing to run nightly proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing performed offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing begins before release and v0.1 documentation is required.',
     'Post-v0.1 physical-device testing, if available, is required.',
     'A post-v0.1 requirement to test on physical devices.',
     'A v0.1 requirement not to test on physical devices.',
@@ -962,6 +1120,7 @@ function assertRuleSelfTests() {
     'Post-v0.1 work: physical-device testing is required.',
     'For the post-v0.1 release — physical-device testing is required.',
     'For work outside v0.1: physical-device testing is required.',
+    'Post-v0.1 requirements: physical-device testing is required.',
     'Use named minimum/current Simulator and Emulator profiles.',
     'Virtual results make no physical-hardware compatibility claim.',
   ];
@@ -969,6 +1128,42 @@ function assertRuleSelfTests() {
     if (findMatchedRule(example)) {
       throw new Error(`V01_VIRTUAL_POLICY_SELF_TEST_REJECTED_ALLOWED:${index}`);
     }
+  }
+
+  const multilineAllowedSources = [
+    'For post-v0.1 work:\n- Physical-device testing is required.',
+    'Post-v0.1 requirements:\n- Physical-device testing is required.',
+    '## For the post-v0.1 release:\n\n1. Documentation is required.\n2. Physical-device testing is required.',
+  ];
+  for (const [index, example] of multilineAllowedSources.entries()) {
+    try {
+      assertNoStaleRequirement(example, `multiline-allowed-${index}`);
+    } catch {
+      throw new Error(
+        `V01_VIRTUAL_POLICY_SELF_TEST_REJECTED_MULTILINE_ALLOWED:${index}`,
+      );
+    }
+  }
+
+  const multilineStaleSources = [
+    'For post-v0.1 work:\n- Physical-device testing is required for v0.1.',
+    'Post-v0.1 requirements:\n- Documentation is required.\n- Physical-device testing is required for v0.1.',
+    'For v0.1 work:\n- Physical-device testing is required.',
+  ];
+  for (const [index, example] of multilineStaleSources.entries()) {
+    try {
+      assertNoStaleRequirement(example, `multiline-stale-${index}`);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith('V01_VIRTUAL_POLICY_STALE_REQUIREMENT:')
+      ) {
+        continue;
+      }
+    }
+    throw new Error(
+      `V01_VIRTUAL_POLICY_SELF_TEST_MISSED_MULTILINE_STALE:${index}`,
+    );
   }
 }
 
