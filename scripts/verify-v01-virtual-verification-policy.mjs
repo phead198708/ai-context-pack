@@ -19,7 +19,9 @@ const policyPaths = [
 const requirementClauseGap = String.raw`[^\r\n!?。！？;；]{0,80}`;
 const physicalDeviceTerm = String.raw`\bphysical[- ]devices?\b`;
 const verificationActivityTerm = String.raw`\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b`;
-const requirementTerm = String.raw`\b(?:requires?|required|requirements?|must|shall|mandatory)\b`;
+const requirementTerm = String.raw`\b(?:requires?|required|must|shall|mandatory)\b`;
+const nounRequirementTerm = String.raw`\brequirements?\b`;
+const policyRequirementTerm = String.raw`(?:${requirementTerm}|${nounRequirementTerm})`;
 const allowancePredicateTerm = String.raw`\b(?:(?:is|are|was|were|be|remain(?:s|ed)?)\s+(?:allowed|permitted|optional)|may|can|allows?|permits?)\b`;
 const physicalDeviceActivity = String.raw`(?:${physicalDeviceTerm}${requirementClauseGap}${verificationActivityTerm}|${verificationActivityTerm}${requirementClauseGap}${physicalDeviceTerm})`;
 const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
@@ -28,29 +30,30 @@ const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
 );
 const negatedClauseGap = String.raw`(?:(?!\band\b)[^\r\n.!?。！？;；]){0,80}`;
 const modalNegatedRequirement = new RegExp(
-  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\b${negatedClauseGap}(?:${requirementTerm}|${physicalDeviceActivity})`,
+  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\b${negatedClauseGap}(?:${policyRequirementTerm}|${physicalDeviceActivity})`,
   'i',
 );
 const auxiliaryNegatedRequirement = new RegExp(
-  String.raw`\b(?:does?|do|is|are|was|were|has|have|had)\s+(?:not|never)\b${negatedClauseGap}${requirementTerm}`,
+  String.raw`\b(?:does?|do|is|are|was|were|has|have|had)\s+(?:not|never)\b${negatedClauseGap}${policyRequirementTerm}`,
   'i',
 );
 const noLongerRequirement = new RegExp(
-  String.raw`\b(?:is|are|was|were)\s+no longer\b${negatedClauseGap}${requirementTerm}`,
+  String.raw`\b(?:is|are|was|were)\s+no longer\b${negatedClauseGap}${policyRequirementTerm}`,
   'i',
 );
 const directNotRequirement = new RegExp(
-  String.raw`\bnot\b${negatedClauseGap}${requirementTerm}`,
+  String.raw`\bnot\b${negatedClauseGap}${policyRequirementTerm}`,
   'i',
 );
 const contractedNegatedRequirement = new RegExp(
-  String.raw`\b(?:(?:is|are|was|were|do|does|did|has|have|had|must|should|would|could)n['’]t|can['’]t|won['’]t|shan['’]t)\b${negatedClauseGap}(?:${requirementTerm}|${physicalDeviceActivity})`,
+  String.raw`\b(?:(?:is|are|was|were|do|does|did|has|have|had|must|should|would|could)n['’]t|can['’]t|won['’]t|shan['’]t)\b${negatedClauseGap}(?:${policyRequirementTerm}|${physicalDeviceActivity})`,
   'i',
 );
 const independentRequirement = new RegExp(requirementTerm, 'i');
+const independentPolicyRequirement = new RegExp(policyRequirementTerm, 'i');
 const independentAllowance = new RegExp(allowancePredicateTerm, 'i');
 const independentPolicyPredicate = new RegExp(
-  `(?:${requirementTerm}|${allowancePredicateTerm})`,
+  `(?:${policyRequirementTerm}|${allowancePredicateTerm})`,
   'i',
 );
 const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
@@ -121,6 +124,22 @@ const staleRequirementRules = [
     id: 'physical-device-requirement-interleaved',
     pattern: new RegExp(
       `(?:${verificationActivityTerm}${requirementClauseGap}${requirementTerm}${requirementClauseGap}${physicalDeviceTerm}|${physicalDeviceTerm}${requirementClauseGap}${requirementTerm}${requirementClauseGap}${verificationActivityTerm})`,
+      'i',
+    ),
+    allowsExplicitScopeOrNegation: true,
+  },
+  {
+    id: 'physical-device-noun-requirement-leading',
+    pattern: new RegExp(
+      `${nounRequirementTerm}\\s*(?::|：|—|–|-|\\b(?:for|of|covering)\\b|\\bto\\s+(?:perform|provide|collect)\\b)${requirementClauseGap}${physicalDeviceActivity}`,
+      'i',
+    ),
+    allowsExplicitScopeOrNegation: true,
+  },
+  {
+    id: 'physical-device-noun-requirement-trailing',
+    pattern: new RegExp(
+      `${physicalDeviceActivity}(?:\\s+${nounRequirementTerm}|\\s+\\b(?:is|are|was|were|be|becomes?|became|remains?|remained|constitutes?|constituted|forms?|formed|counts?|counted)\\b${requirementClauseGap}${nounRequirementTerm})`,
       'i',
     ),
     allowsExplicitScopeOrNegation: true,
@@ -256,12 +275,13 @@ function assertNoStaleRequirement(source, sourceName) {
 function findMatchedRule(source) {
   for (const clause of splitRequirementClauses(source)) {
     for (const rule of staleRequirementRules) {
-      if (!rule.pattern.test(clause)) {
+      const ruleMatch = rule.pattern.exec(clause);
+      if (ruleMatch === null) {
         continue;
       }
       if (
         rule.allowsExplicitScopeOrNegation &&
-        (isExplicitlyOutsideV01(clause) ||
+        (isExplicitlyOutsideV01(clause, ruleMatch) ||
           isExplicitlyNegatedRequirement(clause))
       ) {
         continue;
@@ -296,9 +316,10 @@ function splitCoordinatedRequirements(clause) {
       (hasPhysicalDeviceActivity(left) ||
         hasPhysicalDeviceActivity(boundRight));
     if (isHardBoundary || hasCoordinatedPolicies) {
+      const standaloneLeadingScope = isStandaloneOutsideV01Qualifier(left);
       const scopedRight =
-        !isHardBoundary &&
-        hasLeadingOutsideV01Qualifier(left) &&
+        ((!isHardBoundary && hasLeadingOutsideV01Qualifier(left)) ||
+          standaloneLeadingScope) &&
         !hasExplicitV01Scope(boundRight)
           ? `post-v0.1 ${boundRight}`
           : boundRight;
@@ -328,7 +349,7 @@ function inheritPhysicalDeviceActivity(left, right) {
 }
 
 function hasIndependentRequirement(source) {
-  return independentRequirement.test(source);
+  return independentPolicyRequirement.test(source);
 }
 
 function hasIndependentPolicyStatement(source) {
@@ -345,6 +366,12 @@ function hasLeadingOutsideV01Qualifier(source) {
   );
 }
 
+function isStandaloneOutsideV01Qualifier(source) {
+  return /^\s*(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\s*$/iu.test(
+    source,
+  );
+}
+
 function hasExplicitV01Scope(source) {
   if (outsideV01Qualifier.test(source)) {
     return true;
@@ -352,8 +379,9 @@ function hasExplicitV01Scope(source) {
   return hasAffirmativeV01Scope(source);
 }
 
-function hasAffirmativeV01Scope(source) {
-  const requirementMatch = independentRequirement.exec(source);
+function hasAffirmativeV01Scope(source, matchedRule) {
+  const requirementMatch =
+    findMatchedRequirement(matchedRule) ?? independentRequirement.exec(source);
   if (requirementMatch === null) {
     return false;
   }
@@ -377,8 +405,8 @@ function hasAffirmativeV01Scope(source) {
         continue;
       }
       if (
-        hasPhysicalDeviceActivity(beforeRequirement) ||
-        !isContextualV01Subject(beforeRequirement)
+        hasTargetV01VerbPrefix(prefix) ||
+        isV01BoundToFollowingRequirement(beforeRequirement)
       ) {
         return true;
       }
@@ -397,6 +425,64 @@ function hasAffirmativeV01Scope(source) {
     }
   }
   return false;
+}
+
+function isV01BoundToFollowingRequirement(beforeRequirement) {
+  const normalized = beforeRequirement.trim();
+  if (normalized.length === 0) {
+    return true;
+  }
+  if (isContextualV01Subject(beforeRequirement)) {
+    return false;
+  }
+  const activityMatch = physicalDeviceActivityMatcher.exec(beforeRequirement);
+  if (activityMatch === null) {
+    return isSimpleV01PredicatePrefix(normalized);
+  }
+  const beforeActivity = beforeRequirement.slice(0, activityMatch.index).trim();
+  const afterActivity = beforeRequirement
+    .slice(activityMatch.index + activityMatch[0].length)
+    .trim();
+  return (
+    isSimpleV01PredicatePrefix(beforeActivity) &&
+    /^(?:(?:is|are|was|were|be|becomes?|became|remains?|remained|has|have|had)\s*)?$/iu.test(
+      afterActivity,
+    )
+  );
+}
+
+function isSimpleV01PredicatePrefix(source) {
+  if (source.length === 0) {
+    return true;
+  }
+  if (source.length > 64 || /[,;；:：—–]/u.test(source)) {
+    return false;
+  }
+  if (
+    new RegExp(policyRequirementTerm, 'iu').test(source) ||
+    /\b(?:although|because|documents?|explains?|notes?|states?|that|though|whereas|which|while|why)\b/iu.test(
+      source,
+    )
+  ) {
+    return false;
+  }
+  return source.split(/\s+/u).length <= 5;
+}
+
+function findMatchedRequirement(matchedRule) {
+  if (matchedRule === undefined) {
+    return undefined;
+  }
+  const relativeMatch = new RegExp(policyRequirementTerm, 'iu').exec(
+    matchedRule[0],
+  );
+  if (relativeMatch === null) {
+    return undefined;
+  }
+  return {
+    0: relativeMatch[0],
+    index: matchedRule.index + relativeMatch.index,
+  };
 }
 
 function isIncidentalV01Reference(prefix) {
@@ -511,8 +597,11 @@ function isOutsideV01QualifierOccurrence(prefix) {
   return /\b(?:post[- ]|outside (?:of )?(?:the )?)$/iu.test(prefix);
 }
 
-function isExplicitlyOutsideV01(clause) {
-  return outsideV01Qualifier.test(clause) && !hasAffirmativeV01Scope(clause);
+function isExplicitlyOutsideV01(clause, matchedRule) {
+  return (
+    outsideV01Qualifier.test(clause) &&
+    !hasAffirmativeV01Scope(clause, matchedRule)
+  );
 }
 
 function isExplicitlyNegatedRequirement(clause) {
@@ -590,6 +679,9 @@ function assertRuleSelfTests() {
     'Physical-device testing is not required for post-v0.1 but is required for v0.1.',
     'Physical-device testing is allowed outside v0.1; is required for v0.1.',
     'Post-v0.1 notes apply; physical-device testing is required.',
+    'v0.1: physical-device testing is required.',
+    'Post-v0.1: physical-device testing is required for v0.1.',
+    'The post-v0.1 documentation requirement explains why v0.1 work requires physical-device testing.',
     'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required.',
     'Requires physical-device\nvalidation evidence.',
     'Physical-device validation is\nrequired.',
@@ -609,6 +701,8 @@ function assertRuleSelfTests() {
     'Post-v0.1 work may use physical-device validation evidence.',
     'Post-v0.1 work requires physical-device validation evidence.',
     'Outside v0.1, teams must test on physical devices.',
+    'Post-v0.1: physical-device testing is required.',
+    'Outside v0.1 — physical-device testing is required.',
     'Physical-device validation is not required for v0.1.',
     'Physical-device validation is not a requirement for v0.1.',
     'No requirements for physical-device validation apply to v0.1.',
@@ -636,6 +730,8 @@ function assertRuleSelfTests() {
     'Post-v0.1 work requires physical-device testing to observe failures during the stable v0.1 release.',
     'Because validation failed in v0.1, post-v0.1 work requires physical-device testing.',
     'Because validation failed in the stable v0.1 release, post-v0.1 work requires physical-device testing.',
+    'The v0.1 documentation requirement explains why post-v0.1 work requires physical-device testing.',
+    'The v0.1 documentation requirement states that physical-device testing is required for post-v0.1 work.',
     'Post-v0.1 work requires physical-device testing for migration from the v0.1 release.',
     'Compared with v0.1, post-v0.1 work requires physical-device testing.',
     'The v0.1 baseline is incomplete, so post-v0.1 work requires physical-device testing.',
