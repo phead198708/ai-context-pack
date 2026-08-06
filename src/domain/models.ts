@@ -75,7 +75,8 @@ export interface ContextItem {
   readonly mediaType: string;
   readonly originalDisplayName?: string;
   readonly originalSha256?: string;
-  readonly originalRelativePath: string;
+  /** Failed imports do not have an application-owned original yet. */
+  readonly originalRelativePath?: string;
   readonly artifactIds: readonly ArtifactId[];
   readonly state: ItemState;
   readonly riskFindingIds: readonly RiskFindingId[];

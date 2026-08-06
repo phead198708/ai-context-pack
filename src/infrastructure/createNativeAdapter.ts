@@ -1,6 +1,12 @@
 import type {
+  NativeArtifactStorageUsage,
   NativeAdapter,
+  NativeArtifactVerification,
   NativeHandoffResult,
+  NativeOwnedArtifact,
+  NativePublishedArtifact,
+  NativeQuarantinePurgeResult,
+  NativeQuarantinedArtifact,
 } from '../domain/nativeAdapter';
 import { newestManifestsFirst } from '../domain/importOrdering';
 import {
@@ -13,7 +19,10 @@ import {
   isRecoveryEvent,
 } from '../domain/shareImportResult';
 import { isCanonicalUuid } from '../domain/canonicalUuid';
-import { isOwnedArtifactPath } from './persistence/ownedPaths';
+import {
+  isOwnedArtifactPath,
+  isOwnedArtifactStorePath,
+} from './persistence/ownedPaths';
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
@@ -28,6 +37,22 @@ export interface NativeMethods {
     requiredHeadroomBytes: number,
   ): Promise<unknown>;
   acknowledgeInbox?(ingestionId: string): Promise<unknown>;
+  publishArtifact?(
+    sourceFileUri: string,
+    relativePath: string,
+    expectedByteCount: number | null,
+    expectedSha256: string | null,
+  ): Promise<unknown>;
+  verifyArtifact?(
+    relativePath: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<unknown>;
+  listOwnedArtifacts?(): Promise<unknown>;
+  removeOwnedArtifact?(relativePath: string): Promise<unknown>;
+  quarantineOwnedArtifact?(relativePath: string): Promise<unknown>;
+  purgeArtifactQuarantine?(olderThanEpochMs: number): Promise<unknown>;
+  getArtifactStorageUsage?(): Promise<unknown>;
   recognizeText(uri: string, script: 'latin' | 'chinese'): Promise<unknown>;
   probePdf(uri: string): Promise<unknown>;
 }
@@ -112,6 +137,88 @@ export const createNativeAdapter = (
           if ((await nativeModule.acknowledgeInbox(ingestionId)) !== true)
             throw new NativeBoundaryError('NATIVE_INBOX_ACK_FAILED');
         },
+        publishArtifact: async (
+          sourceFileUri,
+          relativePath,
+          expectedByteCount,
+          expectedSha256,
+        ) => {
+          if (!nativeModule.publishArtifact)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.publishArtifact(
+            sourceFileUri,
+            relativePath,
+            expectedByteCount ?? null,
+            expectedSha256 ?? null,
+          );
+          if (!isNativePublishedArtifact(value))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
+        verifyArtifact: async (
+          relativePath,
+          expectedByteCount,
+          expectedSha256,
+        ) => {
+          if (!nativeModule.verifyArtifact)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.verifyArtifact(
+            relativePath,
+            expectedByteCount,
+            expectedSha256,
+          );
+          if (!isNativeArtifactVerification(value))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
+        listOwnedArtifacts: async () => {
+          if (!nativeModule.listOwnedArtifacts)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.listOwnedArtifacts();
+          if (
+            !Array.isArray(value) ||
+            !value.every(isNativeOwnedArtifact) ||
+            new Set(value.map(item => item.relativePath)).size !== value.length
+          )
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
+        removeOwnedArtifact: async relativePath => {
+          if (!nativeModule.removeOwnedArtifact)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          if ((await nativeModule.removeOwnedArtifact(relativePath)) !== true)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_REMOVE_FAILED');
+        },
+        quarantineOwnedArtifact: async relativePath => {
+          if (!nativeModule.quarantineOwnedArtifact)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.quarantineOwnedArtifact(
+            relativePath,
+          );
+          if (!isNativeQuarantinedArtifact(value))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
+        purgeArtifactQuarantine: async olderThanEpochMs => {
+          if (!Number.isSafeInteger(olderThanEpochMs) || olderThanEpochMs < 0)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_INPUT_INVALID');
+          if (!nativeModule.purgeArtifactQuarantine)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.purgeArtifactQuarantine(
+            olderThanEpochMs,
+          );
+          if (!isNativeQuarantinePurgeResult(value))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
+        getArtifactStorageUsage: async () => {
+          if (!nativeModule.getArtifactStorageUsage)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.getArtifactStorageUsage();
+          if (!isNativeArtifactStorageUsage(value))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
         recognizeText: async (uri, script) => {
           const value = await nativeModule.recognizeText(uri, script);
           if (!isOCRResultV1(value))
@@ -137,6 +244,27 @@ export const createNativeAdapter = (
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         acknowledgeInbox: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        publishArtifact: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        verifyArtifact: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        listOwnedArtifacts: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        removeOwnedArtifact: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        quarantineOwnedArtifact: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        purgeArtifactQuarantine: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        getArtifactStorageUsage: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         recognizeText: async () => {
@@ -202,4 +330,104 @@ function isNativeHandoffResult(value: unknown): value is NativeHandoffResult {
     Array.isArray(result.artifacts) &&
     result.artifacts.every(isNativeHandoffArtifact)
   );
+}
+
+function isNativePublishedArtifact(
+  value: unknown,
+): value is NativePublishedArtifact {
+  if (typeof value !== 'object' || value === null) return false;
+  const artifact = value as Record<string, unknown>;
+  return (
+    Object.keys(artifact).length === 4 &&
+    typeof artifact.relativePath === 'string' &&
+    isOwnedArtifactPath(artifact.relativePath) &&
+    isNonNegativeInteger(artifact.byteCount) &&
+    typeof artifact.sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(artifact.sha256) &&
+    typeof artifact.created === 'boolean'
+  );
+}
+
+function isNativeArtifactVerification(
+  value: unknown,
+): value is NativeArtifactVerification {
+  if (typeof value !== 'object' || value === null) return false;
+  const verification = value as Record<string, unknown>;
+  const allowed = ['relativePath', 'status', 'byteCount', 'sha256'];
+  if (
+    !Object.keys(verification).every(key => allowed.includes(key)) ||
+    typeof verification.relativePath !== 'string' ||
+    !isOwnedArtifactPath(verification.relativePath) ||
+    !['verified', 'missing', 'mismatch'].includes(
+      typeof verification.status === 'string' ? verification.status : '',
+    )
+  )
+    return false;
+  if (verification.status === 'missing')
+    return (
+      verification.byteCount === undefined && verification.sha256 === undefined
+    );
+  return (
+    isNonNegativeInteger(verification.byteCount) &&
+    typeof verification.sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(verification.sha256)
+  );
+}
+
+function isNativeOwnedArtifact(value: unknown): value is NativeOwnedArtifact {
+  if (typeof value !== 'object' || value === null) return false;
+  const artifact = value as Record<string, unknown>;
+  return (
+    Object.keys(artifact).length === 2 &&
+    typeof artifact.relativePath === 'string' &&
+    isOwnedArtifactStorePath(artifact.relativePath) &&
+    isNonNegativeInteger(artifact.byteCount)
+  );
+}
+
+function isNativeArtifactStorageUsage(
+  value: unknown,
+): value is NativeArtifactStorageUsage {
+  if (typeof value !== 'object' || value === null) return false;
+  const usage = value as Record<string, unknown>;
+  return (
+    Object.keys(usage).length === 4 &&
+    isNonNegativeInteger(usage.artifactCount) &&
+    isNonNegativeInteger(usage.artifactBytes) &&
+    isNonNegativeInteger(usage.quarantineCount) &&
+    isNonNegativeInteger(usage.quarantineBytes)
+  );
+}
+
+function isNativeQuarantinedArtifact(
+  value: unknown,
+): value is NativeQuarantinedArtifact {
+  if (typeof value !== 'object' || value === null) return false;
+  const result = value as Record<string, unknown>;
+  if (result.quarantined === false) return Object.keys(result).length === 1;
+  return (
+    result.quarantined === true &&
+    Object.keys(result).length === 4 &&
+    typeof result.quarantineId === 'string' &&
+    isCanonicalUuid(result.quarantineId) &&
+    typeof result.anonymousId === 'string' &&
+    isCanonicalUuid(result.anonymousId) &&
+    isNonNegativeInteger(result.byteCount)
+  );
+}
+
+function isNativeQuarantinePurgeResult(
+  value: unknown,
+): value is NativeQuarantinePurgeResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const result = value as Record<string, unknown>;
+  return (
+    Object.keys(result).length === 2 &&
+    isNonNegativeInteger(result.purgedCount) &&
+    isNonNegativeInteger(result.purgedBytes)
+  );
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }

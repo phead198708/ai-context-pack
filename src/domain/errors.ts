@@ -76,6 +76,22 @@ export const DOMAIN_ERROR_CATALOG = {
     disposition: 'retryable',
     category: 'resource',
   },
+  STORAGE_DIVERGENCE_DETECTED: {
+    disposition: 'retryable',
+    category: 'integrity',
+  },
+  STORAGE_ARTIFACT_IMMUTABLE: {
+    disposition: 'terminal',
+    category: 'integrity',
+  },
+  PERSISTENCE_CONFLICT: {
+    disposition: 'retryable',
+    category: 'state',
+  },
+  DEVELOPMENT_RESET_FORBIDDEN: {
+    disposition: 'terminal',
+    category: 'state',
+  },
 } as const satisfies Readonly<
   Record<
     string,
@@ -84,6 +100,13 @@ export const DOMAIN_ERROR_CATALOG = {
 >;
 
 export type DomainErrorCode = keyof typeof DOMAIN_ERROR_CATALOG;
+
+export function isDomainErrorCode(value: unknown): value is DomainErrorCode {
+  return (
+    typeof value === 'string' &&
+    Object.keys(DOMAIN_ERROR_CATALOG).includes(value)
+  );
+}
 
 export interface DomainErrorDefinition {
   readonly code: DomainErrorCode;

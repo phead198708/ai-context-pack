@@ -11,9 +11,14 @@ import TestRenderer, {
 } from 'react-test-renderer';
 import App from '../App';
 import type { ImportManifestV1 } from '../src/domain/contracts';
+import type {
+  InboxManifestProcessor,
+  InboxPackSummary,
+} from '../src/domain/inboxEventWorkflow';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import { NativeBoundaryError } from '../src/infrastructure/createNativeAdapter';
 import { nativeAdapter } from '../src/infrastructure/nativeAdapter';
+import { persistenceInboxProcessor } from '../src/infrastructure/persistence/runtime';
 
 jest.mock('expo-status-bar', () => ({ StatusBar: () => null }));
 jest.mock('../src/infrastructure/nativeAdapter', () => ({
@@ -27,12 +32,30 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
     ackRecoveryEvent: jest.fn(),
     handoffInbox: jest.fn(),
     acknowledgeInbox: jest.fn(),
+    publishArtifact: jest.fn(),
+    verifyArtifact: jest.fn(),
+    listOwnedArtifacts: jest.fn(),
+    removeOwnedArtifact: jest.fn(),
+    quarantineOwnedArtifact: jest.fn(),
+    purgeArtifactQuarantine: jest.fn(),
+    getArtifactStorageUsage: jest.fn(),
     recognizeText: jest.fn(),
     probePdf: jest.fn(),
   },
 }));
+jest.mock('../src/infrastructure/persistence/runtime', () => ({
+  persistenceInboxProcessor: {
+    process: jest.fn().mockResolvedValue(undefined),
+    listPersistedPacks: jest.fn(),
+  },
+}));
 
 const mockNative = nativeAdapter as jest.Mocked<NativeAdapter>;
+const mockPersistenceInboxProcessor =
+  persistenceInboxProcessor as InboxManifestProcessor & {
+    process: jest.Mock;
+    listPersistedPacks: jest.Mock;
+  };
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const eventId = '223e4567-e89b-42d3-a456-426614174000';
 const manifest: ImportManifestV1 = {
@@ -42,6 +65,15 @@ const manifest: ImportManifestV1 = {
   source: 'android-share-intent',
   status: 'complete',
   items: [],
+};
+const persistedPack: InboxPackSummary = {
+  id: ingestionId,
+  schemaVersion: 1,
+  title: 'Context Pack',
+  createdAt: manifest.createdAt,
+  updatedAt: manifest.createdAt,
+  state: 'draft',
+  itemCount: 0,
 };
 
 let appStateListener: ((state: AppStateStatus) => void) | undefined;
@@ -94,6 +126,8 @@ async function press(target: ReactTestInstance): Promise<void> {
 describe('App interactions', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockPersistenceInboxProcessor.process.mockResolvedValue(undefined);
+    mockPersistenceInboxProcessor.listPersistedPacks.mockReset();
     appStateListener = undefined;
     inboxListener = undefined;
     appStateRemove = jest.fn();
@@ -118,6 +152,7 @@ describe('App interactions', () => {
     mockNative.ackEphemeralShareEvent.mockResolvedValue(undefined);
     mockNative.getPendingRecoveryEvent.mockResolvedValue(null);
     mockNative.ackRecoveryEvent.mockResolvedValue(undefined);
+    mockNative.acknowledgeInbox.mockResolvedValue(undefined);
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -232,5 +267,48 @@ describe('App interactions', () => {
     expect(renderedText(renderer)).toContain('Import detail');
     expect(renderedText(renderer)).toContain(`ID ${ingestionId}`);
     act(() => renderer.unmount());
+  });
+
+  test('keeps an ACKed import visible from persisted Packs across refresh and restart', async () => {
+    mockNative.scanInbox
+      .mockResolvedValueOnce([manifest])
+      .mockResolvedValue([]);
+    mockNative.getPendingShareEvents
+      .mockResolvedValueOnce([
+        { schemaVersion: 1, id: ingestionId, result: 'complete' },
+      ])
+      .mockResolvedValue([]);
+    mockPersistenceInboxProcessor.process.mockImplementation(
+      async (manifests: readonly ImportManifestV1[]) => {
+        for (const value of manifests)
+          await mockNative.acknowledgeInbox(value.ingestionId);
+      },
+    );
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
+      persistedPack,
+    ]);
+
+    const firstRenderer = await renderApp();
+    expect(mockNative.acknowledgeInbox).toHaveBeenCalledWith(ingestionId);
+    expect(mockNative.ackPendingShareEvent).toHaveBeenCalledWith(ingestionId);
+    expect(
+      mockPersistenceInboxProcessor.listPersistedPacks,
+    ).toHaveBeenCalledTimes(1);
+    expect(renderedText(firstRenderer)).toContain(`ID ${ingestionId}`);
+
+    await act(async () => {
+      appStateListener?.('active');
+      await flushWorkflow();
+    });
+    expect(mockNative.scanInbox).toHaveBeenLastCalledWith();
+    await press(control(firstRenderer, 'tab', 'inbox'));
+    expect(renderedText(firstRenderer)).toContain('0 item · draft');
+    expect(renderedText(firstRenderer)).not.toContain('Inbox is empty');
+    act(() => firstRenderer.unmount());
+
+    const restartedRenderer = await renderApp();
+    expect(renderedText(restartedRenderer)).toContain('0 item · draft');
+    expect(renderedText(restartedRenderer)).not.toContain('Inbox is empty');
+    act(() => restartedRenderer.unmount());
   });
 });

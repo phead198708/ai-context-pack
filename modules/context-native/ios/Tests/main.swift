@@ -356,6 +356,28 @@ final class InboxRecoverySupportTests: XCTestCase {
     XCTAssertEqual(manifests.first?["ingestionId"] as? String, id)
   }
 
+  func testPersistenceErrorCodesRemainValidFailedManifestValues() throws {
+    let id = UUID().uuidString.lowercased()
+    for errorCode in [
+      "STORAGE_DIVERGENCE_DETECTED",
+      "STORAGE_ARTIFACT_IMMUTABLE",
+      "PERSISTENCE_CONFLICT",
+      "DEVELOPMENT_RESET_FORBIDDEN"
+    ] {
+      try writeFailedManifest(
+        directoryId: id,
+        manifestId: id,
+        errorCode: errorCode
+      )
+      let manifest = try InboxManifestValidator.readPublished(
+        inbox: root.appendingPathComponent("Inbox"),
+        ingestionId: id
+      )
+      let items = try XCTUnwrap(manifest["items"] as? [[String: Any]])
+      XCTAssertEqual(items.first?["errorCode"] as? String, errorCode)
+    }
+  }
+
   func testManifestIdentityMismatchIsRejected() throws {
     try writeManifest(
       directoryId: UUID().uuidString.lowercased(),
@@ -472,6 +494,24 @@ final class InboxRecoverySupportTests: XCTestCase {
       XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
       XCTAssertEqual((error as? InboxManifestValidationError)?.stableCode, "SCHEMA_INVALID")
     }
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(
+        at: root.appendingPathComponent("Inbox"),
+        includingPropertiesForKeys: nil
+      ).count,
+      0
+    )
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(
+        at: root.appendingPathComponent("InboxQuarantine"),
+        includingPropertiesForKeys: nil
+      ).count,
+      1
+    )
+    XCTAssertEqual(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")).count,
+      0
+    )
   }
 
   func testCalendarInvalidTimestampsAreSchemaInvalid() throws {
@@ -616,6 +656,32 @@ final class InboxRecoverySupportTests: XCTestCase {
     ]
     let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     try data.write(to: directory.appendingPathComponent("manifest.json"))
+  }
+
+  private func writeFailedManifest(
+    directoryId: String,
+    manifestId: String,
+    errorCode: String
+  ) throws {
+    let directory = root.appendingPathComponent("Inbox/\(directoryId)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let manifest: [String: Any] = [
+      "schemaVersion": 1,
+      "ingestionId": manifestId,
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "source": "ios-share-extension",
+      "status": "failed",
+      "items": [[
+        "id": manifestItemId,
+        "order": 0,
+        "mediaType": "application/octet-stream",
+        "byteCount": 0,
+        "status": "failed",
+        "errorCode": errorCode,
+      ]],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+    try data.write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
   }
 
   private func rewriteManifestSchemaVersion(

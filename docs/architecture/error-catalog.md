@@ -28,5 +28,9 @@ Category identifies the protection boundary. It does not contain user content.
 | `RESOURCE_LOW_DISK`                  | user-action-required | resource  |
 | `RESOURCE_MEMORY_PRESSURE`           | retryable            | resource  |
 | `STORAGE_WRITE_FAILED`               | retryable            | resource  |
+| `STORAGE_DIVERGENCE_DETECTED`        | retryable            | integrity |
+| `STORAGE_ARTIFACT_IMMUTABLE`         | terminal             | integrity |
+| `PERSISTENCE_CONFLICT`               | retryable            | state     |
+| `DEVELOPMENT_RESET_FORBIDDEN`        | terminal             | state     |
 
 New codes require tests, documentation, and a compatibility review. Renaming or reclassifying an existing code is a breaking contract change. Errors and diagnostics may include irreversible IDs, enum values, counts, byte sizes, durations, and processor versions; they must not include imported text, OCR output, filenames, full URLs, file bytes, or detector match values.

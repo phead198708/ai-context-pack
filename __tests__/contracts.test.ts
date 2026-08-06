@@ -15,6 +15,7 @@ import {
   runLatestRequest,
   ShareFailureLatch,
 } from '../src/domain/latestRequestGate';
+import { DOMAIN_ERROR_CATALOG } from '../src/domain/errors';
 describe('versioned native contracts', () => {
   const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
   const itemId = '223e4567-e89b-42d3-a456-426614174000';
@@ -42,6 +43,30 @@ describe('versioned native contracts', () => {
   test('rejects breaking manifest versions', () => {
     expect(isImportManifestV1({ schemaVersion: 2, items: [] })).toBe(false);
   });
+  test.each(Object.keys(DOMAIN_ERROR_CATALOG))(
+    'accepts catalogued failed-item error code %s',
+    errorCode => {
+      expect(
+        isImportManifestV1({
+          schemaVersion: 1,
+          ingestionId,
+          createdAt: '2026-01-01T00:00:00Z',
+          source: 'ios-share-extension',
+          status: 'failed',
+          items: [
+            {
+              id: itemId,
+              order: 0,
+              mediaType: 'application/octet-stream',
+              byteCount: 0,
+              status: 'failed',
+              errorCode,
+            },
+          ],
+        }),
+      ).toBe(true);
+    },
+  );
   test.each([
     'content://provider/item',
     '/private/container/item.bin',

@@ -4,6 +4,8 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import android.util.JsonReader
 import android.util.JsonToken
 import com.google.mlkit.vision.common.InputImage
@@ -89,6 +91,106 @@ class ContextNativeModule : Module() {
       catch (error: InboxArtifactHandoffException) { throw NativeException(error.stableCode) }
     }
 
+    AsyncFunction("publishArtifact") {
+      sourceFileUri: String,
+      relativePath: String,
+      expectedByteCount: Double?,
+      expectedSha256: String? ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        val unresolvedSource = File(controlledFileUri(sourceFileUri).path
+          ?: throw NativeException("INVALID_LOCAL_FILE_URI"))
+        val sourceMode = try { Os.lstat(unresolvedSource.path).st_mode }
+        catch (_: Exception) { throw NativeException("INVALID_LOCAL_FILE_URI") }
+        if (OsConstants.S_ISLNK(sourceMode)) {
+          throw NativeException("INVALID_LOCAL_FILE_URI")
+        }
+        val source = unresolvedSource.canonicalFile
+        val allowedRoots = listOf(context.filesDir, context.cacheDir).map(File::getCanonicalFile)
+        if (allowedRoots.none { root ->
+            source.path.startsWith(root.path + File.separator)
+          }) throw NativeException("INVALID_LOCAL_FILE_URI")
+        OwnedArtifactStore.publish(
+          context.filesDir,
+          source,
+          relativePath,
+          expectedByteCount?.let(::safeIntegerLong),
+          expectedSha256,
+        )
+      } catch (error: OwnedArtifactStoreException) {
+        throw NativeException(error.stableCode)
+      } catch (error: NativeException) {
+        throw error
+      } catch (_: Exception) {
+        throw NativeException("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("verifyArtifact") {
+      relativePath: String,
+      expectedByteCount: Double,
+      expectedSha256: String ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        OwnedArtifactStore.verify(
+          context.filesDir,
+          relativePath,
+          safeIntegerLong(expectedByteCount),
+          expectedSha256,
+        )
+      } catch (error: OwnedArtifactStoreException) {
+        throw NativeException(error.stableCode)
+      } catch (error: NativeException) {
+        throw error
+      } catch (_: Exception) {
+        throw NativeException("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("listOwnedArtifacts") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { OwnedArtifactStore.list(context.filesDir) }
+      catch (error: OwnedArtifactStoreException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("removeOwnedArtifact") { relativePath: String ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { OwnedArtifactStore.remove(context.filesDir, relativePath) }
+      catch (error: OwnedArtifactStoreException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("quarantineOwnedArtifact") { relativePath: String ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { OwnedArtifactStore.quarantine(context.filesDir, relativePath) }
+      catch (error: OwnedArtifactStoreException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("purgeArtifactQuarantine") { olderThanEpochMs: Double ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        OwnedArtifactStore.purgeQuarantine(
+          context.filesDir,
+          safeIntegerLong(olderThanEpochMs),
+        )
+      } catch (error: OwnedArtifactStoreException) {
+        throw NativeException(error.stableCode)
+      } catch (error: NativeException) {
+        throw error
+      } catch (_: Exception) {
+        throw NativeException("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("getArtifactStorageUsage") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { OwnedArtifactStore.usage(context.filesDir) }
+      catch (error: OwnedArtifactStoreException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("STORAGE_WRITE_FAILED") }
+    }
+
     AsyncFunction("recognizeText") { fileUri: String, script: String, promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
       val uri = controlledFileUri(fileUri)
@@ -113,6 +215,13 @@ class ContextNativeModule : Module() {
     val uri = Uri.parse(value)
     if (uri.scheme != "file") throw NativeException("INVALID_LOCAL_FILE_URI")
     return uri
+  }
+
+  private fun safeIntegerLong(value: Double): Long {
+    if (!value.isFinite() || value < 0 || value > 9_007_199_254_740_991.0 || value % 1.0 != 0.0) {
+      throw NativeException("SCHEMA_INVALID")
+    }
+    return value.toLong()
   }
 
   private fun ocrResult(result: Text, sourceWidth: Int, sourceHeight: Int, script: String, started: Long): Map<String, Any> {
@@ -166,6 +275,10 @@ internal object InboxManifestScanner {
     "RESOURCE_LOW_DISK",
     "RESOURCE_MEMORY_PRESSURE",
     "STORAGE_WRITE_FAILED",
+    "STORAGE_DIVERGENCE_DETECTED",
+    "STORAGE_ARTIFACT_IMMUTABLE",
+    "PERSISTENCE_CONFLICT",
+    "DEVELOPMENT_RESET_FORBIDDEN",
   )
 
   fun scan(inbox: File): List<Map<String, Any?>> {
@@ -180,24 +293,44 @@ internal object InboxManifestScanner {
     if (recovery) throw NativeException("INBOX_RECOVERY_REQUIRED")
     if (!inbox.exists()) return emptyList()
     if (!inbox.isDirectory || !inbox.canRead()) throw NativeException("INBOX_SCAN_FAILED")
-    val files = try { manifestFiles(inbox) }
+    val rootPath = try { inbox.canonicalPath + File.separator }
     catch (_: Exception) { throw NativeException("INBOX_SCAN_FAILED") }
-    return files.map { file ->
+    val ids = mutableSetOf<String>()
+    val ingestions = inbox.listFiles()?.sortedBy { it.name }
+      ?: throw NativeException("INBOX_SCAN_FAILED")
+    val manifests = mutableListOf<Map<String, Any?>>()
+    for (ingestion in ingestions) {
+      val file = try {
+        check(!isSymbolicLink(ingestion))
+        check(ingestion.isDirectory && ingestion.parentFile?.canonicalFile == inbox.canonicalFile)
+        check(ingestion.canonicalPath.startsWith(rootPath))
+        val id = ingestion.name
+        check(ingestionIdPattern.matches(id) && UUID.fromString(id).toString() == id && ids.add(id))
+        val children = ingestion.listFiles() ?: error("INBOX_SCAN_FAILED")
+        check(children.none { it.isDirectory || isSymbolicLink(it) })
+        File(ingestion, "manifest.json").takeIf { it.isFile }
+      } catch (_: Exception) {
+        quarantineMalformed(inbox, ingestion)
+        throw NativeException("SCHEMA_INVALID")
+      } ?: continue
       try {
         val rawManifest = file.readText()
         val manifest = strictJsonObject(rawManifest)
         validateOwnedManifest(manifest, rawManifest, requireNotNull(file.parentFile))
-        jsonObjectToMap(manifest)
+        manifests += jsonObjectToMap(manifest)
       } catch (error: InboxManifestValidationException) {
+        quarantineMalformed(inbox, ingestion)
         throw NativeException(error.stableCode)
       } catch (_: IOException) {
         throw NativeException("INBOX_SCAN_FAILED")
       } catch (_: SecurityException) {
         throw NativeException("INBOX_SCAN_FAILED")
       } catch (_: Exception) {
+        quarantineMalformed(inbox, ingestion)
         throw NativeException("SCHEMA_INVALID")
       }
     }
+    return manifests
   }
 
   fun readPublished(inbox: File, ingestionId: String): Map<String, Any?> {
@@ -233,18 +366,31 @@ internal object InboxManifestScanner {
     }
   }
 
-  private fun manifestFiles(root: File): List<File> {
-    val rootPath = root.canonicalPath + File.separator
-    val ids = mutableSetOf<String>()
-    return (root.listFiles() ?: error("INBOX_SCAN_FAILED")).mapNotNull { ingestion ->
-      check(ingestion.isDirectory && ingestion.parentFile?.canonicalFile == root.canonicalFile)
-      check(ingestion.canonicalPath.startsWith(rootPath))
-      val id = ingestion.name
-      check(ingestionIdPattern.matches(id) && UUID.fromString(id).toString() == id && ids.add(id))
-      val children = ingestion.listFiles() ?: error("INBOX_SCAN_FAILED")
-      check(children.none { it.isDirectory })
-      File(ingestion, "manifest.json").takeIf { it.isFile }
+  private fun quarantineMalformed(inbox: File, ingestion: File) {
+    try {
+      val container = requireNotNull(inbox.parentFile)
+      val quarantine = File(container, "InboxQuarantine")
+      if (quarantine.exists()) {
+        check(quarantine.isDirectory && !isSymbolicLink(quarantine))
+      } else {
+        check(quarantine.mkdir())
+        synchronizeDirectory(container)
+      }
+      val target = File(quarantine, "${UUID.randomUUID()}.quarantine")
+      check(ingestion.renameTo(target))
+      synchronizeDirectory(inbox)
+      synchronizeDirectory(quarantine)
+    } catch (_: Exception) {
+      throw NativeException("STORAGE_WRITE_FAILED")
     }
+  }
+
+  private fun isSymbolicLink(file: File): Boolean =
+    OsConstants.S_ISLNK(Os.lstat(file.path).st_mode)
+
+  private fun synchronizeDirectory(directory: File) {
+    val descriptor = Os.open(directory.path, OsConstants.O_RDONLY, 0)
+    try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
   }
 
   private fun validateOwnedManifest(manifest: JSONObject, rawManifest: String, ingestion: File) {

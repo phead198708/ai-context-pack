@@ -8,6 +8,13 @@ import type {
   PipelineRun,
 } from '../src/domain/models';
 
+const { readFileSync } = jest.requireActual<{
+  readonly readFileSync: (path: string, encoding: 'utf8') => string;
+}>('fs');
+const { join } = jest.requireActual<{
+  readonly join: (...parts: readonly string[]) => string;
+}>('path');
+
 type Equal<Left, Right> = (<Value>() => Value extends Left ? 1 : 2) extends <
   Value,
 >() => Value extends Right ? 1 : 2
@@ -35,4 +42,63 @@ describe('persisted domain error boundaries', () => {
       ),
     ).toBe(true);
   });
+
+  test('keeps Swift, Kotlin, and documented manifest error mirrors exact', () => {
+    const expected = Object.keys(DOMAIN_ERROR_CATALOG).sort();
+    const swift = readFileSync(
+      join(
+        process.cwd(),
+        'modules/context-native/ios/InboxManifestValidator.swift',
+      ),
+      'utf8',
+    );
+    const kotlin = readFileSync(
+      join(
+        process.cwd(),
+        'modules/context-native/android/src/main/java/com/aicontextpack/nativebridge/ContextNativeModule.kt',
+      ),
+      'utf8',
+    );
+    const documentation = readFileSync(
+      join(process.cwd(), 'docs/architecture/error-catalog.md'),
+      'utf8',
+    );
+
+    expect(
+      quotedCodesInBlock(
+        swift,
+        'private static let stableErrorCodes: Set<String> = [',
+        '\n  ]',
+      ),
+    ).toEqual(expected);
+    expect(
+      quotedCodesInBlock(
+        kotlin,
+        'private val stableErrorCodes = setOf(',
+        '\n  )',
+      ),
+    ).toEqual(expected);
+    expect(
+      [...documentation.matchAll(/^\| `([A-Z][A-Z0-9_]*)`\s+\|/gm)]
+        .map(match => match[1]!)
+        .sort(),
+    ).toEqual(expected);
+  });
 });
+
+function quotedCodesInBlock(
+  source: string,
+  startMarker: string,
+  endMarker: string,
+): string[] {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  if (start < 0 || end < 0) throw new Error('ERROR_CATALOG_MIRROR_MISSING');
+  return [
+    ...source
+      .slice(start + startMarker.length, end)
+      .matchAll(/"([A-Z][A-Z0-9_]*)"/g),
+  ]
+    .map(match => match[1]!)
+    .sort();
+}

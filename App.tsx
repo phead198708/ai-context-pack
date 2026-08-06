@@ -16,6 +16,7 @@ import {
   type InboxWorkflowState,
 } from './src/domain/inboxEventWorkflow';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
+import { persistenceInboxProcessor } from './src/infrastructure/persistence/runtime';
 import { colors, spacing, typography } from './src/ui/tokens';
 
 type Screen = 'inbox' | 'detail' | 'diagnostics';
@@ -30,10 +31,14 @@ function App(): React.JSX.Element {
   }, []);
   const workflow = useRef<InboxEventWorkflow | null>(null);
   if (!workflow.current)
-    workflow.current = new InboxEventWorkflow(nativeAdapter, {
-      setState: setWorkflowState,
-      showNewestImport: () => setScreen('detail'),
-    });
+    workflow.current = new InboxEventWorkflow(
+      nativeAdapter,
+      {
+        setState: setWorkflowState,
+        showNewestImport: () => setScreen('detail'),
+      },
+      persistenceInboxProcessor,
+    );
   useEffect(() => {
     workflow.current?.bootstrap();
     const subscription = AppState.addEventListener('change', next => {
@@ -114,6 +119,18 @@ function Inbox({
         detail="Share a synthetic image to this app, then open it again."
       />
     );
+  if (state.packs)
+    return (
+      <View>
+        {state.packs.map(pack => (
+          <StateCard
+            key={pack.id}
+            title={pack.title}
+            detail={`${pack.itemCount} item · ${pack.state}`}
+          />
+        ))}
+      </View>
+    );
   return (
     <View>
       {state.manifests.map(manifest => (
@@ -128,12 +145,15 @@ function Inbox({
 }
 
 function ImportDetail({ state }: { state: LoadState }): React.JSX.Element {
+  const pack = state.kind === 'ready' ? state.packs?.[0] : undefined;
   const manifest = state.kind === 'ready' ? state.manifests[0] : undefined;
   return (
     <StateCard
       title="Import detail"
       detail={
-        manifest
+        pack
+          ? `ID ${pack.id}\nSchema ${pack.schemaVersion}\nItems ${pack.itemCount}`
+          : manifest
           ? `ID ${manifest.ingestionId}\nSchema ${manifest.schemaVersion}\nItems ${manifest.items.length}`
           : 'No import selected.'
       }

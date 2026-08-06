@@ -1,6 +1,7 @@
 import type { ImportManifestV1 } from '../src/domain/contracts';
 import {
   InboxEventWorkflow,
+  type InboxManifestProcessor,
   type InboxWorkflowState,
 } from '../src/domain/inboxEventWorkflow';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
@@ -24,7 +25,10 @@ const event = (
   ...extra,
 });
 
-function harness(overrides: Partial<NativeAdapter> = {}) {
+function harness(
+  overrides: Partial<NativeAdapter> = {},
+  processor?: InboxManifestProcessor,
+) {
   const native: NativeAdapter = {
     available: true,
     scanInbox: jest.fn().mockResolvedValue([manifest]),
@@ -35,6 +39,13 @@ function harness(overrides: Partial<NativeAdapter> = {}) {
     ackRecoveryEvent: jest.fn().mockResolvedValue(undefined),
     handoffInbox: jest.fn().mockResolvedValue([]),
     acknowledgeInbox: jest.fn().mockResolvedValue(undefined),
+    publishArtifact: jest.fn(),
+    verifyArtifact: jest.fn(),
+    listOwnedArtifacts: jest.fn(),
+    removeOwnedArtifact: jest.fn(),
+    quarantineOwnedArtifact: jest.fn(),
+    purgeArtifactQuarantine: jest.fn(),
+    getArtifactStorageUsage: jest.fn(),
     recognizeText: jest.fn(),
     probePdf: jest.fn(),
     ...overrides,
@@ -48,7 +59,7 @@ function harness(overrides: Partial<NativeAdapter> = {}) {
     native,
     states,
     view,
-    workflow: new InboxEventWorkflow(native, view),
+    workflow: new InboxEventWorkflow(native, view, processor),
   };
 }
 
@@ -414,6 +425,82 @@ describe('InboxEventWorkflow integration', () => {
     });
 
     await h.workflow.retry();
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('durable persistence completes before a successful share event is ACKed', async () => {
+    const order: string[] = [];
+    const pending = event(0, 'complete');
+    const h = harness(
+      {
+        getPendingShareEvents: jest.fn().mockResolvedValue([pending]),
+        ackPendingShareEvent: jest.fn().mockImplementation(async () => {
+          order.push('event-ack');
+        }),
+      },
+      {
+        process: jest.fn().mockImplementation(async () => {
+          order.push('persistence');
+        }),
+      },
+    );
+
+    await h.workflow.bootstrap();
+
+    expect(order).toEqual(['persistence', 'event-ack']);
+  });
+
+  test('reuses only the lifecycle scan matching a live Android event after Inbox ACK', async () => {
+    const pending = event(0, 'complete');
+    const matchingManifest = {
+      ...manifest,
+      ingestionId: pending.id,
+    } as ImportManifestV1;
+    const process = jest.fn().mockResolvedValue(undefined);
+    const scanInbox = jest
+      .fn()
+      .mockResolvedValueOnce([matchingManifest])
+      .mockResolvedValueOnce([]);
+    const h = harness({ scanInbox }, { process });
+
+    await h.workflow.appBecameActive();
+    await h.workflow.receive(pending);
+
+    expect(scanInbox).toHaveBeenCalledTimes(1);
+    expect(process).toHaveBeenCalledTimes(1);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'ready',
+      manifests: [matchingManifest],
+    });
+  });
+
+  test('migration failure remains retryable and prevents event ACK until persistence succeeds', async () => {
+    const pending = event(0, 'complete');
+    const process = jest
+      .fn()
+      .mockRejectedValueOnce(
+        new NativeBoundaryError('SCHEMA_VERSION_UNSUPPORTED'),
+      )
+      .mockResolvedValue(undefined);
+    const ack = jest.fn().mockResolvedValue(undefined);
+    const h = harness(
+      {
+        getPendingShareEvents: jest.fn().mockResolvedValue([pending]),
+        ackPendingShareEvent: ack,
+      },
+      { process },
+    );
+
+    await h.workflow.bootstrap();
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'SCHEMA_VERSION_UNSUPPORTED',
+    });
+    expect(ack).not.toHaveBeenCalled();
+
+    await h.workflow.retry();
+    expect(process).toHaveBeenCalledTimes(2);
+    expect(ack).toHaveBeenCalledTimes(1);
     expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
   });
 

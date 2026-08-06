@@ -35,7 +35,7 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
-  fun rejectsMalformedManifestInsteadOfDroppingIt() {
+  fun quarantinesMalformedManifestAndRetryCanContinue() {
     File(inbox, "$validIngestionId/manifest.json").apply {
       parentFile?.mkdirs()
       writeText("{truncated")
@@ -44,6 +44,9 @@ class InboxManifestScannerInstrumentedTest {
     val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
 
     assertEquals("SCHEMA_INVALID", error.code)
+    assertEquals(emptyList<File>(), inbox.listFiles()?.toList())
+    assertEquals(1, File(inbox.parentFile, "InboxQuarantine").listFiles()?.size)
+    assertEquals(emptyList<Map<String, Any?>>(), InboxManifestScanner.scan(inbox))
   }
 
   @Test
@@ -149,16 +152,16 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsInvalidCurrentVersionTimestampAsSchemaInvalid() {
-    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
-      parentFile?.mkdirs()
-      writeBytes(byteArrayOf(1, 2, 3))
-    }
     listOf(
       "not-a-timestamp",
       "2026-02-29T00:00:00Z",
       "2026-01-01T24:00:00Z",
       "2026-04-31T00:00:00Z",
     ).forEach { timestamp ->
+      val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+        parentFile?.mkdirs()
+        writeBytes(byteArrayOf(1, 2, 3))
+      }
       writeManifest(item, createdAt = timestamp)
 
       val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
@@ -205,6 +208,23 @@ class InboxManifestScannerInstrumentedTest {
   }
 
   @Test
+  fun persistenceErrorCodesRemainValidFailedManifestValues() {
+    for (errorCode in listOf(
+      "STORAGE_DIVERGENCE_DETECTED",
+      "STORAGE_ARTIFACT_IMMUTABLE",
+      "PERSISTENCE_CONFLICT",
+      "DEVELOPMENT_RESET_FORBIDDEN",
+    )) {
+      writeFailedManifest(errorCode)
+      val manifests = InboxManifestScanner.scan(inbox)
+      assertEquals(errorCode, (manifests.single()["items"] as List<*>).single().let {
+        (it as Map<*, *>)["errorCode"]
+      })
+      File(inbox, validIngestionId).deleteRecursively()
+    }
+  }
+
+  @Test
   fun rejectsManifestThatReferencesAnotherIngestion() {
     val other = File(inbox, "$otherIngestionId/$validItemId.bin").apply {
       parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
@@ -237,9 +257,6 @@ class InboxManifestScannerInstrumentedTest {
 
   @Test
   fun rejectsEveryNonCanonicalNumericSchemaVersionWithStableCode() {
-    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
-      parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
-    }
     for (rawVersion in listOf(
       "-1",
       "1.5",
@@ -249,6 +266,9 @@ class InboxManifestScannerInstrumentedTest {
       "1.0000000000000001",
       "1.000000000000000000000000000000000000001",
     )) {
+      val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+        parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3))
+      }
       writeManifest(item)
       rewriteManifestSchemaVersion(rawVersion)
 
@@ -628,6 +648,25 @@ class InboxManifestScannerInstrumentedTest {
         "items",
         JSONArray().put(copiedItem),
       )
+    File(directory, "manifest.json").writeText(payload.toString())
+  }
+
+  private fun writeFailedManifest(errorCode: String) {
+    val directory = File(inbox, validIngestionId).apply { mkdirs() }
+    val failedItem = JSONObject()
+      .put("id", validItemId)
+      .put("order", 0)
+      .put("mediaType", "application/octet-stream")
+      .put("byteCount", 0)
+      .put("status", "failed")
+      .put("errorCode", errorCode)
+    val payload = JSONObject()
+      .put("schemaVersion", 1)
+      .put("ingestionId", validIngestionId)
+      .put("createdAt", "2026-01-01T00:00:00Z")
+      .put("source", "android-share-intent")
+      .put("status", "failed")
+      .put("items", JSONArray().put(failedItem))
     File(directory, "manifest.json").writeText(payload.toString())
   }
 
