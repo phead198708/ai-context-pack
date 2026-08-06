@@ -39,6 +39,7 @@ function clone(value) {
 function makeInventory() {
   return fixture.requiredIssueNumbers.map(number => ({
     number,
+    repository_url: `https://api.github.com/repos/${canonical.manifest.githubInventory.repository}`,
     title: `${fixture.titlePrefix} ${number}`,
     body: fixture.defaultBody,
     labels: [{ name: 'type:task' }, 'platform:shared'],
@@ -162,6 +163,40 @@ test('transport records outside the canonical range do not enter inventory', () 
     pull_request: {},
   });
   assert.equal(verifyInventory(canonical.manifest, records).records, 23);
+});
+
+test('inventory records must identify the canonical repository', () => {
+  const correct = makeInventory();
+  assert.equal(verifyInventory(canonical.manifest, correct).records, 23);
+
+  const missing = makeInventory();
+  delete missing[0].repository_url;
+  expectRule(
+    () => verifyInventory(canonical.manifest, missing),
+    'INVENTORY_REPOSITORY_MISMATCH',
+    { issue: 2 },
+  );
+
+  const wrong = makeInventory();
+  const wrongRepository = 'https://api.github.com/repos/synthetic/other';
+  wrong[0].repository_url = wrongRepository;
+  expectRule(
+    () => verifyInventory(canonical.manifest, wrong),
+    'INVENTORY_REPOSITORY_MISMATCH',
+    { issue: 2 },
+  );
+
+  let diagnostic;
+  try {
+    verifyInventory(canonical.manifest, wrong);
+  } catch (error) {
+    diagnostic = formatPolicyError(error);
+  }
+  assert.equal(
+    diagnostic,
+    'V01_POLICY_ERROR rule=INVENTORY_REPOSITORY_MISMATCH issue=2',
+  );
+  assert.doesNotMatch(diagnostic, new RegExp(wrongRepository));
 });
 
 test('inventory rejects missing Epic and required Issues', () => {

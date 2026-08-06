@@ -190,6 +190,7 @@ export function verifyInventory(manifest, envelope) {
 
   const required = manifest.githubInventory.requiredIssueNumbers;
   const requiredSet = new Set(required);
+  const expectedRepositoryUrl = `https://api.github.com/repos/${manifest.githubInventory.repository}`;
   const records = new Map();
 
   for (const record of envelope) {
@@ -202,6 +203,9 @@ export function verifyInventory(manifest, envelope) {
       fail('INVENTORY_RECORD_INVALID');
     }
     if (!requiredSet.has(record.number)) continue;
+    if (record.repository_url !== expectedRepositoryUrl) {
+      fail('INVENTORY_REPOSITORY_MISMATCH', { issue: record.number });
+    }
     if (Object.hasOwn(record, 'pull_request')) {
       fail('INVENTORY_PULL_REQUEST_FORBIDDEN', { issue: record.number });
     }
