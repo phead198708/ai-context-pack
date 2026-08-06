@@ -29,8 +29,9 @@ const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
   'i',
 );
 const negatedClauseGap = String.raw`(?:(?!\band\b|${policyRequirementTerm})[^\r\n.!?。！？;；]){0,80}`;
+const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:required|mandatory|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
 const modalNegatedRequirement = new RegExp(
-  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\b${negatedClauseGap}(?:${policyRequirementTerm}|${physicalDeviceActivity})`,
+  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\s+${modalNegatedComplement}`,
   'i',
 );
 const auxiliaryNegatedRequirement = new RegExp(
@@ -57,6 +58,8 @@ const independentPolicyPredicate = new RegExp(
   'i',
 );
 const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
+const requirementToActivityBoundary =
+  /\b(?:after|although|because|before|even\s+if|if|once|since|though|unless|until|when(?:ever)?|whereas|while)\b/iu;
 const outsideV01Qualifier =
   /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
 const policyCoordinatorTerm = String.raw`(?:as well as|even though|nevertheless|nonetheless|however|whereas|although|while|though|because|but|yet|and|or|plus)`;
@@ -277,6 +280,12 @@ function findMatchedRule(source) {
     for (const rule of staleRequirementRules) {
       const ruleMatch = rule.pattern.exec(clause);
       if (ruleMatch === null) {
+        continue;
+      }
+      if (
+        rule.allowsExplicitScopeOrNegation &&
+        !isRequirementBoundToPhysicalActivity(clause, ruleMatch)
+      ) {
         continue;
       }
       if (
@@ -517,6 +526,21 @@ function findMatchedPhysicalActivity(matchedRule) {
   };
 }
 
+function isRequirementBoundToPhysicalActivity(source, matchedRule) {
+  const requirement = findMatchedRequirement(source, matchedRule);
+  const activity = findMatchedPhysicalActivity(matchedRule);
+  if (requirement === undefined || activity === undefined) {
+    return false;
+  }
+  const requirementEnd = requirement.index + requirement[0].length;
+  if (requirementEnd >= activity.index) {
+    return true;
+  }
+  return !requirementToActivityBoundary.test(
+    source.slice(requirementEnd, activity.index),
+  );
+}
+
 function isIncidentalV01Reference(prefix) {
   return (
     /\bfrom\b(?:(?!\bto\b)[^\r\n.!?。！？;；]){0,48}$/iu.test(prefix) ||
@@ -728,6 +752,10 @@ function assertRuleSelfTests() {
     'Post-v0.1 documentation is required, and physical-device testing for v0.1 migration is required.',
     'Physical-device testing is required for v0.1 to compare post-v0.1 behavior.',
     'Physical-device testing must not fail and is required.',
+    'Physical-device testing must not fail.',
+    'Physical-device testing must not fail even if documentation is required.',
+    'v0.1 requires physical-device testing before post-v0.1 documentation begins.',
+    'v0.1 physical-device testing is required before post-v0.1 documentation begins.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
     'Physical-device testing is allowed outside v0.1 and physical-device evidence is required.',
     'Documentation is allowed outside v0.1 and physical-device evidence is required.',
@@ -781,6 +809,7 @@ function assertRuleSelfTests() {
     'Documentation is required even if physical-device testing is not required for v0.1.',
     'Physical-device testing is not required for v0.1 even if documentation is required.',
     'Physical-device testing must not be required for v0.1.',
+    'Physical-device testing must not be required even if documentation is required.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing not required for v0.1.',
     "Physical-device testing isn't required for v0.1.",
@@ -806,6 +835,8 @@ function assertRuleSelfTests() {
     'Because validation failed in the stable v0.1 release, post-v0.1 work requires physical-device testing.',
     'The v0.1 documentation requirement explains why post-v0.1 work requires physical-device testing.',
     'The v0.1 documentation requirement states that physical-device testing is required for post-v0.1 work.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing begins.',
+    'v0.1 documentation is required after post-v0.1 physical-device testing ends.',
     'A post-v0.1 requirement to test on physical devices.',
     'A v0.1 requirement not to test on physical devices.',
     'Post-v0.1 work requires physical-device testing for migration from the v0.1 release.',
