@@ -32,10 +32,16 @@ const negatedClauseGap = String.raw`(?:(?!\band\b|${policyRequirementTerm}|${phy
 const modalModifierTerm = String.raw`actually|again|always|automatically|ever|explicitly|independently|necessarily|normally|ordinarily|otherwise|still`;
 const boundedModalModifier = String.raw`(?:(?:${modalModifierTerm})\s+){0,3}`;
 const boundedCopulaModifier = String.raw`(?:(?:\p{L}+(?:[-'’]\p{L}+)*)\s+){0,3}`;
+const negatingCopulaModifierTerm = String.raw`barely|hardly|never|no|nor|not|rarely|scarcely|seldom`;
+const boundedNonNegatingCopulaModifier = String.raw`(?:(?!(?:${negatingCopulaModifierTerm})\b)(?:\p{L}+(?:[-'’]\p{L}+)*)\s+){0,3}`;
 const sharedPolicyModifierTerm = String.raw`actually|again|always|automatically|eventually|ever|explicitly|independently|later|necessarily|normally|now|occasionally|often|ordinarily|otherwise|previously|rarely|sometimes|soon|still|then|typically|usually`;
 const sharedPolicyModifier = String.raw`(?:(?:${sharedPolicyModifierTerm})\s+){0,3}`;
-const ambiguousLyPolicySubjectTerm = String.raw`ally|assembly|belly|bully|butterfly|costly|daily|elderly|family|fly|folly|friendly|holly|italy|jelly|july|likely|lily|lively|lonely|lovely|monthly|monopoly|orderly|quarterly|rally|reply|supply|timely|weekly|worldly|yearly`;
-const openSharedPolicyModifier = String.raw`(?:(?!(?:${ambiguousLyPolicySubjectTerm})\b)(?:\p{L}+ly)\s+){1,3}`;
+// Open derived-adverb morphology avoids treating every noun ending in `-ly`
+// as a shared modifier. The shape is based on productive adjective suffixes
+// and consonant-final adjective stems rather than either an adverb allowlist or
+// a noun denylist.
+const derivedAdverbStem = String.raw`(?:\p{L}{2,}(?:al|ant|ary|en|ent|ful|ic|ible|ive|less|ous)|\p{L}{2,}(?:ck|ct|ft|gh|ld|nd|ng|pt|rd|rm|st))`;
+const openSharedPolicyModifier = String.raw`(?:(?:${derivedAdverbStem})ly\s+){1,3}`;
 const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:compulsory|essential|mandatory|necessary|obligatory|required|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
 const modalNegatedRequirement = new RegExp(
   String.raw`\b(?:must|shall|should|will|would|can|could|need)\s+(?:not|never)\s+${boundedModalModifier}${modalNegatedComplement}`,
@@ -51,13 +57,13 @@ const auxiliaryNegatedRequirement = new RegExp(
   String.raw`\b(?:does?|do|is|are|was|were|has|have|had)\s+(?:not|never)\b${negatedClauseGap}${policyRequirementTerm}`,
   'i',
 );
-const physicalActivityObjectDeterminer = String.raw`(?:(?:all|any|each|either|every|some|that|the|these|this|those)\s+)?`;
+const physicalActivityObjectDeterminer = String.raw`(?:(?:(?:all|any|each|either|every|her|his|its|my|our|some|that|the|their|these|this|those|your)|\p{L}+(?:[-'’]\p{L}+)*['’]s)\s+)?`;
 const auxiliaryNegatedPhysicalActivityObjectRequirement = new RegExp(
   String.raw`\b(?:(?:do|does|did)\s+(?:not|never)|(?:do|does|did)n['’]t)\s+${boundedModalModifier}(?:accept|classify|count|describe|report|represent|treat)\s+${physicalActivityObjectDeterminer}${physicalDeviceActivity}\s+as\s+(?:being\s+)?(?:(?:a|an|the)\s+)?${policyRequirementTerm}`,
   'i',
 );
 const noLongerRequirement = new RegExp(
-  String.raw`\b(?:(?:is|are|was|were)\s+|(?:can|could|may|might|must|shall|should|will|would)\s+${boundedCopulaModifier})no longer\b${negatedClauseGap}${policyRequirementTerm}`,
+  String.raw`\b(?:(?:is|are|was|were)\s+|(?:can|could|may|might|must|shall|should|will|would)\s+${boundedNonNegatingCopulaModifier})no longer\b${negatedClauseGap}${policyRequirementTerm}`,
   'iu',
 );
 const directNotRequirement = new RegExp(
@@ -95,7 +101,8 @@ const irregularReducedActivityModifier = String.raw`(?:begun|built|done|given|he
 const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|failed|feed|happened|heed|need|occurred|persisted|proceeded|read|seed|speed|succeeded|waited|worked)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
 const passiveActivityModifier = String.raw`(?:(?:offline|online|\p{L}+ly)\s+){0,3}`;
 const passiveTemporalAgentLead = String.raw`deadline|end|evening|final|launch|milestone|morning|night|noon|release|schedule|time|today|tomorrow|week|weekend|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|last|next|this`;
-const passiveTemporalAgentContinuation = String.raw`afternoon|candidate|cutoff|date|day|deadline|end|evening|launch|milestone|month|morning|night|noon|notes?|release|schedule|time|today|tomorrow|week|weekend|year|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december`;
+const passiveAgentPhraseBoundary = String.raw`after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within`;
+const passiveAgentiveRoleHead = String.raw`(?:\p{L}{2,}(?:eers?|ers?|ors?|ists?|ysts?|ians?|ants?|ents?|ees?)|assurance|engineering|groups?|management|operations|personnel|qa|staff|teams?)`;
 const activityBoundaryOrAttachment =
   /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu;
 const outsideV01Qualifier =
@@ -1165,28 +1172,51 @@ function matchLeadingPassiveActivityAgent(source) {
     return undefined;
   }
   cursor += firstToken[0].length;
+  const agentTokens = [firstToken[0]];
+  const agentEnds = [cursor];
+  while (agentTokens.length < 5) {
+    if (
+      new RegExp(
+        String.raw`^\s+(?:${passiveAgentPhraseBoundary})\b`,
+        'iu',
+      ).test(source.slice(cursor))
+    ) {
+      break;
+    }
+    const nextToken =
+      /^\s+(?<token>[\p{L}\p{M}]+(?:[-'’][\p{L}\p{M}]+)*)/u.exec(
+        source.slice(cursor),
+      );
+    const token = nextToken?.groups?.token;
+    if (token === undefined) {
+      break;
+    }
+    cursor += nextToken[0].length;
+    agentTokens.push(token);
+    agentEnds.push(cursor);
+  }
   if (
     !new RegExp(String.raw`^(?:${passiveTemporalAgentLead})$`, 'iu').test(
-      firstToken[0],
+      agentTokens[0],
     )
   ) {
-    return { length: cursor };
+    return { length: agentEnds.at(-1) };
   }
-  const secondToken =
-    /^\s+(?<token>\p{Lu}[\p{L}\p{M}]*(?:[-'’][\p{L}\p{M}]+)*)/u.exec(
-      source.slice(cursor),
-    );
-  const token = secondToken?.groups?.token;
-  if (
-    token === undefined ||
-    new RegExp(
-      String.raw`^(?:${passiveTemporalAgentContinuation})$`,
-      'iu',
-    ).test(token)
-  ) {
+  const hasAgentiveRoleHead = agentTokens.some(
+    (token, index) =>
+      index > 0 &&
+      new RegExp(String.raw`^(?:${passiveAgentiveRoleHead})$`, 'iu').test(
+        token,
+      ),
+  );
+  if (!hasAgentiveRoleHead) {
     return undefined;
   }
-  return { length: cursor + secondToken[0].length };
+  // Inspect the complete phrase: temporal prefixes such as `Final Release` or
+  // `Release Candidate` may introduce a productively agentive role head in
+  // either normal lowercase prose or title case. Without an agentive head,
+  // the phrase remains an open milestone name (`Next Sprint`, ...).
+  return { length: agentEnds.at(-1) };
 }
 
 function findResumedActivityPredicate(source, attachedEnd) {
@@ -1346,6 +1376,9 @@ function isExplicitlyNegatedRequirement(clause, matchedRule) {
     return false;
   }
   const requirementEnd = requirement.index + requirement[0].length;
+  if (hasAdditionalNegationAroundNoLonger(clause, requirement)) {
+    return false;
+  }
   const negations = [
     needNegatedPhysicalActivityOccurrence,
     modalNegatedRequirement,
@@ -1386,6 +1419,31 @@ function isExplicitlyNegatedRequirement(clause, matchedRule) {
       negation.index !== undefined &&
       negation.index <= activity.index &&
       negation.index + negation[0].length >= activityEnd,
+  );
+}
+
+function hasAdditionalNegationAroundNoLonger(clause, requirement) {
+  const requirementEnd = requirement.index + requirement[0].length;
+  const relevantClause = clause.slice(
+    Math.max(0, requirement.index - 120),
+    requirementEnd,
+  );
+  const additionalNegation = new RegExp(
+    String.raw`\b(?:${negatingCopulaModifierTerm})\b|n['’]t\b`,
+    'iu',
+  );
+  return Array.from(relevantClause.matchAll(/\bno longer\b/giu)).some(
+    noLonger => {
+      if (noLonger.index === undefined) {
+        return false;
+      }
+      const before = relevantClause.slice(
+        Math.max(0, noLonger.index - 80),
+        noLonger.index,
+      );
+      const after = relevantClause.slice(noLonger.index + noLonger[0].length);
+      return additionalNegation.test(before) || additionalNegation.test(after);
+    },
   );
 }
 
@@ -1458,7 +1516,16 @@ function assertRuleSelfTests() {
     'Physical-device testing need not occur, but generally remains mandatory for v0.1.',
     'Physical-device testing need not occur, but frequently remains mandatory for v0.1.',
     'Physical-device testing need not occur, but hardly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but quickly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but carefully remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but suddenly remains mandatory for v0.1.',
     'Physical-device testing need not occur, but suddenly will become mandatory for v0.1.',
+    'Physical-device testing will not no longer be mandatory for v0.1.',
+    'Physical-device testing will never no longer be mandatory for v0.1.',
+    'Physical-device testing will rarely no longer be mandatory for v0.1.',
+    'Physical-device testing is not no longer mandatory for v0.1.',
+    "Physical-device testing isn't no longer mandatory for v0.1.",
+    'Physical-device testing will no longer not be mandatory for v0.1.',
     'Physical-device testing generally is required for v0.1.',
     'Physical-device testing unexpectedly remains mandatory for v0.1.',
     'Physical-device testing need not occur although it is required for v0.1.',
@@ -1514,6 +1581,10 @@ function assertRuleSelfTests() {
     'The physical-device testing completed by Release Coordinators before shipment is required for v0.1.',
     'The physical-device testing completed by Release Analysts before shipment is required for v0.1.',
     'The physical-device testing completed by Final Reviewers before shipment is required for v0.1.',
+    'The physical-device testing completed by Final Release Coordinators before shipment is required for v0.1.',
+    'The physical-device testing completed by Release Candidate Managers before shipment is required for v0.1.',
+    'The physical-device testing completed by release engineers before shipment is required for v0.1.',
+    'The physical-device testing completed by Release Quality Assurance before shipment is required for v0.1.',
     'Post-v0.1 physical-device tests failed deliberately before release are required for v0.1.',
     'Post-v0.1 physical-device tests failed before release and will be mandatory for v0.1.',
     'Post-v0.1 physical-device tests failed before release and will soon be mandatory for v0.1.',
@@ -1607,6 +1678,9 @@ function assertRuleSelfTests() {
     'v0.1 does not treat the physical-device testing as required.',
     'v0.1 does not classify any physical-device testing as mandatory.',
     'v0.1 does not count these physical-device tests as requirements.',
+    'v0.1 does not treat its physical-device testing as required.',
+    'v0.1 does not classify our physical-device tests as mandatory.',
+    "v0.1 does not count the team's physical-device tests as requirements.",
     'Physical-device testing is not mandated for v0.1.',
     'Physical-device testing is not compulsory for v0.1.',
     'Physical-device testing is not obligatory for v0.1.',
@@ -1646,6 +1720,10 @@ function assertRuleSelfTests() {
     'Physical-device testing need not occur, but supply will be required for v0.1.',
     'Physical-device testing need not occur, but family becomes mandatory for v0.1.',
     'Physical-device testing need not occur, but July remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but anomaly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but monopoly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but butterfly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but nightly remains mandatory for v0.1.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing will no longer be mandatory for v0.1.',
     'Physical-device testing need not occur, but will no longer be mandatory for v0.1.',
@@ -1738,7 +1816,9 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing completed all checks by QA before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing completed successfully by Tuesday before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing completed by Final Release before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed by Release Candidate before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing completed by Next Tuesday before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed by Next Sprint before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing proceeded before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing launched before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing proceeds, and v0.1 documentation is required.',
