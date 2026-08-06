@@ -73,6 +73,8 @@ const activityFinitePredicate = new RegExp(
 );
 const openInflectedActivityPredicate =
   /^(?<predicate>\p{L}{2,}(?:ed|s|ies))\b/iu;
+const irregularReducedActivityModifier = String.raw`(?:begun|built|done|given|held|made|run|seen|taken|written)`;
+const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|feed|heed|need|proceed|read|seed|speed|succeed)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
 const activityBoundaryOrAttachment =
   /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu;
 const outsideV01Qualifier =
@@ -894,6 +896,15 @@ function hasIndependentActivityPredicate(
   const openInflectedPredicate = openInflectedActivityPredicate.exec(predicate);
   if (openInflectedPredicate !== null) {
     const remainder = predicate.slice(openInflectedPredicate[0].length).trim();
+    if (
+      preferAttachedParticiple &&
+      new RegExp(`^${reducedActivityModifier}\\b`, 'iu').test(remainder)
+    ) {
+      return hasIndependentActivityPredicate(remainder, {
+        activitySource,
+        preferAttachedParticiple: true,
+      });
+    }
     return (
       remainder.length > 0 && !activityBoundaryOrAttachment.test(remainder)
     );
@@ -915,8 +926,8 @@ function consumeLeadingAttachedActivityModifier(
 ) {
   const reducedRelative = new RegExp(
     preferAttachedParticiple
-      ? String.raw`^(?<participle>(?:(?!(?:bleed|breed|feed|heed|need|proceed|read|seed|speed|succeed)\b)\p{L}+ed|begun|built|done|given|held|made|run|seen|taken|written))\b`
-      : String.raw`^(?<participle>(?:begun|built|done|given|held|made|run|seen|taken|written))\b`,
+      ? String.raw`^(?<participle>${reducedActivityModifier})\b`
+      : String.raw`^(?<participle>${irregularReducedActivityModifier})\b`,
     'iu',
   ).exec(source);
   if (reducedRelative !== null) {
@@ -1210,6 +1221,7 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing performed before release is required for v0.1.',
     'Post-v0.1 physical-device testing begins before release and is required for v0.1.',
     'Post-v0.1 physical-device testing workflows before release are required for v0.1.',
+    'Post-v0.1 physical-device testing workflows scheduled before release are required for v0.1.',
     'Post-v0.1 physical-device validation plans before release are required for v0.1.',
     'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
     'Post-v0.1 physical-device testing that uses workflows before release is required for v0.1.',
@@ -1326,6 +1338,7 @@ function assertRuleSelfTests() {
     'v0.1 documentation is required before post-v0.1 physical-device tests proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device testing, which runs offline, proceeds.',
     'v0.1 documentation is required before post-v0.1 physical-device testing workflows proceed.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing workflows scheduled offline proceed.',
     'v0.1 documentation is required before post-v0.1 physical-device validation plans begin.',
     'v0.1 documentation is required before post-v0.1 physical-device testing procedures start.',
     'Post-v0.1 physical-device testing proceeds before v0.1 documentation is required.',
