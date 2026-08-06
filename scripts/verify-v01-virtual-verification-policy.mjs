@@ -65,13 +65,10 @@ const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
 const requirementToActivityBoundary =
   /\b(?:after|although|because|before|even\s+if|if|once|since|though|unless|until|when(?:ever)?|whereas|while)\b/iu;
 const activityFiniteFunctionalPredicate = String.raw`\b(?:am|are|can(?:not)?|could|did|do|does|had|has|have|is|may|might|must|shall|should|was|were|will|would)\b`;
-const activityFiniteLexicalShape = String.raw`\b\p{L}{2,}(?:ed|s)\b`;
+const activityFiniteLexicalPredicate = String.raw`\b(?:advanc(?:e|ed|es)|begin(?:s)?|collect(?:ed|s)?|complet(?:e|ed|es)|contain(?:ed|s)?|continu(?:e|ed|es)|creat(?:e|ed|es)|end(?:ed|s)?|execut(?:e|ed|es)|exist(?:ed|s)?|fail(?:ed|s)?|finish(?:ed|es)?|generat(?:e|ed|es)|happen(?:ed|s)?|includ(?:e|ed|es)|launch(?:ed|es)?|mov(?:e|ed|es)|occur(?:red|s)?|operat(?:e|ed|es)|pass(?:ed|es)?|persist(?:ed|s)?|proceed(?:ed|s)?|process(?:ed|es)?|produc(?:e|ed|es)|read(?:s)?|record(?:ed|s)?|remain(?:ed|s)?|requir(?:e|ed|es)|restart(?:ed|s)?|resum(?:e|ed|es)|return(?:ed|s)?|run(?:s)?|ship(?:ped|s)?|start(?:ed|s)?|stop(?:ped|s)?|stor(?:e|ed|es)|succeed(?:ed|s)?|tak(?:e|es)|test(?:ed|s)?|transition(?:ed|s)?|us(?:e|ed|es)|validat(?:e|ed|es)|verif(?:y|ied|ies)|wait(?:ed|s)?|work(?:ed|s)?|writ(?:e|es))\b`;
+const activityIrregularFinitePredicate = String.raw`\b(?:became|began|came|fell|got|grew|ran|rose|took|went|wrote)\b`;
 const activityFinitePredicate = new RegExp(
-  `(?:${activityFiniteFunctionalPredicate}|${activityFiniteLexicalShape})`,
-  'iu',
-);
-const activityAuxiliaryOrModal = new RegExp(
-  `^${activityFiniteFunctionalPredicate}$`,
+  `(?:${activityFiniteFunctionalPredicate}|${activityFiniteLexicalPredicate}|${activityIrregularFinitePredicate})`,
   'iu',
 );
 const outsideV01Qualifier =
@@ -271,24 +268,60 @@ function assertIssueInventory(issues) {
 function assertNoStaleRequirement(source, sourceName) {
   const lines = source.split(/\r?\n/u);
   const contextualLines = [];
-  let activeOutsideScopeHeading;
+  const scopeHeadings = [];
   for (const [index, line] of lines.entries()) {
+    const markdownListIndent = findMarkdownListIndent(line);
+    const isMarkdownListItem = markdownListIndent !== undefined;
+    if (isMarkdownListItem) {
+      while (
+        scopeHeadings.at(-1)?.listIndent !== undefined &&
+        scopeHeadings.at(-1).listIndent >= markdownListIndent
+      ) {
+        scopeHeadings.pop();
+      }
+      for (const scopeHeading of scopeHeadings) {
+        scopeHeading.hasListChildren = true;
+      }
+    } else if (/^\s*(?:>\s*)?#{1,6}\s+/u.test(line)) {
+      scopeHeadings.length = 0;
+    } else if (
+      line.trim().length > 0 &&
+      scopeHeadings.at(-1)?.hasListChildren
+    ) {
+      scopeHeadings.length = 0;
+    }
     const outsideScopeHeading = findOutsideV01ScopeHeading(line);
     if (outsideScopeHeading !== undefined) {
-      activeOutsideScopeHeading = outsideScopeHeading;
+      if (!isMarkdownListItem) {
+        scopeHeadings.length = 0;
+      }
+      scopeHeadings.push({
+        hasListChildren: false,
+        heading: outsideScopeHeading,
+        listIndent: isMarkdownListItem ? markdownListIndent : -1,
+      });
+      continue;
+    }
+    const affirmativeScopeHeading = findAffirmativeV01ScopeHeading(line);
+    if (affirmativeScopeHeading !== undefined) {
+      if (!isMarkdownListItem) {
+        scopeHeadings.length = 0;
+      }
+      scopeHeadings.push({
+        hasListChildren: false,
+        heading: affirmativeScopeHeading,
+        listIndent: isMarkdownListItem ? markdownListIndent : -1,
+      });
       continue;
     }
     if (line.trim().length === 0) {
       continue;
     }
-    const isMarkdownListItem = /^\s*(?:[-*+]\s+|\d+[.)]\s+)/u.test(line);
-    if (/^\s*(?:>\s*)?#{1,6}\s+/u.test(line)) {
-      activeOutsideScopeHeading = undefined;
-    }
+    const activeScopeHeading = scopeHeadings.at(-1)?.heading;
     const contextualLine =
-      activeOutsideScopeHeading === undefined
+      activeScopeHeading === undefined
         ? stripMarkdownListMarker(line)
-        : `${activeOutsideScopeHeading}: ${stripMarkdownListMarker(line)}`;
+        : `${activeScopeHeading}: ${stripMarkdownListMarker(line)}`;
     contextualLines.push(contextualLine);
     const matchedRule = findMatchedRule(contextualLine);
     if (matchedRule) {
@@ -299,7 +332,7 @@ function assertNoStaleRequirement(source, sourceName) {
       );
     }
     if (!isMarkdownListItem) {
-      activeOutsideScopeHeading = undefined;
+      scopeHeadings.length = 0;
     }
   }
   const normalized = contextualLines.join(' ').replace(/\s+/gu, ' ');
@@ -311,13 +344,28 @@ function assertNoStaleRequirement(source, sourceName) {
   }
 }
 
+function findMarkdownListIndent(source) {
+  const listItem = /^(?<indent>\s*)(?:[-*+]\s+|\d+[.)]\s+)/u.exec(source);
+  return listItem === null
+    ? undefined
+    : (listItem.groups?.indent ?? '').replaceAll('\t', '  ').length;
+}
+
 function findOutsideV01ScopeHeading(source) {
-  const heading = source
-    .trim()
+  const heading = normalizeScopeHeading(source);
+  return isOutsideV01ScopeOnlyHeading(heading) ? heading : undefined;
+}
+
+function findAffirmativeV01ScopeHeading(source) {
+  const heading = normalizeScopeHeading(source);
+  return isAffirmativeV01ScopeOnlyHeading(heading) ? heading : undefined;
+}
+
+function normalizeScopeHeading(source) {
+  return stripMarkdownListMarker(source)
     .replace(/^(?:>\s*)?(?:#{1,6}\s+)?/u, '')
     .replace(/\s*[:：—–]\s*$/u, '')
     .trim();
-  return isOutsideV01ScopeOnlyHeading(heading) ? heading : undefined;
 }
 
 function stripMarkdownListMarker(source) {
@@ -449,6 +497,23 @@ function isOutsideV01ScopeOnlyHeading(source) {
     `^\\s*(?:for\\s+(?:the\\s+)?)?(?:${outsideScope}(?:\\s+${scopeNoun})?|${scopeNoun}\\s+${outsideScope})\\s*$`,
     'iu',
   ).test(normalizedSource);
+}
+
+function isAffirmativeV01ScopeOnlyHeading(source) {
+  if (
+    outsideV01Qualifier.test(source) ||
+    hasPhysicalDeviceActivity(source) ||
+    independentRequirement.test(source) ||
+    independentAllowance.test(source)
+  ) {
+    return false;
+  }
+  const scopeNoun =
+    '(?:activities|items|milestone|phase|planning|release|requirements?|roadmap|scope|tasks|verification|work)';
+  return new RegExp(
+    String.raw`^\s*(?:for\s+(?:the\s+)?)?(?:v0\.1(?:\s+scope)?(?:\s+${scopeNoun})?|${scopeNoun}(?:\s+for)?\s+(?:the\s+)?v0\.1(?:\s+scope)?)\s*$`,
+    'iu',
+  ).test(source);
 }
 
 function hasExplicitV01Scope(source) {
@@ -613,7 +678,7 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
       return true;
     }
     return !(
-      hasIndependentActivityPredicate(source.slice(activityEnd), activity[0]) &&
+      hasIndependentActivityPredicate(source.slice(activityEnd)) &&
       isPhysicalActivityExplicitlyOutsideV01(source, activity)
     );
   }
@@ -622,21 +687,53 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
   if (boundary === null) {
     return true;
   }
-  if (hasCoordinatedSharedActivitySubject(between, boundary)) {
+  const subjectRelationship = classifyRequirementSubjectAfterBoundary(
+    between,
+    boundary,
+  );
+  if (subjectRelationship === 'shared') {
     return true;
   }
+  if (subjectRelationship === 'new') {
+    return false;
+  }
   return !(
-    hasIndependentActivityPredicate(
-      between.slice(0, boundary.index),
-      activity[0],
-    ) && isPhysicalActivityExplicitlyOutsideV01(source, activity)
+    hasIndependentActivityPredicate(between.slice(0, boundary.index)) &&
+    isPhysicalActivityExplicitlyOutsideV01(source, activity)
   );
 }
 
-function hasCoordinatedSharedActivitySubject(source, boundary) {
-  const afterBoundary = source.slice(boundary.index + boundary[0].length);
-  return /\b(?:and|but|or|yet)\s+(?:(?:am|are|be|becomes?|is|remains?|was|were)\s*)?$/iu.test(
-    afterBoundary,
+function classifyRequirementSubjectAfterBoundary(source, boundary) {
+  const afterBoundary = source
+    .slice(boundary.index + boundary[0].length)
+    .trim()
+    .replace(/\b(?:am|are|be|becomes?|is|remains?|was|were)\s*$/iu, '')
+    .trim();
+  const coordinatedTail =
+    /\b(?:although|and|but|or|though|whereas|while|yet)\s*(?<tail>[^,;；:：—–]*)$/iu.exec(
+      afterBoundary,
+    );
+  if (coordinatedTail !== null) {
+    const tail = coordinatedTail.groups?.tail.trim() ?? '';
+    return tail.length === 0 || isSubjectContinuationModifierPhrase(tail)
+      ? 'shared'
+      : 'new';
+  }
+  const trailingModifiers = new RegExp(
+    String.raw`(?:^|\s)(?<tail>(?:(?:also|eventually|later|now|still|then|typically|usually|\p{L}+ly)\s*){1,3})$`,
+    'iu',
+  ).exec(afterBoundary);
+  return trailingModifiers !== null &&
+    isSubjectContinuationModifierPhrase(
+      trailingModifiers.groups?.tail.trim() ?? '',
+    )
+    ? 'shared'
+    : 'unknown';
+}
+
+function isSubjectContinuationModifierPhrase(source) {
+  return /^(?:(?:also|eventually|later|now|still|then|typically|usually|\p{L}+ly)\s*){1,3}$/iu.test(
+    source,
   );
 }
 
@@ -658,7 +755,7 @@ function isPhysicalActivityExplicitlyOutsideV01(source, activity) {
   );
 }
 
-function hasIndependentActivityPredicate(source, activitySource) {
+function hasIndependentActivityPredicate(source) {
   let predicate = source.trim();
 
   // Comma-delimited relative and conditional material modifies the activity;
@@ -694,74 +791,54 @@ function hasIndependentActivityPredicate(source, activitySource) {
     return false;
   }
 
-  if (new RegExp(`^${activityFinitePredicate.source}`, 'iu').test(predicate)) {
-    return true;
-  }
-  return (
-    /\btests\b/iu.test(activitySource) &&
-    /^(?!\p{L}+(?:ing|tion|ment|ness|ity|ics|ence|ance|al|ure)\b)\p{L}{2,}\b/iu.test(
-      predicate,
-    )
-  );
+  return new RegExp(`^${activityFinitePredicate.source}`, 'iu').test(predicate);
 }
 
 function consumeLeadingAttachedActivityModifier(source) {
   const reducedRelative =
-    /^(?<participle>\p{L}+(?<!e)ed)\b(?<remainder>[\s\S]*)$/iu.exec(source);
-  if (reducedRelative !== null) {
-    const remainder = reducedRelative.groups?.remainder ?? '';
-    const resumedPredicate = activityFinitePredicate.exec(remainder);
-    if (resumedPredicate === null) {
-      return '';
-    }
-    const beforeResumedPredicate = remainder.slice(0, resumedPredicate.index);
-    return /\b(?:and|or|plus|as well as)\b/iu.test(beforeResumedPredicate)
-      ? ''
-      : remainder.slice(resumedPredicate.index).trim();
-  }
-  if (!/^(?:that|to|which|who|whose)\b/iu.test(source)) {
-    return source;
-  }
-  const infinitive = /^to\s+\p{L}+(?<remainder>[\s\S]*)$/iu.exec(source);
-  if (infinitive !== null) {
-    const remainder = infinitive.groups?.remainder ?? '';
-    const resumedPredicate = activityFinitePredicate.exec(remainder);
-    if (resumedPredicate === null) {
-      return '';
-    }
-    const beforeResumedPredicate = remainder.slice(0, resumedPredicate.index);
-    return /\b(?:and|or|plus|as well as)\b/iu.test(beforeResumedPredicate)
-      ? ''
-      : remainder.slice(resumedPredicate.index).trim();
-  }
-  const predicates = Array.from(
-    source.matchAll(new RegExp(activityFinitePredicate.source, 'giu')),
-  );
-  if (predicates.length < 2) {
-    return '';
-  }
-  const attachedPredicate = predicates[0];
-  let resumedPredicateIndex = 1;
-  const auxiliaryComplement = predicates[1];
-  if (activityAuxiliaryOrModal.test(attachedPredicate[0])) {
-    const betweenAuxiliaryAndComplement = source.slice(
-      attachedPredicate.index + attachedPredicate[0].length,
-      auxiliaryComplement.index,
+    /^(?<participle>(?:(?!(?:bleed|breed|feed|heed|need|proceed|read|seed|speed|succeed)\b)\p{L}+ed|begun|built|done|given|held|made|seen|taken|written))\b/iu.exec(
+      source,
     );
-    if (
-      /^\s*(?:(?:not|never|\p{L}+ly)\s+){0,3}$/iu.test(
-        betweenAuxiliaryAndComplement,
-      )
-    ) {
-      resumedPredicateIndex += 1;
-    }
+  if (reducedRelative !== null) {
+    return findResumedActivityPredicate(
+      source,
+      reducedRelative.groups?.participle.length ?? reducedRelative[0].length,
+    );
   }
-  for (const resumedPredicate of predicates.slice(resumedPredicateIndex)) {
-    const betweenPredicates = source.slice(
-      attachedPredicate.index + attachedPredicate[0].length,
+  const infinitive = /^(?<modifier>to\s+\p{L}+)\b/iu.exec(source);
+  if (infinitive !== null) {
+    return findResumedActivityPredicate(
+      source,
+      infinitive.groups?.modifier.length ?? infinitive[0].length,
+    );
+  }
+  const possessiveRelative = new RegExp(
+    String.raw`^whose\s+\p{L}+\s+(?:(?:${activityFiniteFunctionalPredicate})\s+(?:(?:not|never|quite|very|\p{L}+ly)\s+){0,3})?\p{L}+\b`,
+    'iu',
+  ).exec(source);
+  if (possessiveRelative !== null) {
+    return findResumedActivityPredicate(source, possessiveRelative[0].length);
+  }
+  const relative = new RegExp(
+    String.raw`^(?:that|which|who)\s+(?:(?:${activityFiniteFunctionalPredicate})\s+(?:(?:not|never|quite|very|\p{L}+ly)\s+){0,3})?\p{L}+\b`,
+    'iu',
+  ).exec(source);
+  if (relative !== null) {
+    return findResumedActivityPredicate(source, relative[0].length);
+  }
+  return source;
+}
+
+function findResumedActivityPredicate(source, attachedEnd) {
+  const resumedPredicates = Array.from(
+    source.matchAll(new RegExp(activityFinitePredicate.source, 'giu')),
+  ).filter(predicate => predicate.index >= attachedEnd);
+  for (const resumedPredicate of resumedPredicates) {
+    const beforeResumedPredicate = source.slice(
+      attachedEnd,
       resumedPredicate.index,
     );
-    if (/\b(?:and|or|plus|as well as)\b/iu.test(betweenPredicates)) {
+    if (/\b(?:and|or|plus|as well as)\b/iu.test(beforeResumedPredicate)) {
       return '';
     }
     return source.slice(resumedPredicate.index).trim();
@@ -832,6 +909,13 @@ function isNaturalVersionModifier(source) {
 
 function isScopeBoundToRequirementPredicate(predicatePrefix) {
   if (predicatePrefix.trim().length === 0) {
+    return true;
+  }
+  if (
+    /^\s*(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:mandatory|required|requirements?)\s*$/iu.test(
+      predicatePrefix,
+    )
+  ) {
     return true;
   }
   if (isSimpleTargetActionPhrase(predicatePrefix)) {
@@ -1005,6 +1089,16 @@ function assertRuleSelfTests() {
     'Physical-device testing begins before release and is required for v0.1.',
     'Post-v0.1 physical-device testing performed before release is required for v0.1.',
     'Post-v0.1 physical-device testing begins before release and is required for v0.1.',
+    'Post-v0.1 physical-device testing workflows before release are required for v0.1.',
+    'Post-v0.1 physical-device validation plans before release are required for v0.1.',
+    'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
+    'Post-v0.1 physical-device testing that uses workflows before release is required for v0.1.',
+    'Post-v0.1 physical-device testing whose scheduler runs on devices before release is required for v0.1.',
+    'Post-v0.1 physical-device validation done before release is required for v0.1.',
+    'Post-v0.1 physical-device testing guaranteed before release is required for v0.1.',
+    'Post-v0.1 physical-device testing begins before release and later is required for v0.1.',
+    'Post-v0.1 physical-device testing begins before release then is required for v0.1.',
+    'Post-v0.1 physical-device testing begins before release and must be required for v0.1.',
     'v0.1 requires physical-device testing before post-v0.1 documentation begins.',
     'v0.1 physical-device testing is required before post-v0.1 documentation begins.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
@@ -1107,6 +1201,18 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing to run nightly proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing performed offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing begins before release and v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing that runs on devices proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing that uses workflows proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing whose scheduler runs offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device validation done offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing guaranteed offline proceeds before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing began before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing became available before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing ran before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing uses devices before v0.1 documentation is required.',
+    'Physical-device testing begins before release and v0.1 documentation is required.',
+    'Physical-device testing begins before release and documentation is required.',
+    'Post-v0.1 physical-device testing begins before release and v0.1 documentation must be required.',
     'Post-v0.1 physical-device testing, if available, is required.',
     'A post-v0.1 requirement to test on physical devices.',
     'A v0.1 requirement not to test on physical devices.',
@@ -1134,6 +1240,10 @@ function assertRuleSelfTests() {
     'For post-v0.1 work:\n- Physical-device testing is required.',
     'Post-v0.1 requirements:\n- Physical-device testing is required.',
     '## For the post-v0.1 release:\n\n1. Documentation is required.\n2. Physical-device testing is required.',
+    'Post-v0.1 requirements:\n- Documentation:\n  - Physical-device testing is required.',
+    'v0.1 release:\n- Physical-device testing is not required.',
+    'Post-v0.1 requirements:\n- v0.1 release:\n  - Documentation is required.\n- Physical-device testing is required.',
+    'For post-v0.1 work:\n- Documentation is required.\n\nPhysical-device testing is not required.',
   ];
   for (const [index, example] of multilineAllowedSources.entries()) {
     try {
@@ -1149,6 +1259,10 @@ function assertRuleSelfTests() {
     'For post-v0.1 work:\n- Physical-device testing is required for v0.1.',
     'Post-v0.1 requirements:\n- Documentation is required.\n- Physical-device testing is required for v0.1.',
     'For v0.1 work:\n- Physical-device testing is required.',
+    'Post-v0.1 requirements:\n- v0.1 release:\n  - Physical-device testing is required.',
+    'Post-v0.1 requirements:\n- For v0.1 work:\n  - Physical-device testing is required.',
+    'Post-v0.1 requirements:\n  - ## v0.1 verification:\n    - Physical-device testing is required.',
+    'For post-v0.1 work:\n- Documentation is required.\n\nPhysical-device testing is required.',
   ];
   for (const [index, example] of multilineStaleSources.entries()) {
     try {
