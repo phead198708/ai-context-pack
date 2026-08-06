@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "release": "v0.1",
+  "verificationEnvironment": "virtual-only",
+  "physicalDeviceEvidenceRequired": false,
+  "physicalDeviceGateLabel": "test:device-required",
+  "githubInventory": {
+    "repository": "phead198708/ai-context-pack",
+    "requiredIssueNumbers": [
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+      22, 23, 24
+    ],
+    "requireNonEmptyTitle": true,
+    "requireNonEmptyBody": true,
+    "requireValidLabels": true,
+    "forbiddenLabels": ["test:device-required"]
+  },
+  "evidence": {
+    "ios": "simulator",
+    "android": "emulator",
+    "physicalHardwareClaimsAllowed": false
+  }
+}

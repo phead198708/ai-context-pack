@@ -11,7 +11,7 @@
     "test:fixtures": "node scripts/verify-fixtures.mjs",
     "test:persistence-migrations": "node scripts/verify-persistence-migrations.mjs",
     "test:persistence-production": "node scripts/verify-production-persistence.mjs",
-    "test:v01-verification-policy": "node scripts/verify-v01-virtual-verification-policy.mjs",
+    "test:v01-verification-policy": "node --test scripts/verify-v01-virtual-verification-policy.test.mjs && node scripts/verify-v01-virtual-verification-policy.mjs",
     "test:workflows": "node scripts/verify-workflow-security.mjs && npm run test:v01-verification-policy",
     "start": "expo start --dev-client",
     "test": "jest --runInBand",
@@ -51,8 +51,6 @@
     "prettier": "2.8.8",
     "react-test-renderer": "19.2.3",
     "typescript": "6.0.3",
-    "wink-pos-tagger": "2.2.2",
-    "wordnet-db": "3.1.14",
     "yaml": "2.9.0"
   },
   "engines": {

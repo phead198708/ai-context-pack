@@ -113,6 +113,8 @@
 
 根据 [ADR-0003](../adr/0003-v0.1-virtual-device-verification.md)，`test:device-required` 不得应用于 v0.1 Epic #2 或 Issues #3–#24。该 label 保留给 post-MVP 或未来版本；v0.1 的特殊平台证据在 issue acceptance criteria 中写明 Simulator/Emulator/CI/store-processing 矩阵与限制。
 
+Free-form issue prose is descriptive, not the machine-executable source of verification policy. The canonical structured manifest and validated GitHub labels define whether physical-device evidence is a release gate. 如果文案与结构化政策冲突，必须人工修正文案并复核，而不是依靠自然语言推断改变 merge gate。
+
 ## 示例
 
 “Implement cross-platform share ingestion”：
