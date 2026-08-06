@@ -19,7 +19,7 @@ const policyPaths = [
 const requirementClauseGap = String.raw`[^\r\n!?。！？;；]{0,80}`;
 const physicalDeviceTerm = String.raw`\bphysical[- ]devices?\b`;
 const verificationActivityTerm = String.raw`\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b`;
-const requirementTerm = String.raw`\b(?:requires?|required|must|shall|mandatory)\b`;
+const requirementTerm = String.raw`\b(?:requires?|required|requirements?|must|shall|mandatory)\b`;
 const allowancePredicateTerm = String.raw`\b(?:(?:is|are|was|were|be|remain(?:s|ed)?)\s+(?:allowed|permitted|optional)|may|can|allows?|permits?)\b`;
 const physicalDeviceActivity = String.raw`(?:${physicalDeviceTerm}${requirementClauseGap}${verificationActivityTerm}|${verificationActivityTerm}${requirementClauseGap}${physicalDeviceTerm})`;
 const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
@@ -56,9 +56,9 @@ const independentPolicyPredicate = new RegExp(
 const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
 const outsideV01Qualifier =
   /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
-const policyCoordinatorTerm = String.raw`(?:as well as|even though|nevertheless|nonetheless|however|whereas|although|while|though|but|yet|and|or|plus)`;
+const policyCoordinatorTerm = String.raw`(?:as well as|even though|nevertheless|nonetheless|however|whereas|although|while|though|because|but|yet|and|or|plus)`;
 const coordinatedPolicyBoundary = new RegExp(
-  `(?:[;；]\\s*|,\\s+(?:${policyCoordinatorTerm}\\s+)?|\\s+${policyCoordinatorTerm}\\s+)`,
+  `(?:[;；:：—–]\\s*|,\\s+(?:${policyCoordinatorTerm}\\s+)?|\\s+${policyCoordinatorTerm}\\s+)`,
   'giu',
 );
 const staleRequirementRules = [
@@ -287,7 +287,9 @@ function splitCoordinatedRequirements(clause) {
     const left = clause.slice(0, separatorIndex).trim();
     const right = clause.slice(separatorIndex + separator[0].length).trim();
     const boundRight = inheritPhysicalDeviceActivity(left, right);
-    const isHardBoundary = /[;；]|\b(?:but|however)\b/iu.test(separator[0]);
+    const isHardBoundary = /[;；:：—–]|\b(?:but|however)\b/iu.test(
+      separator[0],
+    );
     const hasCoordinatedPolicies =
       hasIndependentPolicyStatement(left) &&
       hasIndependentPolicyStatement(boundRight) &&
@@ -368,8 +370,13 @@ function hasAffirmativeV01Scope(source) {
         match.index + match[0].length,
         requirementMatch.index,
       );
+      if (hasLeadingTargetV01ScopePrefix(prefix)) {
+        return true;
+      }
+      if (outsideV01Qualifier.test(beforeRequirement)) {
+        continue;
+      }
       if (
-        hasTargetV01ScopePrefix(prefix) ||
         hasPhysicalDeviceActivity(beforeRequirement) ||
         !isContextualV01Subject(beforeRequirement)
       ) {
@@ -382,11 +389,9 @@ function hasAffirmativeV01Scope(source) {
       match.index,
     );
     if (
-      hasTargetV01ScopePrefix(prefix) ||
-      hasTargetV01VerbPrefix(prefix) ||
-      /^\s*(?:(?:the|a|our|version|release|target)\s+){0,3}$/iu.test(
-        afterRequirement,
-      )
+      hasDirectTargetV01Scope(afterRequirement) ||
+      hasTargetV01VerbPrefix(afterRequirement) ||
+      hasDirectV01Qualifier(afterRequirement)
     ) {
       return true;
     }
@@ -409,20 +414,96 @@ function isContextualV01Subject(suffix) {
   );
 }
 
-function hasTargetV01ScopePrefix(prefix) {
-  return /\b(?:for|in|on|at|during|within|under|throughout|by|across|before|through|as part of)\s+(?:(?:all|the|a|our|version|release|target)\s+){0,3}$/iu.test(
+function hasLeadingTargetV01ScopePrefix(prefix) {
+  return /(?:^|[.!?。！？;；:：—–]\s*|,\s*)\b(?:for|in|on|at|during|within|under|throughout|by|across|before|through|as part of)\s+(?:(?:all|the|a|our|version|release|target|stable|current|production)\s+){0,5}$/iu.test(
     prefix,
   );
 }
 
-function hasTargetV01VerbPrefix(prefix) {
-  return (
-    /\b(?:ship(?:s|ped|ping)?|validat(?:e|es|ed|ing)|support(?:s|ed|ing)?|releas(?:e|es|ed|ing)|deliver(?:s|ed|ing)?|publish(?:es|ed|ing)?|deploy(?:s|ed|ing)?|launch(?:es|ed|ing)?|test(?:s|ed|ing)?|verif(?:y|ies|ied|ying)|certif(?:y|ies|ied|ying)|accept(?:s|ed|ing)?|build(?:s|ing)?|submit(?:s|ted|ting)?|distribut(?:e|es|ed|ing)|enable(?:s|d|ing)?|migrat(?:e|es|ed|ing)|upgrad(?:e|es|ed|ing)|port(?:s|ed|ing)?|transition(?:s|ed|ing)?|mov(?:e|es|ed|ing)|target(?:s|ed|ing)?)\s+(?:to\s+)?(?:(?:all|the|a|our|version|release|target)\s+){0,3}$/iu.test(
-      prefix,
-    ) ||
-    /\b(?:migrat(?:e|es|ed|ing)|upgrad(?:e|es|ed|ing)|port(?:s|ed|ing)?|transition(?:s|ed|ing)?|mov(?:e|es|ed|ing))\b[^\r\n.!?。！？;；]{0,40}\bto\s+(?:(?:all|the|a|our|version|release|target)\s+){0,3}$/iu.test(
-      prefix,
+function hasDirectTargetV01Scope(afterRequirement) {
+  const scopeMatch =
+    /\b(?:for|in|on|at|during|within|under|throughout|by|across|before|through|as part of)\b(?<modifier>[^\r\n.!?。！？;；:：—–]{0,48})$/iu.exec(
+      afterRequirement,
+    );
+  if (
+    scopeMatch === null ||
+    !isNaturalVersionModifier(scopeMatch.groups?.modifier ?? '')
+  ) {
+    return false;
+  }
+  const predicatePrefix = afterRequirement.slice(0, scopeMatch.index);
+  if (predicatePrefix.trim().length === 0) {
+    return true;
+  }
+  if (
+    /\b(?:because|since|given that|compare(?:d|s|ing)?|comparison|against|versus|vs\.?|relative to|reference(?:d|s|ing)?|baseline|behavior|failed|lacks?)\b/iu.test(
+      predicatePrefix,
     )
+  ) {
+    return false;
+  }
+  return isScopeBoundToRequirementPredicate(predicatePrefix);
+}
+
+function hasDirectV01Qualifier(afterRequirement) {
+  const normalized = afterRequirement.trim();
+  return isNaturalVersionModifier(normalized);
+}
+
+function isNaturalVersionModifier(source) {
+  const normalized = source.trim();
+  return (
+    normalized.length <= 48 &&
+    !/\b(?:against|as|at|because|before|behavior|by|compare(?:d|s|ing)?|comparison|during|for|from|given|in|on|reference|relative|since|through|throughout|to|under|versus|via|while|with|within)\b|[,:：—–]/iu.test(
+      normalized,
+    )
+  );
+}
+
+function isScopeBoundToRequirementPredicate(predicatePrefix) {
+  if (predicatePrefix.trim().length === 0) {
+    return true;
+  }
+  if (isSimpleTargetActionPhrase(predicatePrefix)) {
+    return true;
+  }
+  const activityMatch = physicalDeviceActivityMatcher.exec(predicatePrefix);
+  if (activityMatch === null) {
+    return false;
+  }
+  const remainder = `${predicatePrefix.slice(
+    0,
+    activityMatch.index,
+  )} ${predicatePrefix.slice(activityMatch.index + activityMatch[0].length)}`;
+  return remainder.trim().length === 0 || isSimpleTargetActionPhrase(remainder);
+}
+
+function hasTargetV01VerbPrefix(prefix) {
+  const actionMatch =
+    /\b(?:ship(?:s|ped|ping)?|validat(?:e|es|ed|ing)|support(?:s|ed|ing)?|releas(?:e|es|ed|ing)|deliver(?:s|ed|ing)?|publish(?:es|ed|ing)?|deploy(?:s|ed|ing)?|launch(?:es|ed|ing)?|test(?:s|ed|ing)?|verif(?:y|ies|ied|ying)|certif(?:y|ies|ied|ying)|accept(?:s|ed|ing)?|build(?:s|ing)?|submit(?:s|ted|ting)?|distribut(?:e|es|ed|ing)|enable(?:s|d|ing)?|target(?:s|ed|ing)?)\b(?<suffix>[^\r\n.!?。！？;；:：—–]{0,48})$/iu.exec(
+      prefix,
+    );
+  if (
+    actionMatch !== null &&
+    isNaturalTargetModifier(actionMatch.groups?.suffix ?? '')
+  ) {
+    return true;
+  }
+  return /\b(?:migration|migrat(?:e|es|ed|ing)|upgrade|upgrad(?:e|es|ed|ing)|port(?:s|ed|ing)?|transition(?:s|ed|ing)?|mov(?:e|es|ed|ing))\b[^\r\n.!?。！？;；:：—–]{0,48}\bto\b[^\r\n.!?。！？;；:：—–]{0,48}$/iu.test(
+    prefix,
+  );
+}
+
+function isNaturalTargetModifier(source) {
+  const normalized = source.trim().replace(/^to\s+/iu, '');
+  return !/\b(?:against|as|at|because|before|behavior|by|compare(?:d|s|ing)?|comparison|during|for|from|given|in|on|reference|relative|since|through|throughout|to|under|versus|via|while|with|within)\b|[,:：—–]/iu.test(
+    normalized,
+  );
+}
+
+function isSimpleTargetActionPhrase(source) {
+  return /^\s*(?:to\s+)?(?:ship(?:s|ped|ping)?|validat(?:e|es|ed|ing)|support(?:s|ed|ing)?|releas(?:e|es|ed|ing)|deliver(?:s|ed|ing)?|publish(?:es|ed|ing)?|deploy(?:s|ed|ing)?|launch(?:es|ed|ing)?|test(?:s|ed|ing)?|verif(?:y|ies|ied|ying)|certif(?:y|ies|ied|ying)|accept(?:s|ed|ing)?|build(?:s|ing)?|submit(?:s|ted|ting)?|distribut(?:e|es|ed|ing)|enable(?:s|d|ing)?|target(?:s|ed|ing)?)\s*$/iu.test(
+    source,
   );
 }
 
@@ -471,12 +552,18 @@ function assertRuleSelfTests() {
     'Teams must test on physical devices.',
     'Physical-device evidence must be attached.',
     'Physical-device verification is mandatory.',
+    'Physical-device validation is a requirement for v0.1.',
+    'Physical-device validation remains one of the requirements for v0.1.',
     'Validation on physical devices is required.',
     'Validation is required on physical devices.',
     'Physical devices are required for validation.',
     'Testing must occur on physical devices.',
     'Post-v0.1 work requires physical-device evidence, but v0.1 requires physical-device testing.',
     'Physical-device testing is not required, but physical-device evidence is required.',
+    'Physical-device testing is not required: physical-device evidence is required for v0.1.',
+    'Physical-device testing is not required — physical-device evidence is required for v0.1.',
+    'Physical-device testing is not required because physical-device evidence is required for v0.1.',
+    'Physical-device testing is optional because physical-device evidence is a requirement for v0.1.',
     'Outside v0.1, testing on physical devices is required, and v0.1 physical-device evidence is required.',
     'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required for v0.1.',
     'Post-v0.1 documentation is required, and v0.1 physical-device testing is required.',
@@ -493,6 +580,11 @@ function assertRuleSelfTests() {
     'Physical-device testing is required to ship v0.1 and compare post-v0.1 behavior.',
     'Physical-device testing is required to validate v0.1 and compare post-v0.1 behavior.',
     'Physical-device testing is required to support v0.1 and compare post-v0.1 behavior.',
+    'Physical-device testing is required to ship the stable v0.1 release and compare post-v0.1 behavior.',
+    'Physical-device testing is required to ship our production-ready stable v0.1 release.',
+    'Physical-device testing is required in the long-term-supported v0.1 release.',
+    'Physical-device testing is required for post-v0.1 migration to the stable v0.1 release.',
+    'Physical-device testing is required for post-v0.1 migration to the long-term-supported stable v0.1 release.',
     'Physical-device testing is required while offline.',
     'Physical-device testing or validation is required.',
     'Physical-device testing is not required for post-v0.1 but is required for v0.1.',
@@ -504,10 +596,10 @@ function assertRuleSelfTests() {
     '必须提供真实设备证据。',
     '在低规格支持设备和当前旗舰设备上验证。',
   ];
-  for (const example of staleExamples) {
+  for (const [index, example] of staleExamples.entries()) {
     const normalized = example.replace(/\s+/gu, ' ');
     if (!findMatchedRule(normalized)) {
-      throw new Error('V01_VIRTUAL_POLICY_SELF_TEST_MISSED_STALE');
+      throw new Error(`V01_VIRTUAL_POLICY_SELF_TEST_MISSED_STALE:${index}`);
     }
   }
 
@@ -518,6 +610,8 @@ function assertRuleSelfTests() {
     'Post-v0.1 work requires physical-device validation evidence.',
     'Outside v0.1, teams must test on physical devices.',
     'Physical-device validation is not required for v0.1.',
+    'Physical-device validation is not a requirement for v0.1.',
+    'No requirements for physical-device validation apply to v0.1.',
     'Physical-device testing must not be required for v0.1.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing not required for v0.1.',
@@ -537,6 +631,11 @@ function assertRuleSelfTests() {
     'Physical-device testing is required for post-v0.1 work to compare migration from v0.1.',
     'Physical-device testing is required for post-v0.1 work to compare against v0.1.',
     'Post-v0.1 work requires physical-device testing because v0.1 lacks this capability.',
+    'Post-v0.1 work requires physical-device testing to compare behavior in v0.1.',
+    'Post-v0.1 work requires physical-device testing to compare behavior in the stable v0.1 release.',
+    'Post-v0.1 work requires physical-device testing to observe failures during the stable v0.1 release.',
+    'Because validation failed in v0.1, post-v0.1 work requires physical-device testing.',
+    'Because validation failed in the stable v0.1 release, post-v0.1 work requires physical-device testing.',
     'Post-v0.1 work requires physical-device testing for migration from the v0.1 release.',
     'Compared with v0.1, post-v0.1 work requires physical-device testing.',
     'The v0.1 baseline is incomplete, so post-v0.1 work requires physical-device testing.',
@@ -546,9 +645,9 @@ function assertRuleSelfTests() {
     'Use named minimum/current Simulator and Emulator profiles.',
     'Virtual results make no physical-hardware compatibility claim.',
   ];
-  for (const example of allowedExamples) {
+  for (const [index, example] of allowedExamples.entries()) {
     if (findMatchedRule(example)) {
-      throw new Error('V01_VIRTUAL_POLICY_SELF_TEST_REJECTED_ALLOWED');
+      throw new Error(`V01_VIRTUAL_POLICY_SELF_TEST_REJECTED_ALLOWED:${index}`);
     }
   }
 }
