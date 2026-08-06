@@ -74,7 +74,7 @@ const activityFinitePredicate = new RegExp(
 const openInflectedActivityPredicate =
   /^(?<predicate>\p{L}{2,}(?:ed|s|ies))\b/iu;
 const irregularReducedActivityModifier = String.raw`(?:begun|built|done|given|held|made|run|seen|taken|written)`;
-const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|feed|happened|heed|need|occurred|persisted|proceeded|read|seed|speed|succeeded|waited|worked)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
+const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|failed|feed|happened|heed|need|occurred|persisted|proceeded|read|seed|speed|succeeded|waited|worked)\b)\p{L}+ed|${irregularReducedActivityModifier})`;
 const activityBoundaryOrAttachment =
   /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu;
 const outsideV01Qualifier =
@@ -741,6 +741,7 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
   const subjectRelationship = classifyRequirementSubjectAfterBoundary(
     between,
     boundary,
+    activity[0],
   );
   if (subjectRelationship === 'shared') {
     return true;
@@ -756,11 +757,20 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
   );
 }
 
-function classifyRequirementSubjectAfterBoundary(source, boundary) {
-  const afterBoundary = source
+function classifyRequirementSubjectAfterBoundary(
+  source,
+  boundary,
+  activitySource,
+) {
+  const afterBoundaryWithPredicate = source
     .slice(boundary.index + boundary[0].length)
-    .trim()
-    .replace(/\b(?:am|are|be|becomes?|is|remains?|was|were)\s*$/iu, '')
+    .trim();
+  const trailingPredicate =
+    /\b(?<predicate>am|are|be|became|becomes?|is|remains?|was|were)\s*$/iu.exec(
+      afterBoundaryWithPredicate,
+    );
+  const afterBoundary = afterBoundaryWithPredicate
+    .replace(/\b(?:am|are|be|became|becomes?|is|remains?|was|were)\s*$/iu, '')
     .trim();
   const coordinatedTail =
     /\b(?:although|and|but|or|though|whereas|while|yet)\s*(?<tail>[^,;；:：—–]*)$/iu.exec(
@@ -784,7 +794,30 @@ function classifyRequirementSubjectAfterBoundary(source, boundary) {
       return 'shared';
     }
   }
-  return classifyPossibleRequirementSubject(afterBoundary, false);
+  const classification = classifyPossibleRequirementSubject(
+    afterBoundary,
+    false,
+  );
+  if (classification !== 'unknown') {
+    return classification;
+  }
+  const predicate = trailingPredicate?.groups?.predicate ?? '';
+  if (
+    /^\p{L}+(?:[-'’]\p{L}+)*(?:\s+\p{L}+(?:[-'’]\p{L}+)*){1,3}$/iu.test(
+      afterBoundary,
+    ) &&
+    /^(?:became|becomes?)$/iu.test(predicate)
+  ) {
+    return 'new';
+  }
+  if (
+    /\btests\b/iu.test(activitySource) &&
+    /^\p{L}+(?:[-'’]\p{L}+)*$/iu.test(afterBoundary) &&
+    /^(?:is|was|becomes?)$/iu.test(predicate)
+  ) {
+    return 'new';
+  }
+  return 'unknown';
 }
 
 function classifyPossibleRequirementSubject(source, followsCoordinator) {
@@ -805,13 +838,6 @@ function classifyPossibleRequirementSubject(source, followsCoordinator) {
   if (
     /\bv0\.1\b\s+\p{L}/iu.test(normalized) ||
     /^(?:(?:a|an|another|any|each|either|every|its|my|neither|no|our|some|the|their|your)\s+|(?:these|this|those|that)\s+\p{L})/iu.test(
-      normalized,
-    )
-  ) {
-    return 'new';
-  }
-  if (
-    /^\p{L}+(?:[-'’]\p{L}+)*(?:\s+\p{L}+(?:[-'’]\p{L}+)*){1,3}$/iu.test(
       normalized,
     )
   ) {
@@ -880,6 +906,17 @@ function hasIndependentActivityPredicate(
     );
   if (prepositionalRelative !== null) {
     predicate = predicate.slice(prepositionalRelative[0].length).trim();
+  }
+
+  if (
+    preferAttachedParticiple &&
+    /\btests\b/iu.test(activitySource) &&
+    /^failed\b/iu.test(predicate)
+  ) {
+    predicate = findResumedActivityPredicate(predicate, 'failed'.length);
+    if (predicate.length === 0) {
+      return false;
+    }
   }
 
   predicate = consumeLeadingAttachedActivityModifier(
@@ -1227,6 +1264,7 @@ function assertRuleSelfTests() {
     'v0.1 requires, if available, physical-device testing results.',
     'v0.1 requires, if available, physical-device testing procedures.',
     'Physical-device testing before release is required for v0.1.',
+    'Physical-device testing before final release is required for v0.1.',
     'Physical-device testing that runs offline before release is required for v0.1.',
     'Physical-device testing that can run offline before release is required for v0.1.',
     'Physical-device testing, which runs offline, before release is required for v0.1.',
@@ -1375,6 +1413,8 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing workflows failed before release notes become mandatory in v0.1.',
     'Post-v0.1 physical-device testing workflows happened before release notes become mandatory in v0.1.',
     'Post-v0.1 physical-device testing workflows occurred before release notes become mandatory in v0.1.',
+    'Post-v0.1 physical-device testing failed before documentation is required for v0.1.',
+    'Post-v0.1 physical-device tests failed before documentation is required for v0.1.',
     'Post-v0.1 physical-device testing that runs offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing that can run offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing to run nightly proceeds before v0.1 documentation is required.',
