@@ -743,17 +743,23 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
     boundary,
     activity[0],
   );
+  const hasIndependentPredicate = hasIndependentActivityPredicate(
+    between.slice(0, boundary.index),
+    {
+      activitySource: activity[0],
+      preferAttachedParticiple: true,
+      explicitBoundarySubject: subjectRelationship === 'new',
+    },
+  );
   if (subjectRelationship === 'shared') {
     return true;
   }
   if (subjectRelationship === 'new') {
-    return false;
+    return !hasIndependentPredicate;
   }
   return !(
-    hasIndependentActivityPredicate(between.slice(0, boundary.index), {
-      activitySource: activity[0],
-      preferAttachedParticiple: true,
-    }) && isPhysicalActivityExplicitlyOutsideV01(source, activity)
+    hasIndependentPredicate &&
+    isPhysicalActivityExplicitlyOutsideV01(source, activity)
   );
 }
 
@@ -807,6 +813,12 @@ function classifyRequirementSubjectAfterBoundary(
       afterBoundary,
     ) &&
     /^(?:became|becomes?)$/iu.test(predicate)
+  ) {
+    return 'new';
+  }
+  if (
+    /(?:^|\s)\p{L}+(?:[-'’]\p{L}+)*s$/iu.test(afterBoundary) &&
+    /^(?:are|were)$/iu.test(predicate)
   ) {
     return 'new';
   }
@@ -878,7 +890,11 @@ function isPhysicalActivityExplicitlyOutsideV01(source, activity) {
 
 function hasIndependentActivityPredicate(
   source,
-  { activitySource = '', preferAttachedParticiple = false } = {},
+  {
+    activitySource = '',
+    preferAttachedParticiple = false,
+    explicitBoundarySubject = false,
+  } = {},
 ) {
   let predicate = source.trim();
 
@@ -909,7 +925,15 @@ function hasIndependentActivityPredicate(
   }
 
   if (
+    explicitBoundarySubject &&
+    new RegExp(`^${activityFinitePredicate.source}`, 'iu').test(predicate)
+  ) {
+    return true;
+  }
+
+  if (
     preferAttachedParticiple &&
+    !explicitBoundarySubject &&
     /\btests\b/iu.test(activitySource) &&
     /^failed\b/iu.test(predicate)
   ) {
@@ -947,6 +971,7 @@ function hasIndependentActivityPredicate(
       return hasIndependentActivityPredicate(remainder, {
         activitySource,
         preferAttachedParticiple: true,
+        explicitBoundarySubject,
       });
     }
     return (
@@ -1280,6 +1305,8 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing workflows scheduled to just run offline before release are required for v0.1.',
     'Post-v0.1 physical-device testing workflows scheduled to often run offline before release are required for v0.1.',
     'Post-v0.1 physical-device testing workflows scheduled to sometimes run offline before release are required for v0.1.',
+    'The physical-device testing scheduled before the final release becomes required for v0.1.',
+    'The physical-device testing workflows scheduled before the final release become required for v0.1.',
     'Post-v0.1 physical-device tests failed deliberately before release are required for v0.1.',
     'Post-v0.1 physical-device validation plans before release are required for v0.1.',
     'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
@@ -1415,6 +1442,9 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing workflows occurred before release notes become mandatory in v0.1.',
     'Post-v0.1 physical-device testing failed before documentation is required for v0.1.',
     'Post-v0.1 physical-device tests failed before documentation is required for v0.1.',
+    'Post-v0.1 physical-device tests failed before release notes are required for v0.1.',
+    'Post-v0.1 physical-device tests failed before builds are required for v0.1.',
+    'Post-v0.1 physical-device tests failed before the release becomes required for v0.1.',
     'Post-v0.1 physical-device testing that runs offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing that can run offline proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing to run nightly proceeds before v0.1 documentation is required.',
