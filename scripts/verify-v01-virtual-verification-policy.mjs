@@ -359,13 +359,71 @@ function hasAffirmativeV01Scope(source) {
     const prefix = source.slice(0, match.index);
     if (
       isOutsideV01QualifierOccurrence(prefix) ||
-      /\bfrom\s*$/iu.test(prefix)
+      isIncidentalV01Reference(prefix)
     ) {
       continue;
     }
-    return true;
+    if (match.index < requirementMatch.index) {
+      const beforeRequirement = source.slice(
+        match.index + match[0].length,
+        requirementMatch.index,
+      );
+      if (
+        hasTargetV01ScopePrefix(prefix) ||
+        hasPhysicalDeviceActivity(beforeRequirement) ||
+        !isContextualV01Subject(beforeRequirement)
+      ) {
+        return true;
+      }
+      continue;
+    }
+    const afterRequirement = source.slice(
+      requirementMatch.index + requirementMatch[0].length,
+      match.index,
+    );
+    if (
+      hasTargetV01ScopePrefix(prefix) ||
+      hasTargetV01VerbPrefix(prefix) ||
+      /^\s*(?:(?:the|a|our|version|release|target)\s+){0,3}$/iu.test(
+        afterRequirement,
+      )
+    ) {
+      return true;
+    }
   }
   return false;
+}
+
+function isIncidentalV01Reference(prefix) {
+  return (
+    /\bfrom\b(?:(?!\bto\b)[^\r\n.!?。！？;；]){0,48}$/iu.test(prefix) ||
+    /\b(?:(?:compare(?:d|s|ing)?|comparison)\s+(?:against|with|to)|against|versus|vs\.?|unlike|relative to|based on|because|since|given that|reference(?:d|s|ing)?(?:\s+(?:against|to))?)\s+(?:the\s+)?$/iu.test(
+      prefix,
+    )
+  );
+}
+
+function isContextualV01Subject(suffix) {
+  return /^\s*(?:(?:baseline|context|comparison|reference|source|lacks?|does(?:n['’]t| not)|cannot|can['’]t)\b|(?:is|was|remains?|serves?|served)\s+(?:the\s+)?(?:baseline|context|comparison|reference|source)\b)/iu.test(
+    suffix,
+  );
+}
+
+function hasTargetV01ScopePrefix(prefix) {
+  return /\b(?:for|in|on|at|during|within|under|throughout|by|across|before|through|as part of)\s+(?:(?:all|the|a|our|version|release|target)\s+){0,3}$/iu.test(
+    prefix,
+  );
+}
+
+function hasTargetV01VerbPrefix(prefix) {
+  return (
+    /\b(?:ship(?:s|ped|ping)?|validat(?:e|es|ed|ing)|support(?:s|ed|ing)?|releas(?:e|es|ed|ing)|deliver(?:s|ed|ing)?|publish(?:es|ed|ing)?|deploy(?:s|ed|ing)?|launch(?:es|ed|ing)?|test(?:s|ed|ing)?|verif(?:y|ies|ied|ying)|certif(?:y|ies|ied|ying)|accept(?:s|ed|ing)?|build(?:s|ing)?|submit(?:s|ted|ting)?|distribut(?:e|es|ed|ing)|enable(?:s|d|ing)?|migrat(?:e|es|ed|ing)|upgrad(?:e|es|ed|ing)|port(?:s|ed|ing)?|transition(?:s|ed|ing)?|mov(?:e|es|ed|ing)|target(?:s|ed|ing)?)\s+(?:to\s+)?(?:(?:all|the|a|our|version|release|target)\s+){0,3}$/iu.test(
+      prefix,
+    ) ||
+    /\b(?:migrat(?:e|es|ed|ing)|upgrad(?:e|es|ed|ing)|port(?:s|ed|ing)?|transition(?:s|ed|ing)?|mov(?:e|es|ed|ing))\b[^\r\n.!?。！？;；]{0,40}\bto\s+(?:(?:all|the|a|our|version|release|target)\s+){0,3}$/iu.test(
+      prefix,
+    )
+  );
 }
 
 function isOutsideV01QualifierOccurrence(prefix) {
@@ -477,6 +535,11 @@ function assertRuleSelfTests() {
     'Post-v0.1, documentation is allowed while physical-device testing is required.',
     'Post-v0.1, physical-device testing or validation is required.',
     'Physical-device testing is required for post-v0.1 work to compare migration from v0.1.',
+    'Physical-device testing is required for post-v0.1 work to compare against v0.1.',
+    'Post-v0.1 work requires physical-device testing because v0.1 lacks this capability.',
+    'Post-v0.1 work requires physical-device testing for migration from the v0.1 release.',
+    'Compared with v0.1, post-v0.1 work requires physical-device testing.',
+    'The v0.1 baseline is incomplete, so post-v0.1 work requires physical-device testing.',
     'No physical-device evidence is required for v0.1.',
     'No validation on physical devices is required for v0.1.',
     'v0.1 does not require physical-device testing.',
