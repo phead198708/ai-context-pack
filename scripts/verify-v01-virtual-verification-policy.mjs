@@ -16,10 +16,11 @@ const policyPaths = [
   'docs/wiki/Product-Spec.md',
   'docs/wiki/Roadmap.md',
 ];
-const requirementClauseGap = String.raw`[^\r\n.!?。！？;；]{0,80}`;
+const requirementClauseGap = String.raw`[^\r\n!?。！？;；]{0,80}`;
 const physicalDeviceTerm = String.raw`\bphysical[- ]devices?\b`;
 const verificationActivityTerm = String.raw`\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b`;
 const requirementTerm = String.raw`\b(?:requires?|required|must|shall|mandatory)\b`;
+const allowancePredicateTerm = String.raw`\b(?:(?:is|are|was|were|be|remain(?:s|ed)?)\s+(?:allowed|permitted|optional)|may|can|allows?|permits?)\b`;
 const physicalDeviceActivity = String.raw`(?:${physicalDeviceTerm}${requirementClauseGap}${verificationActivityTerm}|${verificationActivityTerm}${requirementClauseGap}${physicalDeviceTerm})`;
 const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
   String.raw`\bno\b${requirementClauseGap}${physicalDeviceActivity}`,
@@ -47,9 +48,14 @@ const contractedNegatedRequirement = new RegExp(
   'i',
 );
 const independentRequirement = new RegExp(requirementTerm, 'i');
+const independentAllowance = new RegExp(allowancePredicateTerm, 'i');
+const independentPolicyPredicate = new RegExp(
+  `(?:${requirementTerm}|${allowancePredicateTerm})`,
+  'i',
+);
+const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
 const outsideV01Qualifier =
   /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
-const anyV01Qualifier = /\bv0\.1\b/iu;
 const staleRequirementRules = [
   {
     id: 'low-end-device-tier',
@@ -263,28 +269,34 @@ function findMatchedRule(source) {
 
 function splitRequirementClauses(source) {
   return source
-    .split(/\.(?=\s|$)|[!?。！？;；]|\b(?:but|however)\b/iu)
+    .split(/\.(?=\s|$)|[!?。！？]/u)
     .map(clause => clause.trim())
     .filter(Boolean)
     .flatMap(splitCoordinatedRequirements);
 }
 
 function splitCoordinatedRequirements(clause) {
-  const separators = clause.matchAll(/(?:,\s+(?:and\s+)?|\s+and\s+)/giu);
+  const separators = clause.matchAll(
+    /(?:[;；]\s*|,\s+(?:(?:and|but|however)\s+)?|\s+(?:and|but|however)\s+)/giu,
+  );
   for (const separator of separators) {
     const separatorIndex = separator.index;
     const left = clause.slice(0, separatorIndex).trim();
     const right = clause.slice(separatorIndex + separator[0].length).trim();
-    if (
-      hasIndependentRequirement(left) &&
-      hasIndependentRequirement(right) &&
-      (hasPhysicalDeviceRequirement(left) ||
-        hasPhysicalDeviceRequirement(right))
-    ) {
+    const boundRight = inheritPhysicalDeviceActivity(left, right);
+    const isHardBoundary = /[;；]|\b(?:but|however)\b/iu.test(separator[0]);
+    const hasCoordinatedPolicies =
+      hasIndependentPolicyStatement(left) &&
+      hasIndependentPolicyStatement(boundRight) &&
+      (hasPhysicalDeviceActivity(left) ||
+        hasPhysicalDeviceActivity(boundRight));
+    if (isHardBoundary || hasCoordinatedPolicies) {
       const scopedRight =
-        hasLeadingOutsideV01Qualifier(left) && !anyV01Qualifier.test(right)
-          ? `post-v0.1 ${right}`
-          : right;
+        !isHardBoundary &&
+        hasLeadingOutsideV01Qualifier(left) &&
+        !hasExplicitV01Scope(boundRight)
+          ? `post-v0.1 ${boundRight}`
+          : boundRight;
       return [
         ...splitCoordinatedRequirements(left),
         ...splitCoordinatedRequirements(scopedRight),
@@ -294,28 +306,80 @@ function splitCoordinatedRequirements(clause) {
   return [clause];
 }
 
-function hasPhysicalDeviceRequirement(source) {
-  return staleRequirementRules.some(
-    rule => rule.allowsExplicitScopeOrNegation && rule.pattern.test(source),
-  );
+function hasPhysicalDeviceActivity(source) {
+  return physicalDeviceActivityMatcher.test(source);
+}
+
+function inheritPhysicalDeviceActivity(left, right) {
+  if (
+    !/^(?:(?:is|are|was|were|remain(?:s|ed)?)\b|(?:must|shall|may|can)\b|(?:required|mandatory)\b(?=\s*(?:(?:for|in|on|at|during|within|under|throughout|by|across|as part of)\b|$)))/iu.test(
+      right,
+    )
+  ) {
+    return right;
+  }
+  const activityMatch = physicalDeviceActivityMatcher.exec(left);
+  return activityMatch === null ? right : `${activityMatch[0]} ${right}`;
 }
 
 function hasIndependentRequirement(source) {
   return independentRequirement.test(source);
 }
 
+function hasIndependentPolicyStatement(source) {
+  return hasIndependentRequirement(source) || independentAllowance.test(source);
+}
+
 function hasLeadingOutsideV01Qualifier(source) {
   const outsideMatch = outsideV01Qualifier.exec(source);
-  const requirementMatch = independentRequirement.exec(source);
+  const predicateMatch = independentPolicyPredicate.exec(source);
   return (
     outsideMatch !== null &&
-    requirementMatch !== null &&
-    outsideMatch.index < requirementMatch.index
+    predicateMatch !== null &&
+    outsideMatch.index < predicateMatch.index
   );
 }
 
+function hasExplicitV01Scope(source) {
+  if (outsideV01Qualifier.test(source)) {
+    return true;
+  }
+  return hasAffirmativeV01Scope(source);
+}
+
+function hasAffirmativeV01Scope(source) {
+  const requirementMatch = independentRequirement.exec(source);
+  if (requirementMatch === null) {
+    return false;
+  }
+  for (const match of source.matchAll(/\bv0\.1\b/giu)) {
+    const prefix = source.slice(0, match.index);
+    if (isOutsideV01QualifierOccurrence(prefix)) {
+      continue;
+    }
+    if (match.index < requirementMatch.index) {
+      if (!/\bfrom\s*$/iu.test(prefix)) {
+        return true;
+      }
+      continue;
+    }
+    if (
+      /\b(?:for|in|on|at|during|within|under|throughout|by|across|as part of)\s+(?:(?:all|the|version)\s+)?$/iu.test(
+        prefix,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isOutsideV01QualifierOccurrence(prefix) {
+  return /\b(?:post[- ]|outside (?:of )?(?:the )?)$/iu.test(prefix);
+}
+
 function isExplicitlyOutsideV01(clause) {
-  return outsideV01Qualifier.test(clause);
+  return outsideV01Qualifier.test(clause) && !hasAffirmativeV01Scope(clause);
 }
 
 function isExplicitlyNegatedRequirement(clause) {
@@ -364,8 +428,16 @@ function assertRuleSelfTests() {
     'Outside v0.1, testing on physical devices is required, and v0.1 physical-device evidence is required.',
     'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required for v0.1.',
     'Post-v0.1 documentation is required, and v0.1 physical-device testing is required.',
+    'Post-v0.1 documentation is required, and physical-device testing for v0.1 migration is required.',
+    'Physical-device testing is required for v0.1 to compare post-v0.1 behavior.',
     'Physical-device testing must not fail and is required.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
+    'Physical-device testing is allowed outside v0.1 and physical-device evidence is required.',
+    'Documentation is allowed outside v0.1 and physical-device evidence is required.',
+    'Physical-device testing may occur outside v0.1 and physical-device evidence is required.',
+    'Physical-device testing is not required for post-v0.1 but is required for v0.1.',
+    'Physical-device testing is allowed outside v0.1; is required for v0.1.',
+    'Post-v0.1 notes apply; physical-device testing is required.',
     'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required.',
     'Requires physical-device\nvalidation evidence.',
     'Physical-device validation is\nrequired.',
@@ -396,6 +468,11 @@ function assertRuleSelfTests() {
     'Post-v0.1 documentation is required, and post-v0.1 physical-device testing is required.',
     'Post-v0.1, documentation is required, and physical-device testing is required.',
     'Outside v0.1, documentation is required, and physical-device testing is required.',
+    'Post-v0.1, documentation is required, and physical-device testing is required to validate migration from v0.1.',
+    'Post-v0.1, documentation is allowed, and physical-device testing is required.',
+    'Post-v0.1, physical-device testing is allowed, and physical-device evidence is required.',
+    'Post-v0.1, physical-device testing is allowed, and is required.',
+    'Physical-device testing is required for post-v0.1 work to compare migration from v0.1.',
     'No physical-device evidence is required for v0.1.',
     'No validation on physical devices is required for v0.1.',
     'v0.1 does not require physical-device testing.',
