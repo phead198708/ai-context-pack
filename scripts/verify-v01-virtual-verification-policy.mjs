@@ -56,6 +56,11 @@ const independentPolicyPredicate = new RegExp(
 const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
 const outsideV01Qualifier =
   /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
+const policyCoordinatorTerm = String.raw`(?:as well as|even though|nevertheless|nonetheless|however|whereas|although|while|though|but|yet|and|or|plus)`;
+const coordinatedPolicyBoundary = new RegExp(
+  `(?:[;；]\\s*|,\\s+(?:${policyCoordinatorTerm}\\s+)?|\\s+${policyCoordinatorTerm}\\s+)`,
+  'giu',
+);
 const staleRequirementRules = [
   {
     id: 'low-end-device-tier',
@@ -276,9 +281,7 @@ function splitRequirementClauses(source) {
 }
 
 function splitCoordinatedRequirements(clause) {
-  const separators = clause.matchAll(
-    /(?:[;；]\s*|,\s+(?:(?:and|but|however)\s+)?|\s+(?:and|but|however)\s+)/giu,
-  );
+  const separators = clause.matchAll(coordinatedPolicyBoundary);
   for (const separator of separators) {
     const separatorIndex = separator.index;
     const left = clause.slice(0, separatorIndex).trim();
@@ -354,22 +357,13 @@ function hasAffirmativeV01Scope(source) {
   }
   for (const match of source.matchAll(/\bv0\.1\b/giu)) {
     const prefix = source.slice(0, match.index);
-    if (isOutsideV01QualifierOccurrence(prefix)) {
-      continue;
-    }
-    if (match.index < requirementMatch.index) {
-      if (!/\bfrom\s*$/iu.test(prefix)) {
-        return true;
-      }
-      continue;
-    }
     if (
-      /\b(?:for|in|on|at|during|within|under|throughout|by|across|as part of)\s+(?:(?:all|the|version)\s+)?$/iu.test(
-        prefix,
-      )
+      isOutsideV01QualifierOccurrence(prefix) ||
+      /\bfrom\s*$/iu.test(prefix)
     ) {
-      return true;
+      continue;
     }
+    return true;
   }
   return false;
 }
@@ -435,6 +429,14 @@ function assertRuleSelfTests() {
     'Physical-device testing is allowed outside v0.1 and physical-device evidence is required.',
     'Documentation is allowed outside v0.1 and physical-device evidence is required.',
     'Physical-device testing may occur outside v0.1 and physical-device evidence is required.',
+    'Physical-device testing is allowed outside v0.1 while physical-device evidence is required.',
+    'Physical-device testing is allowed outside v0.1 whereas physical-device evidence is required.',
+    'Physical-device testing is allowed outside v0.1 yet physical-device evidence is required.',
+    'Physical-device testing is required to ship v0.1 and compare post-v0.1 behavior.',
+    'Physical-device testing is required to validate v0.1 and compare post-v0.1 behavior.',
+    'Physical-device testing is required to support v0.1 and compare post-v0.1 behavior.',
+    'Physical-device testing is required while offline.',
+    'Physical-device testing or validation is required.',
     'Physical-device testing is not required for post-v0.1 but is required for v0.1.',
     'Physical-device testing is allowed outside v0.1; is required for v0.1.',
     'Post-v0.1 notes apply; physical-device testing is required.',
@@ -472,6 +474,8 @@ function assertRuleSelfTests() {
     'Post-v0.1, documentation is allowed, and physical-device testing is required.',
     'Post-v0.1, physical-device testing is allowed, and physical-device evidence is required.',
     'Post-v0.1, physical-device testing is allowed, and is required.',
+    'Post-v0.1, documentation is allowed while physical-device testing is required.',
+    'Post-v0.1, physical-device testing or validation is required.',
     'Physical-device testing is required for post-v0.1 work to compare migration from v0.1.',
     'No physical-device evidence is required for v0.1.',
     'No validation on physical devices is required for v0.1.',
