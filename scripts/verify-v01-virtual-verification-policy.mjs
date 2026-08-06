@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createReadStream, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -8,10 +9,49 @@ import createPosTagger from 'wink-pos-tagger';
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const policyPosTagger = createPosTagger();
-const [wordNetAdverbs, wordNetPersonOrGroupNouns] = await Promise.all([
-  loadWordNetWords('data.adv', 'r', undefined, 'adverbs'),
-  loadWordNetWords('data.noun', 'n', new Set([14, 18]), 'person/group nouns'),
+const wordNetFileDigests = new Map([
+  [
+    'data.adj',
+    'ca1033bf627eb95f6cbb2864f8990be8e6a01a3c182e7d7c7094ccf8ead242cc',
+  ],
+  [
+    'data.adv',
+    'aea301f39ac1b24be9a880dbc6cc6331bc5391f58c7525a1b298a13c922f2ed3',
+  ],
+  [
+    'data.noun',
+    '2cad22fe43461ee7ae61a564ae6a518c57445c8597e53542caddb5c26a6a5d94',
+  ],
 ]);
+const [wordNetAdverbData, wordNetAdjectiveData, wordNetNounData] =
+  await Promise.all([
+    loadWordNetWords(
+      'data.adv',
+      new Set(['r']),
+      undefined,
+      undefined,
+      'adverbs',
+    ),
+    loadWordNetWords(
+      'data.adj',
+      new Set(['a', 's']),
+      undefined,
+      undefined,
+      'adjectives',
+    ),
+    loadWordNetWords(
+      'data.noun',
+      new Set(['n']),
+      new Set([14, 18]),
+      new Set([4, 6, 10, 11, 22, 28]),
+      'person/group nouns',
+    ),
+  ]);
+const wordNetAdverbs = wordNetAdverbData.categoryWords;
+const wordNetAdjectives = wordNetAdjectiveData.allWords;
+const wordNetNouns = wordNetNounData.allWords;
+const wordNetPersonOrGroupNouns = wordNetNounData.categoryWords;
+const wordNetTemporalOrArtifactNouns = wordNetNounData.excludedWords;
 const policyPaths = [
   '.github/labels.yml',
   '.github/pull_request_template.md',
@@ -60,7 +100,7 @@ const auxiliaryNegatedRequirement = new RegExp(
   String.raw`\b(?:does?|do|is|are|was|were|has|have|had)\s+(?:not|never)\b${negatedClauseGap}${policyRequirementTerm}`,
   'i',
 );
-const possessiveNounWord = String.raw`\p{L}+(?:[-'’]\p{L}+)*`;
+const possessiveNounWord = String.raw`\p{L}[\p{L}\p{M}]*(?:[-'’]\p{L}[\p{L}\p{M}]*)*`;
 const possessiveNounPhrase = String.raw`(?:(?:a|an|the)\s+)?(?:${possessiveNounWord}\s+){0,3}${possessiveNounWord}(?:['’]s|s['’])`;
 const physicalActivityObjectDeterminer = String.raw`(?:(?:(?:all|any|each|either|every|her|his|its|my|our|some|that|the|their|these|this|those|your)|${possessiveNounPhrase})\s+)?`;
 const auxiliaryNegatedPhysicalActivityObjectRequirement = new RegExp(
@@ -107,7 +147,7 @@ const reducedActivityModifier = String.raw`(?:(?!(?:bleed|breed|failed|feed|happ
 const passiveActivityModifier = String.raw`(?:(?:offline|online|\p{L}+ly)\s+){0,3}`;
 const passiveTemporalAgentLead = String.raw`deadline|end|evening|final|launch|milestone|morning|night|noon|release|schedule|time|today|tomorrow|week|weekend|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|last|next|this`;
 const passiveAgentPhraseBoundary = String.raw`after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within`;
-const passiveMetonymicDepartmentHead = String.raw`assurance|engineering|operations|qa`;
+const passiveMetonymicOrganizationHead = String.raw`assurance|board|engineering|leadership|office|operations|qa`;
 const activityBoundaryOrAttachment =
   /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|though|under|unless|until|when(?:ever)?|whereas|while|with|without|within)\b/iu;
 const outsideV01Qualifier =
@@ -456,6 +496,12 @@ function splitRequirementClauses(source) {
 
 function splitCoordinatedRequirements(clause) {
   clause = normalizeBalancedDashActivityModifiers(clause);
+  // A second negative-polarity predicate can restore a requirement through
+  // the same physical-activity subject. Keep that bounded restatement intact
+  // so the no-longer exemption sees both predicates before clause splitting.
+  if (hasSharedNoLongerNotOptionalRestatement(clause)) {
+    return [clause];
+  }
   const separators = clause.matchAll(coordinatedPolicyBoundary);
   for (const separator of separators) {
     const separatorIndex = separator.index;
@@ -585,8 +631,9 @@ function isSharedPolicyPredicate(
   return modifierWords.every(
     (word, index) =>
       taggedWords[index]?.normal === word &&
-      taggedWords[index]?.pos.startsWith('RB') &&
-      wordNetAdverbs.has(word),
+      wordNetAdverbs.has(word) &&
+      (taggedWords[index]?.pos.startsWith('RB') ||
+        (!wordNetNouns.has(word) && !wordNetAdjectives.has(word))),
   );
 }
 
@@ -1253,27 +1300,28 @@ function matchLeadingPassiveActivityAgent(source) {
   const normalizedAgentTokens = agentTokens.map(token =>
     token.toLocaleLowerCase('en-US'),
   );
-  const hasSemanticRoleHead = normalizedAgentTokens.some(
-    (token, index) =>
-      index > 0 &&
-      !(token === 'candidate' && index === normalizedAgentTokens.length - 1) &&
-      isWordNetPersonOrGroup(token),
-  );
-  const hasMetonymicDepartmentHead = normalizedAgentTokens.some(
-    (token, index) =>
-      index > 0 &&
-      new RegExp(
-        String.raw`^(?:${passiveMetonymicDepartmentHead})$`,
-        'iu',
-      ).test(token),
-  );
-  if (!hasSemanticRoleHead && !hasMetonymicDepartmentHead) {
+  const normalizedHead = normalizedAgentTokens.at(-1);
+  const hasSemanticRoleHead =
+    normalizedAgentTokens.length > 1 &&
+    normalizedHead !== undefined &&
+    normalizedHead !== 'candidate' &&
+    isWordNetPersonOrGroup(normalizedHead) &&
+    !isWordNetTemporalOrArtifact(normalizedHead);
+  const hasMetonymicOrganizationHead =
+    normalizedAgentTokens.length > 1 &&
+    normalizedHead !== undefined &&
+    new RegExp(
+      String.raw`^(?:${passiveMetonymicOrganizationHead})$`,
+      'iu',
+    ).test(normalizedHead);
+  if (!hasSemanticRoleHead && !hasMetonymicOrganizationHead) {
     return undefined;
   }
-  // WordNet person/group senses keep role heads open without treating event,
-  // act, process, artifact, or time nouns as agents. A tiny domain exception
-  // covers metonymic department names whose dictionary senses describe their
-  // discipline or work rather than the team performing it.
+  // Only the phrase head is decisive. A person/group sense remains open to
+  // new role names, while competing act, event, artifact, communication,
+  // process, or time senses keep milestone names temporal. A tiny domain
+  // exception covers organization heads whose dictionary ambiguity describes
+  // both the team and its work or physical object.
   return { length: agentEnds.at(-1) };
 }
 
@@ -1283,46 +1331,72 @@ function isWordNetPersonOrGroup(token) {
   );
 }
 
+function isWordNetTemporalOrArtifact(token) {
+  return Array.from(wordNetLemmaCandidates(token)).some(lemma =>
+    wordNetTemporalOrArtifactNouns.has(lemma),
+  );
+}
+
 async function loadWordNetWords(
   fileName,
-  expectedPartOfSpeech,
+  expectedPartsOfSpeech,
   expectedLexFiles,
+  excludedLexFiles,
   description,
 ) {
   const wordNetDirectory = join(dirname(require.resolve('wordnet-db')), 'dict');
+  const input = createReadStream(join(wordNetDirectory, fileName), {
+    encoding: 'utf8',
+  });
+  const digest = createHash('sha256');
+  input.on('data', chunk => digest.update(chunk));
   const lines = createInterface({
-    input: createReadStream(join(wordNetDirectory, fileName), {
-      encoding: 'utf8',
-    }),
+    input,
     crlfDelay: Infinity,
   });
-  const wordsInCategory = new Set();
-  for await (const line of lines) {
-    const fields = line.slice(0, line.indexOf(' | ')).trim().split(/\s+/u);
-    if (fields.length < 4 || !/^\d{8}$/u.test(fields[0] ?? '')) {
-      continue;
-    }
-    const lexFile = Number(fields[1]);
-    const partOfSpeech = fields[2];
-    const wordCount = Number.parseInt(fields[3] ?? '', 16);
-    if (
-      partOfSpeech !== expectedPartOfSpeech ||
-      !Number.isSafeInteger(wordCount) ||
-      (expectedLexFiles !== undefined && !expectedLexFiles.has(lexFile))
-    ) {
-      continue;
-    }
-    for (let index = 0; index < wordCount; index += 1) {
-      const word = fields[4 + index * 2];
-      if (word !== undefined) {
-        wordsInCategory.add(word.toLocaleLowerCase('en-US'));
+  const allWords = new Set();
+  const categoryWords = new Set();
+  const excludedWords = new Set();
+  try {
+    for await (const line of lines) {
+      const fields = line.slice(0, line.indexOf(' | ')).trim().split(/\s+/u);
+      if (fields.length < 4 || !/^\d{8}$/u.test(fields[0] ?? '')) {
+        continue;
+      }
+      const lexFile = Number(fields[1]);
+      const partOfSpeech = fields[2];
+      const wordCount = Number.parseInt(fields[3] ?? '', 16);
+      if (
+        !expectedPartsOfSpeech.has(partOfSpeech) ||
+        !Number.isSafeInteger(wordCount)
+      ) {
+        continue;
+      }
+      for (let index = 0; index < wordCount; index += 1) {
+        const word = fields[4 + index * 2];
+        if (word !== undefined) {
+          const normalizedWord = word.toLocaleLowerCase('en-US');
+          allWords.add(normalizedWord);
+          if (expectedLexFiles === undefined || expectedLexFiles.has(lexFile)) {
+            categoryWords.add(normalizedWord);
+          }
+          if (excludedLexFiles?.has(lexFile)) {
+            excludedWords.add(normalizedWord);
+          }
+        }
       }
     }
+  } catch {
+    throw new Error(`V01_VIRTUAL_POLICY_WORDNET_INTEGRITY_INVALID:${fileName}`);
   }
-  if (wordsInCategory.size === 0) {
+  const expectedDigest = wordNetFileDigests.get(fileName);
+  if (expectedDigest === undefined || digest.digest('hex') !== expectedDigest) {
+    throw new Error(`V01_VIRTUAL_POLICY_WORDNET_INTEGRITY_INVALID:${fileName}`);
+  }
+  if (allWords.size === 0 || categoryWords.size === 0) {
     throw new Error(`The pinned WordNet data contains no ${description}.`);
   }
-  return wordsInCategory;
+  return { allWords, categoryWords, excludedWords };
 }
 
 function wordNetLemmaCandidates(token) {
@@ -1543,22 +1617,14 @@ function isExplicitlyNegatedRequirement(clause, matchedRule) {
 }
 
 function hasAdditionalNegationAroundNoLonger(clause, requirement) {
+  if (hasSharedNoLongerNotOptionalRestatement(clause)) {
+    return true;
+  }
   const requirementEnd = requirement.index + requirement[0].length;
   const relevantClause = clause.slice(
     Math.max(0, requirement.index - 120),
     requirementEnd,
   );
-  const trailingSharedRestatement = clause.slice(
-    requirementEnd,
-    requirementEnd + 120,
-  );
-  if (
-    /^\s*,?\s*(?:(?:and|but|yet)\s+)?(?:(?:it|that|this)\s+)?(?:(?:is|are|remain(?:s|ed)?)\s+)?(?:not|never)\s+optional\b/iu.test(
-      trailingSharedRestatement,
-    )
-  ) {
-    return true;
-  }
   const additionalNegation = new RegExp(
     String.raw`\b(?:${negatingCopulaModifierTerm})\b|n['’]t\b`,
     'iu',
@@ -1576,6 +1642,23 @@ function hasAdditionalNegationAroundNoLonger(clause, requirement) {
       return additionalNegation.test(before) || additionalNegation.test(after);
     },
   );
+}
+
+function hasSharedNoLongerNotOptionalRestatement(clause) {
+  const sharedNotOptionalRestatement =
+    /^\s*(?:[,;；:：—–]\s*)?(?:(?:although|and|but|though|whereas|while|yet)\s+)?(?:(?:it|that|this)\s+)?(?:(?:is|are|remain(?:s|ed)?)\s+)?(?:not|never)\s+optional\b/iu;
+  return Array.from(
+    clause.matchAll(
+      new RegExp(noLongerRequirement.source, `${noLongerRequirement.flags}g`),
+    ),
+  ).some(noLonger => {
+    if (noLonger.index === undefined) {
+      return false;
+    }
+    return sharedNotOptionalRestatement.test(
+      clause.slice(noLonger.index + noLonger[0].length, noLonger.index + 160),
+    );
+  });
 }
 
 function parseIssuePayload(source) {
@@ -1660,6 +1743,7 @@ function assertRuleSelfTests() {
     'Physical-device testing need not occur, but simply remains mandatory for v0.1.',
     'Physical-device testing need not occur, but deliberately remains mandatory for v0.1.',
     'Physical-device testing need not occur, but rapidly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but briefly remains mandatory for v0.1.',
     'Physical-device testing need not occur, but suddenly will become mandatory for v0.1.',
     'Physical-device testing will not no longer be mandatory for v0.1.',
     'Physical-device testing will never no longer be mandatory for v0.1.',
@@ -1670,6 +1754,11 @@ function assertRuleSelfTests() {
     'Physical-device testing is no longer required, not optional, for v0.1.',
     'Physical-device testing is no longer required and is not optional for v0.1.',
     'Physical-device testing is no longer required, never optional, for v0.1.',
+    'Physical-device testing is no longer required, but is not optional for v0.1.',
+    'Physical-device testing is no longer required; it is not optional for v0.1.',
+    'Physical-device testing is no longer required while it is not optional for v0.1.',
+    'Physical-device testing is no longer required although this is not optional for v0.1.',
+    'Physical-device testing is no longer required — that is not optional for v0.1.',
     'Physical-device testing generally is required for v0.1.',
     'Physical-device testing unexpectedly remains mandatory for v0.1.',
     'Physical-device testing need not occur although it is required for v0.1.',
@@ -1732,6 +1821,8 @@ function assertRuleSelfTests() {
     'The physical-device testing completed by Release Leadership before shipment is required for v0.1.',
     'The physical-device testing completed by Release Office before shipment is required for v0.1.',
     'The physical-device testing completed by Release Council before shipment is required for v0.1.',
+    'The physical-device testing completed by Release Review Board before shipment is required for v0.1.',
+    "v0.1 treats Jose\u0301's physical-device testing as required.",
     'Post-v0.1 physical-device tests failed deliberately before release are required for v0.1.',
     'Post-v0.1 physical-device tests failed before release and will be mandatory for v0.1.',
     'Post-v0.1 physical-device tests failed before release and will soon be mandatory for v0.1.',
@@ -1829,6 +1920,7 @@ function assertRuleSelfTests() {
     'v0.1 does not classify our physical-device tests as mandatory.',
     "v0.1 does not count the team's physical-device tests as requirements.",
     "v0.1 does not treat Alice's physical-device testing as required.",
+    "v0.1 does not treat Jose\u0301's physical-device testing as required.",
     "v0.1 does not classify the release team's physical-device tests as mandatory.",
     "v0.1 does not count teams' physical-device tests as requirements.",
     'Physical-device testing is not mandated for v0.1.',
@@ -1874,10 +1966,22 @@ function assertRuleSelfTests() {
     'Physical-device testing need not occur, but monopoly remains mandatory for v0.1.',
     'Physical-device testing need not occur, but butterfly remains mandatory for v0.1.',
     'Physical-device testing need not occur, but nightly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but daily remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but weekly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but monthly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but quarterly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but yearly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but friendly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but costly remains mandatory for v0.1.',
+    'Physical-device testing need not occur, but worldly remains mandatory for v0.1.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing will no longer be mandatory for v0.1.',
     'Physical-device testing is no longer required for v0.1, and documentation is not optional.',
     'Physical-device testing is no longer required, but documentation is not optional for v0.1.',
+    'Physical-device testing is no longer required; documentation is not optional for v0.1.',
+    'Physical-device testing is no longer required while documentation is not optional for v0.1.',
+    'Physical-device testing is no longer required although documentation is not optional for v0.1.',
+    'Physical-device testing is no longer required — documentation is not optional for v0.1.',
     'Physical-device testing is no longer required and is not permitted for v0.1.',
     'Physical-device testing need not occur, but will no longer be mandatory for v0.1.',
     'Physical-device testing will soon no longer be mandatory for v0.1.',
@@ -1976,6 +2080,11 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device testing completed by Final Shipment before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing completed by Release Event before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing completed by Next Increment before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed by Release Party before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed by Next Meeting before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed by Final Assembly before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed by Release Conference before v0.1 documentation is required.',
+    'Post-v0.1 physical-device testing completed by Next Convention before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing proceeded before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing launched before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing proceeds, and v0.1 documentation is required.',
