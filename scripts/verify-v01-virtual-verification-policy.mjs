@@ -30,9 +30,9 @@ const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
 );
 const negatedClauseGap = String.raw`(?:(?!\band\b|${policyRequirementTerm})[^\r\n.!?。！？;；]){0,80}`;
 const boundedModalModifier = String.raw`(?:(?:actually|again|always|automatically|ever|explicitly|independently|necessarily|normally|ordinarily|otherwise|still)\s+){0,3}`;
-const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:required|mandatory|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
+const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:happen|occur|take\s+place)|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:required|mandatory|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
 const modalNegatedRequirement = new RegExp(
-  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\s+${boundedModalModifier}${modalNegatedComplement}`,
+  String.raw`\b(?:must|shall|should|will|would|can|could|need)\s+(?:not|never)\s+${boundedModalModifier}${modalNegatedComplement}`,
   'i',
 );
 const auxiliaryNegatedRequirement = new RegExp(
@@ -931,6 +931,21 @@ function hasIndependentActivityPredicate(
     predicate = predicate.slice(prepositionalRelative[0].length).trim();
   }
 
+  // A reduced passive followed by its own modifier remains attached even
+  // without delimiting commas. A bare participle can still be finite (for
+  // example, `testing completed before documentation is required`), so only
+  // consume it here when material follows the participle before the boundary.
+  if (
+    preferAttachedParticiple &&
+    explicitBoundarySubject &&
+    new RegExp(`^${reducedActivityModifier}\\b\\s+\\S`, 'iu').test(predicate)
+  ) {
+    predicate = consumeLeadingAttachedActivityModifier(predicate, true);
+    if (predicate.length === 0) {
+      return false;
+    }
+  }
+
   if (
     explicitBoundarySubject &&
     !hasLeadingComma &&
@@ -1292,6 +1307,8 @@ function assertRuleSelfTests() {
     'Physical-device testing must not fail and is required.',
     'Physical-device testing must not fail.',
     'Physical-device testing must not fail even if documentation is required.',
+    'Physical-device testing need not fail and is required for v0.1.',
+    'Physical-device testing need not occur and is required for v0.1.',
     "Physical-device testing mustn't fail even if documentation is required.",
     'Physical-device testing mustn’t fail even if documentation is required.',
     "Physical-device testing mustn't ever fail even if documentation is required.",
@@ -1326,6 +1343,8 @@ function assertRuleSelfTests() {
     'The physical-device testing workflows scheduled before the final release become required for v0.1.',
     'The physical-device testing, completed offline before the final release, becomes required for v0.1.',
     'The physical-device testing, executed offline before the final release, becomes required for v0.1.',
+    'The physical-device testing completed by QA before release is required for v0.1.',
+    'The physical-device testing executed offline before release is required for v0.1.',
     'Post-v0.1 physical-device tests failed deliberately before release are required for v0.1.',
     'Post-v0.1 physical-device validation plans before release are required for v0.1.',
     'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
@@ -1419,6 +1438,10 @@ function assertRuleSelfTests() {
     "Physical-device testing mustn't ever be required for v0.1.",
     'Physical-device testing mustn’t ever be required for v0.1.',
     'Physical-device testing must not ever be required for v0.1.',
+    'Physical-device testing need not occur for v0.1.',
+    'Physical-device testing need never happen for v0.1.',
+    'Physical-device testing need not ever take place for v0.1.',
+    'Physical-device testing need not be required for v0.1.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing not required for v0.1.',
     "Physical-device testing isn't required for v0.1.",
