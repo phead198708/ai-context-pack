@@ -29,7 +29,9 @@ const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
   'i',
 );
 const negatedClauseGap = String.raw`(?:(?!\band\b|${policyRequirementTerm}|${physicalDeviceTerm}|${verificationActivityTerm})[^\r\n.!?。！？;；]){0,80}`;
-const boundedModalModifier = String.raw`(?:(?:actually|again|always|automatically|ever|explicitly|independently|necessarily|normally|ordinarily|otherwise|still)\s+){0,3}`;
+const modalModifierTerm = String.raw`actually|again|always|automatically|ever|explicitly|independently|necessarily|normally|ordinarily|otherwise|still`;
+const boundedModalModifier = String.raw`(?:(?:${modalModifierTerm})\s+){0,3}`;
+const boundedCopulaModifier = String.raw`(?:(?:\p{L}+(?:[-'’]\p{L}+)*)\s+){0,3}`;
 const sharedPolicyModifier = String.raw`(?:(?:again|always|eventually|later|necessarily|normally|now|ordinarily|otherwise|still|then|typically|usually|\p{L}+ly)\s+){0,3}`;
 const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:compulsory|essential|mandatory|necessary|obligatory|required|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
 const modalNegatedRequirement = new RegExp(
@@ -71,7 +73,7 @@ const independentPolicyPredicate = new RegExp(
 const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
 const requirementToActivityBoundary =
   /\b(?:after|although|because|before|even\s+if|if|once|since|though|unless|until|when(?:ever)?|whereas|while)\b/iu;
-const boundaryCopulaPredicate = String.raw`(?:am|are|be|became|becomes?|is|remain(?:s|ed)?|was|were|(?:can|could|may|might|must|shall|should|will|would)\s+${boundedModalModifier}(?:be|become|remain))`;
+const boundaryCopulaPredicate = String.raw`(?:am|are|be|became|becomes?|is|remain(?:s|ed)?|was|were|(?:can|could|may|might|must|shall|should|will|would)\s+${boundedCopulaModifier}(?:be|become|remain))`;
 const activityFiniteFunctionalPredicate = String.raw`\b(?:am|are|can(?:not)?|could|did|do|does|had|has|have|is|may|might|must|shall|should|was|were|will|would)\b`;
 const activityFiniteLexicalPredicate = String.raw`\b(?:advanc(?:e|ed|es)|begin(?:s)?|collect(?:ed|s)?|complet(?:e|ed|es)|contain(?:ed|s)?|continu(?:e|ed|es)|creat(?:e|ed|es)|end(?:ed|s)?|execut(?:e|ed|es)|exist(?:ed|s)?|fail(?:ed|s)?|finish(?:ed|es)?|generat(?:e|ed|es)|happen(?:ed|s)?|includ(?:e|ed|es)|launch(?:ed|es)?|mov(?:e|ed|es)|occur(?:red|s)?|operat(?:e|ed|es)|pass(?:ed|es)?|persist(?:ed|s)?|proceed(?:ed|s)?|process(?:ed|es)?|produc(?:e|ed|es)|read(?:s)?|record(?:ed|s)?|remain(?:ed|s)?|requir(?:e|ed|es)|restart(?:ed|s)?|resum(?:e|ed|es)|return(?:ed|s)?|run(?:s)?|ship(?:ped|s)?|start(?:ed|s)?|stop(?:ped|s)?|stor(?:e|ed|es)|succeed(?:ed|s)?|tak(?:e|es)|test(?:ed|s)?|transition(?:ed|s)?|us(?:e|ed|es)|validat(?:e|ed|es)|verif(?:y|ied|ies)|wait(?:ed|s)?|work(?:ed|s)?|writ(?:e|es))\b`;
 const activityIrregularFinitePredicate = String.raw`\b(?:became|began|came|fell|got|grew|ran|rose|took|went|wrote)\b`;
@@ -1429,6 +1431,9 @@ function assertRuleSelfTests() {
     'The physical-device testing executed offline by QA before release is required for v0.1.',
     'Post-v0.1 physical-device tests failed deliberately before release are required for v0.1.',
     'Post-v0.1 physical-device tests failed before release and will be mandatory for v0.1.',
+    'Post-v0.1 physical-device tests failed before release and will soon be mandatory for v0.1.',
+    'Post-v0.1 physical-device tests failed before release and will eventually become mandatory for v0.1.',
+    'Post-v0.1 physical-device tests failed before release and will very soon be mandatory for v0.1.',
     'Post-v0.1 physical-device validation plans before release are required for v0.1.',
     'Post-v0.1 physical-device testing that runs on devices before release is required for v0.1.',
     'Post-v0.1 physical-device testing that uses workflows before release is required for v0.1.',
@@ -1594,6 +1599,9 @@ function assertRuleSelfTests() {
     'Post-v0.1 physical-device tests failed before the release becomes required for v0.1.',
     'Post-v0.1 physical-device tests failed before release notes remain mandatory in v0.1.',
     'Post-v0.1 physical-device tests failed before release notes will be mandatory in v0.1.',
+    'Post-v0.1 physical-device tests failed before release notes will soon be mandatory in v0.1.',
+    'Post-v0.1 physical-device tests failed before release notes will eventually become mandatory in v0.1.',
+    'Post-v0.1 physical-device tests failed before release notes will very soon be mandatory in v0.1.',
     'Post-v0.1 physical-device testing completed before documentation will be required in v0.1.',
     'Post-v0.1 physical-device testing failed before personnel are required for v0.1.',
     'Post-v0.1 physical-device testing failed before staff are required for v0.1.',
