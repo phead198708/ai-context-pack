@@ -47,6 +47,9 @@ const contractedNegatedRequirement = new RegExp(
   'i',
 );
 const independentRequirement = new RegExp(requirementTerm, 'i');
+const outsideV01Qualifier =
+  /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
+const anyV01Qualifier = /\bv0\.1\b/iu;
 const staleRequirementRules = [
   {
     id: 'low-end-device-tier',
@@ -278,9 +281,13 @@ function splitCoordinatedRequirements(clause) {
       (hasPhysicalDeviceRequirement(left) ||
         hasPhysicalDeviceRequirement(right))
     ) {
+      const scopedRight =
+        hasLeadingOutsideV01Qualifier(left) && !anyV01Qualifier.test(right)
+          ? `post-v0.1 ${right}`
+          : right;
       return [
         ...splitCoordinatedRequirements(left),
-        ...splitCoordinatedRequirements(right),
+        ...splitCoordinatedRequirements(scopedRight),
       ];
     }
   }
@@ -297,10 +304,18 @@ function hasIndependentRequirement(source) {
   return independentRequirement.test(source);
 }
 
-function isExplicitlyOutsideV01(clause) {
-  return /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu.test(
-    clause,
+function hasLeadingOutsideV01Qualifier(source) {
+  const outsideMatch = outsideV01Qualifier.exec(source);
+  const requirementMatch = independentRequirement.exec(source);
+  return (
+    outsideMatch !== null &&
+    requirementMatch !== null &&
+    outsideMatch.index < requirementMatch.index
   );
+}
+
+function isExplicitlyOutsideV01(clause) {
+  return outsideV01Qualifier.test(clause);
 }
 
 function isExplicitlyNegatedRequirement(clause) {
@@ -351,6 +366,7 @@ function assertRuleSelfTests() {
     'Post-v0.1 documentation is required, and v0.1 physical-device testing is required.',
     'Physical-device testing must not fail and is required.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
+    'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required.',
     'Requires physical-device\nvalidation evidence.',
     'Physical-device validation is\nrequired.',
     '必须提供真实设备证据。',
@@ -378,6 +394,8 @@ function assertRuleSelfTests() {
     "v0.1 doesn't require testing on physical devices.",
     'v0.1 doesn’t require testing on physical devices.',
     'Post-v0.1 documentation is required, and post-v0.1 physical-device testing is required.',
+    'Post-v0.1, documentation is required, and physical-device testing is required.',
+    'Outside v0.1, documentation is required, and physical-device testing is required.',
     'No physical-device evidence is required for v0.1.',
     'No validation on physical devices is required for v0.1.',
     'v0.1 does not require physical-device testing.',
