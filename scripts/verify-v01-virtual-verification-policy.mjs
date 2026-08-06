@@ -43,7 +43,7 @@ const occurrencePlatformContext = String.raw`(?:across|for|in|on|within)\s+(?:(?
 const occurrenceSubjectModifier = String.raw`(?:(?:actually|explicitly|independently|itself|normally|offline|online|ordinarily|otherwise|still|\p{L}+ly)\s+|${occurrencePlatformContext}\s+){0,3}`;
 const needNegatedPhysicalActivityOccurrence = new RegExp(
   String.raw`${physicalDeviceActivity}\s+${occurrenceSubjectModifier}need\s+(?:not|never)\s+${boundedModalModifier}(?:happen|occur|take\s+place)\b`,
-  'i',
+  'iu',
 );
 const auxiliaryNegatedRequirement = new RegExp(
   String.raw`\b(?:does?|do|is|are|was|were|has|have|had)\s+(?:not|never)\b${negatedClauseGap}${policyRequirementTerm}`,
@@ -1398,6 +1398,8 @@ function assertRuleSelfTests() {
     'Physical-device testing need not occur but later becomes mandatory for v0.1.',
     'Physical-device testing need not occur, but will still be mandatory for v0.1.',
     'Physical-device testing need not occur, but will soon be mandatory for v0.1.',
+    'Physical-device testing generally is required for v0.1.',
+    'Physical-device testing unexpectedly remains mandatory for v0.1.',
     'Physical-device testing need not occur although it is required for v0.1.',
     'Physical-device testing need not occur; it is required for v0.1.',
     'Physical-device testing is optional; will be required for v0.1.',
@@ -1562,6 +1564,8 @@ function assertRuleSelfTests() {
     'Physical-device testing need not be required for v0.1.',
     'Physical-device testing on both platforms need not occur for v0.1.',
     'Physical-device testing itself normally need not occur for v0.1.',
+    'Physical-device testing generally need not occur for v0.1.',
+    'Physical-device testing unexpectedly need never happen for v0.1.',
     'Validation on physical devices across both platforms need never happen for v0.1.',
     'Physical-device testing on both iOS and Android need not take place for v0.1.',
     'Physical-device testing need not occur although documentation is required for v0.1.',
