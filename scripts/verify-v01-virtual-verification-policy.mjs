@@ -28,7 +28,7 @@ const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
   String.raw`\bno\b${requirementClauseGap}${physicalDeviceActivity}`,
   'i',
 );
-const negatedClauseGap = String.raw`(?:(?!\band\b)[^\r\n.!?。！？;；]){0,80}`;
+const negatedClauseGap = String.raw`(?:(?!\band\b|${policyRequirementTerm})[^\r\n.!?。！？;；]){0,80}`;
 const modalNegatedRequirement = new RegExp(
   String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\b${negatedClauseGap}(?:${policyRequirementTerm}|${physicalDeviceActivity})`,
   'i',
@@ -131,7 +131,7 @@ const staleRequirementRules = [
   {
     id: 'physical-device-noun-requirement-leading',
     pattern: new RegExp(
-      `${nounRequirementTerm}\\s*(?::|：|—|–|-|\\b(?:for|of|covering)\\b|\\bto\\s+(?:perform|provide|collect)\\b)${requirementClauseGap}${physicalDeviceActivity}`,
+      `${nounRequirementTerm}\\s*(?::|：|—|–|-|\\b(?:for|of|covering)\\b|\\bto\\s+(?:perform|provide|collect)\\b|\\bto\\b(?=\\s+(?:test|validate|verify)\\b))${requirementClauseGap}${physicalDeviceActivity}`,
       'i',
     ),
     allowsExplicitScopeOrNegation: true,
@@ -282,7 +282,7 @@ function findMatchedRule(source) {
       if (
         rule.allowsExplicitScopeOrNegation &&
         (isExplicitlyOutsideV01(clause, ruleMatch) ||
-          isExplicitlyNegatedRequirement(clause))
+          isExplicitlyNegatedRequirement(clause, ruleMatch))
       ) {
         continue;
       }
@@ -381,7 +381,8 @@ function hasExplicitV01Scope(source) {
 
 function hasAffirmativeV01Scope(source, matchedRule) {
   const requirementMatch =
-    findMatchedRequirement(matchedRule) ?? independentRequirement.exec(source);
+    findMatchedRequirement(source, matchedRule) ??
+    independentRequirement.exec(source);
   if (requirementMatch === null) {
     return false;
   }
@@ -469,19 +470,50 @@ function isSimpleV01PredicatePrefix(source) {
   return source.split(/\s+/u).length <= 5;
 }
 
-function findMatchedRequirement(matchedRule) {
+function findMatchedRequirement(source, matchedRule) {
+  const activity = findMatchedPhysicalActivity(matchedRule);
+  if (activity === undefined) {
+    return undefined;
+  }
+  const candidates = Array.from(
+    source.matchAll(new RegExp(policyRequirementTerm, 'giu')),
+  );
+  return candidates.reduce((closest, candidate) => {
+    if (candidate.index === undefined) {
+      return closest;
+    }
+    const candidateEnd = candidate.index + candidate[0].length;
+    const distance =
+      candidateEnd < activity.index
+        ? activity.index - candidateEnd
+        : candidate.index > activity.index + activity[0].length
+        ? candidate.index - (activity.index + activity[0].length)
+        : 0;
+    if (
+      distance > 80 ||
+      (closest !== undefined && closest.distance <= distance)
+    ) {
+      return closest;
+    }
+    return {
+      0: candidate[0],
+      index: candidate.index,
+      distance,
+    };
+  }, undefined);
+}
+
+function findMatchedPhysicalActivity(matchedRule) {
   if (matchedRule === undefined) {
     return undefined;
   }
-  const relativeMatch = new RegExp(policyRequirementTerm, 'iu').exec(
-    matchedRule[0],
-  );
-  if (relativeMatch === null) {
+  const relativeActivity = physicalDeviceActivityMatcher.exec(matchedRule[0]);
+  if (relativeActivity === null) {
     return undefined;
   }
   return {
-    0: relativeMatch[0],
-    index: matchedRule.index + relativeMatch.index,
+    0: relativeActivity[0],
+    index: matchedRule.index + relativeActivity.index,
   };
 }
 
@@ -604,14 +636,49 @@ function isExplicitlyOutsideV01(clause, matchedRule) {
   );
 }
 
-function isExplicitlyNegatedRequirement(clause) {
-  return (
-    modalNegatedRequirement.test(clause) ||
-    auxiliaryNegatedRequirement.test(clause) ||
-    noLongerRequirement.test(clause) ||
-    directNotRequirement.test(clause) ||
-    contractedNegatedRequirement.test(clause) ||
-    explicitlyAbsentPhysicalDeviceActivity.test(clause)
+function isExplicitlyNegatedRequirement(clause, matchedRule) {
+  const requirement = findMatchedRequirement(clause, matchedRule);
+  if (requirement === undefined) {
+    return false;
+  }
+  const requirementEnd = requirement.index + requirement[0].length;
+  const negations = [
+    modalNegatedRequirement,
+    auxiliaryNegatedRequirement,
+    noLongerRequirement,
+    directNotRequirement,
+    contractedNegatedRequirement,
+  ];
+  const requirementIsNegated = negations.some(pattern =>
+    Array.from(
+      clause.matchAll(new RegExp(pattern.source, `${pattern.flags}g`)),
+    ).some(
+      negation =>
+        negation.index !== undefined &&
+        negation.index <= requirement.index &&
+        negation.index + negation[0].length >= requirementEnd,
+    ),
+  );
+  if (requirementIsNegated) {
+    return true;
+  }
+  const activity = findMatchedPhysicalActivity(matchedRule);
+  if (activity === undefined) {
+    return false;
+  }
+  const activityEnd = activity.index + activity[0].length;
+  return Array.from(
+    clause.matchAll(
+      new RegExp(
+        explicitlyAbsentPhysicalDeviceActivity.source,
+        `${explicitlyAbsentPhysicalDeviceActivity.flags}g`,
+      ),
+    ),
+  ).some(
+    negation =>
+      negation.index !== undefined &&
+      negation.index <= activity.index &&
+      negation.index + negation[0].length >= activityEnd,
   );
 }
 
@@ -653,6 +720,8 @@ function assertRuleSelfTests() {
     'Physical-device testing is not required — physical-device evidence is required for v0.1.',
     'Physical-device testing is not required because physical-device evidence is required for v0.1.',
     'Physical-device testing is optional because physical-device evidence is a requirement for v0.1.',
+    'Documentation is not required even if physical-device testing is required for v0.1.',
+    "Documentation isn't required even if v0.1 requires physical-device testing.",
     'Outside v0.1, testing on physical devices is required, and v0.1 physical-device evidence is required.',
     'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required for v0.1.',
     'Post-v0.1 documentation is required, and v0.1 physical-device testing is required.',
@@ -674,6 +743,9 @@ function assertRuleSelfTests() {
     'Physical-device testing is required in the long-term-supported v0.1 release.',
     'Physical-device testing is required for post-v0.1 migration to the stable v0.1 release.',
     'Physical-device testing is required for post-v0.1 migration to the long-term-supported stable v0.1 release.',
+    'A v0.1 requirement to test on physical devices.',
+    'A v0.1 requirement to validate on physical devices.',
+    'A v0.1 requirement to verify on physical devices.',
     'Physical-device testing is required while offline.',
     'Physical-device testing or validation is required.',
     'Physical-device testing is not required for post-v0.1 but is required for v0.1.',
@@ -706,6 +778,8 @@ function assertRuleSelfTests() {
     'Physical-device validation is not required for v0.1.',
     'Physical-device validation is not a requirement for v0.1.',
     'No requirements for physical-device validation apply to v0.1.',
+    'Documentation is required even if physical-device testing is not required for v0.1.',
+    'Physical-device testing is not required for v0.1 even if documentation is required.',
     'Physical-device testing must not be required for v0.1.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing not required for v0.1.',
@@ -732,6 +806,8 @@ function assertRuleSelfTests() {
     'Because validation failed in the stable v0.1 release, post-v0.1 work requires physical-device testing.',
     'The v0.1 documentation requirement explains why post-v0.1 work requires physical-device testing.',
     'The v0.1 documentation requirement states that physical-device testing is required for post-v0.1 work.',
+    'A post-v0.1 requirement to test on physical devices.',
+    'A v0.1 requirement not to test on physical devices.',
     'Post-v0.1 work requires physical-device testing for migration from the v0.1 release.',
     'Compared with v0.1, post-v0.1 work requires physical-device testing.',
     'The v0.1 baseline is incomplete, so post-v0.1 work requires physical-device testing.',
