@@ -29,9 +29,10 @@ const explicitlyAbsentPhysicalDeviceActivity = new RegExp(
   'i',
 );
 const negatedClauseGap = String.raw`(?:(?!\band\b|${policyRequirementTerm})[^\r\n.!?。！？;；]){0,80}`;
+const boundedModalModifier = String.raw`(?:(?:actually|again|always|automatically|ever|explicitly|independently|necessarily|normally|ordinarily|otherwise|still)\s+){0,3}`;
 const modalNegatedComplement = String.raw`(?:${physicalDeviceActivity}|(?:be|become|remain)\s+(?:(?:a|an|the)\s+)?(?:required|mandatory|requirements?)|(?:require|mandate|perform|provide|collect)\s+${physicalDeviceActivity}|(?:be\s+)?(?:accepted|classified|counted|described|reported|represented|treated)\s+as\s+${physicalDeviceActivity})`;
 const modalNegatedRequirement = new RegExp(
-  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\s+${modalNegatedComplement}`,
+  String.raw`\b(?:must|shall|should|will|would|can|could)\s+(?:not|never)\s+${boundedModalModifier}${modalNegatedComplement}`,
   'i',
 );
 const auxiliaryNegatedRequirement = new RegExp(
@@ -51,7 +52,7 @@ const contractedAuxiliaryNegatedRequirement = new RegExp(
   'i',
 );
 const contractedModalNegatedRequirement = new RegExp(
-  String.raw`\b(?:(?:must|should|would|could)n['’]t|can['’]t|won['’]t|shan['’]t)\s+${modalNegatedComplement}`,
+  String.raw`\b(?:(?:must|should|would|could)n['’]t|can['’]t|won['’]t|shan['’]t)\s+${boundedModalModifier}${modalNegatedComplement}`,
   'i',
 );
 const independentRequirement = new RegExp(requirementTerm, 'i');
@@ -64,8 +65,6 @@ const independentPolicyPredicate = new RegExp(
 const physicalDeviceActivityMatcher = new RegExp(physicalDeviceActivity, 'i');
 const requirementToActivityBoundary =
   /\b(?:after|although|because|before|even\s+if|if|once|since|though|unless|until|when(?:ever)?|whereas|while)\b/iu;
-const independentPredicateTerm =
-  /\b(?:am|is|are|was|were|becomes?|became|begins?|began|ends?|ended|starts?|started|stops?|stopped|occurs?|occurred|fails?|failed|succeeds?|succeeded|runs?|ran|continues?|continued|completes?|completed|exists?|existed|happens?|happened|remains?|remained|applies?|applied|uses?|used|needs?|needed|requires?|required|must|shall|will|would|can|could|should|does?|did|has|have|had)\b/iu;
 const outsideV01Qualifier =
   /\b(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b/iu;
 const policyCoordinatorTerm = String.raw`(?:as well as|even though|nevertheless|nonetheless|however|whereas|although|while|though|because|but|yet|and|or|plus)`;
@@ -331,10 +330,10 @@ function splitCoordinatedRequirements(clause) {
       (hasPhysicalDeviceActivity(left) ||
         hasPhysicalDeviceActivity(boundRight));
     if (isHardBoundary || hasCoordinatedPolicies) {
-      const standaloneLeadingScope = isStandaloneOutsideV01Qualifier(left);
+      const scopeOnlyHeading = isOutsideV01ScopeOnlyHeading(left);
       const scopedRight =
         ((!isHardBoundary && hasLeadingOutsideV01Qualifier(left)) ||
-          standaloneLeadingScope) &&
+          scopeOnlyHeading) &&
         !hasExplicitV01Scope(boundRight)
           ? `post-v0.1 ${boundRight}`
           : boundRight;
@@ -381,10 +380,22 @@ function hasLeadingOutsideV01Qualifier(source) {
   );
 }
 
-function isStandaloneOutsideV01Qualifier(source) {
-  return /^\s*(?:outside (?:of )?(?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\s*$/iu.test(
-    source,
-  );
+function isOutsideV01ScopeOnlyHeading(source) {
+  if (
+    hasPhysicalDeviceActivity(source) ||
+    independentRequirement.test(source) ||
+    independentAllowance.test(source)
+  ) {
+    return false;
+  }
+  const scopeNoun =
+    '(?:activities|items|milestone|phase|planning|release|roadmap|scope|tasks|verification|work)';
+  const outsideScope =
+    '(?:outside (?:of )?(?:the )?v0\\.1(?: scope)?|post[- ]v0\\.1)';
+  return new RegExp(
+    `^\\s*(?:for\\s+(?:the\\s+)?)?(?:${outsideScope}(?:\\s+${scopeNoun})?|${scopeNoun}\\s+${outsideScope})\\s*$`,
+    'iu',
+  ).test(source);
 }
 
 function hasExplicitV01Scope(source) {
@@ -548,14 +559,71 @@ function isRequirementBoundToPhysicalActivity(source, matchedRule) {
     if (!requirementToActivityBoundary.test(between)) {
       return true;
     }
-    return !independentPredicateTerm.test(source.slice(activityEnd));
+    return !hasIndependentActivityPredicate(
+      source.slice(activityEnd),
+      activity[0],
+    );
   }
   const between = source.slice(activityEnd, requirement.index);
   const boundary = requirementToActivityBoundary.exec(between);
   if (boundary === null) {
     return true;
   }
-  return !independentPredicateTerm.test(between.slice(0, boundary.index));
+  return !hasIndependentActivityPredicate(
+    between.slice(0, boundary.index),
+    activity[0],
+  );
+}
+
+function hasIndependentActivityPredicate(source, activitySource) {
+  let predicate = source.trim();
+
+  // Comma-delimited relative and conditional material modifies the activity;
+  // only a predicate that resumes after that material can sever the binding.
+  const delimitedModifier =
+    /^,?\s*(?:although|as|even\s+if|if|though|when(?:ever)?|whereas|which|while|who|whose)\b[^,\r\n]{0,80},\s*/iu;
+  while (delimitedModifier.test(predicate)) {
+    predicate = predicate.replace(delimitedModifier, '').trim();
+  }
+  predicate = predicate.replace(/^,\s*/u, '').trim();
+  predicate = predicate
+    .replace(
+      /^(?:(?:also|always|currently|eventually|generally|later|never|normally|now|occasionally|often|previously|rarely|sometimes|soon|still|then|typically|usually|\p{L}+ly)\s+){1,3}/iu,
+      '',
+    )
+    .trim();
+  if (predicate.length === 0) {
+    return false;
+  }
+
+  // These markers introduce attached relative, infinitive, prepositional or
+  // subordinate modifiers. A verb inside such a modifier is not the physical
+  // activity subject's independent predicate.
+  if (
+    /^(?:after|although|as|at|before|because|by|during|for|from|if|in|of|on|once|since|that|though|to|under|unless|until|when(?:ever)?|whereas|which|while|who|whose|with|without|within)\b/iu.test(
+      predicate,
+    )
+  ) {
+    return false;
+  }
+
+  const finiteAuxiliaryOrModal =
+    /^(?:am|are|can(?:not)?|could|did|do|does|had|has|have|is|may|might|must|shall|should|was|were|will|would)\b/iu;
+  const finiteLexicalShape =
+    /^(?!(?:\p{L}*(?:ics|ness|ous|ss))\b)\p{L}{2,}(?:ed|s)\b/iu;
+  const irregularFinite =
+    /^(?:became|began|came|fell|got|grew|ran|rose|took|went)\b/iu;
+  const pluralActivityUsesBarePredicate =
+    /\btests\b/iu.test(activitySource) &&
+    /^(?!\p{L}*(?:ing|tion|ment|ness|ity|ics|ence|ance|al|ure)\b)\p{L}{2,}\b/iu.test(
+      predicate,
+    );
+  return (
+    finiteAuxiliaryOrModal.test(predicate) ||
+    finiteLexicalShape.test(predicate) ||
+    irregularFinite.test(predicate) ||
+    pluralActivityUsesBarePredicate
+  );
 }
 
 function isIncidentalV01Reference(prefix) {
@@ -774,9 +842,16 @@ function assertRuleSelfTests() {
     'Physical-device testing must not fail even if documentation is required.',
     "Physical-device testing mustn't fail even if documentation is required.",
     'Physical-device testing mustn’t fail even if documentation is required.',
+    "Physical-device testing mustn't ever fail even if documentation is required.",
+    'Physical-device testing mustn’t ever fail even if documentation is required.',
     'v0.1 requires, if available, physical-device testing.',
     'v0.1 requires, when possible, validation on physical devices.',
+    'v0.1 requires, if available, physical-device testing that runs offline.',
+    'v0.1 requires, if available, physical-device testing to run nightly.',
     'Physical-device testing before release is required for v0.1.',
+    'Physical-device testing that runs offline before release is required for v0.1.',
+    'Physical-device testing, which runs offline, before release is required for v0.1.',
+    'Physical-device testing to begin before release is required for v0.1.',
     'v0.1 requires physical-device testing before post-v0.1 documentation begins.',
     'v0.1 physical-device testing is required before post-v0.1 documentation begins.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
@@ -802,8 +877,11 @@ function assertRuleSelfTests() {
     'Physical-device testing is not required for post-v0.1 but is required for v0.1.',
     'Physical-device testing is allowed outside v0.1; is required for v0.1.',
     'Post-v0.1 notes apply; physical-device testing is required.',
+    'Post-v0.1 documentation is required: physical-device testing is required.',
+    'For v0.1 work: physical-device testing is required.',
     'v0.1: physical-device testing is required.',
     'Post-v0.1: physical-device testing is required for v0.1.',
+    'For post-v0.1 work: physical-device testing is required for v0.1.',
     'The post-v0.1 documentation requirement explains why v0.1 work requires physical-device testing.',
     'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required.',
     'Requires physical-device\nvalidation evidence.',
@@ -835,6 +913,9 @@ function assertRuleSelfTests() {
     'Physical-device testing must not be required even if documentation is required.',
     "Physical-device testing mustn't be required even if documentation is required.",
     'Physical-device testing mustn’t be required even if documentation is required.',
+    "Physical-device testing mustn't ever be required for v0.1.",
+    'Physical-device testing mustn’t ever be required for v0.1.',
+    'Physical-device testing must not ever be required for v0.1.',
     'Physical-device testing is no longer required for v0.1.',
     'Physical-device testing not required for v0.1.',
     "Physical-device testing isn't required for v0.1.",
@@ -864,6 +945,10 @@ function assertRuleSelfTests() {
     'v0.1 documentation is required after post-v0.1 physical-device testing ends.',
     'Post-v0.1 physical-device testing begins before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing ends after v0.1 documentation is required.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing proceeds.',
+    'v0.1 documentation is required before post-v0.1 physical-device tests proceed.',
+    'v0.1 documentation is required before post-v0.1 physical-device testing, which runs offline, proceeds.',
+    'Post-v0.1 physical-device testing proceeds before v0.1 documentation is required.',
     'Post-v0.1 physical-device testing, if available, is required.',
     'A post-v0.1 requirement to test on physical devices.',
     'A v0.1 requirement not to test on physical devices.',
@@ -873,6 +958,10 @@ function assertRuleSelfTests() {
     'No physical-device evidence is required for v0.1.',
     'No validation on physical devices is required for v0.1.',
     'v0.1 does not require physical-device testing.',
+    'For post-v0.1 work: physical-device testing is required.',
+    'Post-v0.1 work: physical-device testing is required.',
+    'For the post-v0.1 release — physical-device testing is required.',
+    'For work outside v0.1: physical-device testing is required.',
     'Use named minimum/current Simulator and Emulator profiles.',
     'Virtual results make no physical-hardware compatibility claim.',
   ];
