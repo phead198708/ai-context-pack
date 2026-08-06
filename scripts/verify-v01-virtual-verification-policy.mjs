@@ -57,6 +57,16 @@ const staleRequirementRules = [
     pattern: /\bphysical-device evidence is attached\b/i,
   },
   {
+    id: 'physical-device-requirement-leading',
+    pattern:
+      /(?![^\r\n.!?。！？]{0,200}\b(?:outside (?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b)\b(?:(?<!not )(?<!never )(?:requires?|required)|must|shall)\b(?!\s+(?:not|never)\b)[^\r\n.!?。！？]{0,80}(?:\bphysical[- ]devices?\b[^\r\n.!?。！？]{0,80}\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b|\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b[^\r\n.!?。！？]{0,80}\bphysical[- ]devices?\b)/i,
+  },
+  {
+    id: 'physical-device-requirement-trailing',
+    pattern:
+      /(?![^\r\n.!?。！？]{0,200}\b(?:outside (?:the )?v0\.1(?: scope)?|post[- ]v0\.1)\b)(?<!no )\bphysical[- ]devices?\b[^\r\n.!?。！？]{0,80}\b(?:acceptance|evidence|tests?|testing|validat(?:e|ion)|verif(?:y|ication))\b[^\r\n.!?。！？]{0,80}\b(?:(?<!not )(?<!never )(?:requires?|required)|must|shall|mandatory)\b(?!\s+(?:not|never)\b)/i,
+  },
+  {
     id: 'physical-share-hosts',
     pattern: /\bphysical-device share hosts\b/i,
   },
@@ -83,6 +93,7 @@ if (
 }
 
 assertRuleSelfTests();
+assertIssueInventorySelfTests();
 
 for (const relativePath of policyPaths) {
   assertNoStaleRequirement(
@@ -94,13 +105,24 @@ for (const relativePath of policyPaths) {
 let issueCount = 'not-provided';
 let physicalGateLabels = 'not-checked';
 if (argumentsList[0] === '--issues-stdin') {
-  const issues = parseIssuePayload(readFileSync(0, 'utf8'));
-  const expectedNumbers = Array.from({ length: 22 }, (_, index) => index + 3);
+  const verification = assertIssueInventory(
+    parseIssuePayload(readFileSync(0, 'utf8')),
+  );
+  issueCount = verification.issueCount;
+  physicalGateLabels = verification.physicalGateLabels;
+}
+
+console.info(
+  `V01_VIRTUAL_POLICY files=${policyPaths.length} issues=${issueCount} physicalGateLabels=${physicalGateLabels} result=pass`,
+);
+
+function assertIssueInventory(issues) {
+  const expectedNumbers = Array.from({ length: 23 }, (_, index) => index + 2);
   const v01Issues = issues
     .filter(
       issue =>
         Number.isInteger(issue?.number) &&
-        issue.number >= 3 &&
+        issue.number >= 2 &&
         issue.number <= 24 &&
         issue.pull_request === undefined,
     )
@@ -110,39 +132,46 @@ if (argumentsList[0] === '--issues-stdin') {
     throw new Error('V01_VIRTUAL_POLICY_ISSUE_INVENTORY_INVALID');
   }
 
-  physicalGateLabels = 0;
+  let matchingPhysicalGateLabels = 0;
   for (const issue of v01Issues) {
     if (typeof issue.title !== 'string' || issue.title.trim().length === 0) {
       throw new Error(
         `V01_VIRTUAL_POLICY_ISSUE_TITLE_INVALID:github-issue-${issue.number}`,
       );
     }
+    if (typeof issue.body !== 'string' || issue.body.trim().length === 0) {
+      throw new Error(
+        `V01_VIRTUAL_POLICY_ISSUE_BODY_INVALID:github-issue-${issue.number}`,
+      );
+    }
     assertNoStaleRequirement(issue.title, `github-issue-${issue.number}-title`);
-    assertNoStaleRequirement(
-      String(issue.body ?? ''),
-      `github-issue-${issue.number}-body`,
-    );
+    assertNoStaleRequirement(issue.body, `github-issue-${issue.number}-body`);
     if (!Array.isArray(issue.labels)) {
       throw new Error(
         `V01_VIRTUAL_POLICY_ISSUE_LABELS_INVALID:github-issue-${issue.number}`,
       );
     }
-    const labelNames = issue.labels.map(label =>
-      typeof label === 'string' ? label : String(label?.name ?? ''),
-    );
+    const labelNames = issue.labels.map(label => {
+      const labelName = typeof label === 'string' ? label : label?.name;
+      if (typeof labelName !== 'string' || labelName.trim().length === 0) {
+        throw new Error(
+          `V01_VIRTUAL_POLICY_ISSUE_LABEL_INVALID:github-issue-${issue.number}`,
+        );
+      }
+      return labelName.trim();
+    });
     if (labelNames.includes('test:device-required')) {
-      physicalGateLabels += 1;
+      matchingPhysicalGateLabels += 1;
       throw new Error(
         `V01_VIRTUAL_POLICY_PHYSICAL_LABEL:github-issue-${issue.number}`,
       );
     }
   }
-  issueCount = v01Issues.length;
+  return {
+    issueCount: v01Issues.length,
+    physicalGateLabels: matchingPhysicalGateLabels,
+  };
 }
-
-console.info(
-  `V01_VIRTUAL_POLICY files=${policyPaths.length} issues=${issueCount} physicalGateLabels=${physicalGateLabels} result=pass`,
-);
 
 function assertNoStaleRequirement(source, sourceName) {
   const lines = source.split(/\r?\n/u);
@@ -190,6 +219,13 @@ function assertRuleSelfTests() {
     'Attach evidence from representative physical devices.',
     'Use hardware-tier benchmark evidence.',
     'Compare hardware tiers benchmark and matrix results.',
+    'Requires physical-device validation evidence.',
+    'Physical device evidence required.',
+    'Teams must test on physical devices.',
+    'Physical-device evidence must be attached.',
+    'Physical-device verification is mandatory.',
+    'Requires physical-device\nvalidation evidence.',
+    'Physical-device validation is\nrequired.',
     '必须提供真实设备证据。',
     '在低规格支持设备和当前旗舰设备上验证。',
   ];
@@ -203,6 +239,9 @@ function assertRuleSelfTests() {
   const allowedExamples = [
     'v0.1 does not require physical hardware.',
     'The physical-device label remains available outside v0.1.',
+    'Post-v0.1 work may use physical-device validation evidence.',
+    'Physical-device validation is not required for v0.1.',
+    'v0.1 does not require physical-device testing.',
     'Use named minimum/current Simulator and Emulator profiles.',
     'Virtual results make no physical-hardware compatibility claim.',
   ];
@@ -211,4 +250,73 @@ function assertRuleSelfTests() {
       throw new Error('V01_VIRTUAL_POLICY_SELF_TEST_REJECTED_ALLOWED');
     }
   }
+}
+
+function assertIssueInventorySelfTests() {
+  const syntheticIssues = Array.from({ length: 23 }, (_, index) => ({
+    number: index + 2,
+    title: `Synthetic v0.1 issue ${index + 2}`,
+    body: 'Virtual-only verification policy.',
+    labels: [],
+  }));
+  const verified = assertIssueInventory(syntheticIssues);
+  if (verified.issueCount !== 23 || verified.physicalGateLabels !== 0) {
+    throw new Error('V01_VIRTUAL_POLICY_SELF_TEST_INVENTORY_PASS_INVALID');
+  }
+
+  assertIssueInventoryFailure(
+    syntheticIssues.filter(issue => issue.number !== 2),
+    'V01_VIRTUAL_POLICY_ISSUE_INVENTORY_INVALID',
+  );
+  assertIssueInventoryFailure(
+    [...syntheticIssues, syntheticIssues[0]],
+    'V01_VIRTUAL_POLICY_ISSUE_INVENTORY_INVALID',
+  );
+  assertIssueInventoryFailure(
+    syntheticIssues.map(issue =>
+      issue.number === 2 ? { ...issue, body: null } : issue,
+    ),
+    'V01_VIRTUAL_POLICY_ISSUE_BODY_INVALID:github-issue-2',
+  );
+  assertIssueInventoryFailure(
+    syntheticIssues.map(issue =>
+      issue.number === 2 ? { ...issue, labels: [{ name: '' }] } : issue,
+    ),
+    'V01_VIRTUAL_POLICY_ISSUE_LABEL_INVALID:github-issue-2',
+  );
+  assertIssueInventoryFailure(
+    syntheticIssues.map(issue =>
+      issue.number === 2
+        ? { ...issue, labels: ['test:device-required'] }
+        : issue,
+    ),
+    'V01_VIRTUAL_POLICY_PHYSICAL_LABEL:github-issue-2',
+  );
+  assertIssueInventoryFailure(
+    syntheticIssues.map(issue =>
+      issue.number === 2
+        ? { ...issue, title: 'Must test on physical devices.' }
+        : issue,
+    ),
+    'V01_VIRTUAL_POLICY_STALE_REQUIREMENT:github-issue-2-title:1:physical-device-requirement-leading',
+  );
+  assertIssueInventoryFailure(
+    syntheticIssues.map(issue =>
+      issue.number === 2
+        ? { ...issue, body: 'Requires physical-device validation evidence.' }
+        : issue,
+    ),
+    'V01_VIRTUAL_POLICY_STALE_REQUIREMENT:github-issue-2-body:1:physical-device-requirement-leading',
+  );
+}
+
+function assertIssueInventoryFailure(issues, expectedError) {
+  try {
+    assertIssueInventory(issues);
+  } catch (error) {
+    if (error instanceof Error && error.message === expectedError) {
+      return;
+    }
+  }
+  throw new Error('V01_VIRTUAL_POLICY_SELF_TEST_EXPECTED_FAILURE_MISSING');
 }

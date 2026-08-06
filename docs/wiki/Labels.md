@@ -111,7 +111,7 @@
 | test:device-required | 8250DF | 仅用于 v0.1 之外明确要求物理设备证据的工作 |
 | test:contract | 1F6FEB | 两端必须通过同一 versioned contract fixture |
 
-根据 [ADR-0003](../adr/0003-v0.1-virtual-device-verification.md)，`test:device-required` 不得应用于 v0.1 Issues #3–#24。该 label 保留给 post-MVP 或未来版本；v0.1 的特殊平台证据在 issue acceptance criteria 中写明 Simulator/Emulator/CI/store-processing 矩阵与限制。
+根据 [ADR-0003](../adr/0003-v0.1-virtual-device-verification.md)，`test:device-required` 不得应用于 v0.1 Epic #2 或 Issues #3–#24。该 label 保留给 post-MVP 或未来版本；v0.1 的特殊平台证据在 issue acceptance criteria 中写明 Simulator/Emulator/CI/store-processing 矩阵与限制。
 
 ## 示例
 
