@@ -46,6 +46,7 @@ const contractedNegatedRequirement = new RegExp(
   String.raw`\b(?:(?:is|are|was|were|do|does|did|has|have|had|must|should|would|could)n['’]t|can['’]t|won['’]t|shan['’]t)\b${negatedClauseGap}(?:${requirementTerm}|${physicalDeviceActivity})`,
   'i',
 );
+const independentRequirement = new RegExp(requirementTerm, 'i');
 const staleRequirementRules = [
   {
     id: 'low-end-device-tier',
@@ -272,8 +273,10 @@ function splitCoordinatedRequirements(clause) {
     const left = clause.slice(0, separatorIndex).trim();
     const right = clause.slice(separatorIndex + separator[0].length).trim();
     if (
-      hasPhysicalDeviceRequirement(left) &&
-      hasPhysicalDeviceRequirement(right)
+      hasIndependentRequirement(left) &&
+      hasIndependentRequirement(right) &&
+      (hasPhysicalDeviceRequirement(left) ||
+        hasPhysicalDeviceRequirement(right))
     ) {
       return [
         ...splitCoordinatedRequirements(left),
@@ -288,6 +291,10 @@ function hasPhysicalDeviceRequirement(source) {
   return staleRequirementRules.some(
     rule => rule.allowsExplicitScopeOrNegation && rule.pattern.test(source),
   );
+}
+
+function hasIndependentRequirement(source) {
+  return independentRequirement.test(source);
 }
 
 function isExplicitlyOutsideV01(clause) {
@@ -341,6 +348,7 @@ function assertRuleSelfTests() {
     'Physical-device testing is not required, but physical-device evidence is required.',
     'Outside v0.1, testing on physical devices is required, and v0.1 physical-device evidence is required.',
     'Physical-device testing is not required for post-v0.1 work, and physical-device evidence is required for v0.1.',
+    'Post-v0.1 documentation is required, and v0.1 physical-device testing is required.',
     'Physical-device testing must not fail and is required.',
     'Physical-device testing is allowed outside v0.1. V0.1 requires physical-device testing.',
     'Requires physical-device\nvalidation evidence.',
@@ -369,6 +377,7 @@ function assertRuleSelfTests() {
     'Physical-device testing isn’t required for v0.1.',
     "v0.1 doesn't require testing on physical devices.",
     'v0.1 doesn’t require testing on physical devices.',
+    'Post-v0.1 documentation is required, and post-v0.1 physical-device testing is required.',
     'No physical-device evidence is required for v0.1.',
     'No validation on physical devices is required for v0.1.',
     'v0.1 does not require physical-device testing.',
