@@ -143,6 +143,20 @@ object ShareIngestionWriter {
       failure = error
     }
 
+    if (committed && validatedResult == null) {
+      try {
+        // Reconcile while ownership still excludes handoff/ACK. Once the lock is
+        // released, the containing app may legitimately remove the Inbox directory.
+        validatedResult = summary(
+          InboxManifestScanner.readPublished(inbox, ingestionId),
+          replayed = false,
+        )
+      } catch (reconciliationFailure: Throwable) {
+        failure?.let(reconciliationFailure::addSuppressed)
+        failure = reconciliationFailure
+      }
+    }
+
     try {
       ownership.close()
     } catch (error: Throwable) {
@@ -156,15 +170,8 @@ object ShareIngestionWriter {
 
     if (committed) {
       validatedResult?.let { return it }
-      return try {
-        summary(
-          InboxManifestScanner.readPublished(inbox, ingestionId),
-          replayed = false,
-        )
-      } catch (reconciliationFailure: Throwable) {
-        failure?.let(reconciliationFailure::addSuppressed)
-        throw reconciliationFailure
-      }
+      failure?.let { throw it }
+      error("INGESTION_COMMITTED_RESULT_MISSING")
     }
 
     validatedResult?.let { return it }

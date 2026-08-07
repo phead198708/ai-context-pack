@@ -383,6 +383,39 @@ class ShareIngestionWriterInstrumentedTest {
     assertTrue(java.io.File(filesDir, "Packs/$packId/originals/${sharedInput.id}.bin").isFile)
   }
 
+  @Test fun acknowledgementAfterPostCommitFailureReturnsTheInLockValidatedSnapshot() {
+    val ingestionId = UUID.randomUUID().toString()
+    val packId = UUID.randomUUID().toString()
+    val sharedInput = input(0, "image/png", fixture("ocr-english.png"))
+    val postCommitFailureInjected = AtomicBoolean(false)
+
+    val result = ShareIngestionWriter.publish(
+      filesDir,
+      ingestionId,
+      listOf(sharedInput),
+      operationHook = { point ->
+        when (point) {
+          ShareIngestionWriter.Point.AFTER_DIRECTORY_PUBLISH -> {
+            postCommitFailureInjected.set(true)
+            throw ShareIngestionInterruptionException()
+          }
+          ShareIngestionWriter.Point.AFTER_OWNERSHIP_RELEASE -> {
+            InboxArtifactHandoff.handoff(filesDir, ingestionId, packId, 0)
+            assertTrue(InboxArtifactHandoff.acknowledge(filesDir, ingestionId))
+          }
+          else -> Unit
+        }
+      },
+    )
+
+    assertTrue(postCommitFailureInjected.get())
+    assertFalse(result.replayed)
+    assertEquals("complete", result.status)
+    assertEquals(1, result.copied)
+    assertFalse(java.io.File(filesDir, "Inbox/$ingestionId").exists())
+    assertTrue(java.io.File(filesDir, "Packs/$packId/originals/${sharedInput.id}.bin").isFile)
+  }
+
   @Test fun oversizedDeclaredMimeCannotAmplifyFailedManifestMetadata() {
     val oversized = "application/" + "x".repeat(500_000)
     val inputs = (0 until ShareIngestionWriter.maximumReportedItemCount).map { order ->

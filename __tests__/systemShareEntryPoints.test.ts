@@ -65,7 +65,11 @@ describe('Issue #8 system-share entry-point boundaries', () => {
       /private func startSession\(\)[\s\S]*dispatchPrecondition\(condition: \.onQueue\(ingestionQueue\)\)[\s\S]*ShareIngestionSession/,
     );
     expect(controller).toMatch(
-      /ShareProviderFileLoader\.load[\s\S]*self\.ingestionQueue\.async/,
+      /ShareProviderFileLoader\.load[\s\S]*performOnIngestionQueueSynchronously/,
+    );
+    expect(controller).toContain('ingestionQueue.sync(execute: operation)');
+    expect(controller).toMatch(
+      /private func consumeProviderResult[\s\S]*dispatchPrecondition\(condition: \.onQueue\(ingestionQueue\)\)[\s\S]*session\.recordFile/,
     );
     expect(writer).toContain('loadFileRepresentation');
     expect(writer).toContain('loadObject(ofClass: NSURL.self)');

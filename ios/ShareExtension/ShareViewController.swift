@@ -8,6 +8,7 @@ final class ShareViewController: UIViewController {
     label: "com.example.aicontextpack.share-ingestion",
     qos: .userInitiated
   )
+  private let ingestionQueueKey = DispatchSpecificKey<UInt8>()
   private var session: ShareIngestionSession?
   private var itemIds: [String] = []
   private var attachments: [NSItemProvider] = []
@@ -15,6 +16,7 @@ final class ShareViewController: UIViewController {
 
   override func viewDidLoad() {
     super.viewDidLoad()
+    ingestionQueue.setSpecific(key: ingestionQueueKey, value: 1)
     configureStatus()
     beginImport()
   }
@@ -119,30 +121,56 @@ final class ShareViewController: UIViewController {
     ShareProviderFileLoader.load(provider: provider, representation: representation) {
       [weak self] result in
       guard let self else { return }
-      self.ingestionQueue.async { [weak self] in
-        guard let self, !self.finished, let session = self.session else { return }
-        do {
-          switch result {
-          case .success(let source):
-            try session.recordFile(
-              id: id,
-              order: index,
-              declaredMediaType: representation.mediaType,
-              source: source
-            )
-          case .failure(let error):
-            try session.recordFailure(
-              id: id,
-              order: index,
-              declaredMediaType: representation.mediaType,
-              code: error.stableCode
-            )
-          }
-          self.processAttachment(at: index + 1)
-        } catch {
-          self.finishWithError(message: "Import could not be recorded.")
-        }
+      // A loadFileRepresentation URL is valid only until this callback returns.
+      // Synchronously enter the serial ingestion queue so recordFile owns the bytes
+      // before the provider is permitted to remove its temporary representation.
+      self.performOnIngestionQueueSynchronously {
+        self.consumeProviderResult(
+          result,
+          representation: representation,
+          id: id,
+          index: index
+        )
       }
+    }
+  }
+
+  private func performOnIngestionQueueSynchronously(_ operation: () -> Void) {
+    if DispatchQueue.getSpecific(key: ingestionQueueKey) != nil {
+      operation()
+    } else {
+      ingestionQueue.sync(execute: operation)
+    }
+  }
+
+  private func consumeProviderResult(
+    _ result: Result<URL, ShareProviderLoadError>,
+    representation: ShareRepresentation,
+    id: String,
+    index: Int
+  ) {
+    dispatchPrecondition(condition: .onQueue(ingestionQueue))
+    guard !finished, let session else { return }
+    do {
+      switch result {
+      case .success(let source):
+        try session.recordFile(
+          id: id,
+          order: index,
+          declaredMediaType: representation.mediaType,
+          source: source
+        )
+      case .failure(let error):
+        try session.recordFailure(
+          id: id,
+          order: index,
+          declaredMediaType: representation.mediaType,
+          code: error.stableCode
+        )
+      }
+      processAttachment(at: index + 1)
+    } catch {
+      finishWithError(message: "Import could not be recorded.")
     }
   }
 
