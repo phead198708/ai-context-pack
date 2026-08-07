@@ -279,10 +279,12 @@ test('inventory rejects missing or malformed labels', () => {
   }
 });
 
-test('forbidden label fails regardless of label order or representation', () => {
+test('forbidden label fails regardless of casing, order, or representation', () => {
   for (const labels of [
     ['test:device-required', 'type:task'],
     [{ name: 'type:task' }, { name: 'test:device-required' }],
+    ['type:task', 'Test:Device-Required'],
+    [{ name: 'TEST:DEVICE-REQUIRED' }, { name: 'type:task' }],
   ]) {
     const records = makeInventory();
     records[22].labels = labels;
@@ -292,6 +294,16 @@ test('forbidden label fails regardless of label order or representation', () => 
       { issue: 24, field: 'labels' },
     );
   }
+
+  const manifest = clone(canonical.manifest);
+  manifest.githubInventory.forbiddenLabels = ['TEST:DEVICE-REQUIRED'];
+  const records = makeInventory();
+  records[0].labels = ['Test:Device-Required'];
+  expectRule(
+    () => verifyInventory(manifest, records),
+    'INVENTORY_FORBIDDEN_LABEL',
+    { issue: 2, field: 'labels' },
+  );
 });
 
 test('free-form prose does not influence structured policy', () => {

@@ -190,6 +190,9 @@ export function verifyInventory(manifest, envelope) {
 
   const required = manifest.githubInventory.requiredIssueNumbers;
   const requiredSet = new Set(required);
+  const forbiddenLabelNames = new Set(
+    manifest.githubInventory.forbiddenLabels.map(name => name.toLowerCase()),
+  );
   const expectedRepositoryUrl = `https://api.github.com/repos/${manifest.githubInventory.repository}`;
   const records = new Map();
 
@@ -222,11 +225,7 @@ export function verifyInventory(manifest, envelope) {
     validateTextField(record, number, 'title');
     validateTextField(record, number, 'body');
     const names = labelNames(record, number);
-    if (
-      names.some(name =>
-        manifest.githubInventory.forbiddenLabels.includes(name),
-      )
-    ) {
+    if (names.some(name => forbiddenLabelNames.has(name.toLowerCase()))) {
       fail('INVENTORY_FORBIDDEN_LABEL', { issue: number, field: 'labels' });
     }
   }

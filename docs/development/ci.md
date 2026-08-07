@@ -33,7 +33,7 @@ Enable “Require branches to be up to date before merging,” require conversat
 
 `npm run test:v01-verification-policy` runs synthetic manifest, integrity, inventory, diagnostic, input-bound, determinism, and prose-invariance tests, then validates the canonical files. The CLI bounds policy files to 64 KiB and stdin to 1 MiB and emits only stable rule IDs plus safe issue-number/field context. Free-form issue prose is descriptive, not the machine-executable source of verification policy. The canonical structured manifest and validated GitHub labels define whether physical-device evidence is a release gate.
 
-For the live audit, pipe the read-only REST transport envelope into `node scripts/verify-v01-virtual-verification-policy.mjs --issues-stdin`. The verifier projects numbers 2–24, requires exactly Epic #2 and Issues #3–#24, validates non-empty title/body fields and labels, rejects in-range pull requests and duplicate/malformed records, and rejects `test:device-required`. Out-of-range REST records do not enter the canonical inventory. Content is never printed.
+For the live audit, pipe the read-only REST transport envelope into `node scripts/verify-v01-virtual-verification-policy.mjs --issues-stdin`. The verifier projects numbers 2–24, requires exactly Epic #2 and Issues #3–#24, validates non-empty title/body fields and labels, rejects in-range pull requests and duplicate/malformed records, and rejects `test:device-required` case-insensitively to match GitHub label identity. Out-of-range REST records do not enter the canonical inventory. Content is never printed.
 
 ## Dependency gate
 
