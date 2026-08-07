@@ -35,10 +35,10 @@ internal class ShareIntentLifecycleCoordinator(
     safely(id) {
       finish(
         id,
-        if (result == ShareInboxImporter.Result.COMPLETE)
+        if (result.published)
           ShareIntentTransactionStore.TerminalResult.COMPLETE
         else ShareIntentTransactionStore.TerminalResult.FAILED,
-        if (result == ShareInboxImporter.Result.FAILED) "SHARE_IMPORT_FAILED" else null,
+        if (result.published) null else (result.code ?: "SHARE_IMPORT_FAILED"),
       )
     }
   }

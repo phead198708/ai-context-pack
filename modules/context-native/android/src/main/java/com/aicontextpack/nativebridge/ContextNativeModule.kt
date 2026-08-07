@@ -266,6 +266,7 @@ internal object InboxManifestScanner {
     "IMPORT_PROVIDER_PERMISSION_EXPIRED",
     "IMPORT_TYPE_UNSUPPORTED",
     "IMPORT_COPY_FAILED",
+    "IMPORT_SIZE_LIMIT_EXCEEDED",
     "IMPORT_PARTIAL_FAILURE",
     "PIPELINE_STAGE_FAILED",
     "PROCESSOR_OUTPUT_INVALID",
@@ -413,7 +414,7 @@ internal object InboxManifestScanner {
     check(manifestStatus in setOf("complete", "partial", "failed"))
     val ownedDirectory = ingestion.canonicalFile
     val items = manifest.getJSONArray("items")
-    check(items.length() > 0)
+    check(items.length() in 1..ShareIngestionWriter.maximumReportedItemCount)
     val ids = mutableSetOf<String>()
     var copied = 0
     var failed = 0
@@ -422,7 +423,11 @@ internal object InboxManifestScanner {
       val itemId = item.getString("id")
       check(ingestionIdPattern.matches(itemId) && UUID.fromString(itemId).toString() == itemId)
       check(ids.add(itemId) && nonNegativeInteger(item.opt("order")) == index.toLong())
-      check(mediaTypePattern.matches(item.getString("mediaType")))
+      val mediaType = item.getString("mediaType")
+      check(
+        mediaType.length <= ShareIngestionWriter.maximumMediaTypeLength &&
+          mediaTypePattern.matches(mediaType),
+      )
       when (item.getString("status")) {
         "copied" -> {
           val keys = item.keys().asSequence().toSet()

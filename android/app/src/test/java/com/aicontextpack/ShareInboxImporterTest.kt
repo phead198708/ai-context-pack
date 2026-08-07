@@ -9,25 +9,20 @@ import java.io.ByteArrayOutputStream
 
 class ShareInboxImporterTest {
   @Test
-  fun resolvesWildcardImageMimeFromProvider() {
-    assertEquals(
-      "image/jpeg",
-      ShareInboxImporter.selectConcreteImageMediaType("image/*", "image/jpeg")
-    )
+  fun preservesConcreteProviderMediaType() {
+    assertEquals("image/jpeg", ShareInboxImporter.concreteOrFallback("image/jpeg"))
   }
 
   @Test
-  fun providerMimeTakesPrecedenceOverConflictingIntentMime() {
-    assertEquals(
-      "image/png",
-      ShareInboxImporter.selectConcreteImageMediaType("image/jpeg", "image/png")
-    )
+  fun normalizesConcreteProviderMediaType() {
+    assertEquals("image/png", ShareInboxImporter.concreteOrFallback(" IMAGE/PNG "))
   }
 
   @Test
-  fun rejectsImageMimeWhenNoConcreteTypeExists() {
-    assertEquals(null, ShareInboxImporter.selectConcreteImageMediaType("image/*", null))
-    assertEquals(null, ShareInboxImporter.selectConcreteImageMediaType("image/jpeg; charset=utf-8", null))
+  fun wildcardAndParameterizedTypesUsePrivacySafeFallback() {
+    assertEquals("application/octet-stream", ShareInboxImporter.concreteOrFallback("image/*"))
+    assertEquals("image/jpeg", ShareInboxImporter.concreteOrFallback("image/jpeg; charset=binary"))
+    assertEquals("application/octet-stream", ShareInboxImporter.concreteOrFallback(null))
   }
 
   @Test

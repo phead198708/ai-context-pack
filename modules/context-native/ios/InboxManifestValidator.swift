@@ -20,6 +20,9 @@ enum InboxManifestValidationError: Error, Equatable {
 }
 
 enum InboxManifestValidator {
+  static let maximumItemCount = 128
+  static let maximumMediaTypeLength = 127
+
   private enum ExactSchemaVersionResult {
     case supported
     case unsupported
@@ -43,6 +46,7 @@ enum InboxManifestValidator {
     "IMPORT_PROVIDER_PERMISSION_EXPIRED",
     "IMPORT_TYPE_UNSUPPORTED",
     "IMPORT_COPY_FAILED",
+    "IMPORT_SIZE_LIMIT_EXCEEDED",
     "IMPORT_PARTIAL_FAILURE",
     "PIPELINE_STAGE_FAILED",
     "PROCESSOR_OUTPUT_INVALID",
@@ -199,7 +203,8 @@ enum InboxManifestValidator {
           let status = manifest["status"] as? String,
           ["complete", "partial", "failed"].contains(status),
           let items = manifest["items"] as? [[String: Any]],
-          !items.isEmpty else {
+          !items.isEmpty,
+          items.count <= maximumItemCount else {
       throw InboxManifestValidationError.invalidManifest
     }
 
@@ -213,6 +218,7 @@ enum InboxManifestValidator {
             itemIds.insert(itemId).inserted,
             nonNegativeInteger(item["order"]) == Int64(order),
             let mediaType = item["mediaType"] as? String,
+            mediaType.utf8.count <= maximumMediaTypeLength,
             mediaType.range(of: "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$", options: .regularExpression) != nil,
             let itemStatus = item["status"] as? String else {
         throw InboxManifestValidationError.invalidManifest

@@ -16,6 +16,7 @@ import type { SavePackGraphInput } from './contracts';
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const MEDIA_TYPE =
   /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/;
+const MAX_MEDIA_TYPE_LENGTH = 127;
 const SAFE_VERSION = /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}$/;
 const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,127}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -131,6 +132,7 @@ export function assertContextItem(item: ContextItem): void {
     !isCanonicalUuid(item.id) ||
     !isCanonicalUuid(item.packId) ||
     !SOURCE_TYPES.has(item.sourceType) ||
+    item.mediaType.length > MAX_MEDIA_TYPE_LENGTH ||
     !MEDIA_TYPE.test(item.mediaType) ||
     (item.originalDisplayName !== undefined &&
       typeof item.originalDisplayName !== 'string') ||
@@ -154,6 +156,7 @@ export function assertArtifact(artifact: Artifact): void {
     (artifact.kind === 'original' && artifact.itemId === undefined) ||
     !ARTIFACT_KINDS.has(artifact.kind) ||
     !isOwnedArtifactPath(artifact.relativePath) ||
+    artifact.mediaType.length > MAX_MEDIA_TYPE_LENGTH ||
     !MEDIA_TYPE.test(artifact.mediaType) ||
     !Number.isSafeInteger(artifact.byteCount) ||
     artifact.byteCount < 0 ||

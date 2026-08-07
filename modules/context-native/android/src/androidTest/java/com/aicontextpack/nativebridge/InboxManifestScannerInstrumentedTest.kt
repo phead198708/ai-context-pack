@@ -618,6 +618,22 @@ class InboxManifestScannerInstrumentedTest {
     }
   }
 
+  @Test
+  fun rejectsOversizedManifestMediaType() {
+    val item = File(inbox, "$validIngestionId/$validItemId.bin").apply {
+      parentFile?.mkdirs()
+      writeBytes(byteArrayOf(1, 2, 3))
+    }
+    writeManifest(
+      item,
+      mediaType = "application/" + "x".repeat(ShareIngestionWriter.maximumMediaTypeLength),
+    )
+
+    val error = assertThrows(NativeException::class.java) { InboxManifestScanner.scan(inbox) }
+
+    assertEquals("SCHEMA_INVALID", error.code)
+  }
+
   private fun writeManifest(
     item: File,
     byteCount: Long = item.length(),
@@ -628,12 +644,13 @@ class InboxManifestScannerInstrumentedTest {
     itemOrder: Int = 0,
     manifestStatus: String = "complete",
     sha256: String? = null,
+    mediaType: String = "image/png",
   ) {
     val directory = manifestDirectory.apply { mkdirs() }
     val copiedItem = JSONObject()
       .put("id", validItemId)
       .put("order", itemOrder)
-      .put("mediaType", "image/png")
+      .put("mediaType", mediaType)
       .put("byteCount", byteCount)
       .put("relativePath", item.name)
       .put("status", "copied")

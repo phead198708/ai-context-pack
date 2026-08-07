@@ -40,6 +40,10 @@ export const DOMAIN_ERROR_CATALOG = {
     disposition: 'retryable',
     category: 'resource',
   },
+  IMPORT_SIZE_LIMIT_EXCEEDED: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
   IMPORT_PARTIAL_FAILURE: {
     disposition: 'user-action-required',
     category: 'input',

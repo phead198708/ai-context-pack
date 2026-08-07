@@ -625,13 +625,29 @@ final class InboxRecoverySupportTests: XCTestCase {
     XCTAssertThrowsError(try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox")))
   }
 
+  func testOversizedManifestMediaTypeIsSchemaInvalid() throws {
+    let id = UUID().uuidString.lowercased()
+    try writeManifest(
+      directoryId: id,
+      manifestId: id,
+      mediaType: "application/" + String(repeating: "x", count: 127)
+    )
+
+    XCTAssertThrowsError(
+      try InboxManifestValidator.read(inbox: root.appendingPathComponent("Inbox"))
+    ) { error in
+      XCTAssertEqual(error as? InboxManifestValidationError, .invalidManifest)
+    }
+  }
+
   private func writeManifest(
     directoryId: String,
     manifestId: String,
     itemURL externalItem: URL? = nil,
     schemaVersion: Any = 1,
     createdAt: String = "2026-01-01T00:00:00.000Z",
-    sha256: String? = nil
+    sha256: String? = nil,
+    mediaType: String = "image/png"
   ) throws {
     let directory = root.appendingPathComponent("Inbox/\(directoryId)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -640,7 +656,7 @@ final class InboxRecoverySupportTests: XCTestCase {
     var copiedItem: [String: Any] = [
       "id": manifestItemId,
       "order": 0,
-      "mediaType": "image/png",
+      "mediaType": mediaType,
       "byteCount": 3,
       "relativePath": item.lastPathComponent,
       "status": "copied"
