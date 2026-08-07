@@ -1104,6 +1104,29 @@ final class InboxArtifactHandoffTests: XCTestCase {
     ))
   }
 
+  func testAcknowledgementPreservesUnsupportedReceiptSchemaCode() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let receipts = container.appendingPathComponent(
+      "InboxAcknowledgements",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: receipts, withIntermediateDirectories: false)
+    try Data(#"{"schemaVersion":2}"#.utf8).write(
+      to: receipts.appendingPathComponent("\(ingestionId).json")
+    )
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .unsupportedVersion)
+      XCTAssertEqual(
+        (error as? InboxArtifactHandoffError)?.stableCode,
+        "SCHEMA_VERSION_UNSUPPORTED"
+      )
+    }
+  }
+
   func testAcknowledgementTombstoneDeletionIsBestEffortAndRetryable() throws {
     let ingestionId = UUID().uuidString.lowercased()
     let itemId = UUID().uuidString.lowercased()

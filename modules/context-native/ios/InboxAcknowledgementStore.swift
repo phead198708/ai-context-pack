@@ -3,6 +3,7 @@ import Foundation
 
 enum InboxAcknowledgementStoreError: Error, Equatable {
   case invalidIdentifier
+  case unsupportedVersion
   case integrityFailed
   case writeFailed
   case recoveryRequired
@@ -10,6 +11,7 @@ enum InboxAcknowledgementStoreError: Error, Equatable {
   var stableCode: String {
     switch self {
     case .invalidIdentifier: "SCHEMA_INVALID"
+    case .unsupportedVersion: "SCHEMA_VERSION_UNSUPPORTED"
     case .integrityFailed: "ARTIFACT_INTEGRITY_FAILED"
     case .writeFailed: "STORAGE_WRITE_FAILED"
     case .recoveryRequired: "PIPELINE_RECOVERY_REQUIRED"
@@ -47,7 +49,9 @@ enum InboxAcknowledgementStore {
         ingestionId: ingestionId
       )
     } catch let error as InboxManifestValidationError {
-      if error == .unsupportedVersion { throw error }
+      if error == .unsupportedVersion {
+        throw InboxAcknowledgementStoreError.unsupportedVersion
+      }
       throw InboxAcknowledgementStoreError.integrityFailed
     } catch {
       throw InboxAcknowledgementStoreError.integrityFailed

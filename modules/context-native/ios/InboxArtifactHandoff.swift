@@ -4,6 +4,7 @@ import Foundation
 
 enum InboxArtifactHandoffError: Error, Equatable {
   case invalidIdentifier
+  case unsupportedVersion
   case manifestMissing
   case lowDisk
   case integrityFailed
@@ -13,6 +14,7 @@ enum InboxArtifactHandoffError: Error, Equatable {
   var stableCode: String {
     switch self {
     case .invalidIdentifier, .manifestMissing: "SCHEMA_INVALID"
+    case .unsupportedVersion: "SCHEMA_VERSION_UNSUPPORTED"
     case .lowDisk: "RESOURCE_LOW_DISK"
     case .integrityFailed: "ARTIFACT_INTEGRITY_FAILED"
     case .writeFailed: "STORAGE_WRITE_FAILED"
@@ -232,9 +234,7 @@ enum InboxArtifactHandoff {
             } catch let error as InboxAcknowledgementStoreError {
               throw handoffError(error)
             } catch let error as InboxManifestValidationError {
-              throw error == .artifactIntegrityFailed
-                ? InboxArtifactHandoffError.integrityFailed
-                : InboxArtifactHandoffError.manifestMissing
+              throw handoffError(error)
             } catch {
               throw InboxArtifactHandoffError.integrityFailed
             }
@@ -266,9 +266,7 @@ enum InboxArtifactHandoff {
         }
         manifestData = snapshot
       } catch let error as InboxManifestValidationError {
-        throw error == .artifactIntegrityFailed
-          ? InboxArtifactHandoffError.integrityFailed
-          : InboxArtifactHandoffError.manifestMissing
+        throw handoffError(error)
       } catch {
         throw InboxArtifactHandoffError.integrityFailed
       }
@@ -600,9 +598,21 @@ enum InboxArtifactHandoff {
   ) -> InboxArtifactHandoffError {
     switch error {
     case .invalidIdentifier: .invalidIdentifier
+    case .unsupportedVersion: .unsupportedVersion
     case .integrityFailed: .integrityFailed
     case .writeFailed: .writeFailed
     case .recoveryRequired: .acknowledgementBlocked
+    }
+  }
+
+  private static func handoffError(
+    _ error: InboxManifestValidationError
+  ) -> InboxArtifactHandoffError {
+    switch error {
+    case .unsupportedVersion: .unsupportedVersion
+    case .artifactIntegrityFailed: .integrityFailed
+    case .invalidManifest: .manifestMissing
+    case .quarantineFailed: .writeFailed
     }
   }
 
