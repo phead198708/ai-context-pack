@@ -58,6 +58,7 @@ object ShareIngestionWriter {
   enum class Point {
     BEFORE_SHARED_DIRECTORY_CREATE,
     BEFORE_SHARED_DIRECTORY_PARENT_SYNC,
+    AFTER_OWNERSHIP_CONFLICT,
     AFTER_LOCKED_REPLAY_MANIFEST_CHECK,
     AFTER_FIRST_CHUNK,
     BEFORE_ITEM_PUBLISH,
@@ -84,12 +85,19 @@ object ShareIngestionWriter {
     val inbox = File(filesDir, "Inbox")
     val publishedDirectory = File(inbox, ingestionId)
     val staging = File(filesDir, "InboxStaging/$ingestionId")
-    val ownership = acquireOwnership(filesDir, ingestionId)
+    val ownership = acquireOwnership(filesDir, ingestionId, operationHook)
     var committed = false
     var validatedResult: ShareIngestionSummary? = null
     var failure: Throwable? = null
     try {
-      if (File(publishedDirectory, "manifest.json").isFile) {
+      val acknowledgement = InboxAcknowledgementStore.read(filesDir, ingestionId)
+      if (acknowledgement != null) {
+        validatedResult = summary(acknowledgement, replayed = true)
+      } else if (InboxAcknowledgementStore.matchingTombstones(filesDir, ingestionId).isNotEmpty()) {
+        // A legacy/interrupted ACK tombstone without a valid receipt is consumed state,
+        // not permission to reopen the provider and publish the same ID again.
+        throw InboxAcknowledgementStoreException("PIPELINE_RECOVERY_REQUIRED")
+      } else if (File(publishedDirectory, "manifest.json").isFile) {
         // Replay detection and validation must remain inside per-ingestion ownership.
         // Otherwise handoff/ACK can remove the directory between the check and read.
         operationHook(Point.AFTER_LOCKED_REPLAY_MANIFEST_CHECK)
@@ -267,7 +275,11 @@ object ShareIngestionWriter {
     }
   }
 
-  private fun acquireOwnership(filesDir: File, ingestionId: String): InboxWriterOwnership {
+  private fun acquireOwnership(
+    filesDir: File,
+    ingestionId: String,
+    operationHook: (Point) -> Unit,
+  ): InboxWriterOwnership {
     val deadline = System.nanoTime() + 5_000_000_000L
     while (true) {
       try {
@@ -276,6 +288,7 @@ object ShareIngestionWriter {
         if (error.message != "INBOX_WRITER_LOCK_ALREADY_EXISTS" || System.nanoTime() >= deadline) {
           throw error
         }
+        operationHook(Point.AFTER_OWNERSHIP_CONFLICT)
         Thread.sleep(10)
       }
     }

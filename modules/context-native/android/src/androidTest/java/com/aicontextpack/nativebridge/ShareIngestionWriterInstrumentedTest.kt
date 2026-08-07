@@ -173,6 +173,128 @@ class ShareIngestionWriterInstrumentedTest {
     assertEquals(1, java.io.File(filesDir, "Inbox").listFiles().orEmpty().size)
   }
 
+  @Test fun acknowledgedImportCannotBeRepublishedByAWaitingDuplicateWriter() {
+    val ingestionId = UUID.randomUUID().toString()
+    val packId = UUID.randomUUID().toString()
+    val firstEntered = CountDownLatch(1)
+    val allowFirstToFinish = CountDownLatch(1)
+    val duplicateObservedConflict = CountDownLatch(1)
+    val allowDuplicateRetry = CountDownLatch(1)
+    val duplicateProviderOpens = AtomicInteger(0)
+    val executor = Executors.newFixedThreadPool(2)
+    val first = executor.submit(Callable {
+      ShareIngestionWriter.publish(
+        filesDir,
+        ingestionId,
+        listOf(input(0, "image/png", fixture("ocr-english.png"))),
+        operationHook = { point ->
+          if (point == ShareIngestionWriter.Point.AFTER_FIRST_CHUNK) {
+            firstEntered.countDown()
+            check(allowFirstToFinish.await(5, TimeUnit.SECONDS))
+          }
+        },
+      )
+    })
+    try {
+      assertTrue(firstEntered.await(2, TimeUnit.SECONDS))
+      val duplicate = executor.submit(Callable {
+        ShareIngestionWriter.publish(
+          filesDir,
+          ingestionId,
+          listOf(
+            ShareIngestionInput(
+              id = UUID.randomUUID().toString(),
+              order = 0,
+              declaredMediaType = "image/png",
+              openStream = {
+                duplicateProviderOpens.incrementAndGet()
+                ByteArrayInputStream(fixture("ocr-english.png"))
+              },
+            ),
+          ),
+          operationHook = { point ->
+            if (point == ShareIngestionWriter.Point.AFTER_OWNERSHIP_CONFLICT) {
+              duplicateObservedConflict.countDown()
+              check(allowDuplicateRetry.await(5, TimeUnit.SECONDS))
+            }
+          },
+        )
+      })
+
+      assertTrue(duplicateObservedConflict.await(2, TimeUnit.SECONDS))
+      allowFirstToFinish.countDown()
+      val published = first.get(3, TimeUnit.SECONDS)
+      InboxArtifactHandoff.handoff(filesDir, ingestionId, packId, 0)
+      assertTrue(InboxArtifactHandoff.acknowledge(filesDir, ingestionId))
+      assertTrue(java.io.File(filesDir, "InboxAcknowledgements/$ingestionId.json").isFile)
+      assertFalse(java.io.File(filesDir, "Inbox/$ingestionId").exists())
+
+      allowDuplicateRetry.countDown()
+      val replay = duplicate.get(3, TimeUnit.SECONDS)
+
+      assertFalse(published.replayed)
+      assertTrue(replay.replayed)
+      assertEquals(published.status, replay.status)
+      assertEquals(published.copied, replay.copied)
+      assertEquals(0, duplicateProviderOpens.get())
+      assertFalse(java.io.File(filesDir, "Inbox/$ingestionId").exists())
+      assertFalse(java.io.File(filesDir, "InboxStaging/$ingestionId").exists())
+    } finally {
+      allowFirstToFinish.countDown()
+      allowDuplicateRetry.countDown()
+      executor.shutdownNow()
+    }
+  }
+
+  @Test fun tombstoneWithoutReceiptFailsClosedUntilAcknowledgementRecoversIt() {
+    val ingestionId = UUID.randomUUID().toString()
+    val published = ShareIngestionWriter.publish(
+      filesDir,
+      ingestionId,
+      listOf(input(0, "image/png", fixture("ocr-english.png"))),
+    )
+    val tombstoneRoot = java.io.File(filesDir, "InboxAckTombstones")
+    assertTrue(tombstoneRoot.mkdirs())
+    val tombstone = java.io.File(
+      tombstoneRoot,
+      "$ingestionId-${UUID.randomUUID()}.ack",
+    )
+    assertTrue(java.io.File(filesDir, "Inbox/$ingestionId").renameTo(tombstone))
+    val providerOpened = AtomicBoolean(false)
+
+    val error = assertThrows(InboxAcknowledgementStoreException::class.java) {
+      ShareIngestionWriter.publish(
+        filesDir,
+        ingestionId,
+        listOf(
+          ShareIngestionInput(
+            id = UUID.randomUUID().toString(),
+            order = 0,
+            declaredMediaType = "image/png",
+            openStream = {
+              providerOpened.set(true)
+              ByteArrayInputStream(fixture("ocr-english.png"))
+            },
+          ),
+        ),
+      )
+    }
+
+    assertEquals("PIPELINE_RECOVERY_REQUIRED", error.stableCode)
+    assertFalse(providerOpened.get())
+    assertTrue(tombstone.isDirectory)
+    assertTrue(InboxArtifactHandoff.acknowledge(filesDir, ingestionId))
+    assertFalse(tombstone.exists())
+    assertTrue(java.io.File(filesDir, "InboxAcknowledgements/$ingestionId.json").isFile)
+    val replay = ShareIngestionWriter.publish(
+      filesDir,
+      ingestionId,
+      listOf(input(0, "image/png", fixture("ocr-english.png"))),
+    )
+    assertTrue(replay.replayed)
+    assertEquals(published.copied, replay.copied)
+  }
+
   @Test fun replayOwnershipBlocksAcknowledgementBetweenManifestCheckAndRead() {
     val ingestionId = UUID.randomUUID().toString()
     val itemId = UUID.randomUUID().toString()

@@ -116,6 +116,7 @@ final class ShareIngestionSession {
   enum Point {
     case beforeSharedDirectoryCreate
     case beforeSharedDirectoryParentSync
+    case afterOwnershipConflict
     case afterLockedReplayManifestCheck
     case afterFirstChunk
     case beforeItemPublish
@@ -151,7 +152,38 @@ final class ShareIngestionSession {
     self.now = now
     self.operationHook = operationHook
     let manifest = published.appendingPathComponent("manifest.json")
-    ownership = try Self.acquireOwnership(container: container, ingestionId: ingestionId)
+    ownership = try Self.acquireOwnership(
+      container: container,
+      ingestionId: ingestionId,
+      operationHook: operationHook
+    )
+    do {
+      if let acknowledgement = try InboxAcknowledgementStore.read(
+        container: container,
+        ingestionId: ingestionId
+      ) {
+        replayedSummary = try Self.summary(
+          acknowledgement,
+          ingestionId: ingestionId,
+          replayed: true
+        )
+        ownership?.release()
+        ownership = nil
+        return
+      }
+      if try !InboxAcknowledgementStore.matchingTombstones(
+        container: container,
+        ingestionId: ingestionId
+      ).isEmpty {
+        // A legacy/interrupted ACK tombstone without a valid receipt is consumed
+        // state, not permission to reopen the provider and republish the same ID.
+        throw InboxAcknowledgementStoreError.recoveryRequired
+      }
+    } catch {
+      ownership?.release()
+      ownership = nil
+      throw error
+    }
     if FileManager.default.fileExists(atPath: manifest.path) {
       defer {
         ownership?.release()
@@ -198,7 +230,8 @@ final class ShareIngestionSession {
 
   private static func acquireOwnership(
     container: URL,
-    ingestionId: String
+    ingestionId: String,
+    operationHook: (Point) throws -> Void
   ) throws -> InboxWriterOwnership {
     let deadline = Date().addingTimeInterval(5)
     while true {
@@ -211,6 +244,7 @@ final class ShareIngestionSession {
         guard Date() < deadline else {
           throw InboxWriterOwnershipError.ownershipUnavailable
         }
+        try operationHook(.afterOwnershipConflict)
         Thread.sleep(forTimeInterval: 0.01)
       }
     }

@@ -29,6 +29,7 @@ enum InboxArtifactHandoffPoint {
 }
 
 enum InboxAcknowledgementPoint {
+  case afterReceiptPublish
   case afterTombstoneRename
   case duringTombstoneDeletion
 }
@@ -187,7 +188,62 @@ enum InboxArtifactHandoff {
       if FileManager.default.fileExists(atPath: lock.path) {
         throw InboxArtifactHandoffError.acknowledgementBlocked
       }
+      var receipt: [String: Any]?
+      do {
+        receipt = try InboxAcknowledgementStore.read(
+          container: container,
+          ingestionId: ingestionId
+        )
+      } catch let error as InboxAcknowledgementStoreError {
+        throw handoffError(error)
+      }
       guard FileManager.default.fileExists(atPath: directory.path) else {
+        if receipt == nil {
+          let tombstones: [URL]
+          do {
+            tombstones = try InboxAcknowledgementStore.matchingTombstones(
+              container: container,
+              ingestionId: ingestionId
+            )
+          } catch let error as InboxAcknowledgementStoreError {
+            throw handoffError(error)
+          }
+          for tombstone in tombstones {
+            do {
+              let manifestURL = tombstone.appendingPathComponent("manifest.json")
+              let manifestData = try Data(
+                contentsOf: manifestURL,
+                options: [.mappedIfSafe]
+              )
+              _ = try InboxManifestValidator.readOwnedDirectory(
+                tombstone,
+                ingestionId: ingestionId
+              )
+              guard try Data(contentsOf: manifestURL, options: [.mappedIfSafe])
+                      == manifestData else {
+                throw InboxArtifactHandoffError.integrityFailed
+              }
+              receipt = try InboxAcknowledgementStore.publish(
+                container: container,
+                ingestionId: ingestionId,
+                manifestData: manifestData,
+                directorySynchronizer: directorySynchronizer
+              )
+            } catch let error as InboxAcknowledgementStoreError {
+              throw handoffError(error)
+            } catch let error as InboxManifestValidationError {
+              throw error == .artifactIntegrityFailed
+                ? InboxArtifactHandoffError.integrityFailed
+                : InboxArtifactHandoffError.manifestMissing
+            } catch {
+              throw InboxArtifactHandoffError.integrityFailed
+            }
+          }
+          if receipt != nil { try operationHook(.afterReceiptPublish) }
+        }
+        // Acknowledging a never-published ID remains an idempotent no-op. A
+        // matching tombstone must first produce a durable receipt or fail closed.
+        guard receipt != nil else { return true }
         cleanupTombstones(
           root: tombstoneRoot,
           ingestionId: ingestionId,
@@ -197,6 +253,36 @@ enum InboxArtifactHandoff {
         )
         return true
       }
+      let manifestData: Data
+      do {
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let snapshot = try Data(contentsOf: manifestURL, options: [.mappedIfSafe])
+        _ = try InboxManifestValidator.readPublished(
+          inbox: inbox,
+          ingestionId: ingestionId
+        )
+        guard try Data(contentsOf: manifestURL, options: [.mappedIfSafe]) == snapshot else {
+          throw InboxArtifactHandoffError.integrityFailed
+        }
+        manifestData = snapshot
+      } catch let error as InboxManifestValidationError {
+        throw error == .artifactIntegrityFailed
+          ? InboxArtifactHandoffError.integrityFailed
+          : InboxArtifactHandoffError.manifestMissing
+      } catch {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
+      do {
+        receipt = try InboxAcknowledgementStore.publish(
+          container: container,
+          ingestionId: ingestionId,
+          manifestData: manifestData,
+          directorySynchronizer: directorySynchronizer
+        )
+      } catch let error as InboxAcknowledgementStoreError {
+        throw handoffError(error)
+      }
+      try operationHook(.afterReceiptPublish)
       try ensureDurableDirectory(
         tombstoneRoot,
         directorySynchronizer: directorySynchronizer
@@ -245,6 +331,36 @@ enum InboxArtifactHandoff {
       var failed = 0
       for tombstone in candidates {
         do {
+          guard let ingestionId = InboxAcknowledgementStore.tombstoneIngestionId(
+            tombstone,
+            root: root
+          ) else {
+            throw InboxArtifactHandoffError.integrityFailed
+          }
+          if try InboxAcknowledgementStore.read(
+            container: container,
+            ingestionId: ingestionId
+          ) == nil {
+            let manifestURL = tombstone.appendingPathComponent("manifest.json")
+            let manifestData = try Data(
+              contentsOf: manifestURL,
+              options: [.mappedIfSafe]
+            )
+            _ = try InboxManifestValidator.readOwnedDirectory(
+              tombstone,
+              ingestionId: ingestionId
+            )
+            guard try Data(contentsOf: manifestURL, options: [.mappedIfSafe])
+                    == manifestData else {
+              throw InboxArtifactHandoffError.integrityFailed
+            }
+            _ = try InboxAcknowledgementStore.publish(
+              container: container,
+              ingestionId: ingestionId,
+              manifestData: manifestData,
+              directorySynchronizer: directorySynchronizer
+            )
+          }
           try tombstoneRemover(tombstone)
           guard !FileManager.default.fileExists(atPath: tombstone.path) else {
             throw InboxArtifactHandoffError.writeFailed
@@ -395,11 +511,12 @@ enum InboxArtifactHandoff {
     directorySynchronizer: (URL) throws -> Void,
     tombstoneRemover: (URL) throws -> Void
   ) {
-    guard let children = try? FileManager.default.contentsOfDirectory(
-      at: root,
-      includingPropertiesForKeys: nil
+    let container = root.deletingLastPathComponent()
+    guard let children = try? InboxAcknowledgementStore.matchingTombstones(
+      container: container,
+      ingestionId: ingestionId
     ) else { return }
-    for child in children where child.lastPathComponent.hasPrefix("\(ingestionId)-") {
+    for child in children {
       cleanupTombstone(
         child,
         operationHook: operationHook,
@@ -410,18 +527,7 @@ enum InboxArtifactHandoff {
   }
 
   private static func validAcknowledgementTombstone(_ url: URL, root: URL) -> Bool {
-    guard url.pathExtension == "ack",
-          url.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
-          let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-          values.isDirectory == true,
-          values.isSymbolicLink != true else { return false }
-    let name = url.deletingPathExtension().lastPathComponent
-    guard name.count == 73 else { return false }
-    let separator = name.index(name.startIndex, offsetBy: 36)
-    guard name[separator] == "-" else { return false }
-    let suffixStart = name.index(after: separator)
-    return canonicalUUID(String(name[..<separator]))
-      && canonicalUUID(String(name[suffixStart...]))
+    InboxAcknowledgementStore.tombstoneIngestionId(url, root: root) != nil
   }
 
   private static func cleanupTombstone(
@@ -486,6 +592,17 @@ enum InboxArtifactHandoff {
   private static func requireCanonicalUUID(_ value: String) throws {
     guard canonicalUUID(value) else {
       throw InboxArtifactHandoffError.invalidIdentifier
+    }
+  }
+
+  private static func handoffError(
+    _ error: InboxAcknowledgementStoreError
+  ) -> InboxArtifactHandoffError {
+    switch error {
+    case .invalidIdentifier: .invalidIdentifier
+    case .integrityFailed: .integrityFailed
+    case .writeFailed: .writeFailed
+    case .recoveryRequired: .acknowledgementBlocked
     }
   }
 

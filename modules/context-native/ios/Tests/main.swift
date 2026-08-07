@@ -1050,6 +1050,60 @@ final class InboxArtifactHandoffTests: XCTestCase {
     XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: tombstones.path), [])
   }
 
+  func testAcknowledgementCrashAfterReceiptCannotReopenAnAlreadyConsumedId() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: ingestionId,
+      items: [(itemId, "image/png", Data([1, 2, 3]))]
+    )
+    var interrupted = false
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId,
+      operationHook: { point in
+        if !interrupted, case .afterReceiptPublish = point {
+          interrupted = true
+          throw TestIOError.injected
+        }
+      }
+    ))
+
+    XCTAssertTrue(interrupted)
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(ingestionId)").path
+    ))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent(
+        "InboxAcknowledgements/\(ingestionId).json"
+      ).path
+    ))
+    let replay = try ShareIngestionSession(
+      container: container,
+      ingestionId: ingestionId
+    )
+    try replay.recordFile(
+      id: UUID().uuidString.lowercased(),
+      order: 0,
+      declaredMediaType: "image/png",
+      source: container.appendingPathComponent("provider-must-not-open")
+    )
+    XCTAssertTrue(try replay.finish().replayed)
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId
+    ))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent("Inbox/\(ingestionId)").path
+    ))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent(
+        "InboxAcknowledgements/\(ingestionId).json"
+      ).path
+    ))
+  }
+
   func testAcknowledgementTombstoneDeletionIsBestEffortAndRetryable() throws {
     let ingestionId = UUID().uuidString.lowercased()
     let itemId = UUID().uuidString.lowercased()

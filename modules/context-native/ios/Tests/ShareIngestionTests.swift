@@ -350,6 +350,143 @@ final class ShareIngestionTests: XCTestCase {
     XCTAssertTrue(try XCTUnwrap(result).get().replayed)
   }
 
+  func testAcknowledgedImportCannotBeRepublishedByAWaitingDuplicateWriter() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    let first = try ShareIngestionSession(container: root, ingestionId: ingestionId)
+    let duplicateObservedConflict = expectation(description: "duplicate observed ownership")
+    let duplicateFinished = expectation(description: "duplicate finished")
+    let allowDuplicateRetry = DispatchSemaphore(value: 0)
+    let resultLock = NSLock()
+    var duplicateResult: Result<ShareIngestionSummary, Error>?
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      let result = Result {
+        let duplicate = try ShareIngestionSession(
+          container: self.root,
+          ingestionId: ingestionId,
+          operationHook: { point in
+            if case .afterOwnershipConflict = point {
+              duplicateObservedConflict.fulfill()
+              guard allowDuplicateRetry.wait(timeout: .now() + 5) == .success else {
+                throw ShareIngestionFatalError.interrupted
+              }
+            }
+          }
+        )
+        // A receipt replay must not attempt to open the provider-backed source.
+        try duplicate.recordFile(
+          id: UUID().uuidString.lowercased(),
+          order: 0,
+          declaredMediaType: "image/png",
+          source: self.root.appendingPathComponent("provider-must-not-open")
+        )
+        return try duplicate.finish()
+      }
+      resultLock.lock()
+      duplicateResult = result
+      resultLock.unlock()
+      duplicateFinished.fulfill()
+    }
+
+    wait(for: [duplicateObservedConflict], timeout: 2)
+    try first.recordFile(
+      id: itemId,
+      order: 0,
+      declaredMediaType: "image/png",
+      source: fixture("ocr-english.png")
+    )
+    let published = try first.finish()
+    let applicationSupport = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: applicationSupport,
+      withIntermediateDirectories: true
+    )
+    _ = try InboxArtifactHandoff.handoff(
+      container: root,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max }
+    )
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: root,
+      ingestionId: ingestionId
+    ))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent(
+        "InboxAcknowledgements/\(ingestionId).json"
+      ).path
+    ))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("Inbox/\(ingestionId)").path
+    ))
+
+    allowDuplicateRetry.signal()
+    wait(for: [duplicateFinished], timeout: 2)
+    resultLock.lock()
+    let replay = duplicateResult
+    resultLock.unlock()
+
+    let replayed = try XCTUnwrap(replay).get()
+    XCTAssertFalse(published.replayed)
+    XCTAssertTrue(replayed.replayed)
+    XCTAssertEqual(replayed.status, published.status)
+    XCTAssertEqual(replayed.copied, published.copied)
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("InboxStaging/\(ingestionId)").path
+    ))
+  }
+
+  func testTombstoneWithoutReceiptFailsClosedUntilAcknowledgementRecoversIt() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    let first = try ShareIngestionSession(container: root, ingestionId: ingestionId)
+    try first.recordFile(
+      id: itemId,
+      order: 0,
+      declaredMediaType: "image/png",
+      source: fixture("ocr-english.png")
+    )
+    let published = try first.finish()
+    let tombstoneRoot = root.appendingPathComponent("InboxAckTombstones", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: tombstoneRoot,
+      withIntermediateDirectories: false
+    )
+    let tombstone = tombstoneRoot.appendingPathComponent(
+      "\(ingestionId)-\(UUID().uuidString.lowercased()).ack",
+      isDirectory: true
+    )
+    try FileManager.default.moveItem(
+      at: root.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true),
+      to: tombstone
+    )
+
+    XCTAssertThrowsError(
+      try ShareIngestionSession(container: root, ingestionId: ingestionId)
+    ) { error in
+      XCTAssertEqual(error as? InboxAcknowledgementStoreError, .recoveryRequired)
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: tombstone.path))
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: root,
+      ingestionId: ingestionId
+    ))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: tombstone.path))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent(
+        "InboxAcknowledgements/\(ingestionId).json"
+      ).path
+    ))
+    let replay = try ShareIngestionSession(container: root, ingestionId: ingestionId)
+      .finish()
+    XCTAssertTrue(replay.replayed)
+    XCTAssertEqual(replay.copied, published.copied)
+  }
+
   func testReplayOwnershipBlocksAcknowledgementBetweenManifestCheckAndRead() throws {
     let ingestionId = UUID().uuidString.lowercased()
     let itemId = UUID().uuidString.lowercased()

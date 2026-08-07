@@ -14,6 +14,7 @@ let package = Package(
       path: ".",
       exclude: ["ContextNative.podspec", "ContextNativeModule.swift", "Tests"],
       sources: [
+        "InboxAcknowledgementStore.swift",
         "InboxArtifactHandoff.swift",
         "InboxManifestValidator.swift",
         "InboxRecoverySupport.swift",
