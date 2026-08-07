@@ -26,6 +26,7 @@ const safeRelativePathPattern =
   /^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9._-]*)*$/;
 
 export const IMPORT_MANIFEST_MAX_ITEMS = 128;
+export const IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH = 127;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -75,7 +76,11 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 function isMediaType(value: unknown): value is string {
-  return typeof value === 'string' && mediaTypePattern.test(value);
+  return (
+    typeof value === 'string' &&
+    value.length <= IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH &&
+    mediaTypePattern.test(value)
+  );
 }
 
 function isSha256(value: unknown): value is string {

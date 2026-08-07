@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 enum ShareRepresentationKind: Equatable {
   case file
+  case fileURL
   case text
   case webURL
 }
@@ -27,44 +28,59 @@ enum ShareRepresentationSelector {
       (.image, .file, "image/*"),
       (.pdf, .file, "application/pdf"),
       (.plainText, .text, "text/plain"),
+      (.fileURL, .fileURL, "application/octet-stream"),
       (.url, .webURL, "text/uri-list"),
+      (.data, .file, "application/octet-stream"),
     ]
     for candidate in candidates {
       if let match = types.first(where: { $0.1.conforms(to: candidate.0) }) {
         return ShareRepresentation(
           identifier: match.0,
-          mediaType: match.1.preferredMIMEType ?? candidate.2,
+          mediaType: boundedMediaType(match.1.preferredMIMEType, fallback: candidate.2),
           kind: candidate.1
         )
       }
     }
     return nil
   }
+
+  private static func boundedMediaType(_ value: String?, fallback: String) -> String {
+    guard let value, value.utf8.count <= ShareIngestionSession.maximumMediaTypeLength else {
+      return fallback
+    }
+    return value
+  }
 }
 
-enum ShareRepresentationPayload: Equatable {
-  case file(URL)
-  case data(Data)
+enum ShareProviderLoadError: Error, Equatable {
+  case permissionExpired
+
+  var stableCode: String { "IMPORT_PROVIDER_PERMISSION_EXPIRED" }
 }
 
-enum ShareRepresentationValue {
-  static func payload(
-    _ value: NSSecureCoding?,
-    kind: ShareRepresentationKind
-  ) -> ShareRepresentationPayload? {
-    switch value {
-    case let data as Data:
-      return .data(data)
-    case let url as URL where kind == .text && url.isFileURL:
-      return .file(url)
-    case let url as URL where kind == .webURL && !url.isFileURL:
-      return url.absoluteString.data(using: .utf8).map(ShareRepresentationPayload.data)
-    case let value as String:
-      return value.data(using: .utf8).map(ShareRepresentationPayload.data)
-    case let value as NSString:
-      return (value as String).data(using: .utf8).map(ShareRepresentationPayload.data)
-    default:
-      return nil
+/** Requests only file-backed provider representations so extension memory stays bounded. */
+enum ShareProviderFileLoader {
+  static func load(
+    provider: NSItemProvider,
+    representation: ShareRepresentation,
+    completion: @escaping (Result<URL, ShareProviderLoadError>) -> Void
+  ) {
+    if representation.kind == .fileURL {
+      provider.loadObject(ofClass: NSURL.self) { value, _ in
+        guard let source = value as? URL, source.isFileURL else {
+          completion(.failure(.permissionExpired))
+          return
+        }
+        completion(.success(source))
+      }
+      return
+    }
+    provider.loadFileRepresentation(forTypeIdentifier: representation.identifier) { source, _ in
+      guard let source else {
+        completion(.failure(.permissionExpired))
+        return
+      }
+      completion(.success(source))
     }
   }
 }
@@ -95,12 +111,14 @@ final class ShareIngestionSession {
   static let maximumReportedItemCount = InboxManifestValidator.maximumItemCount
   static let maximumBinaryBytes = 52_428_800
   static let maximumTextBytes = 1_048_576
+  static let maximumMediaTypeLength = 127
 
   enum Point {
     case afterFirstChunk
     case beforeItemPublish
     case beforeManifestPublish
     case beforeDirectoryPublish
+    case afterDirectoryPublish
   }
 
   private let container: URL
@@ -305,12 +323,20 @@ final class ShareIngestionSession {
       try Self.ensureDurableDirectory(inbox)
       try operationHook(.beforeDirectoryPublish)
       try Self.atomicRename(staging, published)
-      try Self.synchronizeDirectory(inbox)
       committed = true
+      // Rename is the visibility commit point. Do not report a failed import after
+      // a complete manifest has become visible merely because the follow-up parent
+      // fsync (or its fault-injection hook) fails.
+      try? operationHook(.afterDirectoryPublish)
+      try? Self.synchronizeDirectory(inbox)
+      let validated = try InboxManifestValidator.readPublished(
+        inbox: inbox,
+        ingestionId: ingestionId
+      )
       ownership?.release()
       ownership = nil
       return try Self.summary(
-        manifest,
+        validated,
         ingestionId: ingestionId,
         replayed: false
       )
@@ -463,7 +489,14 @@ final class ShareIngestionSession {
     guard let normalized = declared?.split(separator: ";", maxSplits: 1).first?
       .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
       !normalized.isEmpty else { return true }
-    if normalized == "*/*" || normalized == "application/octet-stream" || normalized == detected {
+    if normalized == "*/*" ||
+      normalized.utf8.count > maximumMediaTypeLength ||
+      normalized.range(
+        of: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$",
+        options: .regularExpression
+      ) == nil ||
+      normalized == "application/octet-stream" ||
+      normalized == detected {
       return true
     }
     if normalized == "image/*" && detected.hasPrefix("image/") { return true }
@@ -474,6 +507,7 @@ final class ShareIngestionSession {
   private static func concreteOrFallbackMediaType(_ value: String?) -> String {
     guard let normalized = value?.split(separator: ";", maxSplits: 1).first?
       .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+      normalized.utf8.count <= maximumMediaTypeLength,
       normalized.range(
         of: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$",
         options: .regularExpression

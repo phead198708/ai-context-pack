@@ -103,64 +103,29 @@ final class ShareViewController: UIViewController {
       }
       return
     }
-    switch representation.kind {
-    case .file:
-      provider.loadFileRepresentation(forTypeIdentifier: representation.identifier) {
-        [weak self] source, _ in
-        guard let self, let session = self.session else { return }
-        do {
-          if let source {
+    ShareProviderFileLoader.load(provider: provider, representation: representation) {
+      [weak self] result in
+      guard let self, let session = self.session else { return }
+      do {
+        switch result {
+        case .success(let source):
             try session.recordFile(
               id: id,
               order: index,
               declaredMediaType: representation.mediaType,
               source: source
             )
-          } else {
+        case .failure(let error):
             try session.recordFailure(
               id: id,
               order: index,
               declaredMediaType: representation.mediaType,
-              code: "IMPORT_PROVIDER_PERMISSION_EXPIRED"
+              code: error.stableCode
             )
-          }
-          self.processAttachment(at: index + 1)
-        } catch {
-          self.finishWithError(message: "Import could not be recorded.")
         }
-      }
-    case .text, .webURL:
-      provider.loadItem(forTypeIdentifier: representation.identifier, options: nil) {
-        [weak self] value, _ in
-        guard let self, let session = self.session else { return }
-        do {
-          switch ShareRepresentationValue.payload(value, kind: representation.kind) {
-          case .file(let source):
-            try session.recordFile(
-              id: id,
-              order: index,
-              declaredMediaType: representation.mediaType,
-              source: source
-            )
-          case .data(let data):
-            try session.recordData(
-              id: id,
-              order: index,
-              declaredMediaType: representation.mediaType,
-              data: data
-            )
-          case nil:
-            try session.recordFailure(
-              id: id,
-              order: index,
-              declaredMediaType: representation.mediaType,
-              code: "IMPORT_PROVIDER_PERMISSION_EXPIRED"
-            )
-          }
-          self.processAttachment(at: index + 1)
-        } catch {
-          self.finishWithError(message: "Import could not be recorded.")
-        }
+        self.processAttachment(at: index + 1)
+      } catch {
+        self.finishWithError(message: "Import could not be recorded.")
       }
     }
   }

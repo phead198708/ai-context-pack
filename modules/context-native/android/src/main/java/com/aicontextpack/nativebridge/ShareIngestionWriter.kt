@@ -53,12 +53,14 @@ object ShareIngestionWriter {
   const val maximumReportedItemCount = 128
   const val maximumBinaryBytes = 52_428_800L
   const val maximumTextBytes = 1_048_576L
+  const val maximumMediaTypeLength = 127
 
   enum class Point {
     AFTER_FIRST_CHUNK,
     BEFORE_ITEM_PUBLISH,
     BEFORE_MANIFEST_PUBLISH,
     BEFORE_DIRECTORY_PUBLISH,
+    AFTER_DIRECTORY_PUBLISH,
   }
 
   fun publish(
@@ -121,8 +123,20 @@ object ShareIngestionWriter {
         ensureDurableDirectory(inbox)
         operationHook(Point.BEFORE_DIRECTORY_PUBLISH)
         atomicRename(staging, publishedDirectory)
-        synchronizeDirectory(inbox)
         committed = true
+        // The directory rename is the visibility commit point. A later parent-directory
+        // fsync failure cannot safely be reported as a failed import while the complete
+        // manifest is already visible; retain and return that committed import instead.
+        try {
+          operationHook(Point.AFTER_DIRECTORY_PUBLISH)
+        } catch (_: Exception) {
+          // Fault injection models a failure in the post-rename durability window.
+        }
+        try {
+          synchronizeDirectory(inbox)
+        } catch (_: Exception) {
+          // The validated published import remains the authoritative result.
+        }
       }
       return summary(
         InboxManifestScanner.readPublished(inbox, ingestionId),
@@ -307,7 +321,13 @@ object ShareIngestionWriter {
 
   private fun declaredTypeAllows(declared: String?, detected: String): Boolean {
     val normalized = declared?.substringBefore(';')?.trim()?.lowercase()
-    if (normalized.isNullOrEmpty() || normalized == "*/*" || normalized == "application/octet-stream") return true
+    if (
+      normalized.isNullOrEmpty() ||
+      normalized == "*/*" ||
+      normalized.length > maximumMediaTypeLength ||
+      !concreteMediaType.matches(normalized) ||
+      normalized == "application/octet-stream"
+    ) return true
     if (normalized == detected) return true
     if (normalized == "image/*" && detected.startsWith("image/")) return true
     if (normalized == "text/*" && detected.startsWith("text/")) return true
@@ -317,7 +337,11 @@ object ShareIngestionWriter {
 
   private fun concreteOrFallbackMediaType(value: String?): String {
     val normalized = value?.substringBefore(';')?.trim()?.lowercase()
-    return if (normalized != null && concreteMediaType.matches(normalized)) normalized
+    return if (
+      normalized != null &&
+      normalized.length <= maximumMediaTypeLength &&
+      concreteMediaType.matches(normalized)
+    ) normalized
     else "application/octet-stream"
   }
 

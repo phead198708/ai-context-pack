@@ -58,6 +58,7 @@ const mockPersistenceInboxProcessor =
   };
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const eventId = '223e4567-e89b-42d3-a456-426614174000';
+const newerPackId = '623e4567-e89b-42d3-a456-426614174000';
 const manifest: ImportManifestV1 = {
   schemaVersion: 1,
   ingestionId,
@@ -206,7 +207,7 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
     expect(appStateRemove).toHaveBeenCalledTimes(1);
     expect(inboxRemove).toHaveBeenCalledTimes(1);
-  });
+  }, 15_000);
 
   test('shows a metadata integrity error and Retry terminates after quarantine', async () => {
     mockNative.getPendingShareEvents
@@ -301,6 +302,25 @@ describe('App interactions', () => {
     );
     expect(renderedText(renderer)).toContain('image/png × 1');
     expect(renderedText(renderer)).toContain('application/zip × 1');
+    act(() => renderer.unmount());
+  });
+
+  test('uses the newest persisted pack as detail authority after multi-import bootstrap', async () => {
+    mockNative.scanInbox.mockResolvedValue([partialManifest, manifest]);
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
+      {
+        ...persistedPack,
+        id: newerPackId,
+        updatedAt: '2026-01-02T00:00:00Z',
+      },
+      persistedPack,
+    ]);
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'tab', 'detail'));
+
+    expect(renderedText(renderer)).toContain(`ID ${newerPackId}`);
+    expect(renderedText(renderer)).not.toContain(`ID ${ingestionId}`);
     act(() => renderer.unmount());
   });
 

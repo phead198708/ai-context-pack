@@ -227,6 +227,55 @@ class ShareIngestionWriterInstrumentedTest {
     assertEquals(1, java.io.File(filesDir, "Inbox").listFiles().orEmpty().size)
   }
 
+  @Test fun failureAfterDirectoryRenameReturnsTheAlreadyVisibleCommittedImport() {
+    val ingestionId = UUID.randomUUID().toString()
+
+    val result = ShareIngestionWriter.publish(
+      filesDir,
+      ingestionId,
+      listOf(input(0, "image/png", fixture("ocr-english.png"))),
+      operationHook = { point ->
+        if (point == ShareIngestionWriter.Point.AFTER_DIRECTORY_PUBLISH) {
+          throw ShareIngestionInterruptionException()
+        }
+      },
+    )
+
+    assertEquals("complete", result.status)
+    assertEquals(1, result.copied)
+    assertTrue(java.io.File(filesDir, "Inbox/$ingestionId/manifest.json").isFile)
+    assertTrue(
+      ShareIngestionWriter.publish(
+        filesDir,
+        ingestionId,
+        listOf(input(0, "image/png", fixture("ocr-english.png"))),
+      ).replayed,
+    )
+  }
+
+  @Test fun oversizedDeclaredMimeCannotAmplifyFailedManifestMetadata() {
+    val oversized = "application/" + "x".repeat(500_000)
+    val inputs = (0 until ShareIngestionWriter.maximumReportedItemCount).map { order ->
+      ShareIngestionInput(
+        id = UUID.randomUUID().toString(),
+        order = order,
+        declaredMediaType = oversized,
+        preflightError = "IMPORT_COPY_FAILED",
+      )
+    }
+
+    val result = ShareIngestionWriter.publish(filesDir, UUID.randomUUID().toString(), inputs)
+    val manifestFile = java.io.File(
+      filesDir,
+      "Inbox/${result.ingestionId}/manifest.json",
+    )
+    @Suppress("UNCHECKED_CAST")
+    val items = result.manifest["items"] as List<Map<String, Any?>>
+
+    assertTrue(items.all { it["mediaType"] == "application/octet-stream" })
+    assertTrue("manifestBytes=${manifestFile.length()}", manifestFile.length() < 100_000)
+  }
+
   @Test fun oversizedTextIsRejectedWithTheStableSizeCode() {
     val input = ShareIngestionInput(
       id = UUID.randomUUID().toString(),

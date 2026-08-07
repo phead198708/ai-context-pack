@@ -98,6 +98,42 @@ class ShareIntentInputCollectorInstrumentedTest {
     assertEquals(1, ShareIntentInputCollector.collect(context, intent).size)
   }
 
+  @Test fun duplicateExtraStreamOccurrencesRemainDistinctOrderedItems() {
+    val stream = Uri.parse("content://synthetic.invalid/duplicate-stream")
+    val intent = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").apply {
+      putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(stream, stream))
+    }
+
+    val inputs = ShareIntentInputCollector.collect(context, intent)
+
+    assertEquals(2, inputs.size)
+    assertEquals(listOf(0, 1), inputs.map { it.order })
+  }
+
+  @Test fun mirroredOccurrencesAreRemovedWithoutCollapsingHostDuplicates() {
+    val stream = Uri.parse("content://synthetic.invalid/repeated-mirror")
+    val clip = ClipData("synthetic", arrayOf("*/*"), ClipData.Item(stream)).apply {
+      addItem(ClipData.Item(stream))
+    }
+    val intent = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").apply {
+      clipData = clip
+      putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(stream, stream))
+    }
+
+    assertEquals(2, ShareIntentInputCollector.collect(context, intent).size)
+  }
+
+  @Test fun oversizedIntentMimeFallsBackBeforeInputsAreCreated() {
+    val oversized = "application/" + "x".repeat(ShareIngestionWriter.maximumMediaTypeLength)
+    val intent = Intent(Intent.ACTION_SEND).setType(oversized).apply {
+      putExtra(Intent.EXTRA_STREAM, Uri.parse("content://synthetic.invalid/oversized-mime"))
+    }
+
+    val input = ShareIntentInputCollector.collect(context, intent).single()
+
+    assertEquals("application/octet-stream", input.declaredMediaType)
+  }
+
   @Test fun malformedShareProducesOneVisibleFailedInput() {
     val input = ShareIntentInputCollector.collect(
       context,

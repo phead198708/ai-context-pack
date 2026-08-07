@@ -13,8 +13,8 @@ import java.util.UUID
 object ShareIntentInputCollector {
   fun collect(context: Context, intent: Intent): List<ShareIngestionInput> {
     val planned = mutableListOf<PlannedInput>()
-    val representedUris = mutableSetOf<String>()
-    val representedText = mutableSetOf<String>()
+    val representedUris = mutableMapOf<String, Int>()
+    val representedText = mutableMapOf<String, Int>()
     val clip = intent.clipData
     if (clip != null && clip.itemCount > 0) {
       for (index in 0 until clip.itemCount) {
@@ -24,11 +24,11 @@ object ShareIntentInputCollector {
         when {
           uri != null -> {
             planned.appendBounded { uriInput(context, uri, intent.type) }
-            representedUris += uri.toString()
+            representedUris.increment(uri.toString())
           }
           text != null -> {
             planned.appendBounded { textInput(text, intent.type) }
-            representedText += text
+            representedText.increment(text)
           }
           else -> {
             planned.appendBounded {
@@ -41,14 +41,21 @@ object ShareIntentInputCollector {
         }
       }
     }
-    streamUris(intent).filter { uri -> representedUris.add(uri.toString()) }
-      .forEach { uri ->
+    val extraUriOccurrences = mutableMapOf<String, Int>()
+    streamUris(intent).forEach { uri ->
+      val key = uri.toString()
+      val occurrence = extraUriOccurrences.increment(key)
+      if (occurrence > (representedUris[key] ?: 0)) {
         planned.appendBounded { uriInput(context, uri, intent.type) }
       }
-    textValues(intent).filterNot(representedText::contains)
-      .forEach { value ->
+    }
+    val extraTextOccurrences = mutableMapOf<String, Int>()
+    textValues(intent).forEach { value ->
+      val occurrence = extraTextOccurrences.increment(value)
+      if (occurrence > (representedText[value] ?: 0)) {
         planned.appendBounded { textInput(value, intent.type) }
       }
+    }
     if (planned.isEmpty()) {
       planned += PlannedInput(
         declaredMediaType = concreteOrFallback(intent.type),
@@ -76,20 +83,28 @@ object ShareIntentInputCollector {
 
   fun concreteOrFallback(value: String?): String {
     val normalized = value?.substringBefore(';')?.trim()?.lowercase()
-    return if (normalized != null && concreteMediaType.matches(normalized)) normalized
+    return if (
+      normalized != null &&
+      normalized.length <= ShareIngestionWriter.maximumMediaTypeLength &&
+      concreteMediaType.matches(normalized)
+    ) normalized
     else "application/octet-stream"
   }
+
+  private fun MutableMap<String, Int>.increment(key: String): Int =
+    (get(key) ?: 0).plus(1).also { put(key, it) }
 
   private fun uriInput(context: Context, uri: Uri, intentType: String?): PlannedInput {
     val resolved = try { context.contentResolver.getType(uri) } catch (_: RuntimeException) { null }
     return PlannedInput(
-      declaredMediaType = resolved ?: intentType,
+      declaredMediaType = concreteOrFallback(resolved ?: intentType),
       openStream = { context.contentResolver.openInputStream(uri) },
     )
   }
 
   private fun textInput(text: String, intentType: String?): PlannedInput = PlannedInput(
-    declaredMediaType = if (intentType?.startsWith("text/") == true) intentType else "text/plain",
+    declaredMediaType = concreteOrFallback(intentType).takeIf { it.startsWith("text/") }
+      ?: "text/plain",
     openStream = { ByteArrayInputStream(text.toByteArray(StandardCharsets.UTF_8)) },
   )
 

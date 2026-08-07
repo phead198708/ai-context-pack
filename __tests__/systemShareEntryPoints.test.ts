@@ -59,6 +59,9 @@ describe('Issue #8 system-share entry-point boundaries', () => {
       /UIApplication|extensionContext\?\.open|Vision|PDFKit|OCR|compress|redact|export/i,
     );
     expect(controller).toContain('completeRequest(returningItems: nil)');
+    expect(controller).not.toContain('.loadItem(');
+    expect(writer).toContain('loadFileRepresentation');
+    expect(writer).toContain('loadObject(ofClass: NSURL.self)');
     expect(writer).toContain('64 * 1024');
     expect(writer).toContain('manifest.partial');
   });

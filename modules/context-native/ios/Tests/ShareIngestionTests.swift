@@ -36,15 +36,148 @@ final class ShareIngestionTests: XCTestCase {
     XCTAssertEqual(representation.kind, .webURL)
   }
 
-  func testFileBackedTextPayloadRemainsAStreamableFile() throws {
-    let source = root.appendingPathComponent("provider-text.txt")
-    try Data("synthetic text".utf8).write(to: source)
+  func testGenericDataAndFileURLProvidersUseFileBackedByteDetection() throws {
+    let data = try XCTUnwrap(ShareRepresentationSelector.select(["public.data"]))
+    let fileURL = try XCTUnwrap(ShareRepresentationSelector.select(["public.file-url"]))
 
-    XCTAssertEqual(
-      ShareRepresentationValue.payload(source as NSURL, kind: .text),
-      .file(source)
+    XCTAssertEqual(data.kind, .file)
+    XCTAssertEqual(data.mediaType, "application/octet-stream")
+    XCTAssertEqual(fileURL.kind, .fileURL)
+    XCTAssertEqual(fileURL.mediaType, "application/octet-stream")
+  }
+
+  func testFileURLProviderLoadsTheUnderlyingBytesInsteadOfItsURLRepresentation() throws {
+    let source = root.appendingPathComponent("generic-provider.png")
+    let bytes = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    try bytes.write(to: source)
+    let provider = NSItemProvider(item: source as NSURL, typeIdentifier: "public.file-url")
+    let representation = try XCTUnwrap(
+      ShareRepresentationSelector.select(provider.registeredTypeIdentifiers)
     )
-    XCTAssertNil(ShareRepresentationValue.payload(source as NSURL, kind: .webURL))
+    let loaded = expectation(description: "underlying file URL loaded")
+
+    ShareProviderFileLoader.load(provider: provider, representation: representation) { result in
+      defer { loaded.fulfill() }
+      switch result {
+      case .success(let loadedSource):
+        XCTAssertEqual(try? Data(contentsOf: loadedSource), bytes)
+      case .failure(let error):
+        XCTFail("unexpected provider failure: \(error)")
+      }
+    }
+
+    wait(for: [loaded], timeout: 2)
+  }
+
+  func testGenericDataProviderStreamsIntoByteDetection() throws {
+    let bytes = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    let provider = NSItemProvider()
+    provider.registerDataRepresentation(
+      forTypeIdentifier: "public.data",
+      visibility: .all
+    ) { completion in
+      completion(bytes, nil)
+      return nil
+    }
+    let representation = try XCTUnwrap(
+      ShareRepresentationSelector.select(provider.registeredTypeIdentifiers)
+    )
+    let ingestionId = UUID().uuidString.lowercased()
+    let session = try ShareIngestionSession(container: root, ingestionId: ingestionId)
+    let loaded = expectation(description: "generic provider copied")
+    var capturedResult: Result<ShareIngestionSummary, Error>?
+
+    ShareProviderFileLoader.load(provider: provider, representation: representation) { result in
+      defer { loaded.fulfill() }
+      capturedResult = Result {
+        let source = try result.get()
+        try session.recordFile(
+          id: UUID().uuidString.lowercased(),
+          order: 0,
+          declaredMediaType: representation.mediaType,
+          source: source
+        )
+        return try session.finish()
+      }
+    }
+
+    wait(for: [loaded], timeout: 2)
+    let summary = try XCTUnwrap(capturedResult).get()
+    let items = try XCTUnwrap(summary.manifest["items"] as? [[String: Any]])
+    XCTAssertEqual(items.first?["mediaType"] as? String, "image/png")
+  }
+
+  func testWebURLProviderLoadsAFileBackedRepresentation() throws {
+    let expected = "https://example.invalid/path?q=synthetic"
+    let provider = NSItemProvider(object: try XCTUnwrap(NSURL(string: expected)))
+    let representation = try XCTUnwrap(
+      ShareRepresentationSelector.select(provider.registeredTypeIdentifiers)
+    )
+    let loaded = expectation(description: "web URL provider file loaded")
+
+    ShareProviderFileLoader.load(provider: provider, representation: representation) { result in
+      defer { loaded.fulfill() }
+      do {
+        let source = try result.get()
+        XCTAssertEqual(try String(contentsOf: source, encoding: .utf8), expected)
+      } catch {
+        XCTFail("unexpected provider failure: \(error)")
+      }
+    }
+
+    wait(for: [loaded], timeout: 2)
+  }
+
+  func testPlainTextProviderLoadsAFileBackedRepresentation() throws {
+    let provider = NSItemProvider(object: "synthetic text" as NSString)
+    let representation = try XCTUnwrap(
+      ShareRepresentationSelector.select(provider.registeredTypeIdentifiers)
+    )
+    let loaded = expectation(description: "provider file loaded")
+
+    ShareProviderFileLoader.load(provider: provider, representation: representation) { result in
+      defer { loaded.fulfill() }
+      do {
+        let source = try result.get()
+        XCTAssertEqual(try Data(contentsOf: source), Data("synthetic text".utf8))
+      } catch {
+        XCTFail("unexpected provider failure: \(error)")
+      }
+    }
+
+    wait(for: [loaded], timeout: 2)
+  }
+
+  func testProviderFileAccessFailureMapsToTheStableExpiryCode() throws {
+    let provider = NSItemProvider()
+    provider.registerFileRepresentation(
+      forTypeIdentifier: "public.data",
+      fileOptions: [],
+      visibility: .all
+    ) { completion in
+      completion(
+        nil,
+        false,
+        NSError(domain: "SyntheticProvider", code: 1)
+      )
+      return nil
+    }
+    let representation = try XCTUnwrap(
+      ShareRepresentationSelector.select(provider.registeredTypeIdentifiers)
+    )
+    let failed = expectation(description: "provider access failed")
+
+    ShareProviderFileLoader.load(provider: provider, representation: representation) { result in
+      defer { failed.fulfill() }
+      switch result {
+      case .success:
+        XCTFail("provider unexpectedly produced a file")
+      case .failure(let error):
+        XCTAssertEqual(error.stableCode, "IMPORT_PROVIDER_PERMISSION_EXPIRED")
+      }
+    }
+
+    wait(for: [failed], timeout: 2)
   }
 
   func testTwentyImagesPreserveOrderAndPassProductionManifestValidation() throws {
@@ -282,6 +415,38 @@ final class ShareIngestionTests: XCTestCase {
     )
   }
 
+  func testFailureAfterDirectoryRenameReturnsTheAlreadyVisibleCommittedImport() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    let session = try ShareIngestionSession(
+      container: root,
+      ingestionId: ingestionId,
+      operationHook: { point in
+        if case .afterDirectoryPublish = point {
+          throw ShareIngestionFatalError.interrupted
+        }
+      }
+    )
+    try session.recordFile(
+      id: itemId,
+      order: 0,
+      declaredMediaType: "image/png",
+      source: fixture("ocr-english.png")
+    )
+
+    let result = try session.finish()
+
+    XCTAssertEqual(result.status, "complete")
+    XCTAssertEqual(result.copied, 1)
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("Inbox/\(ingestionId)/manifest.json").path
+    ))
+    XCTAssertTrue(try ShareIngestionSession(
+      container: root,
+      ingestionId: ingestionId
+    ).finish().replayed)
+  }
+
   func testOversizedTextAndDeclaredTypeMismatchHaveStableRejectedCodes() throws {
     let session = try ShareIngestionSession(
       container: root,
@@ -310,6 +475,28 @@ final class ShareIngestionTests: XCTestCase {
       ["IMPORT_SIZE_LIMIT_EXCEEDED", "IMPORT_TYPE_UNSUPPORTED"]
     )
     XCTAssertEqual(items[1]["mediaType"] as? String, "application/pdf")
+  }
+
+  func testOversizedDeclaredMimeFallsBackBeforeManifestSerialization() throws {
+    let session = try ShareIngestionSession(
+      container: root,
+      ingestionId: UUID().uuidString.lowercased()
+    )
+    try session.recordFailure(
+      id: UUID().uuidString.lowercased(),
+      order: 0,
+      declaredMediaType: "application/" + String(repeating: "x", count: 500_000),
+      code: "IMPORT_COPY_FAILED"
+    )
+
+    let result = try session.finish()
+    let items = try XCTUnwrap(result.manifest["items"] as? [[String: Any]])
+    XCTAssertEqual(items.count, 1)
+    let item = try XCTUnwrap(items.first)
+
+    XCTAssertEqual(item["mediaType"] as? String, "application/octet-stream")
+    let manifest = root.appendingPathComponent("Inbox/\(result.ingestionId)/manifest.json")
+    XCTAssertLessThan(try Data(contentsOf: manifest).count, 2_000)
   }
 
   func testStorageFailureDuringItemPublicationAbortsInsteadOfBecomingAnItemFailure() throws {

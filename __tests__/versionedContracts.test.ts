@@ -21,6 +21,7 @@ import {
   isPipelineCheckpointV1,
   isRiskFindingV1,
   IMPORT_MANIFEST_MAX_ITEMS,
+  IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH,
 } from '../src/domain/validation';
 import { DOMAIN_ERROR_CATALOG } from '../src/domain/errors';
 
@@ -204,6 +205,22 @@ const negativeContractCorpus: readonly {
           errorCode: 'IMPORT_SIZE_LIMIT_EXCEEDED',
         }),
       ),
+    }),
+  },
+  {
+    name: 'import media type exceeding its metadata bound',
+    fixture: 'import-manifest-v1.json',
+    authority: 'structural-schema',
+    mutate: fixture => ({
+      ...fixture,
+      items: [
+        {
+          ...firstRecordField(fixture, 'items'),
+          mediaType: `application/${'x'.repeat(
+            IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH,
+          )}`,
+        },
+      ],
     }),
   },
   {

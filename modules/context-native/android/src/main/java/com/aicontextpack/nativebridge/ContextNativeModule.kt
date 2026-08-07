@@ -423,7 +423,11 @@ internal object InboxManifestScanner {
       val itemId = item.getString("id")
       check(ingestionIdPattern.matches(itemId) && UUID.fromString(itemId).toString() == itemId)
       check(ids.add(itemId) && nonNegativeInteger(item.opt("order")) == index.toLong())
-      check(mediaTypePattern.matches(item.getString("mediaType")))
+      val mediaType = item.getString("mediaType")
+      check(
+        mediaType.length <= ShareIngestionWriter.maximumMediaTypeLength &&
+          mediaTypePattern.matches(mediaType),
+      )
       when (item.getString("status")) {
         "copied" -> {
           val keys = item.keys().asSequence().toSet()

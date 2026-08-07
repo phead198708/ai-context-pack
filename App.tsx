@@ -152,12 +152,12 @@ function ImportDetail({ state }: { state: LoadState }): React.JSX.Element {
     <StateCard
       title="Import detail"
       detail={
-        manifest
+        pack
+          ? `ID ${pack.id}\nSchema ${pack.schemaVersion}\nItems ${pack.itemCount}`
+          : manifest
           ? `ID ${manifest.ingestionId}\nSchema ${
               manifest.schemaVersion
             }\n${manifestSummary(manifest)}\n${manifestTypeSummary(manifest)}`
-          : pack
-          ? `ID ${pack.id}\nSchema ${pack.schemaVersion}\nItems ${pack.itemCount}`
           : 'No import selected.'
       }
     />
