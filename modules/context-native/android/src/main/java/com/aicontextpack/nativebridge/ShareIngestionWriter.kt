@@ -57,11 +57,13 @@ object ShareIngestionWriter {
 
   enum class Point {
     BEFORE_SHARED_DIRECTORY_CREATE,
+    BEFORE_SHARED_DIRECTORY_PARENT_SYNC,
     AFTER_FIRST_CHUNK,
     BEFORE_ITEM_PUBLISH,
     BEFORE_MANIFEST_PUBLISH,
     BEFORE_DIRECTORY_PUBLISH,
     AFTER_DIRECTORY_PUBLISH,
+    AFTER_OWNERSHIP_RELEASE,
   }
 
   fun publish(
@@ -146,8 +148,14 @@ object ShareIngestionWriter {
     } catch (error: Throwable) {
       if (failure == null) failure = error else failure.addSuppressed(error)
     }
+    try {
+      operationHook(Point.AFTER_OWNERSHIP_RELEASE)
+    } catch (error: Throwable) {
+      if (failure == null) failure = error else failure.addSuppressed(error)
+    }
 
     if (committed) {
+      validatedResult?.let { return it }
       return try {
         summary(
           InboxManifestScanner.readPublished(inbox, ingestionId),
@@ -419,15 +427,16 @@ object ShareIngestionWriter {
   ) {
     if (directory.exists()) {
       requireSafeDirectory(directory)
-      return
+    } else {
+      operationHook(Point.BEFORE_SHARED_DIRECTORY_CREATE)
+      if (!directory.mkdir()) {
+        // A different ingestion can create this shared directory after our existence
+        // check. Accept only the intended non-symlink directory, then establish the
+        // same parent-directory durability boundary as the winning creator.
+        requireSafeDirectory(directory)
+      }
     }
-    operationHook(Point.BEFORE_SHARED_DIRECTORY_CREATE)
-    if (!directory.mkdir()) {
-      // A different ingestion can create this shared directory after our existence
-      // check. Accept only the intended non-symlink directory, then establish the
-      // same parent-directory durability boundary as the winning creator.
-      requireSafeDirectory(directory)
-    }
+    operationHook(Point.BEFORE_SHARED_DIRECTORY_PARENT_SYNC)
     synchronizeDirectory(requireNotNull(directory.parentFile))
   }
 

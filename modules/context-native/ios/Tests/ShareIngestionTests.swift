@@ -411,6 +411,41 @@ final class ShareIngestionTests: XCTestCase {
     )
   }
 
+  func testPreexistingSharedDirectoriesStillReachParentDurabilityBoundary() throws {
+    let first = try ShareIngestionSession(
+      container: root,
+      ingestionId: UUID().uuidString.lowercased()
+    )
+    try first.recordFile(
+      id: UUID().uuidString.lowercased(),
+      order: 0,
+      declaredMediaType: "image/png",
+      source: fixture("ocr-english.png")
+    )
+    _ = try first.finish()
+    var parentSyncs = 0
+    let second = try ShareIngestionSession(
+      container: root,
+      ingestionId: UUID().uuidString.lowercased(),
+      operationHook: { point in
+        if case .beforeSharedDirectoryParentSync = point {
+          parentSyncs += 1
+        }
+      }
+    )
+
+    try second.recordFile(
+      id: UUID().uuidString.lowercased(),
+      order: 0,
+      declaredMediaType: "image/png",
+      source: fixture("ocr-english.png")
+    )
+    let summary = try second.finish()
+
+    XCTAssertEqual(summary.status, "complete")
+    XCTAssertEqual(parentSyncs, 2)
+  }
+
   func testProviderCanDisappearAfterCopyAndOwnedHandoffStillSucceeds() throws {
     let ingestionId = UUID().uuidString.lowercased()
     let packId = UUID().uuidString.lowercased()

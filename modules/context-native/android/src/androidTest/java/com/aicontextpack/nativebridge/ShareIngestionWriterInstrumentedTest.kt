@@ -209,6 +209,30 @@ class ShareIngestionWriterInstrumentedTest {
     }
   }
 
+  @Test fun preexistingSharedDirectoriesStillReachParentDurabilityBoundary() {
+    val first = ShareIngestionWriter.publish(
+      filesDir,
+      UUID.randomUUID().toString(),
+      listOf(input(0, "image/png", fixture("ocr-english.png"))),
+    )
+    val parentSyncs = AtomicInteger(0)
+
+    val second = ShareIngestionWriter.publish(
+      filesDir,
+      UUID.randomUUID().toString(),
+      listOf(input(0, "image/png", fixture("ocr-english.png"))),
+      operationHook = { point ->
+        if (point == ShareIngestionWriter.Point.BEFORE_SHARED_DIRECTORY_PARENT_SYNC) {
+          parentSyncs.incrementAndGet()
+        }
+      },
+    )
+
+    assertEquals("complete", first.status)
+    assertEquals("complete", second.status)
+    assertEquals(2, parentSyncs.get())
+  }
+
   @Test fun ownershipTimeoutCannotDeleteAnotherWritersActiveStaging() {
     val ingestionId = UUID.randomUUID().toString()
     val entered = CountDownLatch(1)
@@ -333,6 +357,30 @@ class ShareIngestionWriterInstrumentedTest {
         listOf(input(0, "image/png", fixture("ocr-english.png"))),
       ).replayed,
     )
+  }
+
+  @Test fun acknowledgementAfterValidationReturnsTheCommittedSnapshot() {
+    val ingestionId = UUID.randomUUID().toString()
+    val packId = UUID.randomUUID().toString()
+    val sharedInput = input(0, "image/png", fixture("ocr-english.png"))
+
+    val result = ShareIngestionWriter.publish(
+      filesDir,
+      ingestionId,
+      listOf(sharedInput),
+      operationHook = { point ->
+        if (point == ShareIngestionWriter.Point.AFTER_OWNERSHIP_RELEASE) {
+          InboxArtifactHandoff.handoff(filesDir, ingestionId, packId, 0)
+          assertTrue(InboxArtifactHandoff.acknowledge(filesDir, ingestionId))
+        }
+      },
+    )
+
+    assertFalse(result.replayed)
+    assertEquals("complete", result.status)
+    assertEquals(1, result.copied)
+    assertFalse(java.io.File(filesDir, "Inbox/$ingestionId").exists())
+    assertTrue(java.io.File(filesDir, "Packs/$packId/originals/${sharedInput.id}.bin").isFile)
   }
 
   @Test fun oversizedDeclaredMimeCannotAmplifyFailedManifestMetadata() {

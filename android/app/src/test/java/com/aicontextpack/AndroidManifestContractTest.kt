@@ -31,10 +31,10 @@ class AndroidManifestContractTest {
         it.categories == setOf("android.intent.category.LAUNCHER")
     })
     assertTrue(contracts.any {
-      it.actions == setOf("android.intent.action.SEND") &&
+        it.actions == setOf("android.intent.action.SEND") &&
         it.categories == setOf("android.intent.category.DEFAULT") &&
         it.data.map { data -> data.getAttributeNS(androidNamespace, "mimeType") }.toSet() ==
-        setOf("image/*", "application/pdf", "text/plain", "text/uri-list")
+        setOf("image/*", "application/pdf", "text/plain", "text/uri-list", "*/*")
     })
     assertTrue(contracts.any {
       it.actions == setOf("android.intent.action.SEND_MULTIPLE") &&

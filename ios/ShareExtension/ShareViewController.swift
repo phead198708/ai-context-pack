@@ -4,6 +4,10 @@ private let appGroupIdentifier = "group.com.example.aicontextpack"
 
 final class ShareViewController: UIViewController {
   private let statusLabel = UILabel()
+  private let ingestionQueue = DispatchQueue(
+    label: "com.example.aicontextpack.share-ingestion",
+    qos: .userInitiated
+  )
   private var session: ShareIngestionSession?
   private var itemIds: [String] = []
   private var attachments: [NSItemProvider] = []
@@ -31,17 +35,26 @@ final class ShareViewController: UIViewController {
   }
 
   private func beginImport() {
-    attachments = extensionContext?.inputItems
+    let providedAttachments = extensionContext?.inputItems
       .compactMap { $0 as? NSExtensionItem }
       .flatMap { $0.attachments ?? [] } ?? []
-    guard !attachments.isEmpty else {
-      finishWithError(message: "No shared items were provided.")
+    guard !providedAttachments.isEmpty else {
+      enqueueError(message: "No shared items were provided.")
       return
     }
-    guard attachments.count <= ShareIngestionSession.maximumReportedItemCount else {
-      finishWithError(message: "Too many shared items.")
+    guard providedAttachments.count <= ShareIngestionSession.maximumReportedItemCount else {
+      enqueueError(message: "Too many shared items.")
       return
     }
+    attachments = providedAttachments
+    itemIds = providedAttachments.map { _ in UUID().uuidString.lowercased() }
+    ingestionQueue.async { [weak self] in
+      self?.startSession()
+    }
+  }
+
+  private func startSession() {
+    dispatchPrecondition(condition: .onQueue(ingestionQueue))
     guard let container = FileManager.default.containerURL(
       forSecurityApplicationGroupIdentifier: appGroupIdentifier
     ) else {
@@ -49,7 +62,6 @@ final class ShareViewController: UIViewController {
       return
     }
     let ingestionId = UUID().uuidString.lowercased()
-    itemIds = attachments.map { _ in UUID().uuidString.lowercased() }
     do {
       session = try ShareIngestionSession(container: container, ingestionId: ingestionId)
       processAttachment(at: 0)
@@ -59,6 +71,7 @@ final class ShareViewController: UIViewController {
   }
 
   private func processAttachment(at index: Int) {
+    dispatchPrecondition(condition: .onQueue(ingestionQueue))
     guard !finished, let session else { return }
     guard index < attachments.count else {
       do { finishSuccessfully(try session.finish()) }
@@ -105,32 +118,36 @@ final class ShareViewController: UIViewController {
     }
     ShareProviderFileLoader.load(provider: provider, representation: representation) {
       [weak self] result in
-      guard let self, let session = self.session else { return }
-      do {
-        switch result {
-        case .success(let source):
+      guard let self else { return }
+      self.ingestionQueue.async { [weak self] in
+        guard let self, !self.finished, let session = self.session else { return }
+        do {
+          switch result {
+          case .success(let source):
             try session.recordFile(
               id: id,
               order: index,
               declaredMediaType: representation.mediaType,
               source: source
             )
-        case .failure(let error):
+          case .failure(let error):
             try session.recordFailure(
               id: id,
               order: index,
               declaredMediaType: representation.mediaType,
               code: error.stableCode
             )
+          }
+          self.processAttachment(at: index + 1)
+        } catch {
+          self.finishWithError(message: "Import could not be recorded.")
         }
-        self.processAttachment(at: index + 1)
-      } catch {
-        self.finishWithError(message: "Import could not be recorded.")
       }
     }
   }
 
   private func finishSuccessfully(_ summary: ShareIngestionSummary) {
+    dispatchPrecondition(condition: .onQueue(ingestionQueue))
     guard !finished else { return }
     finished = true
     DispatchQueue.main.async {
@@ -142,6 +159,7 @@ final class ShareViewController: UIViewController {
   }
 
   private func finishWithError(message: String) {
+    dispatchPrecondition(condition: .onQueue(ingestionQueue))
     guard !finished else { return }
     finished = true
     DispatchQueue.main.async {
@@ -152,6 +170,11 @@ final class ShareViewController: UIViewController {
     }
   }
 
+  private func enqueueError(message: String) {
+    ingestionQueue.async { [weak self] in
+      self?.finishWithError(message: message)
+    }
+  }
 }
 
 private enum ShareExtensionError: Error { case importFailed }

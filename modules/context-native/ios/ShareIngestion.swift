@@ -115,6 +115,7 @@ final class ShareIngestionSession {
 
   enum Point {
     case beforeSharedDirectoryCreate
+    case beforeSharedDirectoryParentSync
     case afterFirstChunk
     case beforeItemPublish
     case beforeManifestPublish
@@ -178,9 +179,11 @@ final class ShareIngestionSession {
     }
     do {
       let stagingRoot = staging.deletingLastPathComponent()
-      try Self.ensureDurableDirectory(stagingRoot) {
-        try operationHook(.beforeSharedDirectoryCreate)
-      }
+      try Self.ensureDurableDirectory(
+        stagingRoot,
+        beforeCreate: { try operationHook(.beforeSharedDirectoryCreate) },
+        beforeParentSync: { try operationHook(.beforeSharedDirectoryParentSync) }
+      )
       try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
       try Self.synchronizeDirectory(stagingRoot)
     } catch {
@@ -335,9 +338,11 @@ final class ShareIngestionSession {
       try Self.atomicRename(partial, final)
       try Self.synchronizeDirectory(staging)
       let inbox = published.deletingLastPathComponent()
-      try Self.ensureDurableDirectory(inbox) {
-        try operationHook(.beforeSharedDirectoryCreate)
-      }
+      try Self.ensureDurableDirectory(
+        inbox,
+        beforeCreate: { try operationHook(.beforeSharedDirectoryCreate) },
+        beforeParentSync: { try operationHook(.beforeSharedDirectoryParentSync) }
+      )
       try operationHook(.beforeDirectoryPublish)
       try Self.atomicRename(staging, published)
       committed = true
@@ -572,28 +577,30 @@ final class ShareIngestionSession {
 
   private static func ensureDurableDirectory(
     _ directory: URL,
-    beforeCreate: () throws -> Void = {}
+    beforeCreate: () throws -> Void = {},
+    beforeParentSync: () throws -> Void = {}
   ) throws {
     var isDirectory: ObjCBool = false
     if FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
       try requireSafeDirectory(directory, isDirectory: isDirectory)
-      return
-    }
-    try beforeCreate()
-    do {
-      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-    } catch {
-      // Different ingestion IDs do not share an ownership lock. A concurrent first
-      // import may therefore create this shared directory after our existence check.
-      var racedIsDirectory: ObjCBool = false
-      guard FileManager.default.fileExists(
-        atPath: directory.path,
-        isDirectory: &racedIsDirectory
-      ) else {
-        throw ShareIngestionFatalError.storageWriteFailed
+    } else {
+      try beforeCreate()
+      do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+      } catch {
+        // Different ingestion IDs do not share an ownership lock. A concurrent first
+        // import may therefore create this shared directory after our existence check.
+        var racedIsDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+          atPath: directory.path,
+          isDirectory: &racedIsDirectory
+        ) else {
+          throw ShareIngestionFatalError.storageWriteFailed
+        }
+        try requireSafeDirectory(directory, isDirectory: racedIsDirectory)
       }
-      try requireSafeDirectory(directory, isDirectory: racedIsDirectory)
     }
+    try beforeParentSync()
     try synchronizeDirectory(directory.deletingLastPathComponent())
   }
 
