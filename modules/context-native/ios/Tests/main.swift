@@ -1127,6 +1127,39 @@ final class InboxArtifactHandoffTests: XCTestCase {
     }
   }
 
+  func testAcknowledgementPreservesUnsupportedTombstoneSchemaCode() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let tombstones = container.appendingPathComponent(
+      "InboxAckTombstones",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: tombstones, withIntermediateDirectories: false)
+    let tombstone = tombstones.appendingPathComponent(
+      "\(ingestionId)-\(UUID().uuidString.lowercased()).ack",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: tombstone, withIntermediateDirectories: false)
+    try Data(#"{"schemaVersion":2}"#.utf8).write(
+      to: tombstone.appendingPathComponent("manifest.json")
+    )
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.acknowledge(
+      container: container,
+      ingestionId: ingestionId
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .unsupportedVersion)
+      XCTAssertEqual(
+        (error as? InboxArtifactHandoffError)?.stableCode,
+        "SCHEMA_VERSION_UNSUPPORTED"
+      )
+    }
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: container.appendingPathComponent(
+        "InboxAcknowledgements/\(ingestionId).json"
+      ).path
+    ))
+  }
+
   func testAcknowledgementTombstoneDeletionIsBestEffortAndRetryable() throws {
     let ingestionId = UUID().uuidString.lowercased()
     let itemId = UUID().uuidString.lowercased()
