@@ -1,89 +1,192 @@
 import UIKit
-import UniformTypeIdentifiers
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
-private let maximumImageBytes = 52_428_800
 
 final class ShareViewController: UIViewController {
   private let statusLabel = UILabel()
+  private var session: ShareIngestionSession?
+  private var itemIds: [String] = []
+  private var attachments: [NSItemProvider] = []
+  private var finished = false
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    statusLabel.text = "Importing image…"
+    configureStatus()
+    beginImport()
+  }
+
+  private func configureStatus() {
+    statusLabel.text = "Preparing import…"
     statusLabel.textAlignment = .center
+    statusLabel.numberOfLines = 0
+    statusLabel.adjustsFontForContentSizeCategory = true
+    statusLabel.accessibilityTraits = [.updatesFrequently]
     statusLabel.translatesAutoresizingMaskIntoConstraints = false
     view.addSubview(statusLabel)
-    NSLayoutConstraint.activate([statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24), statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24), statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor)])
-    receiveSingleImage()
+    NSLayoutConstraint.activate([
+      statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+      statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+      statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+    ])
   }
 
-  private func receiveSingleImage() {
-    guard let provider = extensionContext?.inputItems.compactMap({ $0 as? NSExtensionItem }).flatMap({ $0.attachments ?? [] }).first(where: { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }),
-          let selectedTypeIdentifier = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) else {
-      finish(message: "No supported image", error: true); return
+  private func beginImport() {
+    attachments = extensionContext?.inputItems
+      .compactMap { $0 as? NSExtensionItem }
+      .flatMap { $0.attachments ?? [] } ?? []
+    guard !attachments.isEmpty else {
+      finishWithError(message: "No shared items were provided.")
+      return
     }
-    guard let mediaType = UTType(selectedTypeIdentifier)?.preferredMIMEType else {
-      finish(message: "Unsupported image type", error: true); return
+    guard attachments.count <= ShareIngestionSession.maximumReportedItemCount else {
+      finishWithError(message: "Too many shared items.")
+      return
     }
-    provider.loadFileRepresentation(forTypeIdentifier: selectedTypeIdentifier) { [weak self] source, _ in
-      guard let self, let source else { self?.finish(message: "Import failed", error: true); return }
-      do { try self.copyAndWriteManifest(source: source, mediaType: mediaType); self.finish(message: "Image saved", error: false) }
-      catch { self.finish(message: "Import failed", error: true) }
+    guard let container = FileManager.default.containerURL(
+      forSecurityApplicationGroupIdentifier: appGroupIdentifier
+    ) else {
+      finishWithError(message: "Import storage is unavailable.")
+      return
     }
-  }
-
-  private func copyAndWriteManifest(source: URL, mediaType: String) throws {
-    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else { throw ShareError.appGroupUnavailable }
-    let ingestionId = UUID().uuidString.lowercased(), itemId = UUID().uuidString.lowercased()
-    let directory = container.appendingPathComponent("InboxStaging/\(ingestionId)", isDirectory: true)
-    let publishedDirectory = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
-    let writerLock = try InboxWriterOwnership.acquire(container: container, ingestionId: ingestionId)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    var committed = false
-    defer {
-      if !committed { try? FileManager.default.removeItem(at: directory) }
-    }
-    let partial = directory.appendingPathComponent("\(itemId).partial"), destination = directory.appendingPathComponent("\(itemId).bin")
-    try copyBounded(from: source, to: partial, limit: maximumImageBytes)
-    try FileManager.default.moveItem(at: partial, to: destination)
-    let bytes = (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-    let timestamp = ISO8601DateFormatter()
-    timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let manifest: [String: Any] = ["schemaVersion": 1, "ingestionId": ingestionId, "createdAt": timestamp.string(from: Date()), "source": "ios-share-extension", "status": "complete", "items": [["id": itemId, "order": 0, "mediaType": mediaType, "byteCount": bytes, "relativePath": destination.lastPathComponent, "status": "copied"]]]
-    let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
-    let manifestPartial = directory.appendingPathComponent("manifest.partial"), manifestURL = directory.appendingPathComponent("manifest.json")
-    try data.write(to: manifestPartial, options: .atomic)
-    try FileManager.default.moveItem(at: manifestPartial, to: manifestURL)
-    try FileManager.default.createDirectory(at: publishedDirectory.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try FileManager.default.moveItem(at: directory, to: publishedDirectory)
-    committed = true
-    writerLock.release()
-  }
-
-  private func copyBounded(from source: URL, to destination: URL, limit: Int) throws {
-    if let size = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > limit {
-      throw ShareError.imageTooLarge
-    }
-    guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw ShareError.copyFailed }
-    let input = try FileHandle(forReadingFrom: source)
-    let output: FileHandle
-    do { output = try FileHandle(forWritingTo: destination) }
-    catch { try? input.close(); throw ShareError.copyFailed }
-    defer {
-      try? input.close()
-      try? output.close()
-    }
-    var total = 0
-    while let data = try input.read(upToCount: 64 * 1024), !data.isEmpty {
-      total += data.count
-      guard total <= limit else { throw ShareError.imageTooLarge }
-      try output.write(contentsOf: data)
+    let ingestionId = UUID().uuidString.lowercased()
+    itemIds = attachments.map { _ in UUID().uuidString.lowercased() }
+    do {
+      session = try ShareIngestionSession(container: container, ingestionId: ingestionId)
+      processAttachment(at: 0)
+    } catch {
+      finishWithError(message: "Import could not be started.")
     }
   }
 
-  private func finish(message: String, error: Bool) {
-    DispatchQueue.main.async { self.statusLabel.text = message; DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { error ? self.extensionContext?.cancelRequest(withError: ShareError.importFailed) : self.extensionContext?.completeRequest(returningItems: nil) } }
+  private func processAttachment(at index: Int) {
+    guard !finished, let session else { return }
+    guard index < attachments.count else {
+      do { finishSuccessfully(try session.finish()) }
+      catch { finishWithError(message: "Import could not be published.") }
+      return
+    }
+    DispatchQueue.main.async {
+      self.statusLabel.text = "Importing \(index + 1) of \(self.attachments.count)…"
+    }
+    let provider = attachments[index]
+    let id = itemIds[index]
+    if index >= ShareIngestionSession.maximumItemCount {
+      do {
+        let declaredMediaType = ShareRepresentationSelector.select(
+          provider.registeredTypeIdentifiers
+        )?.mediaType
+        try session.recordFailure(
+          id: id,
+          order: index,
+          declaredMediaType: declaredMediaType,
+          code: "IMPORT_SIZE_LIMIT_EXCEEDED"
+        )
+        processAttachment(at: index + 1)
+      } catch {
+        finishWithError(message: "Import could not be recorded.")
+      }
+      return
+    }
+    guard let representation = ShareRepresentationSelector.select(
+      provider.registeredTypeIdentifiers
+    ) else {
+      do {
+        try session.recordFailure(
+          id: id,
+          order: index,
+          declaredMediaType: "application/octet-stream",
+          code: "IMPORT_TYPE_UNSUPPORTED"
+        )
+        processAttachment(at: index + 1)
+      } catch {
+        finishWithError(message: "Import could not be recorded.")
+      }
+      return
+    }
+    switch representation.kind {
+    case .file:
+      provider.loadFileRepresentation(forTypeIdentifier: representation.identifier) {
+        [weak self] source, _ in
+        guard let self, let session = self.session else { return }
+        do {
+          if let source {
+            try session.recordFile(
+              id: id,
+              order: index,
+              declaredMediaType: representation.mediaType,
+              source: source
+            )
+          } else {
+            try session.recordFailure(
+              id: id,
+              order: index,
+              declaredMediaType: representation.mediaType,
+              code: "IMPORT_PROVIDER_PERMISSION_EXPIRED"
+            )
+          }
+          self.processAttachment(at: index + 1)
+        } catch {
+          self.finishWithError(message: "Import could not be recorded.")
+        }
+      }
+    case .text, .webURL:
+      provider.loadItem(forTypeIdentifier: representation.identifier, options: nil) {
+        [weak self] value, _ in
+        guard let self, let session = self.session else { return }
+        do {
+          switch ShareRepresentationValue.payload(value, kind: representation.kind) {
+          case .file(let source):
+            try session.recordFile(
+              id: id,
+              order: index,
+              declaredMediaType: representation.mediaType,
+              source: source
+            )
+          case .data(let data):
+            try session.recordData(
+              id: id,
+              order: index,
+              declaredMediaType: representation.mediaType,
+              data: data
+            )
+          case nil:
+            try session.recordFailure(
+              id: id,
+              order: index,
+              declaredMediaType: representation.mediaType,
+              code: "IMPORT_PROVIDER_PERMISSION_EXPIRED"
+            )
+          }
+          self.processAttachment(at: index + 1)
+        } catch {
+          self.finishWithError(message: "Import could not be recorded.")
+        }
+      }
+    }
   }
+
+  private func finishSuccessfully(_ summary: ShareIngestionSummary) {
+    guard !finished else { return }
+    finished = true
+    DispatchQueue.main.async {
+      self.statusLabel.text = "Accepted \(summary.copied) · Rejected \(summary.rejected) · Failed \(summary.failed)"
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+        self.extensionContext?.completeRequest(returningItems: nil)
+      }
+    }
+  }
+
+  private func finishWithError(message: String) {
+    guard !finished else { return }
+    finished = true
+    DispatchQueue.main.async {
+      self.statusLabel.text = message
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+        self.extensionContext?.cancelRequest(withError: ShareExtensionError.importFailed)
+      }
+    }
+  }
+
 }
 
-private enum ShareError: Error { case appGroupUnavailable, copyFailed, imageTooLarge, importFailed, writerLockUnavailable }
+private enum ShareExtensionError: Error { case importFailed }

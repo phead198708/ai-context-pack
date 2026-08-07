@@ -66,6 +66,36 @@ const manifest: ImportManifestV1 = {
   status: 'complete',
   items: [],
 };
+const partialManifest: ImportManifestV1 = {
+  ...manifest,
+  status: 'partial',
+  items: [
+    {
+      id: '323e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      mediaType: 'image/png',
+      status: 'copied',
+      byteCount: 128,
+      relativePath: '323e4567-e89b-42d3-a456-426614174000.bin',
+    },
+    {
+      id: '423e4567-e89b-42d3-a456-426614174000',
+      order: 1,
+      mediaType: 'application/zip',
+      status: 'failed',
+      byteCount: 0,
+      errorCode: 'IMPORT_TYPE_UNSUPPORTED',
+    },
+    {
+      id: '523e4567-e89b-42d3-a456-426614174000',
+      order: 2,
+      mediaType: 'text/plain',
+      status: 'failed',
+      byteCount: 0,
+      errorCode: 'IMPORT_COPY_FAILED',
+    },
+  ],
+};
 const persistedPack: InboxPackSummary = {
   id: ingestionId,
   schemaVersion: 1,
@@ -161,7 +191,7 @@ describe('App interactions', () => {
     mockNative.scanInbox.mockResolvedValue([manifest]);
     const renderer = await renderApp();
 
-    expect(renderedText(renderer)).toContain('Image received');
+    expect(renderedText(renderer)).toContain('Share import');
     expect(mockNative.scanInbox).toHaveBeenCalledTimes(1);
     expect(mockNative.getPendingShareEvents).toHaveBeenCalledTimes(1);
     expect(AppState.addEventListener).toHaveBeenCalledWith(
@@ -228,7 +258,7 @@ describe('App interactions', () => {
       await flushWorkflow();
     });
     expect(mockNative.scanInbox).toHaveBeenCalledTimes(2);
-    expect(renderedText(renderer)).toContain('Image received');
+    expect(renderedText(renderer)).toContain('Share import');
     act(() => renderer.unmount());
   });
 
@@ -252,7 +282,7 @@ describe('App interactions', () => {
 
   test('handles the native inbox event and opens the newest import', async () => {
     const renderer = await renderApp();
-    mockNative.scanInbox.mockResolvedValue([manifest]);
+    mockNative.scanInbox.mockResolvedValue([partialManifest]);
 
     await act(async () => {
       inboxListener?.({
@@ -266,6 +296,11 @@ describe('App interactions', () => {
     expect(mockNative.ackPendingShareEvent).toHaveBeenCalledWith(eventId);
     expect(renderedText(renderer)).toContain('Import detail');
     expect(renderedText(renderer)).toContain(`ID ${ingestionId}`);
+    expect(renderedText(renderer)).toContain(
+      '1 accepted · 1 rejected · 1 failed · partial',
+    );
+    expect(renderedText(renderer)).toContain('image/png × 1');
+    expect(renderedText(renderer)).toContain('application/zip × 1');
     act(() => renderer.unmount());
   });
 

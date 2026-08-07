@@ -20,6 +20,7 @@ let package = Package(
         "InboxWriterOwnership.swift",
         "OwnedArtifactStore.swift",
         "PrivacySafeLogger.swift",
+        "ShareIngestion.swift",
       ]
     ),
     .testTarget(

@@ -15,6 +15,7 @@ import {
   InboxEventWorkflow,
   type InboxWorkflowState,
 } from './src/domain/inboxEventWorkflow';
+import type { ImportManifestV1 } from './src/domain/contracts';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
 import { persistenceInboxProcessor } from './src/infrastructure/persistence/runtime';
 import { colors, spacing, typography } from './src/ui/tokens';
@@ -136,8 +137,8 @@ function Inbox({
       {state.manifests.map(manifest => (
         <StateCard
           key={manifest.ingestionId}
-          title="Image received"
-          detail={`${manifest.items.length} item · ${manifest.status}`}
+          title="Share import"
+          detail={manifestSummary(manifest)}
         />
       ))}
     </View>
@@ -151,14 +152,39 @@ function ImportDetail({ state }: { state: LoadState }): React.JSX.Element {
     <StateCard
       title="Import detail"
       detail={
-        pack
+        manifest
+          ? `ID ${manifest.ingestionId}\nSchema ${
+              manifest.schemaVersion
+            }\n${manifestSummary(manifest)}\n${manifestTypeSummary(manifest)}`
+          : pack
           ? `ID ${pack.id}\nSchema ${pack.schemaVersion}\nItems ${pack.itemCount}`
-          : manifest
-          ? `ID ${manifest.ingestionId}\nSchema ${manifest.schemaVersion}\nItems ${manifest.items.length}`
           : 'No import selected.'
       }
     />
   );
+}
+
+function manifestSummary(manifest: ImportManifestV1): string {
+  const copied = manifest.items.filter(item => item.status === 'copied').length;
+  const rejected = manifest.items.filter(
+    item =>
+      item.status === 'failed' &&
+      (item.errorCode === 'IMPORT_TYPE_UNSUPPORTED' ||
+        item.errorCode === 'IMPORT_SIZE_LIMIT_EXCEEDED'),
+  ).length;
+  const failed = manifest.items.length - copied - rejected;
+  return `${copied} accepted · ${rejected} rejected · ${failed} failed · ${manifest.status}`;
+}
+
+function manifestTypeSummary(manifest: ImportManifestV1): string {
+  const counts = new Map<string, number>();
+  manifest.items.forEach(item =>
+    counts.set(item.mediaType, (counts.get(item.mediaType) ?? 0) + 1),
+  );
+  const values = [...counts.entries()].map(
+    ([mediaType, count]) => `${mediaType} × ${count}`,
+  );
+  return values.length === 0 ? 'Types none' : `Types ${values.join(', ')}`;
 }
 
 function Diagnostics(): React.JSX.Element {

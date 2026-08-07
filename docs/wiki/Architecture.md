@@ -69,6 +69,8 @@ Logical layout:
 
 Every import begins with an atomic, schema-versioned ImportManifestV1. Provider files are copied before permission can expire. A recovery scan is idempotent.
 
+Production system-share ingestion is documented in [System-share ingestion](../development/system-share-ingestion.md). Both entry points preserve provider order, accept at most 20 copied items, stream through bounded buffers, detect supported bytes independently of filenames/provider MIME, compute SHA-256, and publish the full ingestion directory atomically. Failed and rejected items remain visible in the manifest with stable codes. Replaying an ingestion ID never reopens the provider.
+
 Persistence, file ownership, migration, locking, cleanup, and replay details are fixed by [ADR-0002](../adr/0002-sqlite-file-storage-and-inbox-recovery.md).
 
 Production persistence uses one app-lifetime Expo SQLite connection at schema v3. Repository boundaries cover Pack graphs, ordered ContextItems, RiskFindings, ExportRecords, artifacts, recovery journals, diagnostics, quarantine records, and cleanup leases. Pack updates use optimistic revisions inside exclusive transactions; unknown newer schemas, stale revisions, relationship violations, and artifact-integrity mismatches fail closed with stable codes.

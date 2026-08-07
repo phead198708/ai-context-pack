@@ -28,6 +28,7 @@
     "items": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 128,
       "uniqueItems": true,
       "items": {
         "oneOf": [
@@ -114,6 +115,7 @@
         "IMPORT_PROVIDER_PERMISSION_EXPIRED",
         "IMPORT_TYPE_UNSUPPORTED",
         "IMPORT_COPY_FAILED",
+        "IMPORT_SIZE_LIMIT_EXCEEDED",
         "IMPORT_PARTIAL_FAILURE",
         "PIPELINE_STAGE_FAILED",
         "PROCESSOR_OUTPUT_INVALID",
@@ -122,7 +124,11 @@
         "PRIVACY_EXPORT_BLOCKED",
         "RESOURCE_LOW_DISK",
         "RESOURCE_MEMORY_PRESSURE",
-        "STORAGE_WRITE_FAILED"
+        "STORAGE_WRITE_FAILED",
+        "STORAGE_DIVERGENCE_DETECTED",
+        "STORAGE_ARTIFACT_IMMUTABLE",
+        "PERSISTENCE_CONFLICT",
+        "DEVELOPMENT_RESET_FORBIDDEN"
       ]
     },
     "copiedItem": {

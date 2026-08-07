@@ -20,7 +20,9 @@ import {
   isPDFPageExtractionV1,
   isPipelineCheckpointV1,
   isRiskFindingV1,
+  IMPORT_MANIFEST_MAX_ITEMS,
 } from '../src/domain/validation';
+import { DOMAIN_ERROR_CATALOG } from '../src/domain/errors';
 
 const { readFileSync, readdirSync } = jest.requireActual<{
   readonly readFileSync: (path: string, encoding: 'utf8') => string;
@@ -179,6 +181,29 @@ const negativeContractCorpus: readonly {
           relativePath: '323e4567-e89b-42d3-a456-426614174000.bin',
         },
       ],
+    }),
+  },
+  {
+    name: 'import manifest exceeding the bounded item count',
+    fixture: 'import-manifest-v1.json',
+    authority: 'structural-schema',
+    mutate: fixture => ({
+      ...fixture,
+      status: 'failed',
+      items: Array.from(
+        { length: IMPORT_MANIFEST_MAX_ITEMS + 1 },
+        (_, order) => ({
+          id: `223e4567-e89b-42d3-a456-${String(426614174000 + order).padStart(
+            12,
+            '0',
+          )}`,
+          order,
+          mediaType: 'application/octet-stream',
+          status: 'failed',
+          byteCount: 0,
+          errorCode: 'IMPORT_SIZE_LIMIT_EXCEEDED',
+        }),
+      ),
     }),
   },
   {
@@ -492,6 +517,47 @@ describe('contract privacy and integrity constraints', () => {
       ],
     };
   }
+
+  test('ImportManifestV1 structurally and semantically accepts the bounded-share rejection code', () => {
+    const contract = contractForFixture('import-manifest-v1.json');
+    const fixture = objectValue(
+      loadJson(fixtureDirectory, 'import-manifest-v1.json'),
+    );
+    const item = firstRecordField(fixture, 'items');
+    const candidate = {
+      ...fixture,
+      status: 'failed',
+      items: [
+        {
+          id: item.id,
+          order: item.order,
+          mediaType: item.mediaType,
+          status: 'failed',
+          byteCount: 0,
+          errorCode: 'IMPORT_SIZE_LIMIT_EXCEEDED',
+        },
+      ],
+    };
+
+    expect(contract.validateSchema(candidate)).toBe(true);
+    expect(isImportManifestV1(candidate)).toBe(true);
+    expect(decodeImportManifestV1(candidate)).toEqual({
+      ok: true,
+      value: candidate,
+    });
+  });
+
+  test('ImportManifestV1 schema error codes match the domain catalog', () => {
+    const schema = objectValue(
+      loadJson(schemaDirectory, 'import-manifest-v1.schema.json'),
+    );
+    const definitions = objectValue(schema.$defs);
+    const errorCode = objectValue(definitions.errorCode);
+
+    expect((errorCode.enum as string[]).slice().sort()).toEqual(
+      Object.keys(DOMAIN_ERROR_CATALOG).sort(),
+    );
+  });
 
   test.each([
     'content://provider/private',

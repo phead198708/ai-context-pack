@@ -2,110 +2,81 @@ package com.aicontextpack
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import com.aicontextpack.nativebridge.InboxWriterOwnership
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
-import java.util.UUID
+import com.aicontextpack.nativebridge.ShareIngestionInput
+import com.aicontextpack.nativebridge.ShareIngestionSummary
+import com.aicontextpack.nativebridge.ShareInputCollectionException
+import com.aicontextpack.nativebridge.ShareIntentInputCollector
+import com.aicontextpack.nativebridge.ShareIngestionWriter
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.concurrent.Executors
 
 object ShareInboxImporter {
-  private const val maxImageBytes = 52_428_800L
   private val executor = Executors.newSingleThreadExecutor { runnable ->
     Thread(runnable, "share-inbox-import").apply { isDaemon = true }
   }
 
-  enum class Result(val wireValue: String) { COMPLETE("complete"), FAILED("failed") }
+  data class Result(
+    val published: Boolean,
+    val status: String? = null,
+    val copied: Int = 0,
+    val rejected: Int = 0,
+    val failed: Int = 0,
+    val code: String? = null,
+  )
 
-  @Suppress("DEPRECATION")
   fun importIfSupportedAsync(
     context: Context,
     intent: Intent?,
     ingestionId: String,
     started: () -> Unit,
     completion: (Result) -> Unit,
-  ) {
-    if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return
-    val source = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+  ): Boolean {
+    if (intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE) {
+      return false
+    }
+    val shareIntent = Intent(intent)
     executor.execute {
       val result = try {
         started()
-        requireNotNull(source) { "SHARE_STREAM_MISSING" }
-        val mediaType = selectConcreteImageMediaType(intent.type, context.contentResolver.getType(source))
-        if (mediaType == null) Result.FAILED else importImage(context, source, mediaType, ingestionId)
+        val inputs = collectInputs(context, shareIntent)
+        ShareIngestionWriter.publish(context.filesDir, ingestionId, inputs).toResult()
+      } catch (error: ShareInputCollectionException) {
+        Result(published = false, code = error.stableCode)
       } catch (_: Exception) {
-        Result.FAILED
+        Result(published = false, code = "SHARE_IMPORT_FAILED")
       }
       completion(result)
     }
+    return true
   }
 
-  internal fun importImage(
-    context: Context,
-    source: Uri,
-    mediaType: String,
-    ingestionId: String = UUID.randomUUID().toString(),
-  ): Result {
-    val itemId = UUID.randomUUID().toString()
-    val directory = File(context.filesDir, "InboxStaging/$ingestionId")
-    val publishedDirectory = File(context.filesDir, "Inbox/$ingestionId")
-    val partial = File(directory, "$itemId.partial")
-    val destination = File(directory, "$itemId.bin")
-    val manifest = File(directory, "manifest.json")
-    var writerOwnership: InboxWriterOwnership? = null
-    return try {
-      require(selectConcreteImageMediaType(mediaType, null) != null) { "SHARE_MIME_INVALID" }
-      writerOwnership = InboxWriterOwnership.acquire(context.filesDir, ingestionId)
-      check(directory.mkdirs()) { "SHARE_DIRECTORY_CREATE_FAILED" }
-      context.contentResolver.openInputStream(source).use { input ->
-        requireNotNull(input) { "SHARE_URI_UNREADABLE" }
-        partial.outputStream().use { output -> copyBounded(input, output, maxImageBytes) }
-      }
-      check(partial.renameTo(destination)) { "SHARE_ATOMIC_MOVE_FAILED" }
-      val item = JSONObject().put("id", itemId).put("order", 0).put("mediaType", mediaType)
-        .put("byteCount", destination.length()).put("relativePath", destination.name).put("status", "copied")
-      val payload = JSONObject()
-        .put("schemaVersion", 1).put("ingestionId", ingestionId).put("createdAt", isoTimestamp())
-        .put("source", "android-share-intent").put("status", "complete").put("items", JSONArray().put(item))
-      val tempManifest = File(directory, "manifest.partial")
-      tempManifest.writeText(payload.toString())
-      check(tempManifest.renameTo(manifest)) { "MANIFEST_ATOMIC_MOVE_FAILED" }
-      check(publishedDirectory.parentFile?.mkdirs() == true || publishedDirectory.parentFile?.isDirectory == true)
-      check(directory.renameTo(publishedDirectory)) { "INGESTION_ATOMIC_PUBLISH_FAILED" }
-      Result.COMPLETE
-    } catch (_: Exception) {
-      directory.deleteRecursively()
-      Result.FAILED
-    } finally {
-      runCatching { writerOwnership?.close() }
-    }
+  internal fun collectInputs(context: Context, intent: Intent): List<ShareIngestionInput> {
+    return ShareIntentInputCollector.collect(context, intent)
   }
 
-  internal fun selectConcreteImageMediaType(intentType: String?, resolvedType: String?): String? =
-    sequenceOf(resolvedType, intentType).firstOrNull { type ->
-      type != null && concreteImageMime.matches(type)
-    }
-
-  internal fun copyBounded(input: java.io.InputStream, output: java.io.OutputStream, limit: Long): Long {
+  internal fun copyBounded(input: InputStream, output: OutputStream, limit: Long): Long {
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var total = 0L
     while (true) {
       val read = input.read(buffer)
       if (read < 0) return total
+      if (read == 0) continue
       total += read
-      check(total <= limit) { "SHARE_IMAGE_TOO_LARGE" }
+      check(total <= limit) { "IMPORT_SIZE_LIMIT_EXCEEDED" }
       output.write(buffer, 0, read)
     }
   }
 
-  private fun isoTimestamp(): String = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-    timeZone = TimeZone.getTimeZone("UTC")
-  }.format(Date())
+  internal fun concreteOrFallback(value: String?): String {
+    return ShareIntentInputCollector.concreteOrFallback(value)
+  }
 
-  private val concreteImageMime = Regex("^image/[a-z0-9][a-z0-9!#$&^_.+-]*$", RegexOption.IGNORE_CASE)
+  private fun ShareIngestionSummary.toResult(): Result = Result(
+    published = true,
+    status = status,
+    copied = copied,
+    rejected = rejected,
+    failed = failed,
+  )
 }
