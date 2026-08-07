@@ -350,6 +350,85 @@ final class ShareIngestionTests: XCTestCase {
     XCTAssertTrue(try XCTUnwrap(result).get().replayed)
   }
 
+  func testReplayOwnershipBlocksAcknowledgementBetweenManifestCheckAndRead() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    let first = try ShareIngestionSession(container: root, ingestionId: ingestionId)
+    try first.recordFile(
+      id: itemId,
+      order: 0,
+      declaredMediaType: "image/png",
+      source: fixture("ocr-english.png")
+    )
+    _ = try first.finish()
+
+    let applicationSupport = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: applicationSupport,
+      withIntermediateDirectories: true
+    )
+    let manifestChecked = expectation(description: "replay checked manifest while owned")
+    let replayCompleted = expectation(description: "replay completed")
+    let allowManifestRead = DispatchSemaphore(value: 0)
+    let resultLock = NSLock()
+    var replayResult: Result<ShareIngestionSummary, Error>?
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      let result = Result {
+        let replay = try ShareIngestionSession(
+          container: self.root,
+          ingestionId: ingestionId,
+          operationHook: { point in
+            if case .afterLockedReplayManifestCheck = point {
+              manifestChecked.fulfill()
+              guard allowManifestRead.wait(timeout: .now() + 5) == .success else {
+                throw ShareIngestionFatalError.interrupted
+              }
+            }
+          }
+        )
+        return try replay.finish()
+      }
+      resultLock.lock()
+      replayResult = result
+      resultLock.unlock()
+      replayCompleted.fulfill()
+    }
+
+    wait(for: [manifestChecked], timeout: 2)
+    let packId = UUID().uuidString.lowercased()
+    _ = try InboxArtifactHandoff.handoff(
+      container: root,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max }
+    )
+    XCTAssertThrowsError(try InboxArtifactHandoff.acknowledge(
+      container: root,
+      ingestionId: ingestionId
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .acknowledgementBlocked)
+    }
+
+    allowManifestRead.signal()
+    wait(for: [replayCompleted], timeout: 2)
+    resultLock.lock()
+    let result = replayResult
+    resultLock.unlock()
+    XCTAssertTrue(try XCTUnwrap(result).get().replayed)
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: root,
+      ingestionId: ingestionId
+    ))
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: applicationSupport
+        .appendingPathComponent("Packs/\(packId)/originals/\(itemId).bin")
+        .path
+    ))
+  }
+
   func testConcurrentDifferentIdsPublishFromAnEmptyContainer() throws {
     let readyToCreateSharedDirectory = expectation(description: "writers reached shared create")
     readyToCreateSharedDirectory.expectedFulfillmentCount = 2

@@ -173,6 +173,60 @@ class ShareIngestionWriterInstrumentedTest {
     assertEquals(1, java.io.File(filesDir, "Inbox").listFiles().orEmpty().size)
   }
 
+  @Test fun replayOwnershipBlocksAcknowledgementBetweenManifestCheckAndRead() {
+    val ingestionId = UUID.randomUUID().toString()
+    val itemId = UUID.randomUUID().toString()
+    val bytes = fixture("ocr-english.png")
+    val providerOpens = AtomicInteger(0)
+    val sharedInput = ShareIngestionInput(
+      id = itemId,
+      order = 0,
+      declaredMediaType = "image/png",
+      openStream = {
+        providerOpens.incrementAndGet()
+        ByteArrayInputStream(bytes)
+      },
+    )
+    ShareIngestionWriter.publish(filesDir, ingestionId, listOf(sharedInput))
+
+    val manifestChecked = CountDownLatch(1)
+    val allowManifestRead = CountDownLatch(1)
+    val executor = Executors.newSingleThreadExecutor()
+    val replay = executor.submit(Callable {
+      ShareIngestionWriter.publish(
+        filesDir,
+        ingestionId,
+        listOf(sharedInput),
+        operationHook = { point ->
+          if (point == ShareIngestionWriter.Point.AFTER_LOCKED_REPLAY_MANIFEST_CHECK) {
+            manifestChecked.countDown()
+            check(allowManifestRead.await(5, TimeUnit.SECONDS))
+          }
+        },
+      )
+    })
+
+    try {
+      assertTrue(manifestChecked.await(2, TimeUnit.SECONDS))
+      val packId = UUID.randomUUID().toString()
+      InboxArtifactHandoff.handoff(filesDir, ingestionId, packId, 0)
+      val blocked = assertThrows(InboxArtifactHandoffException::class.java) {
+        InboxArtifactHandoff.acknowledge(filesDir, ingestionId)
+      }
+      assertEquals("PIPELINE_RECOVERY_REQUIRED", blocked.stableCode)
+
+      allowManifestRead.countDown()
+      val result = replay.get(5, TimeUnit.SECONDS)
+      assertTrue(result.replayed)
+      assertEquals(1, providerOpens.get())
+      assertTrue(InboxArtifactHandoff.acknowledge(filesDir, ingestionId))
+      assertTrue(java.io.File(filesDir, "Packs/$packId/originals/$itemId.bin").isFile)
+    } finally {
+      allowManifestRead.countDown()
+      executor.shutdownNow()
+    }
+  }
+
   @Test fun concurrentDifferentIdsPublishFromAnEmptyContainer() {
     val readyToCreateSharedDirectory = CountDownLatch(2)
     val allowCreation = CountDownLatch(1)

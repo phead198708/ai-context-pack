@@ -58,6 +58,7 @@ object ShareIngestionWriter {
   enum class Point {
     BEFORE_SHARED_DIRECTORY_CREATE,
     BEFORE_SHARED_DIRECTORY_PARENT_SYNC,
+    AFTER_LOCKED_REPLAY_MANIFEST_CHECK,
     AFTER_FIRST_CHUNK,
     BEFORE_ITEM_PUBLISH,
     BEFORE_MANIFEST_PUBLISH,
@@ -82,10 +83,6 @@ object ShareIngestionWriter {
 
     val inbox = File(filesDir, "Inbox")
     val publishedDirectory = File(inbox, ingestionId)
-    if (File(publishedDirectory, "manifest.json").isFile) {
-      return summary(InboxManifestScanner.readPublished(inbox, ingestionId), replayed = true)
-    }
-
     val staging = File(filesDir, "InboxStaging/$ingestionId")
     val ownership = acquireOwnership(filesDir, ingestionId)
     var committed = false
@@ -93,6 +90,9 @@ object ShareIngestionWriter {
     var failure: Throwable? = null
     try {
       if (File(publishedDirectory, "manifest.json").isFile) {
+        // Replay detection and validation must remain inside per-ingestion ownership.
+        // Otherwise handoff/ACK can remove the directory between the check and read.
+        operationHook(Point.AFTER_LOCKED_REPLAY_MANIFEST_CHECK)
         validatedResult = summary(
           InboxManifestScanner.readPublished(inbox, ingestionId),
           replayed = true,

@@ -116,6 +116,7 @@ final class ShareIngestionSession {
   enum Point {
     case beforeSharedDirectoryCreate
     case beforeSharedDirectoryParentSync
+    case afterLockedReplayManifestCheck
     case afterFirstChunk
     case beforeItemPublish
     case beforeManifestPublish
@@ -150,20 +151,15 @@ final class ShareIngestionSession {
     self.now = now
     self.operationHook = operationHook
     let manifest = published.appendingPathComponent("manifest.json")
-    if FileManager.default.fileExists(atPath: manifest.path) {
-      let validated = try InboxManifestValidator.readPublished(
-        inbox: container.appendingPathComponent("Inbox", isDirectory: true),
-        ingestionId: ingestionId
-      )
-      replayedSummary = try Self.summary(validated, ingestionId: ingestionId, replayed: true)
-      return
-    }
     ownership = try Self.acquireOwnership(container: container, ingestionId: ingestionId)
     if FileManager.default.fileExists(atPath: manifest.path) {
       defer {
         ownership?.release()
         ownership = nil
       }
+      // Replay detection and validation must remain inside per-ingestion ownership.
+      // Otherwise handoff/ACK can remove the directory between the check and read.
+      try operationHook(.afterLockedReplayManifestCheck)
       let validated = try InboxManifestValidator.readPublished(
         inbox: container.appendingPathComponent("Inbox", isDirectory: true),
         ingestionId: ingestionId
