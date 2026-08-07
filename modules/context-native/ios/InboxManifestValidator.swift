@@ -430,11 +430,21 @@ enum InboxManifestValidator {
   }
 
   private static func sha256(_ file: URL) throws -> String {
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
+    guard let input = InputStream(url: file) else {
+      throw InboxManifestValidationError.artifactIntegrityFailed
+    }
+    let bufferSize = 64 * 1024
+    var buffer = [UInt8](repeating: 0, count: bufferSize)
     var hasher = SHA256()
-    while let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty {
-      hasher.update(data: data)
+    input.open()
+    defer { input.close() }
+    while true {
+      let count = input.read(&buffer, maxLength: bufferSize)
+      if count < 0 {
+        throw InboxManifestValidationError.artifactIntegrityFailed
+      }
+      guard count > 0 else { break }
+      hasher.update(data: Data(bytes: buffer, count: count))
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }

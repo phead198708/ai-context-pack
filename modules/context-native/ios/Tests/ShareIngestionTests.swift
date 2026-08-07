@@ -251,6 +251,24 @@ final class ShareIngestionTests: XCTestCase {
     XCTAssertEqual(items.last?["errorCode"] as? String, "IMPORT_TYPE_UNSUPPORTED")
   }
 
+  func testMixedCaseHttpsSchemeIsDetectedAsAWebURL() throws {
+    let session = try ShareIngestionSession(
+      container: root,
+      ingestionId: UUID().uuidString.lowercased()
+    )
+    try session.recordData(
+      id: UUID().uuidString.lowercased(),
+      order: 0,
+      declaredMediaType: "text/plain",
+      data: Data("HTTPS://example.invalid/path".utf8)
+    )
+
+    let result = try session.finish()
+    let item = try XCTUnwrap((result.manifest["items"] as? [[String: Any]])?.first)
+
+    XCTAssertEqual(item["mediaType"] as? String, "text/uri-list")
+  }
+
   func testPublishedReplayDoesNotReadTheProviderAgain() throws {
     let ingestionId = UUID().uuidString.lowercased()
     let source = try sourceCopy("replay-provider.png", from: fixture("ocr-english.png"))
@@ -330,6 +348,67 @@ final class ShareIngestionTests: XCTestCase {
     let result = duplicateResult
     resultLock.unlock()
     XCTAssertTrue(try XCTUnwrap(result).get().replayed)
+  }
+
+  func testConcurrentDifferentIdsPublishFromAnEmptyContainer() throws {
+    let readyToCreateSharedDirectory = expectation(description: "writers reached shared create")
+    readyToCreateSharedDirectory.expectedFulfillmentCount = 2
+    let completed = expectation(description: "different-ID writers completed")
+    completed.expectedFulfillmentCount = 2
+    let allowCreation = DispatchSemaphore(value: 0)
+    let resultLock = NSLock()
+    var results: [Result<ShareIngestionSummary, Error>] = []
+
+    for _ in 0..<2 {
+      let ingestionId = UUID().uuidString.lowercased()
+      DispatchQueue.global(qos: .userInitiated).async {
+        var interceptedFirstCreate = false
+        let result = Result {
+          let session = try ShareIngestionSession(
+            container: self.root,
+            ingestionId: ingestionId,
+            operationHook: { point in
+              if case .beforeSharedDirectoryCreate = point, !interceptedFirstCreate {
+                interceptedFirstCreate = true
+                readyToCreateSharedDirectory.fulfill()
+                guard allowCreation.wait(timeout: .now() + 5) == .success else {
+                  throw ShareIngestionFatalError.interrupted
+                }
+              }
+            }
+          )
+          try session.recordFile(
+            id: UUID().uuidString.lowercased(),
+            order: 0,
+            declaredMediaType: "image/png",
+            source: self.fixture("ocr-english.png")
+          )
+          return try session.finish()
+        }
+        resultLock.lock()
+        results.append(result)
+        resultLock.unlock()
+        completed.fulfill()
+      }
+    }
+
+    wait(for: [readyToCreateSharedDirectory], timeout: 2)
+    allowCreation.signal()
+    allowCreation.signal()
+    wait(for: [completed], timeout: 5)
+
+    resultLock.lock()
+    let capturedResults = results
+    resultLock.unlock()
+    let summaries = try capturedResults.map { try $0.get() }
+    XCTAssertEqual(summaries.count, 2)
+    XCTAssertTrue(summaries.allSatisfy { $0.status == "complete" && $0.copied == 1 })
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(
+        atPath: root.appendingPathComponent("Inbox").path
+      ).count,
+      2
+    )
   }
 
   func testProviderCanDisappearAfterCopyAndOwnedHandoffStillSucceeds() throws {
@@ -580,12 +659,16 @@ final class ShareIngestionTests: XCTestCase {
     var image = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     image.append(Data(repeating: 0x01, count: 5 * 1024 * 1024 - image.count))
     try image.write(to: source)
+    let footprintBefore = currentPhysicalFootprintBytes()
+    var observedFootprint = footprintBefore
     let session = try ShareIngestionSession(
       container: root,
-      ingestionId: UUID().uuidString.lowercased()
+      ingestionId: UUID().uuidString.lowercased(),
+      operationHook: { _ in
+        observedFootprint = max(observedFootprint, currentPhysicalFootprintBytes())
+      }
     )
 
-    let residentBefore = peakResidentBytes()
     let started = Date()
     for order in 0..<20 {
       try session.recordFile(
@@ -597,16 +680,21 @@ final class ShareIngestionTests: XCTestCase {
     }
     let result = try session.finish()
     let duration = Date().timeIntervalSince(started)
-    let residentAfter = peakResidentBytes()
-    let residentGrowth = residentAfter > residentBefore ? residentAfter - residentBefore : 0
+    let footprintAfter = currentPhysicalFootprintBytes()
+    observedFootprint = max(observedFootprint, footprintAfter)
+    let footprintGrowth = observedFootprint > footprintBefore
+      ? observedFootprint - footprintBefore
+      : 0
 
     XCTAssertEqual(result.copied, 20)
     XCTAssertLessThan(duration, 10)
-    XCTAssertLessThan(residentGrowth, 32 * 1024 * 1024)
+    XCTAssertLessThan(footprintGrowth, 32 * 1024 * 1024)
     print(
       "SHARE_INGESTION_BENCHMARK platform=swift-macos items=20 itemBytes=5242880 " +
       "totalBytes=104857600 durationMs=\(Int(duration * 1_000)) bufferBytes=65536 " +
-      "peakResidentBytes=\(residentAfter) residentGrowthBytes=\(residentGrowth) ocrRuns=0"
+      "baselinePhysFootprintBytes=\(footprintBefore) " +
+      "observedPhysFootprintBytes=\(observedFootprint) " +
+      "physFootprintGrowthBytes=\(footprintGrowth) ocrRuns=0"
     )
   }
 
@@ -643,8 +731,16 @@ final class ShareIngestionTests: XCTestCase {
   }
 }
 
-private func peakResidentBytes() -> UInt64 {
-  var usage = rusage()
-  guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
-  return UInt64(usage.ru_maxrss)
+private func currentPhysicalFootprintBytes() -> UInt64 {
+  var info = task_vm_info_data_t()
+  var count = mach_msg_type_number_t(
+    MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size
+  )
+  let status = withUnsafeMutablePointer(to: &info) { pointer in
+    pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+      task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+    }
+  }
+  guard status == KERN_SUCCESS else { return 0 }
+  return info.phys_footprint
 }

@@ -114,6 +114,7 @@ final class ShareIngestionSession {
   static let maximumMediaTypeLength = 127
 
   enum Point {
+    case beforeSharedDirectoryCreate
     case afterFirstChunk
     case beforeItemPublish
     case beforeManifestPublish
@@ -177,7 +178,9 @@ final class ShareIngestionSession {
     }
     do {
       let stagingRoot = staging.deletingLastPathComponent()
-      try Self.ensureDurableDirectory(stagingRoot)
+      try Self.ensureDurableDirectory(stagingRoot) {
+        try operationHook(.beforeSharedDirectoryCreate)
+      }
       try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
       try Self.synchronizeDirectory(stagingRoot)
     } catch {
@@ -225,13 +228,25 @@ final class ShareIngestionSession {
     let accessed = source.startAccessingSecurityScopedResource()
     defer { if accessed { source.stopAccessingSecurityScopedResource() } }
     do {
-      let input = try FileHandle(forReadingFrom: source)
-      defer { try? input.close() }
+      guard let input = InputStream(url: source) else {
+        throw ShareInputFailure("IMPORT_COPY_FAILED")
+      }
+      let bufferSize = 64 * 1024
+      var buffer = [UInt8](repeating: 0, count: bufferSize)
+      input.open()
+      defer { input.close() }
       try copyAndRecord(
         id: id,
         order: order,
         declaredMediaType: declaredMediaType,
-        read: { try input.read(upToCount: 64 * 1024) ?? Data() }
+        read: {
+          let count = input.read(&buffer, maxLength: bufferSize)
+          if count < 0 {
+            throw input.streamError ?? ShareInputFailure("IMPORT_COPY_FAILED")
+          }
+          guard count > 0 else { return Data() }
+          return Data(bytes: buffer, count: count)
+        }
       )
     } catch let error as ShareIngestionFatalError {
       throw error
@@ -320,7 +335,9 @@ final class ShareIngestionSession {
       try Self.atomicRename(partial, final)
       try Self.synchronizeDirectory(staging)
       let inbox = published.deletingLastPathComponent()
-      try Self.ensureDurableDirectory(inbox)
+      try Self.ensureDurableDirectory(inbox) {
+        try operationHook(.beforeSharedDirectoryCreate)
+      }
       try operationHook(.beforeDirectoryPublish)
       try Self.atomicRename(staging, published)
       committed = true
@@ -517,7 +534,8 @@ final class ShareIngestionSession {
 
   private static func validWebURL(_ value: String) -> Bool {
     guard let components = URLComponents(string: value),
-          components.scheme == "http" || components.scheme == "https",
+          let scheme = components.scheme?.lowercased(),
+          scheme == "http" || scheme == "https",
           components.host?.isEmpty == false else { return false }
     return true
   }
@@ -552,17 +570,41 @@ final class ShareIngestionSession {
     }
   }
 
-  private static func ensureDurableDirectory(_ directory: URL) throws {
+  private static func ensureDurableDirectory(
+    _ directory: URL,
+    beforeCreate: () throws -> Void = {}
+  ) throws {
     var isDirectory: ObjCBool = false
     if FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
-      let values = try directory.resourceValues(forKeys: [.isSymbolicLinkKey])
-      guard isDirectory.boolValue, values.isSymbolicLink != true else {
-        throw ShareIngestionFatalError.storageWriteFailed
-      }
+      try requireSafeDirectory(directory, isDirectory: isDirectory)
       return
     }
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    try beforeCreate()
+    do {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    } catch {
+      // Different ingestion IDs do not share an ownership lock. A concurrent first
+      // import may therefore create this shared directory after our existence check.
+      var racedIsDirectory: ObjCBool = false
+      guard FileManager.default.fileExists(
+        atPath: directory.path,
+        isDirectory: &racedIsDirectory
+      ) else {
+        throw ShareIngestionFatalError.storageWriteFailed
+      }
+      try requireSafeDirectory(directory, isDirectory: racedIsDirectory)
+    }
     try synchronizeDirectory(directory.deletingLastPathComponent())
+  }
+
+  private static func requireSafeDirectory(
+    _ directory: URL,
+    isDirectory: ObjCBool
+  ) throws {
+    let values = try directory.resourceValues(forKeys: [.isSymbolicLinkKey])
+    guard isDirectory.boolValue, values.isSymbolicLink != true else {
+      throw ShareIngestionFatalError.storageWriteFailed
+    }
   }
 
   private static func canonicalUUID(_ value: String) -> Bool {

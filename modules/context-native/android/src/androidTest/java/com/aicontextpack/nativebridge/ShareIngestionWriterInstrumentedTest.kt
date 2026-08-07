@@ -108,6 +108,18 @@ class ShareIngestionWriterInstrumentedTest {
     assertEquals("IMPORT_TYPE_UNSUPPORTED", items.last()["errorCode"])
   }
 
+  @Test fun mixedCaseHttpsSchemeIsDetectedAsAWebUrl() {
+    val result = ShareIngestionWriter.publish(
+      filesDir,
+      UUID.randomUUID().toString(),
+      listOf(input(0, "text/plain", "HTTPS://example.invalid/path".toByteArray())),
+    )
+
+    @Suppress("UNCHECKED_CAST")
+    val item = (result.manifest["items"] as List<Map<String, Any?>>).single()
+    assertEquals("text/uri-list", item["mediaType"])
+  }
+
   @Test fun replayAndOwnedHandoffDoNotNeedTheProviderPermissionAgain() {
     val available = AtomicBoolean(true)
     val opens = AtomicInteger(0)
@@ -159,6 +171,42 @@ class ShareIngestionWriterInstrumentedTest {
     executor.shutdownNow()
     assertEquals(listOf(false, true), results.map { it.replayed }.sorted())
     assertEquals(1, java.io.File(filesDir, "Inbox").listFiles().orEmpty().size)
+  }
+
+  @Test fun concurrentDifferentIdsPublishFromAnEmptyContainer() {
+    val readyToCreateSharedDirectory = CountDownLatch(2)
+    val allowCreation = CountDownLatch(1)
+    val executor = Executors.newFixedThreadPool(2)
+    val calls = (0 until 2).map {
+      executor.submit(Callable {
+        val interceptedFirstCreate = AtomicBoolean(false)
+        ShareIngestionWriter.publish(
+          filesDir,
+          UUID.randomUUID().toString(),
+          listOf(input(0, "image/png", fixture("ocr-english.png"))),
+          operationHook = { point ->
+            if (
+              point == ShareIngestionWriter.Point.BEFORE_SHARED_DIRECTORY_CREATE &&
+              interceptedFirstCreate.compareAndSet(false, true)
+            ) {
+              readyToCreateSharedDirectory.countDown()
+              check(allowCreation.await(5, TimeUnit.SECONDS))
+            }
+          },
+        )
+      })
+    }
+    try {
+      assertTrue(readyToCreateSharedDirectory.await(2, TimeUnit.SECONDS))
+      allowCreation.countDown()
+      val results = calls.map { it.get(5, TimeUnit.SECONDS) }
+
+      assertTrue(results.all { it.status == "complete" && it.copied == 1 })
+      assertEquals(2, java.io.File(filesDir, "Inbox").listFiles().orEmpty().size)
+    } finally {
+      allowCreation.countDown()
+      executor.shutdownNow()
+    }
   }
 
   @Test fun ownershipTimeoutCannotDeleteAnotherWritersActiveStaging() {
@@ -244,6 +292,40 @@ class ShareIngestionWriterInstrumentedTest {
     assertEquals("complete", result.status)
     assertEquals(1, result.copied)
     assertTrue(java.io.File(filesDir, "Inbox/$ingestionId/manifest.json").isFile)
+    assertTrue(
+      ShareIngestionWriter.publish(
+        filesDir,
+        ingestionId,
+        listOf(input(0, "image/png", fixture("ocr-english.png"))),
+      ).replayed,
+    )
+  }
+
+  @Test fun ownershipCleanupFailureAfterCommitReturnsTheValidatedPublishedImport() {
+    val ingestionId = UUID.randomUUID().toString()
+    val lockFile = java.io.File(filesDir, "InboxWriterLocks/$ingestionId.lock")
+    val cleanupFailureInjected = AtomicBoolean(false)
+
+    val result = ShareIngestionWriter.publish(
+      filesDir,
+      ingestionId,
+      listOf(input(0, "image/png", fixture("ocr-english.png"))),
+      operationHook = { point ->
+        if (point == ShareIngestionWriter.Point.AFTER_DIRECTORY_PUBLISH) {
+          assertTrue(lockFile.delete())
+          assertTrue(lockFile.mkdir())
+          assertTrue(java.io.File(lockFile, "prevent-delete").createNewFile())
+          cleanupFailureInjected.set(true)
+        }
+      },
+    )
+
+    assertTrue(cleanupFailureInjected.get())
+    assertFalse(result.replayed)
+    assertEquals("complete", result.status)
+    assertEquals(1, result.copied)
+    assertTrue(java.io.File(filesDir, "Inbox/$ingestionId/manifest.json").isFile)
+    assertTrue(lockFile.deleteRecursively())
     assertTrue(
       ShareIngestionWriter.publish(
         filesDir,

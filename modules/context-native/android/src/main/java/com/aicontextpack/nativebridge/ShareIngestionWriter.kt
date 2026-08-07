@@ -56,6 +56,7 @@ object ShareIngestionWriter {
   const val maximumMediaTypeLength = 127
 
   enum class Point {
+    BEFORE_SHARED_DIRECTORY_CREATE,
     AFTER_FIRST_CHUNK,
     BEFORE_ITEM_PUBLISH,
     BEFORE_MANIFEST_PUBLISH,
@@ -84,24 +85,26 @@ object ShareIngestionWriter {
     }
 
     val staging = File(filesDir, "InboxStaging/$ingestionId")
+    val ownership = acquireOwnership(filesDir, ingestionId)
     var committed = false
-    var ownershipAcquired = false
+    var validatedResult: ShareIngestionSummary? = null
+    var failure: Throwable? = null
     try {
-      acquireOwnership(filesDir, ingestionId).use {
-        ownershipAcquired = true
-        if (File(publishedDirectory, "manifest.json").isFile) {
-          return summary(InboxManifestScanner.readPublished(inbox, ingestionId), replayed = true)
-        }
+      if (File(publishedDirectory, "manifest.json").isFile) {
+        validatedResult = summary(
+          InboxManifestScanner.readPublished(inbox, ingestionId),
+          replayed = true,
+        )
+      } else {
         check(!publishedDirectory.exists()) { "INGESTION_DESTINATION_CONFLICT" }
         check(!staging.exists()) { "INGESTION_RECOVERY_REQUIRED" }
         val stagingRoot = requireNotNull(staging.parentFile)
-        ensureDurableDirectory(stagingRoot)
+        ensureDurableDirectory(stagingRoot, operationHook)
         check(staging.mkdir()) { "INGESTION_STAGING_CREATE_FAILED" }
         synchronizeDirectory(stagingRoot)
 
         val items = inputs.map { input -> copyInput(staging, input, operationHook) }
         val copied = items.count { it.getString("status") == "copied" }
-        val failed = items.size - copied
         val status = when {
           copied == items.size -> "complete"
           copied > 0 -> "partial"
@@ -120,31 +123,46 @@ object ShareIngestionWriter {
         operationHook(Point.BEFORE_MANIFEST_PUBLISH)
         atomicRename(partialManifest, finalManifest)
         synchronizeDirectory(staging)
-        ensureDurableDirectory(inbox)
+        ensureDurableDirectory(inbox, operationHook)
         operationHook(Point.BEFORE_DIRECTORY_PUBLISH)
         atomicRename(staging, publishedDirectory)
         committed = true
-        // The directory rename is the visibility commit point. A later parent-directory
-        // fsync failure cannot safely be reported as a failed import while the complete
-        // manifest is already visible; retain and return that committed import instead.
-        try {
-          operationHook(Point.AFTER_DIRECTORY_PUBLISH)
-        } catch (_: Exception) {
-          // Fault injection models a failure in the post-rename durability window.
-        }
-        try {
-          synchronizeDirectory(inbox)
-        } catch (_: Exception) {
-          // The validated published import remains the authoritative result.
-        }
+        // The directory rename is the visibility commit point. All later failures,
+        // including ownership cleanup, must reconcile against the published manifest
+        // instead of reporting a failed import that is already visible.
+        operationHook(Point.AFTER_DIRECTORY_PUBLISH)
+        synchronizeDirectory(inbox)
+        validatedResult = summary(
+          InboxManifestScanner.readPublished(inbox, ingestionId),
+          replayed = false,
+        )
       }
-      return summary(
-        InboxManifestScanner.readPublished(inbox, ingestionId),
-        replayed = false,
-      )
-    } finally {
-      if (!committed && ownershipAcquired) runCatching { staging.deleteRecursively() }
+    } catch (error: Throwable) {
+      failure = error
     }
+
+    try {
+      ownership.close()
+    } catch (error: Throwable) {
+      if (failure == null) failure = error else failure.addSuppressed(error)
+    }
+
+    if (committed) {
+      return try {
+        summary(
+          InboxManifestScanner.readPublished(inbox, ingestionId),
+          replayed = false,
+        )
+      } catch (reconciliationFailure: Throwable) {
+        failure?.let(reconciliationFailure::addSuppressed)
+        throw reconciliationFailure
+      }
+    }
+
+    validatedResult?.let { return it }
+    runCatching { staging.deleteRecursively() }
+    failure?.let { throw it }
+    error("INGESTION_RESULT_MISSING")
   }
 
   private fun copyInput(
@@ -347,7 +365,7 @@ object ShareIngestionWriter {
 
   private fun validWebURL(value: String): Boolean = try {
     val uri = java.net.URI(value)
-    (uri.scheme == "http" || uri.scheme == "https") && !uri.host.isNullOrBlank()
+    uri.scheme?.lowercase(Locale.ROOT) in setOf("http", "https") && !uri.host.isNullOrBlank()
   } catch (_: Exception) {
     false
   }
@@ -395,16 +413,29 @@ object ShareIngestionWriter {
     }
   }
 
-  private fun ensureDurableDirectory(directory: File) {
+  private fun ensureDurableDirectory(
+    directory: File,
+    operationHook: (Point) -> Unit,
+  ) {
     if (directory.exists()) {
-      check(
-        directory.isDirectory &&
-          !OsConstants.S_ISLNK(Os.lstat(directory.path).st_mode),
-      ) { "INGESTION_DIRECTORY_INVALID" }
+      requireSafeDirectory(directory)
       return
     }
-    check(directory.mkdir()) { "INGESTION_DIRECTORY_CREATE_FAILED" }
+    operationHook(Point.BEFORE_SHARED_DIRECTORY_CREATE)
+    if (!directory.mkdir()) {
+      // A different ingestion can create this shared directory after our existence
+      // check. Accept only the intended non-symlink directory, then establish the
+      // same parent-directory durability boundary as the winning creator.
+      requireSafeDirectory(directory)
+    }
     synchronizeDirectory(requireNotNull(directory.parentFile))
+  }
+
+  private fun requireSafeDirectory(directory: File) {
+    check(
+      directory.isDirectory &&
+        !OsConstants.S_ISLNK(Os.lstat(directory.path).st_mode),
+    ) { "INGESTION_DIRECTORY_INVALID" }
   }
 
   private fun isoTimestamp(date: Date): String = SimpleDateFormat(
