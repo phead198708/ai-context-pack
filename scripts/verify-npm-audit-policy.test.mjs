@@ -36,7 +36,14 @@ function makeLock() {
     packages: {
       '': {
         dependencies: { expo: '57.0.11' },
-        devDependencies: { jest: '29.7.0' },
+        devDependencies: {
+          '@expo/cli': '57.0.13',
+          '@react-native-community/cli': '20.2.0',
+          '@react-native-community/cli-platform-android': '20.2.0',
+          '@react-native-community/cli-platform-ios': '20.2.0',
+          jest: '29.7.0',
+        },
+        optionalDependencies: { '@expo/metro-config': '57.0.7' },
       },
       ...Object.fromEntries(
         APPROVED_HIGH_LOCK_TOPOLOGY.map(entry => [
@@ -128,6 +135,19 @@ test('approved image-size advisories pass only on the pinned Metro lock path', (
     highPackages: 13,
     exceptions: 2,
   });
+
+  const alternateExpoCycle = makeReport();
+  alternateExpoCycle.vulnerabilities['@expo/cli'].effects = ['expo'];
+  alternateExpoCycle.vulnerabilities['@expo/metro-config'].effects = [];
+  assert.equal(verifyAuditReport(alternateExpoCycle, makeLock()).exceptions, 2);
+
+  for (const approved of APPROVED_HIGH_FIX_OPTIONS) {
+    for (const value of approved.values) {
+      const report = makeReport();
+      report.vulnerabilities[approved.name].fixAvailable = clone(value);
+      assert.equal(verifyAuditReport(report, makeLock()).exceptions, 2);
+    }
+  }
 });
 
 test('a clean audit passes without consulting the temporary exception', () => {
@@ -263,6 +283,13 @@ test('runtime exposure, fix metadata, and dependency-path drift fail closed', ()
 
 test('compatible fixes on every propagated high package fail closed', () => {
   for (const name of APPROVED_HIGH_PACKAGES) {
+    const booleanFix = makeReport();
+    booleanFix.vulnerabilities[name].fixAvailable = true;
+    expectRule(
+      () => verifyAuditReport(booleanFix, makeLock()),
+      'AUDIT_FIX_GRAPH_DRIFT',
+    );
+
     const report = makeReport();
     report.vulnerabilities[name].fixAvailable = {
       name,
@@ -274,6 +301,44 @@ test('compatible fixes on every propagated high package fail closed', () => {
       'AUDIT_FIX_GRAPH_DRIFT',
     );
   }
+});
+
+test('lower-severity records cannot hide alternate high propagation paths', () => {
+  const lowerSeverity = makeReport();
+  lowerSeverity.vulnerabilities['@expo/config'] = {
+    name: '@expo/config',
+    severity: 'moderate',
+    isDirect: false,
+    via: ['image-size'],
+    effects: ['@expo/cli'],
+    nodes: ['node_modules/@expo/config'],
+    range: '*',
+    fixAvailable: false,
+  };
+  lowerSeverity.metadata.vulnerabilities.moderate = 1;
+  lowerSeverity.metadata.vulnerabilities.total += 1;
+  expectRule(
+    () => verifyAuditReport(lowerSeverity, makeLock()),
+    'AUDIT_SEVERITY_INCONSISTENT',
+  );
+
+  const unrelatedModerate = makeReport();
+  unrelatedModerate.vulnerabilities['synthetic-moderate'] = {
+    name: 'synthetic-moderate',
+    severity: 'moderate',
+    isDirect: false,
+    via: [],
+    effects: [],
+    nodes: ['node_modules/synthetic-moderate'],
+    range: '*',
+    fixAvailable: false,
+  };
+  unrelatedModerate.metadata.vulnerabilities.moderate = 1;
+  unrelatedModerate.metadata.vulnerabilities.total += 1;
+  expectRule(
+    () => verifyAuditReport(unrelatedModerate, makeLock()),
+    'AUDIT_HIGH_GRAPH_DRIFT',
+  );
 });
 
 test('the complete propagation topology and lock identities fail closed on drift', () => {
@@ -298,6 +363,13 @@ test('the complete propagation topology and lock identities fail closed on drift
     clone(alternateLockPath.packages['node_modules/metro']);
   expectRule(
     () => verifyAuditReport(makeReport(), alternateLockPath),
+    'AUDIT_EXCEPTION_LOCK_DRIFT',
+  );
+
+  const missingRootPin = makeLock();
+  delete missingRootPin.packages[''].optionalDependencies['@expo/metro-config'];
+  expectRule(
+    () => verifyAuditReport(makeReport(), missingRootPin),
     'AUDIT_EXCEPTION_LOCK_DRIFT',
   );
 

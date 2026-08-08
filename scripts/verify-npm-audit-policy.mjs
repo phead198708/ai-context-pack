@@ -10,6 +10,12 @@ const allowedSeverities = new Set([
   'high',
   'critical',
 ]);
+const severityRank = new Map(
+  ['info', 'low', 'moderate', 'high', 'critical'].map((severity, index) => [
+    severity,
+    index,
+  ]),
+);
 
 export const AUDIT_STDIN_LIMIT_BYTES = 2 * 1024 * 1024;
 
@@ -77,23 +83,25 @@ const newAppScreenDowngrade = Object.freeze({
   version: '0.84.1',
   isSemVerMajor: true,
 });
+const expoCliDowngrade = Object.freeze({
+  name: '@expo/cli',
+  version: '0.24.24',
+  isSemVerMajor: true,
+});
+const expoMetroConfigDowngrade = Object.freeze({
+  name: '@expo/metro-config',
+  version: '0.20.18',
+  isSemVerMajor: true,
+});
 
 export const APPROVED_HIGH_GRAPH = Object.freeze([
   Object.freeze({
     name: '@expo/cli',
-    isDirect: false,
-    via: Object.freeze([
-      'package:@expo/config',
-      'package:@expo/config-plugins',
-      'package:@expo/inline-modules',
-      'package:@expo/metro',
-      'package:@expo/metro-config',
-      'package:@expo/prebuild-config',
-    ]),
+    isDirect: true,
+    via: Object.freeze(['package:@expo/metro', 'package:@expo/metro-config']),
     effects: Object.freeze([]),
-    nodes: Object.freeze(['node_modules/expo/node_modules/@expo/cli']),
-    range:
-      '<=0.0.0-canary-20231123-1b19f96-4 || >=0.0.1-canary-20231125-d600e44',
+    nodes: Object.freeze(['node_modules/@expo/cli']),
+    range: '>=0.25.0-canary-20250612-338ef55',
   }),
   Object.freeze({
     name: '@expo/metro',
@@ -109,11 +117,11 @@ export const APPROVED_HIGH_GRAPH = Object.freeze([
   }),
   Object.freeze({
     name: '@expo/metro-config',
-    isDirect: false,
-    via: Object.freeze(['package:@expo/config', 'package:@expo/metro']),
+    isDirect: true,
+    via: Object.freeze(['package:@expo/metro']),
     effects: Object.freeze(['expo']),
-    nodes: Object.freeze(['node_modules/expo/node_modules/@expo/metro-config']),
-    range: '<=0.0.1-canary-20240418-8d74597 || >=0.1.49-alpha.0',
+    nodes: Object.freeze(['node_modules/@expo/metro-config']),
+    range: '>=0.21.0-canary-20250630-547cd82',
   }),
   Object.freeze({
     name: '@react-native/community-cli-plugin',
@@ -156,15 +164,13 @@ export const APPROVED_HIGH_GRAPH = Object.freeze([
     isDirect: true,
     via: Object.freeze([
       'package:@expo/cli',
-      'package:@expo/config',
-      'package:@expo/config-plugins',
-      'package:@expo/local-build-cache-provider',
       'package:@expo/metro',
       'package:@expo/metro-config',
     ]),
     effects: Object.freeze([]),
     nodes: Object.freeze(['node_modules/expo']),
-    range: '46.0.5 || >=47.0.0-alpha.1',
+    range:
+      '52.0.0-canary-20240625-2333e70 - 52.0.0-canary-20241018-f71b3e0 || >=54.0.0-canary-20250611-f0afe80',
   }),
   Object.freeze({
     name: 'image-size',
@@ -227,18 +233,40 @@ export const APPROVED_HIGH_GRAPH = Object.freeze([
   }),
 ]);
 
+// npm 10.9.2 assigns the Expo cycle's `expo` effect to either edge while
+// preserving the same nodes, via links, ranges, and directness. Admit only the
+// two complete reports observed for this exact lock graph.
+export const APPROVED_AUDIT_GRAPHS = Object.freeze([
+  APPROVED_HIGH_GRAPH,
+  Object.freeze(
+    APPROVED_HIGH_GRAPH.map(entry => {
+      if (entry.name === '@expo/cli') {
+        return Object.freeze({ ...entry, effects: Object.freeze(['expo']) });
+      }
+      if (entry.name === '@expo/metro-config') {
+        return Object.freeze({ ...entry, effects: Object.freeze([]) });
+      }
+      return entry;
+    }),
+  ),
+]);
+
 export const APPROVED_HIGH_FIX_OPTIONS = Object.freeze([
   Object.freeze({
     name: '@expo/cli',
-    values: Object.freeze([true, expoDowngrade]),
+    values: Object.freeze([expoCliDowngrade]),
   }),
   Object.freeze({
     name: '@expo/metro',
-    values: Object.freeze([expoDowngrade]),
+    values: Object.freeze([
+      expoCliDowngrade,
+      expoDowngrade,
+      expoMetroConfigDowngrade,
+    ]),
   }),
   Object.freeze({
     name: '@expo/metro-config',
-    values: Object.freeze([true, expoDowngrade]),
+    values: Object.freeze([expoMetroConfigDowngrade]),
   }),
   Object.freeze({
     name: '@react-native/community-cli-plugin',
@@ -259,19 +287,39 @@ export const APPROVED_HIGH_FIX_OPTIONS = Object.freeze([
   Object.freeze({ name: 'expo', values: Object.freeze([expoDowngrade]) }),
   Object.freeze({
     name: 'image-size',
-    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+    values: Object.freeze([
+      expoCliDowngrade,
+      expoDowngrade,
+      expoMetroConfigDowngrade,
+      reactNativeDowngrade,
+    ]),
   }),
   Object.freeze({
     name: 'metro',
-    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+    values: Object.freeze([
+      expoCliDowngrade,
+      expoDowngrade,
+      expoMetroConfigDowngrade,
+      reactNativeDowngrade,
+    ]),
   }),
   Object.freeze({
     name: 'metro-config',
-    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+    values: Object.freeze([
+      expoCliDowngrade,
+      expoDowngrade,
+      expoMetroConfigDowngrade,
+      reactNativeDowngrade,
+    ]),
   }),
   Object.freeze({
     name: 'metro-transform-worker',
-    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+    values: Object.freeze([
+      expoCliDowngrade,
+      expoDowngrade,
+      expoMetroConfigDowngrade,
+      reactNativeDowngrade,
+    ]),
   }),
   Object.freeze({
     name: 'react-native',
@@ -282,7 +330,7 @@ export const APPROVED_HIGH_FIX_OPTIONS = Object.freeze([
 export const APPROVED_HIGH_LOCK_TOPOLOGY = Object.freeze([
   Object.freeze({
     name: '@expo/cli',
-    path: 'node_modules/expo/node_modules/@expo/cli',
+    path: 'node_modules/@expo/cli',
     version: '57.0.13',
     resolved: 'https://registry.npmjs.org/@expo/cli/-/cli-57.0.13.tgz',
     integrity:
@@ -313,7 +361,7 @@ export const APPROVED_HIGH_LOCK_TOPOLOGY = Object.freeze([
   }),
   Object.freeze({
     name: '@expo/metro-config',
-    path: 'node_modules/expo/node_modules/@expo/metro-config',
+    path: 'node_modules/@expo/metro-config',
     version: '57.0.7',
     resolved:
       'https://registry.npmjs.org/@expo/metro-config/-/metro-config-57.0.7.tgz',
@@ -562,6 +610,13 @@ function verifyExceptionLock(packageLock) {
   const root = packages[''];
   if (
     !isRecord(root) ||
+    root.devDependencies?.['@expo/cli'] !== '57.0.13' ||
+    root.devDependencies?.['@react-native-community/cli'] !== '20.2.0' ||
+    root.devDependencies?.['@react-native-community/cli-platform-android'] !==
+      '20.2.0' ||
+    root.devDependencies?.['@react-native-community/cli-platform-ios'] !==
+      '20.2.0' ||
+    root.optionalDependencies?.['@expo/metro-config'] !== '57.0.7' ||
     root.dependencies?.['image-size'] !== undefined ||
     root.devDependencies?.['image-size'] !== undefined ||
     root.optionalDependencies?.['image-size'] !== undefined ||
@@ -675,6 +730,18 @@ export function verifyAuditReport(report, packageLock) {
     .sort();
   if (criticalNames.length > 0) fail('AUDIT_UNAPPROVED_CRITICAL');
 
+  for (const vulnerability of Object.values(vulnerabilities)) {
+    for (const via of vulnerability.via) {
+      if (
+        typeof via === 'string' &&
+        severityRank.get(vulnerability.severity) <
+          severityRank.get(vulnerabilities[via].severity)
+      ) {
+        fail('AUDIT_SEVERITY_INCONSISTENT');
+      }
+    }
+  }
+
   const highNames = Object.entries(vulnerabilities)
     .filter(([, value]) => value.severity === 'high')
     .map(([name]) => name)
@@ -715,10 +782,14 @@ export function verifyAuditReport(report, packageLock) {
     fail('AUDIT_UNAPPROVED_ADVISORY');
   }
 
-  const highGraph = highNames.map(name =>
-    highGraphProjection(name, vulnerabilities[name]),
-  );
-  if (JSON.stringify(highGraph) !== JSON.stringify(APPROVED_HIGH_GRAPH)) {
+  const auditGraph = Object.keys(vulnerabilities)
+    .sort()
+    .map(name => highGraphProjection(name, vulnerabilities[name]));
+  if (
+    !APPROVED_AUDIT_GRAPHS.some(
+      approved => JSON.stringify(auditGraph) === JSON.stringify(approved),
+    )
+  ) {
     fail('AUDIT_HIGH_GRAPH_DRIFT');
   }
 
@@ -726,6 +797,8 @@ export function verifyAuditReport(report, packageLock) {
     const approved = APPROVED_HIGH_FIX_OPTIONS[index];
     const actual = fixProjection(vulnerabilities[name].fixAvailable);
     if (
+      !isRecord(actual) ||
+      actual.isSemVerMajor !== true ||
       approved.name !== name ||
       !approved.values.some(
         value => JSON.stringify(value) === JSON.stringify(actual),

@@ -141,6 +141,25 @@ function parseWorkflow(source, name) {
   }
 }
 
+function containsRawNpmAudit(command) {
+  const normalized = command.replace(/\\\r?\n/g, ' ');
+  const segments = normalized.split(/(?:&&|\|\||[;|&()\n])/);
+  for (const segment of segments) {
+    const tokens = segment.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) ?? [];
+    for (const [index, rawToken] of tokens.entries()) {
+      const token = rawToken.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, '$1$2');
+      if (token !== 'npm' && !token.endsWith('/npm')) continue;
+      const argumentsAfterNpm = tokens
+        .slice(index + 1)
+        .map(candidate =>
+          candidate.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, '$1$2'),
+        );
+      if (argumentsAfterNpm.includes('audit')) return true;
+    }
+  }
+  return false;
+}
+
 function assertNpmAuditPolicyWorkflow(source, name) {
   const workflow = parseWorkflow(source, name);
   const shared = workflow?.jobs?.shared;
@@ -177,7 +196,7 @@ function assertNpmAuditPolicyWorkflow(source, name) {
     if (!isRecord(job) || !Array.isArray(job.steps)) continue;
     for (const [index, step] of job.steps.entries()) {
       if (!isRecord(step) || typeof step.run !== 'string') continue;
-      if (/\bnpm\s+audit\b/.test(step.run)) {
+      if (containsRawNpmAudit(step.run)) {
         throw new Error(
           `WORKFLOW_NPM_AUDIT_POLICY_INVALID:${name}:${jobId}:${index}:raw`,
         );
@@ -1241,6 +1260,24 @@ const auditWorkflowRejectedExamples = [
       candidate => candidate.run === 'npm run audit:ci',
     );
     step.run = 'npm audit --audit-level=critical';
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const [, nonSharedJob] = Object.entries(workflow.jobs).find(
+      ([jobId, job]) => jobId !== 'shared' && Array.isArray(job.steps),
+    );
+    nonSharedJob.steps.push({
+      name: 'Weaker audit with global npm option',
+      run: 'npm --silent audit --audit-level=critical',
+    });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const [, nonSharedJob] = Object.entries(workflow.jobs).find(
+      ([jobId, job]) => jobId !== 'shared' && Array.isArray(job.steps),
+    );
+    nonSharedJob.steps.push({
+      name: 'Weaker audit through explicit npm path',
+      run: '/usr/local/bin/npm --prefix . audit --audit-level=critical',
+    });
   }),
   auditWorkflowWithMutation(workflow => {
     workflow.jobs.shared.steps.push({
