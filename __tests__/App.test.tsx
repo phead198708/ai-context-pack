@@ -2,7 +2,9 @@ import React from 'react';
 import {
   AppState,
   type AppStateStatus,
+  BackHandler,
   DeviceEventEmitter,
+  ScrollView,
 } from 'react-native';
 import TestRenderer, {
   act,
@@ -18,7 +20,12 @@ import type {
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import { NativeBoundaryError } from '../src/infrastructure/createNativeAdapter';
 import { nativeAdapter } from '../src/infrastructure/nativeAdapter';
-import { persistenceInboxProcessor } from '../src/infrastructure/persistence/runtime';
+import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
+import { mainAppPicker } from '../src/infrastructure/mainAppPickers';
+import {
+  createEmptyDraftPack,
+  persistenceInboxProcessor,
+} from '../src/infrastructure/persistence/runtime';
 
 jest.mock('expo-status-bar', () => ({ StatusBar: () => null }));
 jest.mock('../src/infrastructure/nativeAdapter', () => ({
@@ -32,6 +39,8 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
     ackRecoveryEvent: jest.fn(),
     handoffInbox: jest.fn(),
     acknowledgeInbox: jest.fn(),
+    publishMainAppImport: jest.fn(),
+    discardMainAppPickerFiles: jest.fn(),
     publishArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
     listOwnedArtifacts: jest.fn(),
@@ -44,18 +53,29 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
   },
 }));
 jest.mock('../src/infrastructure/persistence/runtime', () => ({
+  createEmptyDraftPack: jest.fn(),
   persistenceInboxProcessor: {
     process: jest.fn().mockResolvedValue(undefined),
     listPersistedPacks: jest.fn(),
   },
 }));
+jest.mock('../src/infrastructure/mainAppPickers', () => ({
+  mainAppPicker: {
+    pickPhotos: jest.fn(),
+    pickFiles: jest.fn(),
+  },
+}));
 
 const mockNative = nativeAdapter as jest.Mocked<NativeAdapter>;
+const mockMainAppPicker = mainAppPicker as jest.Mocked<MainAppPicker>;
 const mockPersistenceInboxProcessor =
   persistenceInboxProcessor as InboxManifestProcessor & {
     process: jest.Mock;
     listPersistedPacks: jest.Mock;
   };
+const mockCreateEmptyDraftPack = createEmptyDraftPack as jest.MockedFunction<
+  typeof createEmptyDraftPack
+>;
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const eventId = '223e4567-e89b-42d3-a456-426614174000';
 const newerPackId = '623e4567-e89b-42d3-a456-426614174000';
@@ -111,6 +131,10 @@ let appStateListener: ((state: AppStateStatus) => void) | undefined;
 let inboxListener: ((event: unknown) => void) | undefined;
 let appStateRemove: jest.Mock;
 let inboxRemove: jest.Mock;
+let backRemove: jest.Mock;
+let hardwareBack:
+  | Parameters<typeof BackHandler.addEventListener>[1]
+  | undefined;
 
 async function flushWorkflow(): Promise<void> {
   for (let index = 0; index < 12; index += 1) await Promise.resolve();
@@ -161,8 +185,10 @@ describe('App interactions', () => {
     mockPersistenceInboxProcessor.listPersistedPacks.mockReset();
     appStateListener = undefined;
     inboxListener = undefined;
+    hardwareBack = undefined;
     appStateRemove = jest.fn();
     inboxRemove = jest.fn();
+    backRemove = jest.fn();
     jest.spyOn(AppState, 'addEventListener').mockImplementation(((
       _type: string,
       listener: (state: AppStateStatus) => void,
@@ -177,6 +203,20 @@ describe('App interactions', () => {
       inboxListener = listener;
       return { remove: inboxRemove };
     }) as unknown as typeof DeviceEventEmitter.addListener);
+    jest
+      .spyOn(BackHandler, 'addEventListener')
+      .mockImplementation((_name, listener) => {
+        hardwareBack = listener;
+        return { remove: backRemove };
+      });
+    mockMainAppPicker.pickPhotos.mockReset().mockResolvedValue({
+      canceled: true,
+      assets: [],
+    });
+    mockMainAppPicker.pickFiles.mockReset().mockResolvedValue({
+      canceled: true,
+      assets: [],
+    });
     mockNative.scanInbox.mockResolvedValue([]);
     mockNative.getPendingShareEvents.mockResolvedValue([]);
     mockNative.ackPendingShareEvent.mockResolvedValue(undefined);
@@ -184,11 +224,12 @@ describe('App interactions', () => {
     mockNative.getPendingRecoveryEvent.mockResolvedValue(null);
     mockNative.ackRecoveryEvent.mockResolvedValue(undefined);
     mockNative.acknowledgeInbox.mockResolvedValue(undefined);
+    mockCreateEmptyDraftPack.mockResolvedValue(persistedPack);
   });
 
   afterEach(() => jest.restoreAllMocks());
 
-  test('bootstraps through the native adapter and removes both listeners', async () => {
+  test('bootstraps through the native adapter and removes all listeners', async () => {
     mockNative.scanInbox.mockResolvedValue([manifest]);
     const renderer = await renderApp();
 
@@ -203,10 +244,15 @@ describe('App interactions', () => {
       'AIContextPackInboxChanged',
       expect.any(Function),
     );
+    expect(BackHandler.addEventListener).toHaveBeenCalledWith(
+      'hardwareBackPress',
+      expect.any(Function),
+    );
 
     act(() => renderer.unmount());
     expect(appStateRemove).toHaveBeenCalledTimes(1);
     expect(inboxRemove).toHaveBeenCalledTimes(1);
+    expect(backRemove).toHaveBeenCalledTimes(1);
   }, 15_000);
 
   test('shows a metadata integrity error and Retry terminates after quarantine', async () => {
@@ -365,5 +411,135 @@ describe('App interactions', () => {
     expect(renderedText(restartedRenderer)).toContain('0 item · draft');
     expect(renderedText(restartedRenderer)).not.toContain('Inbox is empty');
     act(() => restartedRenderer.unmount());
+  });
+
+  test('opens the main-app import flow without creating an accidental empty Pack', async () => {
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'button', 'New Pack'));
+
+    expect(renderedText(renderer)).toContain('Add photos, PDF or text files');
+    expect(
+      control(renderer, 'button', 'Import Pack').props.accessibilityState,
+    ).toEqual({
+      disabled: true,
+    });
+    expect(mockCreateEmptyDraftPack).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  test('routes Android hardware back through selected-file cleanup before returning to Inbox', async () => {
+    const fileUri = 'file:///cache/hardware-back.png';
+    mockMainAppPicker.pickPhotos.mockResolvedValue({
+      canceled: false,
+      assets: [
+        {
+          uri: fileUri,
+          mediaType: 'image/png',
+          byteCount: 4,
+        },
+      ],
+    });
+    mockNative.discardMainAppPickerFiles.mockResolvedValue(undefined);
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'button', 'New Pack'));
+    await press(control(renderer, 'button', 'Add Photos'));
+
+    await act(async () => {
+      expect(hardwareBack?.({ type: 'hardwareBackPress', timeStamp: 0 })).toBe(
+        true,
+      );
+      await flushWorkflow();
+    });
+
+    expect(mockNative.discardMainAppPickerFiles).toHaveBeenCalledWith([
+      fileUri,
+    ]);
+    expect(renderedText(renderer)).toContain('Inbox is empty');
+    expect(renderedText(renderer)).not.toContain(
+      'Add photos, PDF or text files',
+    );
+    act(() => renderer.unmount());
+  });
+
+  test('keeps selected cache files inside the flow when background import navigation arrives', async () => {
+    const fileUri = 'file:///cache/navigation-guard.png';
+    mockMainAppPicker.pickPhotos.mockResolvedValue({
+      canceled: false,
+      assets: [
+        {
+          uri: fileUri,
+          mediaType: 'image/png',
+          byteCount: 4,
+        },
+      ],
+    });
+    mockNative.discardMainAppPickerFiles.mockResolvedValue(undefined);
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'button', 'New Pack'));
+    await press(control(renderer, 'button', 'Add Photos'));
+
+    expect(
+      renderer.root.findAll(node => node.props.accessibilityRole === 'tab'),
+    ).toHaveLength(0);
+    expect(
+      renderer.root.findAll(
+        node => node.props.accessibilityLabel === 'Create Empty Draft',
+      ),
+    ).toHaveLength(0);
+
+    mockNative.scanInbox.mockResolvedValue([manifest]);
+    await act(async () => {
+      inboxListener?.({
+        schemaVersion: 1,
+        id: eventId,
+        result: 'complete',
+      });
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer).replace(/\s+/g, ' ')).toContain('1 selected');
+    expect(renderedText(renderer)).toContain('Cancel New Pack');
+    expect(mockNative.discardMainAppPickerFiles).not.toHaveBeenCalled();
+
+    await press(control(renderer, 'button', 'Cancel New Pack'));
+    expect(mockNative.discardMainAppPickerFiles).toHaveBeenCalledWith([
+      fileUri,
+    ]);
+    expect(renderedText(renderer)).toContain('Share import');
+    expect(renderedText(renderer)).not.toContain('Cancel New Pack');
+    act(() => renderer.unmount());
+  });
+
+  test('keeps navigation and screen content in one Dynamic Type scroll surface', async () => {
+    const renderer = await renderApp();
+    const scrollSurface = renderer.root.findByType(ScrollView);
+
+    expect(renderer.root.findAllByType(ScrollView)).toHaveLength(1);
+    expect(instanceText(scrollSurface)).toContain('New Pack');
+    expect(instanceText(scrollSurface)).toContain('diagnostics');
+    expect(instanceText(scrollSurface)).toContain('Inbox is empty');
+
+    await press(control(renderer, 'button', 'New Pack'));
+    expect(instanceText(scrollSurface)).toContain(
+      'Import is disabled until at least one item is selected',
+    );
+    act(() => renderer.unmount());
+  });
+
+  test('creates an empty Pack only through the explicit Empty Draft action', async () => {
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
+      persistedPack,
+    ]);
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'button', 'Create Empty Draft'));
+
+    expect(mockCreateEmptyDraftPack).toHaveBeenCalledTimes(1);
+    expect(mockNative.scanInbox).toHaveBeenCalledTimes(2);
+    expect(renderedText(renderer)).toContain('Import detail');
+    expect(renderedText(renderer)).toContain(`ID ${ingestionId}`);
+    act(() => renderer.unmount());
   });
 });

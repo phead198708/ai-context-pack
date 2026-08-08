@@ -259,7 +259,10 @@ enum InboxManifestValidator {
           let createdAt = manifest["createdAt"] as? String,
           isoDateTime(createdAt),
           let source = manifest["source"] as? String,
-          source == "ios-share-extension" || source == "android-share-intent",
+          source == "ios-share-extension" ||
+            source == "android-share-intent" ||
+            source == "main-app-picker" ||
+            source == "main-app-text",
           let status = manifest["status"] as? String,
           ["complete", "partial", "failed"].contains(status),
           let items = manifest["items"] as? [[String: Any]],

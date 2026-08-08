@@ -129,6 +129,7 @@ final class ShareIngestionSession {
   private let ingestionId: String
   private let staging: URL
   private let published: URL
+  private let source: String
   private let now: () -> Date
   private let operationHook: (Point) throws -> Void
   private var ownership: InboxWriterOwnership?
@@ -139,16 +140,18 @@ final class ShareIngestionSession {
   init(
     container: URL,
     ingestionId: String,
+    source: String = "ios-share-extension",
     now: @escaping () -> Date = Date.init,
     operationHook: @escaping (Point) throws -> Void = { _ in }
   ) throws {
-    guard Self.canonicalUUID(ingestionId) else {
+    guard Self.canonicalUUID(ingestionId), Self.allowedSources.contains(source) else {
       throw ShareIngestionFatalError.invalidInput
     }
     self.container = container
     self.ingestionId = ingestionId
     self.staging = container.appendingPathComponent("InboxStaging/\(ingestionId)", isDirectory: true)
     self.published = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
+    self.source = source
     self.now = now
     self.operationHook = operationHook
     let manifest = published.appendingPathComponent("manifest.json")
@@ -256,8 +259,8 @@ final class ShareIngestionSession {
     declaredMediaType: String?,
     source: URL
   ) throws {
-    try requireNext(id: id, order: order)
     guard replayedSummary == nil else { return }
+    try requireNext(id: id, order: order)
     let accessed = source.startAccessingSecurityScopedResource()
     defer { if accessed { source.stopAccessingSecurityScopedResource() } }
     do {
@@ -301,8 +304,8 @@ final class ShareIngestionSession {
     declaredMediaType: String?,
     data: Data
   ) throws {
-    try requireNext(id: id, order: order)
     guard replayedSummary == nil else { return }
+    try requireNext(id: id, order: order)
     var offset = 0
     do {
       try copyAndRecord(
@@ -336,11 +339,11 @@ final class ShareIngestionSession {
     declaredMediaType: String?,
     code: String
   ) throws {
+    guard replayedSummary == nil else { return }
     try requireNext(id: id, order: order)
     guard Self.failedItemCodes.contains(code) else {
       throw ShareIngestionFatalError.invalidInput
     }
-    guard replayedSummary == nil else { return }
     appendFailure(id: id, order: order, mediaType: declaredMediaType, code: code)
   }
 
@@ -355,7 +358,7 @@ final class ShareIngestionSession {
       "schemaVersion": 1,
       "ingestionId": ingestionId,
       "createdAt": formatter.string(from: now()),
-      "source": "ios-share-extension",
+      "source": source,
       "status": status,
       "items": items,
     ]
@@ -676,6 +679,12 @@ final class ShareIngestionSession {
     "IMPORT_TYPE_UNSUPPORTED",
     "IMPORT_COPY_FAILED",
     "IMPORT_SIZE_LIMIT_EXCEEDED",
+  ]
+
+  private static let allowedSources: Set<String> = [
+    "ios-share-extension",
+    "main-app-picker",
+    "main-app-text",
   ]
 }
 

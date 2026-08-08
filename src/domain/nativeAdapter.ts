@@ -4,6 +4,7 @@ import type {
   PDFProbeResultV1,
 } from './contracts';
 import type { PendingShareEvent, RecoveryEvent } from './shareImportResult';
+import type { MainAppImportDraft, MainAppImportInput } from './mainAppImport';
 export interface NativeHandoffArtifact {
   readonly id: string;
   readonly itemId: string;
@@ -63,6 +64,12 @@ export interface NativeAdapter {
     requiredHeadroomBytes: number,
   ): Promise<NativeHandoffResult>;
   acknowledgeInbox(ingestionId: string): Promise<void>;
+  publishMainAppImport(
+    ingestionId: MainAppImportDraft['ingestionId'],
+    source: 'main-app-picker' | 'main-app-text',
+    inputs: readonly MainAppImportInput[],
+  ): Promise<ImportManifestV1>;
+  discardMainAppPickerFiles(fileUris: readonly string[]): Promise<void>;
   publishArtifact(
     sourceFileUri: string,
     relativePath: string,

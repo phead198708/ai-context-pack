@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
+  BackHandler,
   DeviceEventEmitter,
   Pressable,
   SafeAreaView,
@@ -17,18 +18,30 @@ import {
 } from './src/domain/inboxEventWorkflow';
 import type { ImportManifestV1 } from './src/domain/contracts';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
-import { persistenceInboxProcessor } from './src/infrastructure/persistence/runtime';
+import { mainAppPicker } from './src/infrastructure/mainAppPickers';
+import {
+  createEmptyDraftPack,
+  persistenceInboxProcessor,
+} from './src/infrastructure/persistence/runtime';
+import { NewPackFlow, type NewPackFlowHandle } from './src/ui/NewPackFlow';
 import { colors, spacing, typography } from './src/ui/tokens';
 
-type Screen = 'inbox' | 'detail' | 'diagnostics';
+type Screen = 'inbox' | 'detail' | 'diagnostics' | 'new-pack';
 type LoadState = InboxWorkflowState;
 
 function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>('inbox');
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
+  const [emptyDraftError, setEmptyDraftError] = useState<string>();
+  const [creatingEmptyDraft, setCreatingEmptyDraft] = useState(false);
+  const scrollView = useRef<ScrollView | null>(null);
+  const newPackFlow = useRef<NewPackFlowHandle | null>(null);
+  const screenRef = useRef<Screen>('inbox');
+  screenRef.current = screen;
   const setWorkflowState = useCallback((value: LoadState) => {
     setState(value);
-    if (value.kind === 'error') setScreen('inbox');
+    if (value.kind === 'error' && screenRef.current !== 'new-pack')
+      setScreen('inbox');
   }, []);
   const workflow = useRef<InboxEventWorkflow | null>(null);
   if (!workflow.current)
@@ -36,7 +49,9 @@ function App(): React.JSX.Element {
       nativeAdapter,
       {
         setState: setWorkflowState,
-        showNewestImport: () => setScreen('detail'),
+        showNewestImport: () => {
+          if (screenRef.current !== 'new-pack') setScreen('detail');
+        },
       },
       persistenceInboxProcessor,
     );
@@ -51,44 +66,102 @@ function App(): React.JSX.Element {
         workflow.current?.receive(event);
       },
     );
+    const backSubscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        if (screenRef.current !== 'new-pack') return false;
+        newPackFlow.current?.cancel().catch(() => undefined);
+        return true;
+      },
+    );
     return () => {
       subscription.remove();
       inboxSubscription.remove();
+      backSubscription.remove();
     };
   }, []);
+  useEffect(() => {
+    scrollView.current?.scrollTo({ animated: false, y: 0 });
+  }, [screen]);
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
-      <View style={styles.header}>
-        <Text accessibilityRole="header" style={styles.title}>
-          AI Context Pack
-        </Text>
-        <Text style={styles.subtitle}>Local-first import foundation</Text>
-      </View>
-      <View accessibilityRole="tablist" style={styles.tabs}>
-        {(['inbox', 'detail', 'diagnostics'] as const).map(value => (
-          <Pressable
-            accessibilityRole="tab"
-            accessibilityState={{ selected: screen === value }}
-            key={value}
-            onPress={() => setScreen(value)}
-            style={[styles.tab, screen === value && styles.selectedTab]}
-          >
-            <Text style={styles.tabText}>{value}</Text>
-          </Pressable>
-        ))}
-      </View>
-      <ScrollView contentContainerStyle={styles.content}>
-        {screen === 'inbox' && (
-          <Inbox
-            state={state}
-            onRetry={() => {
-              workflow.current?.retry();
-            }}
-          />
-        )}
-        {screen === 'detail' && <ImportDetail state={state} />}
-        {screen === 'diagnostics' && <Diagnostics />}
+      <ScrollView
+        ref={scrollView}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.header}>
+          <Text accessibilityRole="header" style={styles.title}>
+            AI Context Pack
+          </Text>
+          <Text style={styles.subtitle}>Local-first import foundation</Text>
+          {screen !== 'new-pack' ? (
+            <View style={styles.headerActions}>
+              <Action label="New Pack" onPress={() => setScreen('new-pack')} />
+              <Action
+                disabled={creatingEmptyDraft}
+                label="Create Empty Draft"
+                onPress={async () => {
+                  setCreatingEmptyDraft(true);
+                  setEmptyDraftError(undefined);
+                  try {
+                    await createEmptyDraftPack();
+                    await workflow.current?.appBecameActive();
+                    setScreen('detail');
+                  } catch (error) {
+                    setEmptyDraftError(appErrorCode(error));
+                  } finally {
+                    setCreatingEmptyDraft(false);
+                  }
+                }}
+              />
+            </View>
+          ) : null}
+          {emptyDraftError ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              {emptyDraftError}
+            </Text>
+          ) : null}
+        </View>
+        {screen !== 'new-pack' ? (
+          <View accessibilityRole="tablist" style={styles.tabs}>
+            {(['inbox', 'detail', 'diagnostics'] as const).map(value => (
+              <Pressable
+                accessibilityRole="tab"
+                accessibilityState={{ selected: screen === value }}
+                key={value}
+                onPress={() => setScreen(value)}
+                style={[styles.tab, screen === value && styles.selectedTab]}
+              >
+                <Text style={styles.tabText}>{value}</Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+        <View style={styles.screenContent}>
+          {screen === 'inbox' && (
+            <Inbox
+              state={state}
+              onRetry={() => {
+                workflow.current?.retry();
+              }}
+            />
+          )}
+          {screen === 'detail' && <ImportDetail state={state} />}
+          {screen === 'diagnostics' && <Diagnostics />}
+          {screen === 'new-pack' && (
+            <NewPackFlow
+              native={nativeAdapter}
+              onCancel={() => setScreen('inbox')}
+              onImported={async () => {
+                await workflow.current?.appBecameActive();
+              }}
+              picker={mainAppPicker}
+              ref={newPackFlow}
+            />
+          )}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -218,25 +291,46 @@ function StateCard({
 function Action({
   label,
   onPress,
+  disabled = false,
 }: {
   label: string;
   onPress: () => void;
+  disabled?: boolean;
 }): React.JSX.Element {
   return (
     <Pressable
+      accessibilityLabel={label}
       accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      disabled={disabled}
       onPress={onPress}
-      style={styles.action}
+      style={[styles.action, disabled && styles.disabledAction]}
     >
       <Text style={styles.actionText}>{label}</Text>
     </Pressable>
   );
 }
+
+function appErrorCode(error: unknown): string {
+  if (typeof error !== 'object' || error === null)
+    return 'EMPTY_DRAFT_CREATE_FAILED';
+  const value = error as { readonly code?: unknown };
+  return typeof value.code === 'string'
+    ? value.code
+    : 'EMPTY_DRAFT_CREATE_FAILED';
+}
+
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.background },
   header: { paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
   title: { ...typography.title, color: colors.text },
   subtitle: { ...typography.body, color: colors.muted },
+  headerActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
   tabs: {
     flexDirection: 'row',
     paddingHorizontal: spacing.md,
@@ -253,7 +347,8 @@ const styles = StyleSheet.create({
     color: colors.text,
     textTransform: 'capitalize',
   },
-  content: { padding: spacing.lg },
+  content: { flexGrow: 1, paddingBottom: spacing.lg },
+  screenContent: { padding: spacing.lg },
   card: {
     backgroundColor: colors.surface,
     borderRadius: 16,
@@ -270,5 +365,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
   },
   actionText: { ...typography.label, color: colors.text },
+  disabledAction: { opacity: 0.45 },
+  error: { ...typography.body, color: '#FCA5A5' },
 });
 export default App;

@@ -4,6 +4,7 @@ import type {
   OCRResultV1,
   PDFProbeResultV1,
 } from '../../../src/domain/contracts';
+import type { MainAppImportInput } from '../../../src/domain/mainAppImport';
 import type {
   NativeArtifactStorageUsage,
   NativeArtifactVerification,
@@ -29,6 +30,12 @@ declare class ContextNativeModule extends NativeModule {
     requiredHeadroomBytes: number,
   ): Promise<unknown>;
   acknowledgeInbox(ingestionId: string): Promise<boolean>;
+  publishMainAppImport(
+    ingestionId: string,
+    source: 'main-app-picker' | 'main-app-text',
+    inputs: readonly MainAppImportInput[],
+  ): Promise<ImportManifestV1>;
+  discardMainAppPickerFiles(fileUris: readonly string[]): Promise<boolean>;
   publishArtifact(
     sourceFileUri: string,
     relativePath: string,

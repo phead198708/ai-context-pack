@@ -197,7 +197,9 @@ export function isImportManifestV1(value: unknown): value is ImportManifestV1 {
     !isCanonicalUuid(value.ingestionId) ||
     !isIsoDateTime(value.createdAt) ||
     (value.source !== 'ios-share-extension' &&
-      value.source !== 'android-share-intent') ||
+      value.source !== 'android-share-intent' &&
+      value.source !== 'main-app-picker' &&
+      value.source !== 'main-app-text') ||
     (value.status !== 'complete' &&
       value.status !== 'partial' &&
       value.status !== 'failed') ||

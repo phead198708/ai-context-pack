@@ -43,6 +43,30 @@ describe('versioned native contracts', () => {
   test('rejects breaking manifest versions', () => {
     expect(isImportManifestV1({ schemaVersion: 2, items: [] })).toBe(false);
   });
+  test.each(['main-app-picker', 'main-app-text'] as const)(
+    'accepts the versioned %s manifest source',
+    source => {
+      expect(
+        isImportManifestV1({
+          schemaVersion: 1,
+          ingestionId,
+          createdAt: '2026-08-07T00:00:00Z',
+          source,
+          status: 'complete',
+          items: [
+            {
+              id: itemId,
+              order: 0,
+              mediaType: 'text/plain',
+              status: 'copied',
+              byteCount: 1,
+              relativePath: `${itemId}.bin`,
+            },
+          ],
+        }),
+      ).toBe(true);
+    },
+  );
   test.each(Object.keys(DOMAIN_ERROR_CATALOG))(
     'accepts catalogued failed-item error code %s',
     errorCode => {

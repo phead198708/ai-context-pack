@@ -2,6 +2,13 @@
   xmlns:tools="http://schemas.android.com/tools">
 
   <uses-permission android:name="android.permission.INTERNET"/>
+  <!-- Issue #9 uses the system Photo Picker/SAF only; no broad media or camera grant. -->
+  <uses-permission android:name="android.permission.CAMERA" tools:node="remove"/>
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove"/>
+  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove"/>
+  <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove"/>
+  <!-- Neutralize CAMERA's implied hardware filter while the permission-removal marker is linted. -->
+  <uses-feature android:name="android.hardware.camera" android:required="false"/>
 
   <queries>
     <!-- Support checking for http(s) links via the Linking API -->

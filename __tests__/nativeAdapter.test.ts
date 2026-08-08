@@ -315,4 +315,126 @@ describe('native adapter runtime boundary', () => {
       code: 'NATIVE_ARTIFACT_INPUT_INVALID',
     });
   });
+
+  test('validates and binds main-app inputs to the exact returned manifest', async () => {
+    const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
+    const fileId = '223e4567-e89b-42d3-a456-426614174000';
+    const textId = '323e4567-e89b-42d3-a456-426614174000';
+    const inputs = [
+      {
+        id: fileId,
+        order: 0,
+        kind: 'file' as const,
+        declaredMediaType: 'application/pdf',
+        byteCount: 4,
+        fileUri: 'file:///cache/input.pdf',
+      },
+      {
+        id: textId,
+        order: 1,
+        kind: 'text' as const,
+        declaredMediaType: 'text/plain',
+        byteCount: 8,
+        text: 'A中🧪',
+      },
+    ];
+    const returned = {
+      schemaVersion: 1,
+      ingestionId,
+      createdAt: '2026-08-07T00:00:00Z',
+      source: 'main-app-picker',
+      status: 'complete',
+      items: inputs.map(input => ({
+        id: input.id,
+        order: input.order,
+        mediaType: input.declaredMediaType,
+        status: 'copied',
+        byteCount: input.byteCount,
+        relativePath: `${input.id}.bin`,
+      })),
+    };
+    const native = {
+      ...mockNativeModule,
+      publishMainAppImport: jest.fn().mockResolvedValue(returned),
+      discardMainAppPickerFiles: jest.fn().mockResolvedValue(true),
+    };
+    const guarded = createNativeAdapter(native);
+
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-picker', inputs),
+    ).resolves.toEqual(returned);
+    expect(native.publishMainAppImport).toHaveBeenCalledWith(
+      ingestionId,
+      'main-app-picker',
+      inputs,
+    );
+    await expect(
+      guarded.discardMainAppPickerFiles(['file:///cache/input.pdf']),
+    ).resolves.toBeUndefined();
+  });
+
+  test('fails closed on source, URL, UTF-8 length, cleanup, and result mismatches', async () => {
+    const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
+    const itemId = '223e4567-e89b-42d3-a456-426614174000';
+    const native = {
+      ...mockNativeModule,
+      publishMainAppImport: jest.fn().mockResolvedValue({}),
+      discardMainAppPickerFiles: jest.fn().mockResolvedValue(false),
+    };
+    const guarded = createNativeAdapter(native);
+    const textInput = {
+      id: itemId,
+      order: 0,
+      kind: 'text' as const,
+      declaredMediaType: 'text/plain',
+      byteCount: 8,
+      text: 'A中🧪',
+    };
+
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-picker', [textInput]),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-text', [
+        { ...textInput, byteCount: 7 },
+      ]),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-text', [
+        {
+          ...textInput,
+          kind: 'url',
+          declaredMediaType: 'text/uri-list',
+          byteCount: 19,
+          text: 'ftp://example.invalid',
+        },
+      ]),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-text', [
+        {
+          ...textInput,
+          kind: 'url',
+          declaredMediaType: 'text/uri-list',
+          byteCount: 20,
+          text: 'http:example.invalid',
+        },
+      ]),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    expect(native.publishMainAppImport).not.toHaveBeenCalled();
+
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-text', [textInput]),
+    ).rejects.toMatchObject({
+      code: 'NATIVE_MAIN_APP_IMPORT_RESULT_INVALID',
+    });
+    await expect(
+      guarded.discardMainAppPickerFiles(['content://provider/private']),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    await expect(
+      guarded.discardMainAppPickerFiles(['file:///cache/input.pdf']),
+    ).rejects.toMatchObject({
+      code: 'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
+    });
+  });
 });

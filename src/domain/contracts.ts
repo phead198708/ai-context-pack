@@ -29,11 +29,17 @@ export interface FailedImportItemV1 extends ImportItemBaseV1 {
 
 export type ImportItemV1 = CopiedImportItemV1 | FailedImportItemV1;
 
+export type ImportSourceV1 =
+  | 'ios-share-extension'
+  | 'android-share-intent'
+  | 'main-app-picker'
+  | 'main-app-text';
+
 export interface ImportManifestV1 {
   readonly schemaVersion: 1;
   readonly ingestionId: string;
   readonly createdAt: string;
-  readonly source: 'ios-share-extension' | 'android-share-intent';
+  readonly source: ImportSourceV1;
   readonly status: 'complete' | 'partial' | 'failed';
   readonly items: readonly ImportItemV1[];
 }

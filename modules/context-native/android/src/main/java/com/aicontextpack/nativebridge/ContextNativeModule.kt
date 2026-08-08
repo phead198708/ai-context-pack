@@ -91,6 +91,40 @@ class ContextNativeModule : Module() {
       catch (error: InboxArtifactHandoffException) { throw NativeException(error.stableCode) }
     }
 
+    AsyncFunction("publishMainAppImport") {
+      ingestionId: String,
+      source: String,
+      inputs: List<Map<String, Any?>> ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        MainAppImportPublisher.publish(
+          context.filesDir,
+          context.cacheDir,
+          ingestionId,
+          source,
+          inputs,
+        )
+      } catch (error: MainAppImportException) {
+        throw NativeException(error.stableCode)
+      } catch (_: ShareIngestionInterruptionException) {
+        throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+      } catch (error: IllegalStateException) {
+        if (error.message?.contains("RECOVERY_REQUIRED") == true) {
+          throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        }
+        throw NativeException("STORAGE_WRITE_FAILED")
+      } catch (_: Exception) {
+        throw NativeException("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("discardMainAppPickerFiles") { fileUris: List<String> ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.discard(context.cacheDir, fileUris) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
     AsyncFunction("publishArtifact") {
       sourceFileUri: String,
       relativePath: String,
@@ -466,7 +500,14 @@ internal object InboxManifestScanner {
     check(ingestionIdPattern.matches(ingestionId) && UUID.fromString(ingestionId).toString() == ingestionId)
     check(ingestionId == expectedIngestionId)
     check(isIsoDateTime(manifest.getString("createdAt")))
-    check(manifest.getString("source") in setOf("ios-share-extension", "android-share-intent"))
+    check(
+      manifest.getString("source") in setOf(
+        "ios-share-extension",
+        "android-share-intent",
+        "main-app-picker",
+        "main-app-text",
+      ),
+    )
     val manifestStatus = manifest.getString("status")
     check(manifestStatus in setOf("complete", "partial", "failed"))
     val canonicalOwnedDirectory = ownedDirectory?.canonicalFile
