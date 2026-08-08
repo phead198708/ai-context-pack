@@ -106,7 +106,7 @@ describe('InboxEventWorkflow integration', () => {
   test('fails closed on cold-start picker-cache recovery and Retry clears it', async () => {
     const recover = jest
       .fn()
-      .mockRejectedValueOnce({ code: 'MAIN_APP_IMPORT_CLEANUP_FAILED' })
+      .mockRejectedValueOnce({ code: 'STORAGE_WRITE_FAILED' })
       .mockResolvedValueOnce(undefined);
     const h = harness({ recoverMainAppPickerCache: recover });
 
@@ -114,14 +114,16 @@ describe('InboxEventWorkflow integration', () => {
 
     expect(h.states.at(-1)).toEqual({
       kind: 'error',
-      code: 'MAIN_APP_IMPORT_CLEANUP_FAILED',
+      code: 'STORAGE_WRITE_FAILED',
     });
     expect(h.native.scanInbox).not.toHaveBeenCalled();
+    expect(h.workflow.isPickerCacheRecovered()).toBe(false);
 
     await h.workflow.retry();
 
     expect(recover).toHaveBeenCalledTimes(2);
     expect(h.native.scanInbox).toHaveBeenCalledTimes(1);
+    expect(h.workflow.isPickerCacheRecovered()).toBe(true);
     expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
   });
 
@@ -473,6 +475,16 @@ describe('InboxEventWorkflow integration', () => {
     await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
     expect(process).toHaveBeenCalledTimes(2);
     expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('a committed main-app import refresh ignores an older failed share item', async () => {
+    const h = harness();
+    await h.workflow.receive(
+      event(0, 'failed', { code: 'SHARE_IMPORT_FAILED' }),
+    );
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+    expect(h.native.scanInbox).toHaveBeenCalledTimes(1);
   });
 
   test('durable persistence completes before a successful share event is ACKed', async () => {

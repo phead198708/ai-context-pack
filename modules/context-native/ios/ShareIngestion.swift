@@ -99,6 +99,7 @@ enum ShareIngestionFatalError: Error, Equatable {
   case invalidInput
   case recoveryRequired
   case storageWriteFailed
+  case artifactIntegrityFailed
   case interrupted
 }
 
@@ -257,7 +258,10 @@ final class ShareIngestionSession {
     id: String,
     order: Int,
     declaredMediaType: String?,
-    source: URL
+    source: URL,
+    retainFailedSource: Bool = false,
+    expectedByteCount: Int64? = nil,
+    expectedSha256: String? = nil
   ) throws {
     guard replayedSummary == nil else { return }
     try requireNext(id: id, order: order)
@@ -275,6 +279,8 @@ final class ShareIngestionSession {
         id: id,
         order: order,
         declaredMediaType: declaredMediaType,
+        expectedByteCount: expectedByteCount,
+        expectedSha256: expectedSha256,
         read: {
           let count = input.read(&buffer, maxLength: bufferSize)
           if count < 0 {
@@ -293,8 +299,37 @@ final class ShareIngestionSession {
         mediaType: failure.detectedMediaType ?? declaredMediaType,
         code: failure.code
       )
+      if retainFailedSource { try retainRetrySource(id: id, source: source) }
     } catch {
       appendFailure(id: id, order: order, mediaType: declaredMediaType, code: "IMPORT_COPY_FAILED")
+    }
+  }
+
+  /** Retains only bounded regular files; oversized/provider-expired inputs remain non-retryable. */
+  private func retainRetrySource(id: String, source: URL) throws {
+    guard let values = try? source.resourceValues(
+      forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+    ), values.isRegularFile == true, values.isSymbolicLink != true,
+      let size = values.fileSize, size >= 0, size <= Self.maximumBinaryBytes else {
+      return
+    }
+    let partial = staging.appendingPathComponent("\(id).retry.partial")
+    let destination = staging.appendingPathComponent("\(id).retry")
+    do {
+      try FileManager.default.copyItem(at: source, to: partial)
+      let copied = try partial.resourceValues(forKeys: [.fileSizeKey])
+      guard copied.fileSize == size else {
+        try? FileManager.default.removeItem(at: partial)
+        return
+      }
+      let handle = try FileHandle(forWritingTo: partial)
+      try handle.synchronize()
+      try handle.close()
+      try Self.atomicRename(partial, destination)
+      try Self.synchronizeDirectory(staging)
+    } catch {
+      try? FileManager.default.removeItem(at: partial)
+      throw ShareIngestionFatalError.storageWriteFailed
     }
   }
 
@@ -406,6 +441,8 @@ final class ShareIngestionSession {
     id: String,
     order: Int,
     declaredMediaType: String?,
+    expectedByteCount: Int64? = nil,
+    expectedSha256: String? = nil,
     read: () throws -> Data
   ) throws {
     let partial = staging.appendingPathComponent("\(id).partial")
@@ -434,6 +471,11 @@ final class ShareIngestionSession {
       }
     }
     try output.synchronize()
+    let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    guard expectedByteCount.map({ $0 == Int64(byteCount) }) ?? true,
+          expectedSha256.map({ $0 == digest }) ?? true else {
+      throw ShareIngestionFatalError.artifactIntegrityFailed
+    }
     let detectedMediaType = try Self.detectMediaType(partial)
     guard Self.declaredTypeAllows(declaredMediaType, detected: detectedMediaType) else {
       throw ShareInputFailure("IMPORT_TYPE_UNSUPPORTED", detectedMediaType: detectedMediaType)
@@ -448,7 +490,7 @@ final class ShareIngestionSession {
       "status": "copied",
       "byteCount": byteCount,
       "relativePath": destination.lastPathComponent,
-      "sha256": hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+      "sha256": digest,
     ])
   }
 

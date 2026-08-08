@@ -263,9 +263,15 @@ export class ExpoSqlitePersistenceRepository
           status: string;
           error_code: string | null;
           artifact_count: number;
+          artifact_relative_path: string | null;
+          artifact_byte_count: number | null;
+          artifact_sha256: string | null;
         }>(
           `SELECT item.id, item.sort_index, item.media_type, item.status, item.error_code,
-             (SELECT COUNT(*) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_count
+             (SELECT COUNT(*) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_count,
+             (SELECT MAX(relative_path) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_relative_path,
+             (SELECT MAX(byte_count) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_byte_count,
+             (SELECT MAX(sha256) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_sha256
            FROM import_items item WHERE item.ingestion_id = ?
            ORDER BY item.sort_index, item.id`,
           [row.ingestion_id],
@@ -282,6 +288,9 @@ export class ExpoSqlitePersistenceRepository
             )
               throw new DomainError('SCHEMA_INVALID');
             const decodedItems = items.map((item, index) => {
+              const artifactRelativePath = item.artifact_relative_path ?? null;
+              const artifactByteCount = item.artifact_byte_count ?? null;
+              const artifactSha256 = item.artifact_sha256 ?? null;
               requireCanonicalId(item.id);
               if (
                 item.sort_index !== index ||
@@ -297,7 +306,17 @@ export class ExpoSqlitePersistenceRepository
               if (
                 (status === 'failed') !== (item.error_code !== null) ||
                 (status === 'copied' && item.artifact_count !== 1) ||
-                (status === 'failed' && item.artifact_count !== 0)
+                (status === 'failed' && item.artifact_count > 1) ||
+                (item.artifact_count === 0 &&
+                  (artifactRelativePath !== null ||
+                    artifactByteCount !== null ||
+                    artifactSha256 !== null)) ||
+                (item.artifact_count === 1 &&
+                  (typeof artifactRelativePath !== 'string' ||
+                    !Number.isSafeInteger(artifactByteCount) ||
+                    (artifactByteCount ?? -1) < 0 ||
+                    typeof artifactSha256 !== 'string' ||
+                    !/^[0-9a-f]{64}$/.test(artifactSha256)))
               )
                 throw new DomainError('SCHEMA_INVALID');
               return {
@@ -307,6 +326,15 @@ export class ExpoSqlitePersistenceRepository
                 status,
                 ...(item.error_code
                   ? { errorCode: domainErrorCode(item.error_code) }
+                  : {}),
+                ...(status === 'failed' && item.artifact_count === 1
+                  ? {
+                      retrySource: {
+                        relativePath: artifactRelativePath!,
+                        byteCount: artifactByteCount!,
+                        sha256: artifactSha256!,
+                      },
+                    }
                   : {}),
               };
             });
@@ -328,9 +356,10 @@ export class ExpoSqlitePersistenceRepository
               manifestFingerprint: row.manifest_fingerprint,
               status,
               itemCount: decodedItems.length,
-              artifactCount: decodedItems.filter(
-                item => item.status === 'copied',
-              ).length,
+              artifactCount: items.reduce(
+                (total, item) => total + item.artifact_count,
+                0,
+              ),
               createdAt: row.created_at,
               items: decodedItems,
             };
@@ -1669,15 +1698,16 @@ function validateCommitImport(input: CommitImportInput): void {
   const copiedItems = input.manifest.items.filter(
     item => item.status === 'copied',
   );
-  const copiedItemsById = new Map(
-    copiedItems.map(item => [item.id, item] as const),
+  const itemsById = new Map(
+    input.manifest.items.map(item => [item.id, item] as const),
   );
   const artifactIds = new Set(input.artifacts.map(artifact => artifact.id));
   if (
-    input.artifacts.length !== copiedItems.length ||
+    input.artifacts.length < copiedItems.length ||
+    input.artifacts.length > input.manifest.items.length ||
     artifactIds.size !== input.artifacts.length ||
     input.artifacts.some(artifact => {
-      const item = copiedItemsById.get(artifact.itemId);
+      const item = itemsById.get(artifact.itemId);
       return (
         !isCanonicalUuid(artifact.id) ||
         artifact.id !== artifact.itemId ||
@@ -1687,11 +1717,16 @@ function validateCommitImport(input: CommitImportInput): void {
         artifact.mediaType !== item.mediaType ||
         !Number.isSafeInteger(artifact.byteCount) ||
         artifact.byteCount < 0 ||
-        artifact.byteCount !== item.byteCount ||
+        (item.status === 'copied' && artifact.byteCount !== item.byteCount) ||
         !/^[0-9a-f]{64}$/.test(artifact.sha256) ||
-        (item.sha256 !== undefined && item.sha256 !== artifact.sha256)
+        (item.status === 'copied' &&
+          item.sha256 !== undefined &&
+          item.sha256 !== artifact.sha256)
       );
-    })
+    }) ||
+    copiedItems.some(
+      item => !input.artifacts.some(artifact => artifact.itemId === item.id),
+    )
   )
     throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
   input.artifacts.forEach(artifact =>

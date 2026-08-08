@@ -25,40 +25,19 @@ const verifierSource = readFileSync(
   ),
   'utf8',
 );
+const approvedPackageLock = JSON.parse(
+  readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package-lock.json'),
+    'utf8',
+  ),
+);
 
 function clone(value) {
   return structuredClone(value);
 }
 
 function makeLock() {
-  return {
-    lockfileVersion: 3,
-    packages: {
-      '': {
-        dependencies: { expo: '57.0.11' },
-        devDependencies: {
-          '@expo/cli': '57.0.13',
-          '@react-native-community/cli': '20.2.0',
-          '@react-native-community/cli-platform-android': '20.2.0',
-          '@react-native-community/cli-platform-ios': '20.2.0',
-          jest: '29.7.0',
-        },
-        optionalDependencies: { '@expo/metro-config': '57.0.7' },
-      },
-      ...Object.fromEntries(
-        APPROVED_HIGH_LOCK_TOPOLOGY.map(entry => [
-          entry.path,
-          {
-            version: entry.version,
-            resolved: entry.resolved,
-            integrity: entry.integrity,
-            license: entry.license,
-            dependencies: clone(entry.dependencies),
-          },
-        ]),
-      ),
-    },
-  };
+  return clone(approvedPackageLock);
 }
 
 function makeReport() {
@@ -148,6 +127,38 @@ test('approved image-size advisories pass only on the pinned Metro lock path', (
       assert.equal(verifyAuditReport(report, makeLock()).exceptions, 2);
     }
   }
+});
+
+test('registry-expanded propagation passes only through the pinned lock graph', () => {
+  const report = makeReport();
+  for (const name of ['expo-image-picker', 'expo-document-picker']) {
+    report.vulnerabilities[name] = {
+      name,
+      severity: 'high',
+      isDirect: true,
+      via: ['expo'],
+      effects: [],
+      nodes: [`node_modules/${name}`],
+      range: '*',
+      fixAvailable: clone(
+        APPROVED_HIGH_FIX_OPTIONS.find(value => value.name === 'expo')
+          .values[0],
+      ),
+    };
+    report.metadata.vulnerabilities.high += 1;
+    report.metadata.vulnerabilities.total += 1;
+  }
+  assert.deepEqual(verifyAuditReport(report, makeLock()), {
+    highPackages: 15,
+    exceptions: 2,
+  });
+
+  const forged = clone(report);
+  forged.vulnerabilities['expo-image-picker'].via = ['image-size'];
+  expectRule(
+    () => verifyAuditReport(forged, makeLock()),
+    'AUDIT_HIGH_GRAPH_DRIFT',
+  );
 });
 
 test('a clean audit passes without consulting the temporary exception', () => {
@@ -328,6 +339,15 @@ test('compatible fixes on every propagated high package fail closed', () => {
       'AUDIT_FIX_GRAPH_DRIFT',
     );
   }
+
+  const wrongPinnedMajor = makeReport();
+  wrongPinnedMajor.vulnerabilities['@expo/cli'].fixAvailable = clone(
+    APPROVED_HIGH_FIX_OPTIONS.find(value => value.name === 'expo').values[0],
+  );
+  expectRule(
+    () => verifyAuditReport(wrongPinnedMajor, makeLock()),
+    'AUDIT_FIX_GRAPH_DRIFT',
+  );
 });
 
 test('lower-severity records cannot hide alternate high propagation paths', () => {

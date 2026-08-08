@@ -198,6 +198,80 @@ class MainAppImportPublisherInstrumentedTest {
     assertEquals(listOf(ingestionId), File(root, "Inbox").list()?.toList())
   }
 
+  @Test fun failedItemRetainsOwnedBytesAndRetriesAfterInboxAcknowledgement() {
+    val firstIngestionId = id()
+    val failedItemId = id()
+    val bytes = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    val image = cached("persisted-retry.bin", bytes)
+    val failed = MainAppImportPublisher.publish(
+      root,
+      cache,
+      firstIngestionId,
+      "main-app-picker",
+      listOf(file(failedItemId, 0, "application/pdf", image)),
+    )
+    @Suppress("UNCHECKED_CAST")
+    val failedItems = failed["items"] as List<Map<String, Any?>>
+    assertEquals("failed", failedItems[0]["status"])
+    assertEquals("image/png", failedItems[0]["mediaType"])
+    assertTrue(File(root, "Inbox/$firstIngestionId/$failedItemId.retry").isFile)
+
+    val handoff = InboxArtifactHandoff.handoff(
+      root,
+      firstIngestionId,
+      firstIngestionId,
+      0,
+      availableBytes = { Long.MAX_VALUE },
+    )
+    @Suppress("UNCHECKED_CAST")
+    val artifact = (handoff["artifacts"] as List<Map<String, Any>>).single()
+    val relativePath = artifact.getValue("relativePath") as String
+    val byteCount = (artifact.getValue("byteCount") as Number).toLong()
+    val sha256 = artifact.getValue("sha256") as String
+    assertEquals(bytes.size.toLong(), byteCount)
+    assertTrue(InboxArtifactHandoff.acknowledge(root, firstIngestionId))
+
+    val integrityError = assertThrows(MainAppImportException::class.java) {
+      MainAppImportPublisher.publish(
+        root,
+        cache,
+        id(),
+        "main-app-picker",
+        listOf(
+          mapOf(
+            "id" to id(),
+            "order" to 0,
+            "kind" to "owned-file",
+            "declaredMediaType" to "image/png",
+            "byteCount" to byteCount,
+            "ownedRelativePath" to relativePath,
+            "sha256" to "0".repeat(64),
+          ),
+        ),
+      )
+    }
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", integrityError.stableCode)
+
+    val retried = MainAppImportPublisher.publish(
+      root,
+      cache,
+      id(),
+      "main-app-picker",
+      listOf(
+        mapOf(
+          "id" to id(),
+          "order" to 0,
+          "kind" to "owned-file",
+          "declaredMediaType" to "image/png",
+          "byteCount" to byteCount,
+          "ownedRelativePath" to relativePath,
+          "sha256" to sha256,
+        ),
+      ),
+    )
+    assertEquals("complete", retried["status"])
+  }
+
   @Test fun boundaryRejectsInvalidUrlByteCountAndPathsOutsideCache() {
     val outside = File(root, "outside.bin").apply { writeText("fixture") }
     val directory = File(cache, "selected-directory").apply { check(mkdirs()) }

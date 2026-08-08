@@ -394,7 +394,9 @@ function isValidMainAppImportInput(
     new Set(inputs.map(input => input.id)).size !== inputs.length
   )
     return false;
-  const containsFile = inputs.some(input => input.kind === 'file');
+  const containsFile = inputs.some(
+    input => input.kind === 'file' || input.kind === 'owned-file',
+  );
   if ((source === 'main-app-picker') !== containsFile) return false;
   return inputs.every((input, index) => {
     const baseValid =
@@ -414,6 +416,15 @@ function isValidMainAppImportInput(
         Object.keys(input).length === 6 &&
         typeof input.fileUri === 'string' &&
         input.fileUri.startsWith('file://')
+      );
+    if (input.kind === 'owned-file')
+      return (
+        Object.keys(input).length === 7 &&
+        typeof input.ownedRelativePath === 'string' &&
+        isOwnedArtifactPath(input.ownedRelativePath) &&
+        input.ownedRelativePath.includes('/originals/') &&
+        typeof input.sha256 === 'string' &&
+        /^[0-9a-f]{64}$/.test(input.sha256)
       );
     if (
       (input.kind !== 'text' && input.kind !== 'url') ||

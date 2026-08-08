@@ -4,6 +4,7 @@ import {
   appendPickerAssets,
   appendTextEntry,
   createMainAppImportDraft,
+  createRetryMainAppImportDraft,
   moveImportItem,
   pickerFileUris,
   removeImportItem,
@@ -24,6 +25,40 @@ function idFactory(): () => string {
 }
 
 describe('main-app import draft', () => {
+  test('hydrates a new ingestion from immutable failed-item retry sources', () => {
+    const createId = idFactory();
+    const draft = createRetryMainAppImportDraft(
+      [
+        {
+          mediaType: 'image/png',
+          byteCount: 4,
+          ownedRelativePath: `Packs/${ingestionId}/originals/${ids[0]}.bin`,
+          sha256: 'a'.repeat(64),
+        },
+      ],
+      createId,
+    );
+
+    expect(draft).toEqual({
+      ingestionId: ids[0],
+      items: [
+        {
+          id: ids[1],
+          order: 0,
+          kind: 'owned-file',
+          declaredMediaType: 'image/png',
+          byteCount: 4,
+          ownedRelativePath: `Packs/${ingestionId}/originals/${ids[0]}.bin`,
+          sha256: 'a'.repeat(64),
+        },
+      ],
+    });
+    expect(pickerFileUris(draft)).toEqual([]);
+    expect(summarizeMainAppImport(draft)).toMatchObject({
+      selectedCount: 1,
+      source: 'main-app-picker',
+    });
+  });
   test('preserves picker order and exposes count, types, size, and unsupported items', () => {
     const created = createMainAppImportDraft(() => ingestionId);
     const edited = appendPickerAssets(

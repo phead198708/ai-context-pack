@@ -203,6 +203,83 @@ final class MainAppImportPublisherTests: XCTestCase {
     )
   }
 
+  func testFailedItemRetainsOwnedBytesAndRetriesAfterInboxAcknowledgement() throws {
+    let firstIngestionId = id()
+    let failedItemId = id()
+    let bytes = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    let image = try cached("persisted-retry.bin", bytes: bytes)
+    let failed = try MainAppImportPublisher.publish(
+      container: root,
+      cacheRoot: cache,
+      ingestionId: firstIngestionId,
+      source: "main-app-picker",
+      rawInputs: [file(failedItemId, 0, "application/pdf", image)]
+    )
+    let failedItems = try XCTUnwrap(failed["items"] as? [[String: Any]])
+    XCTAssertEqual(failedItems[0]["status"] as? String, "failed")
+    XCTAssertEqual(failedItems[0]["mediaType"] as? String, "image/png")
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("Inbox/\(firstIngestionId)/\(failedItemId).retry").path
+    ))
+
+    let ownedRoot = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+    let handoff = try InboxArtifactHandoff.handoff(
+      container: root,
+      applicationSupport: ownedRoot,
+      ingestionId: firstIngestionId,
+      packId: firstIngestionId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max }
+    )
+    let artifacts = try XCTUnwrap(handoff["artifacts"] as? [[String: Any]])
+    let artifact = try XCTUnwrap(artifacts.first)
+    let relativePath = try XCTUnwrap(artifact["relativePath"] as? String)
+    let byteCount = try XCTUnwrap((artifact["byteCount"] as? NSNumber)?.int64Value)
+    let sha256 = try XCTUnwrap(artifact["sha256"] as? String)
+    XCTAssertEqual(byteCount, Int64(bytes.count))
+    XCTAssertTrue(try InboxArtifactHandoff.acknowledge(
+      container: root,
+      ingestionId: firstIngestionId
+    ))
+
+    XCTAssertThrowsError(try MainAppImportPublisher.publish(
+      container: root,
+      cacheRoot: cache,
+      ownedRoot: ownedRoot,
+      ingestionId: id(),
+      source: "main-app-picker",
+      rawInputs: [[
+        "id": id(),
+        "order": 0,
+        "kind": "owned-file",
+        "declaredMediaType": "image/png",
+        "byteCount": byteCount,
+        "ownedRelativePath": relativePath,
+        "sha256": String(repeating: "0", count: 64),
+      ]]
+    )) { error in
+      XCTAssertEqual(error as? MainAppImportError, .artifactIntegrityFailed)
+    }
+
+    let retried = try MainAppImportPublisher.publish(
+      container: root,
+      cacheRoot: cache,
+      ownedRoot: ownedRoot,
+      ingestionId: id(),
+      source: "main-app-picker",
+      rawInputs: [[
+        "id": id(),
+        "order": 0,
+        "kind": "owned-file",
+        "declaredMediaType": "image/png",
+        "byteCount": byteCount,
+        "ownedRelativePath": relativePath,
+        "sha256": sha256,
+      ]]
+    )
+    XCTAssertEqual(retried["status"] as? String, "complete")
+  }
+
   func testBoundaryRejectsInvalidURLByteCountAndPathsOutsideCache() throws {
     let outside = try cached("outside.bin", bytes: Data("fixture".utf8), directory: root)
     let directory = cache.appendingPathComponent("selected-directory", isDirectory: true)

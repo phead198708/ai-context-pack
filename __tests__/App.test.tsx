@@ -380,6 +380,10 @@ describe('App interactions', () => {
 
   test('keeps persisted rejected and failed item codes visible with a retry target', async () => {
     mockNative.scanInbox.mockResolvedValue([]);
+    mockNative.publishMainAppImport.mockResolvedValue({
+      ...manifest,
+      source: 'main-app-picker',
+    });
     mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
       {
         ...persistedPack,
@@ -392,7 +396,16 @@ describe('App interactions', () => {
             order: item.order,
             mediaType: item.mediaType,
             status: item.status,
-            ...(item.status === 'failed' ? { errorCode: item.errorCode } : {}),
+            ...(item.status === 'failed'
+              ? {
+                  errorCode: item.errorCode,
+                  retrySource: {
+                    relativePath: `Packs/${persistedPack.id}/originals/${item.id}.bin`,
+                    byteCount: 4,
+                    sha256: 'a'.repeat(64),
+                  },
+                }
+              : {}),
           })),
         },
       },
@@ -407,6 +420,30 @@ describe('App interactions', () => {
     expect(renderedText(renderer)).toContain('IMPORT_COPY_FAILED');
     await press(control(renderer, 'button', 'Retry failed items in New Pack'));
     expect(renderedText(renderer)).toContain('New Pack');
+    expect(renderedText(renderer)).toContain('2 selected');
+    await press(control(renderer, 'button', 'Import Pack'));
+    expect(mockNative.publishMainAppImport).toHaveBeenCalledWith(
+      expect.any(String),
+      'main-app-picker',
+      [
+        expect.objectContaining({
+          kind: 'owned-file',
+          declaredMediaType: 'application/zip',
+          ownedRelativePath: `Packs/${persistedPack.id}/originals/${
+            partialManifest.items[1]!.id
+          }.bin`,
+          sha256: 'a'.repeat(64),
+        }),
+        expect.objectContaining({
+          kind: 'owned-file',
+          declaredMediaType: 'text/plain',
+          ownedRelativePath: `Packs/${persistedPack.id}/originals/${
+            partialManifest.items[2]!.id
+          }.bin`,
+          sha256: 'a'.repeat(64),
+        }),
+      ],
+    );
     act(() => renderer.unmount());
   });
 
@@ -470,15 +507,11 @@ describe('App interactions', () => {
 
   test('keeps every Pack creation entry locked until native picker-cache recovery succeeds', async () => {
     mockNative.recoverMainAppPickerCache
-      .mockRejectedValueOnce(
-        new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED'),
-      )
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'))
       .mockResolvedValue(undefined);
     const renderer = await renderApp();
 
-    expect(renderedText(renderer)).toContain(
-      'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
-    );
+    expect(renderedText(renderer)).toContain('STORAGE_WRITE_FAILED');
     expect(
       control(renderer, 'button', 'New Pack').props.accessibilityState,
     ).toEqual({ disabled: true });

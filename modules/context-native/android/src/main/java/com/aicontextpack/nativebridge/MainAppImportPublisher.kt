@@ -106,13 +106,14 @@ object MainAppImportPublisher {
     val cacheRoot = cacheDir.canonicalFile
     val pickerFiles = mutableListOf<File>()
     val seen = mutableSetOf<String>()
-    val inputs = rawInputs.mapIndexed { index, raw ->
-      val decoded = decodeInput(raw, index, cacheRoot)
+    val decodedInputs = rawInputs.mapIndexed { index, raw ->
+      val decoded = decodeInput(raw, index, cacheRoot, filesDir)
       if (!seen.add(decoded.id)) invalid()
-      decoded.file?.let(pickerFiles::add)
-      decoded.input
+      decoded.transientFile?.let(pickerFiles::add)
+      decoded
     }
-    val containsFile = pickerFiles.isNotEmpty()
+    val inputs = decodedInputs.map(DecodedInput::input)
+    val containsFile = decodedInputs.any(DecodedInput::isFile)
     if ((source == "main-app-picker") != containsFile) invalid()
 
     val manifest = ShareIngestionWriter.publish(
@@ -156,16 +157,22 @@ object MainAppImportPublisher {
   private data class DecodedInput(
     val id: String,
     val input: ShareIngestionInput,
-    val file: File? = null,
+    val transientFile: File? = null,
+    val isFile: Boolean = false,
   )
 
   private fun decodeInput(
     raw: Map<String, Any?>,
     expectedOrder: Int,
     cacheRoot: File,
+    filesRoot: File,
   ): DecodedInput {
     val kind = raw["kind"] as? String ?: invalid()
-    val expectedKeys = if (kind == "file") fileKeys else textKeys
+    val expectedKeys = when (kind) {
+      "file" -> fileKeys
+      "owned-file" -> ownedFileKeys
+      else -> textKeys
+    }
     if (raw.keys != expectedKeys) invalid()
     val id = raw["id"] as? String ?: invalid()
     requireCanonicalUuid(id)
@@ -182,6 +189,7 @@ object MainAppImportPublisher {
           order = expectedOrder,
           declaredMediaType = declaredMediaType,
           openStream = { FileInputStream(file) },
+          retainFailedSource = true,
         )
       } else {
         ShareIngestionInput(
@@ -191,7 +199,40 @@ object MainAppImportPublisher {
           preflightError = "IMPORT_PROVIDER_PERMISSION_EXPIRED",
         )
       }
-      return DecodedInput(id, input, file)
+      return DecodedInput(id, input, file, true)
+    }
+
+    if (kind == "owned-file") {
+      val relativePath = raw["ownedRelativePath"] as? String ?: invalid()
+      val expectedSha256 = raw["sha256"] as? String ?: invalid()
+      val expectedByteCount = exactNonNegativeLong(raw["byteCount"])
+      val verification = try {
+        OwnedArtifactStore.verify(
+          filesRoot,
+          relativePath,
+          expectedByteCount,
+          expectedSha256,
+        )
+      } catch (error: OwnedArtifactStoreException) {
+        throw MainAppImportException(error.stableCode)
+      }
+      if (verification["status"] != "verified") {
+        throw MainAppImportException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      val file = File(filesRoot, relativePath)
+      return DecodedInput(
+        id,
+        ShareIngestionInput(
+          id = id,
+          order = expectedOrder,
+          declaredMediaType = declaredMediaType,
+          openStream = { FileInputStream(file) },
+          retainFailedSource = true,
+          expectedByteCount = expectedByteCount,
+          expectedSha256 = expectedSha256,
+        ),
+        isFile = true,
+      )
     }
 
     if (kind !in setOf("text", "url")) invalid()
@@ -311,5 +352,14 @@ object MainAppImportPublisher {
     "declaredMediaType",
     "byteCount",
     "text",
+  )
+  private val ownedFileKeys = setOf(
+    "id",
+    "order",
+    "kind",
+    "declaredMediaType",
+    "byteCount",
+    "ownedRelativePath",
+    "sha256",
   )
 }

@@ -18,6 +18,10 @@ import {
   type InboxWorkflowState,
 } from './src/domain/inboxEventWorkflow';
 import type { ImportManifestV1 } from './src/domain/contracts';
+import {
+  createRetryMainAppImportDraft,
+  type MainAppImportDraft,
+} from './src/domain/mainAppImport';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
 import { mainAppPicker } from './src/infrastructure/mainAppPickers';
 import {
@@ -37,11 +41,8 @@ function App(): React.JSX.Element {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const [emptyDraftError, setEmptyDraftError] = useState<string>();
   const [creatingEmptyDraft, setCreatingEmptyDraft] = useState(false);
-  const [bootstrapComplete, setBootstrapComplete] = useState(false);
-  const pickerCleanupBlocked =
-    state.kind === 'error' &&
-    (state.code === 'MAIN_APP_IMPORT_CLEANUP_FAILED' ||
-      state.code === 'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED');
+  const [pickerCacheRecovered, setPickerCacheRecovered] = useState(false);
+  const [retryDraft, setRetryDraft] = useState<MainAppImportDraft>();
   const scrollView = useRef<ScrollView | null>(null);
   const newPackFlow = useRef<NewPackFlowHandle | null>(null);
   const screenRef = useRef<Screen>('inbox');
@@ -66,7 +67,10 @@ function App(): React.JSX.Element {
   useEffect(() => {
     let mounted = true;
     workflow.current?.bootstrap().finally(() => {
-      if (mounted) setBootstrapComplete(true);
+      if (mounted)
+        setPickerCacheRecovered(
+          workflow.current?.isPickerCacheRecovered() === true,
+        );
     });
     const subscription = AppState.addEventListener('change', next => {
       if (next === 'active') workflow.current?.appBecameActive();
@@ -125,16 +129,15 @@ function App(): React.JSX.Element {
           {screen !== 'new-pack' ? (
             <View style={styles.headerActions}>
               <Action
-                disabled={!bootstrapComplete || pickerCleanupBlocked}
+                disabled={!pickerCacheRecovered}
                 label={t(locale, 'newPack')}
-                onPress={() => setScreen('new-pack')}
+                onPress={() => {
+                  setRetryDraft(undefined);
+                  setScreen('new-pack');
+                }}
               />
               <Action
-                disabled={
-                  creatingEmptyDraft ||
-                  !bootstrapComplete ||
-                  pickerCleanupBlocked
-                }
+                disabled={creatingEmptyDraft || !pickerCacheRecovered}
                 label={t(locale, 'createEmptyDraft')}
                 onPress={async () => {
                   setCreatingEmptyDraft(true);
@@ -179,23 +182,35 @@ function App(): React.JSX.Element {
               locale={locale}
               state={state}
               onRetry={() => {
-                workflow.current?.retry();
+                workflow.current?.retry().finally(() => {
+                  setPickerCacheRecovered(
+                    workflow.current?.isPickerCacheRecovered() === true,
+                  );
+                });
               }}
             />
           )}
           {screen === 'detail' && (
             <ImportDetail
               locale={locale}
-              onRetryFailed={() => setScreen('new-pack')}
+              onRetryFailed={sources => {
+                setRetryDraft(createRetryMainAppImportDraft(sources));
+                setScreen('new-pack');
+              }}
               state={state}
             />
           )}
           {screen === 'diagnostics' && <Diagnostics locale={locale} />}
           {screen === 'new-pack' && (
             <NewPackFlow
+              {...(retryDraft ? { createDraft: () => retryDraft } : {})}
+              key={retryDraft?.ingestionId ?? 'new-pack'}
               native={nativeAdapter}
               locale={locale}
-              onCancel={() => setScreen('inbox')}
+              onCancel={() => {
+                setRetryDraft(undefined);
+                setScreen('inbox');
+              }}
               onImported={async () => {
                 await workflow.current?.refreshForMainAppImport();
               }}
@@ -275,16 +290,32 @@ function ImportDetail({
   locale,
 }: {
   state: LoadState;
-  onRetryFailed: () => void;
+  onRetryFailed: (
+    sources: readonly {
+      readonly mediaType: string;
+      readonly byteCount: number;
+      readonly ownedRelativePath: string;
+      readonly sha256: string;
+    }[],
+  ) => void;
   locale: AppLocale;
 }): React.JSX.Element {
   const pack = state.kind === 'ready' ? state.packs?.[0] : undefined;
   const manifest = state.kind === 'ready' ? state.manifests[0] : undefined;
   const persistedImport = pack?.import;
-  const hasFailedItems =
-    persistedImport?.items.some(item => item.status === 'failed') ??
-    manifest?.items.some(item => item.status === 'failed') ??
-    false;
+  const retrySources =
+    persistedImport?.items.flatMap(item =>
+      item.status === 'failed' && item.retrySource
+        ? [
+            {
+              mediaType: item.mediaType,
+              byteCount: item.retrySource.byteCount,
+              ownedRelativePath: item.retrySource.relativePath,
+              sha256: item.retrySource.sha256,
+            },
+          ]
+        : [],
+    ) ?? [];
   return (
     <StateCard
       title={t(locale, 'importDetail')}
@@ -314,8 +345,11 @@ function ImportDetail({
           : t(locale, 'noImportSelected')
       }
     >
-      {hasFailedItems ? (
-        <Action label={t(locale, 'retryFailedItems')} onPress={onRetryFailed} />
+      {retrySources.length > 0 ? (
+        <Action
+          label={t(locale, 'retryFailedItems')}
+          onPress={() => onRetryFailed(retrySources)}
+        />
       ) : null}
     </StateCard>
   );

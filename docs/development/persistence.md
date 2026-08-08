@@ -37,7 +37,7 @@ Native publication rejects traversal, aliases, non-canonical IDs, uncontrolled e
 For each manifest:
 
 1. Journal `discovered` and `handoff-started` before native publication.
-2. Native handoff validates the exact manifest bytes and copied artifact set, checks missing-byte budget plus 16 MiB headroom, and publishes immutable originals.
+2. Native handoff validates the exact manifest bytes, every copied artifact, and any bounded failed-item `.retry` source, checks the full missing-byte budget plus 16 MiB headroom, and publishes immutable originals. A copied item requires exactly one original; a failed item permits zero or one retained original.
 3. Journal `files-published`; commit the import, Pack, items, artifacts, references, and journal removal in one exclusive transaction.
 4. ACK only after commit. Exact replay returns `replayed`; any manifest/artifact identity mismatch fails with `ARTIFACT_INTEGRITY_FAILED` and retains recovery material.
 5. Load the ordered persisted Pack graphs for display. A later empty native Inbox scan cannot hide an already committed Pack.

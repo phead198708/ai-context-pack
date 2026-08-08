@@ -5,6 +5,7 @@ enum MainAppImportError: Error, Equatable {
   case stagingFailed
   case cleanupFailed
   case committedCleanupRequired
+  case artifactIntegrityFailed
 
   var stableCode: String {
     switch self {
@@ -13,6 +14,7 @@ enum MainAppImportError: Error, Equatable {
     case .cleanupFailed: return "MAIN_APP_IMPORT_CLEANUP_FAILED"
     case .committedCleanupRequired:
       return "MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED"
+    case .artifactIntegrityFailed: return "ARTIFACT_INTEGRITY_FAILED"
     }
   }
 }
@@ -102,6 +104,7 @@ enum MainAppImportPublisher {
   static func publish(
     container: URL,
     cacheRoot: URL,
+    ownedRoot: URL? = nil,
     ingestionId: String,
     source: String,
     rawInputs: [[String: Any]],
@@ -118,13 +121,18 @@ enum MainAppImportPublisher {
       throw MainAppImportError.invalidInput
     }
     let decoded = try rawInputs.enumerated().map { index, raw in
-      try decode(raw, expectedOrder: index, cacheRoot: cacheRoot)
+      try decode(
+        raw,
+        expectedOrder: index,
+        cacheRoot: cacheRoot,
+        ownedRoot: ownedRoot
+      )
     }
     guard Set(decoded.map(\.id)).count == decoded.count else {
       throw MainAppImportError.invalidInput
     }
-    let pickerFiles = decoded.compactMap(\.file)
-    guard (source == "main-app-picker") == !pickerFiles.isEmpty else {
+    let pickerFiles = decoded.compactMap(\.transientFile)
+    guard (source == "main-app-picker") == decoded.contains(where: { $0.file != nil }) else {
       throw MainAppImportError.invalidInput
     }
     let session = try ShareIngestionSession(
@@ -135,13 +143,16 @@ enum MainAppImportPublisher {
     )
     for item in decoded {
       switch item.value {
-      case .file(let file, let mediaType):
+      case .file(let file, let mediaType, _, let expectedByteCount, let expectedSha256):
         if FileManager.default.fileExists(atPath: file.path) {
           try session.recordFile(
             id: item.id,
             order: item.order,
             declaredMediaType: mediaType,
-            source: file
+            source: file,
+            retainFailedSource: true,
+            expectedByteCount: expectedByteCount,
+            expectedSha256: expectedSha256
           )
         } else {
           try session.recordFailure(
@@ -186,7 +197,7 @@ enum MainAppImportPublisher {
   }
 
   private enum Value {
-    case file(URL, String)
+    case file(URL, String, Bool, Int64?, String?)
     case text(String, String)
   }
 
@@ -196,7 +207,13 @@ enum MainAppImportPublisher {
     let value: Value
 
     var file: URL? {
-      if case .file(let file, _) = value { return file }
+      if case .file(let file, _, _, _, _) = value { return file }
+      return nil
+    }
+
+    var transientFile: URL? {
+      if case .file(let file, _, let removeAfterCommit, _, _) = value,
+        removeAfterCommit { return file }
       return nil
     }
   }
@@ -204,10 +221,12 @@ enum MainAppImportPublisher {
   private static func decode(
     _ raw: [String: Any],
     expectedOrder: Int,
-    cacheRoot: URL
+    cacheRoot: URL,
+    ownedRoot: URL?
   ) throws -> Input {
     guard let kind = raw["kind"] as? String,
-          Set(raw.keys) == (kind == "file" ? fileKeys : textKeys),
+          Set(raw.keys) == (kind == "file" ? fileKeys :
+            (kind == "owned-file" ? ownedFileKeys : textKeys)),
           let id = raw["id"] as? String,
           canonicalUUID(id),
           try exactNonNegativeInteger(raw["order"]) == expectedOrder,
@@ -223,7 +242,45 @@ enum MainAppImportPublisher {
         throw MainAppImportError.invalidInput
       }
       let file = try controlledCacheFile(value, cacheRoot: cacheRoot)
-      return Input(id: id, order: expectedOrder, value: .file(file, mediaType))
+      return Input(
+        id: id,
+        order: expectedOrder,
+        value: .file(file, mediaType, true, nil, nil)
+      )
+    }
+
+    if kind == "owned-file" {
+      guard let ownedRoot,
+            let relativePath = raw["ownedRelativePath"] as? String,
+            let sha256 = raw["sha256"] as? String else {
+        throw MainAppImportError.invalidInput
+      }
+      let byteCount = try exactNonNegativeInteger(raw["byteCount"])
+      let verification: [String: Any]
+      do {
+        verification = try OwnedArtifactStore.verify(
+          root: ownedRoot,
+          relativePath: relativePath,
+          expectedByteCount: byteCount,
+          expectedSha256: sha256
+        )
+      } catch {
+        throw MainAppImportError.artifactIntegrityFailed
+      }
+      guard verification["status"] as? String == "verified" else {
+        throw MainAppImportError.artifactIntegrityFailed
+      }
+      return Input(
+        id: id,
+        order: expectedOrder,
+        value: .file(
+          ownedRoot.appendingPathComponent(relativePath),
+          mediaType,
+          false,
+          byteCount,
+          sha256
+        )
+      )
     }
 
     let exactByteCount = try exactNonNegativeInteger(raw["byteCount"])
@@ -347,6 +404,10 @@ enum MainAppImportPublisher {
     "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$"
   private static let fileKeys: Set<String> = [
     "id", "order", "kind", "declaredMediaType", "byteCount", "fileUri",
+  ]
+  private static let ownedFileKeys: Set<String> = [
+    "id", "order", "kind", "declaredMediaType", "byteCount",
+    "ownedRelativePath", "sha256",
   ]
   private static let textKeys: Set<String> = [
     "id", "order", "kind", "declaredMediaType", "byteCount", "text",

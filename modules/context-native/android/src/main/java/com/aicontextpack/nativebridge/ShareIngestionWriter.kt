@@ -25,6 +25,9 @@ data class ShareIngestionInput(
   val declaredMediaType: String?,
   val openStream: (() -> InputStream?)? = null,
   val preflightError: String? = null,
+  val retainFailedSource: Boolean = false,
+  val expectedByteCount: Long? = null,
+  val expectedSha256: String? = null,
 )
 
 data class ShareIngestionSummary(
@@ -243,6 +246,13 @@ object ShareIngestionWriter {
           total
         }
       }
+      val actualHash = digest.digest().toHex()
+      if (
+        input.expectedByteCount?.let { it != byteCount } == true ||
+        input.expectedSha256?.let { it != actualHash } == true
+      ) {
+        throw ShareIngestionIntegrityException()
+      }
       val detectedMediaType = detectMediaType(partial)
       if (!declaredTypeAllows(input.declaredMediaType, detectedMediaType)) {
         throw ShareInputException("IMPORT_TYPE_UNSUPPORTED", detectedMediaType)
@@ -257,13 +267,16 @@ object ShareIngestionWriter {
         .put("status", "copied")
         .put("byteCount", byteCount)
         .put("relativePath", destination.name)
-        .put("sha256", digest.digest().toHex())
+        .put("sha256", actualHash)
     } catch (error: ShareIngestionInterruptionException) {
       throw error
     } catch (error: ShareIngestionStorageException) {
       throw error
+    } catch (error: ShareIngestionIntegrityException) {
+      throw error
     } catch (error: ShareInputException) {
       partial.delete()
+      if (input.retainFailedSource) retainRetrySource(staging, input)
       failedItem(input, error.stableCode, error.detectedMediaType)
     } catch (_: SecurityException) {
       partial.delete()
@@ -274,6 +287,47 @@ object ShareIngestionWriter {
     } catch (_: Exception) {
       partial.delete()
       failedItem(input, "IMPORT_COPY_FAILED")
+    }
+  }
+
+  /** Retains only a complete bounded source; an oversized or revoked source has no retry payload. */
+  private fun retainRetrySource(staging: File, input: ShareIngestionInput) {
+    val source = try {
+      input.openStream?.invoke()
+    } catch (_: Exception) {
+      null
+    } ?: return
+    val partial = File(staging, "${input.id}.retry.partial")
+    val destination = File(staging, "${input.id}.retry")
+    try {
+      var oversized = false
+      source.use { stream ->
+        FileOutputStream(partial).use { output ->
+          val buffer = ByteArray(64 * 1024)
+          var total = 0L
+          while (true) {
+            val count = stream.read(buffer)
+            if (count < 0) break
+            if (count == 0) continue
+            total += count
+            if (total > maximumBinaryBytes) {
+              oversized = true
+              break
+            }
+            output.write(buffer, 0, count)
+          }
+          output.fd.sync()
+        }
+      }
+      if (oversized) {
+        partial.delete()
+        return
+      }
+      atomicRename(partial, destination)
+      synchronizeDirectory(staging)
+    } catch (_: Exception) {
+      partial.delete()
+      throw ShareIngestionStorageException()
     }
   }
 
@@ -523,3 +577,4 @@ private class ShareInputException(
 ) : Exception(stableCode)
 
 private class ShareIngestionStorageException : Exception("SHARE_INGESTION_STORAGE_FAILED")
+class ShareIngestionIntegrityException : Exception("ARTIFACT_INTEGRITY_FAILED")

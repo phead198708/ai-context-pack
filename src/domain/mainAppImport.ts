@@ -4,7 +4,7 @@ export const MAIN_APP_IMPORT_MAX_ITEMS = 20;
 export const MAIN_APP_IMPORT_MAX_BINARY_BYTES = 52_428_800;
 export const MAIN_APP_IMPORT_MAX_TEXT_BYTES = 1_048_576;
 
-export type MainAppImportInputKind = 'file' | 'text' | 'url';
+export type MainAppImportInputKind = 'file' | 'owned-file' | 'text' | 'url';
 
 interface MainAppImportInputBase {
   readonly id: string;
@@ -20,6 +20,13 @@ export interface MainAppFileImportInput extends MainAppImportInputBase {
   readonly fileUri: string;
 }
 
+export interface MainAppOwnedFileImportInput extends MainAppImportInputBase {
+  readonly kind: 'owned-file';
+  /** Immutable app-owned source retained from an earlier failed import. */
+  readonly ownedRelativePath: string;
+  readonly sha256: string;
+}
+
 export interface MainAppTextImportInput extends MainAppImportInputBase {
   readonly kind: 'text' | 'url';
   readonly text: string;
@@ -27,7 +34,15 @@ export interface MainAppTextImportInput extends MainAppImportInputBase {
 
 export type MainAppImportInput =
   | MainAppFileImportInput
+  | MainAppOwnedFileImportInput
   | MainAppTextImportInput;
+
+export interface MainAppRetrySource {
+  readonly mediaType: string;
+  readonly byteCount: number;
+  readonly ownedRelativePath: string;
+  readonly sha256: string;
+}
 
 export interface MainAppPickerAsset {
   readonly uri: string;
@@ -82,6 +97,24 @@ export function createMainAppImportDraft(
   createId: () => string = createCanonicalUuid,
 ): MainAppImportDraft {
   return { ingestionId: createId(), items: [] };
+}
+
+export function createRetryMainAppImportDraft(
+  sources: readonly MainAppRetrySource[],
+  createId: () => string = createCanonicalUuid,
+): MainAppImportDraft {
+  return {
+    ingestionId: createId(),
+    items: sources.slice(0, MAIN_APP_IMPORT_MAX_ITEMS).map((source, order) => ({
+      id: createId(),
+      order,
+      kind: 'owned-file',
+      declaredMediaType: source.mediaType,
+      byteCount: source.byteCount,
+      ownedRelativePath: source.ownedRelativePath,
+      sha256: source.sha256,
+    })),
+  };
 }
 
 export function appendPickerAssets(
@@ -187,7 +220,9 @@ export function summarizeMainAppImport(
       count,
     })),
     items,
-    source: draft.items.every(item => item.kind !== 'file')
+    source: draft.items.every(
+      item => item.kind !== 'file' && item.kind !== 'owned-file',
+    )
       ? 'main-app-text'
       : 'main-app-picker',
   };

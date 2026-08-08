@@ -81,21 +81,29 @@ export class InboxPersistenceCoordinator {
       const copiedItems = handoff.manifest.items.filter(
         item => item.status === 'copied',
       );
+      const itemsById = new Map(
+        handoff.manifest.items.map(item => [item.id, item] as const),
+      );
       const artifactIds = new Set(artifacts.map(artifact => artifact.itemId));
       if (
-        artifacts.length !== copiedItems.length ||
+        artifacts.length < copiedItems.length ||
+        artifacts.length > handoff.manifest.items.length ||
         artifactIds.size !== artifacts.length ||
         artifacts.some(
           artifact =>
             artifact.relativePath !==
               ownedOriginalPath(request.packId, artifact.itemId) ||
-            !copiedItems.some(
-              item =>
-                item.id === artifact.itemId &&
-                item.byteCount === artifact.byteCount &&
-                item.mediaType === artifact.mediaType &&
-                (item.sha256 === undefined || item.sha256 === artifact.sha256),
-            ),
+            (() => {
+              const item = itemsById.get(artifact.itemId);
+              return (
+                !item ||
+                item.mediaType !== artifact.mediaType ||
+                (item.status === 'copied' &&
+                  (item.byteCount !== artifact.byteCount ||
+                    (item.sha256 !== undefined &&
+                      item.sha256 !== artifact.sha256)))
+              );
+            })(),
         ) ||
         copiedItems.some(item => !artifactIds.has(item.id))
       )

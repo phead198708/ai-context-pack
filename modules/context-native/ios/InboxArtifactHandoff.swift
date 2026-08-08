@@ -96,20 +96,50 @@ enum InboxArtifactHandoff {
       .appendingPathComponent("Packs", isDirectory: true)
       .appendingPathComponent(packId, isDirectory: true)
       .appendingPathComponent("originals", isDirectory: true)
-    var requiredFreeBytes = requiredHeadroomBytes
-    for item in items where item["status"] as? String == "copied" {
-      guard let itemId = item["id"] as? String,
-            let byteCount = (item["byteCount"] as? NSNumber)?.int64Value,
-            byteCount >= 0 else {
+    func sourceDescriptor(
+      _ item: [String: Any]
+    ) throws -> (name: String, byteCount: Int64, sha256: String?)? {
+      guard let itemId = item["id"] as? String else {
         throw InboxArtifactHandoffError.integrityFailed
       }
       try requireCanonicalUUID(itemId)
-      let destination = destinationDirectory.appendingPathComponent("\(itemId).bin")
-      if FileManager.default.fileExists(atPath: destination.path) { continue }
-      guard requiredFreeBytes <= Int64.max - byteCount else {
+      if item["status"] as? String == "copied" {
+        guard let name = item["relativePath"] as? String,
+              name == "\(itemId).bin",
+              let byteCount = (item["byteCount"] as? NSNumber)?.int64Value,
+              byteCount >= 0 else {
+          throw InboxArtifactHandoffError.integrityFailed
+        }
+        return (name, byteCount, item["sha256"] as? String)
+      }
+      guard item["status"] as? String == "failed" else {
         throw InboxArtifactHandoffError.integrityFailed
       }
-      requiredFreeBytes += byteCount
+      let name = "\(itemId).retry"
+      let source = sourceDirectory.appendingPathComponent(name)
+      guard FileManager.default.fileExists(atPath: source.path) else { return nil }
+      let values = try source.resourceValues(
+        forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+      )
+      guard values.isRegularFile == true, values.isSymbolicLink != true,
+            let size = values.fileSize, size >= 0 else {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
+      return (name, Int64(size), nil)
+    }
+    var requiredFreeBytes = requiredHeadroomBytes
+    for item in items {
+      guard let itemId = item["id"] as? String else {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
+      guard let descriptor = try sourceDescriptor(item) else { continue }
+      try requireCanonicalUUID(itemId)
+      let destination = destinationDirectory.appendingPathComponent("\(itemId).bin")
+      if FileManager.default.fileExists(atPath: destination.path) { continue }
+      guard requiredFreeBytes <= Int64.max - descriptor.byteCount else {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
+      requiredFreeBytes += descriptor.byteCount
     }
     if try availableBytes(existingDirectory(atOrAbove: applicationSupport)) < requiredFreeBytes {
       throw InboxArtifactHandoffError.lowDisk
@@ -121,27 +151,21 @@ enum InboxArtifactHandoff {
     )
 
     let artifacts: [[String: Any]] = try items.compactMap { item -> [String: Any]? in
-      guard item["status"] as? String == "copied" else { return nil }
       guard let itemId = item["id"] as? String,
-            let mediaType = item["mediaType"] as? String,
-            let sourceName = item["relativePath"] as? String,
-            let byteCount = (item["byteCount"] as? NSNumber)?.int64Value else {
+            let mediaType = item["mediaType"] as? String else {
         throw InboxArtifactHandoffError.integrityFailed
       }
+      guard let descriptor = try sourceDescriptor(item) else { return nil }
       try requireCanonicalUUID(itemId)
-      guard sourceName == "\(itemId).bin", byteCount >= 0 else {
-        throw InboxArtifactHandoffError.integrityFailed
-      }
-      let sha256 = item["sha256"] as? String
-      let source = sourceDirectory.appendingPathComponent(sourceName)
+      let source = sourceDirectory.appendingPathComponent(descriptor.name)
       let destination = destinationDirectory.appendingPathComponent("\(itemId).bin")
       let partial = destinationDirectory.appendingPathComponent("\(itemId).bin.partial")
       let actualHash = try publish(
         source: source,
         partial: partial,
         destination: destination,
-        byteCount: byteCount,
-        sha256: sha256,
+        byteCount: descriptor.byteCount,
+        sha256: descriptor.sha256,
         operationHook: operationHook,
         directorySynchronizer: directorySynchronizer
       )
@@ -150,7 +174,7 @@ enum InboxArtifactHandoff {
         "itemId": itemId,
         "relativePath": "Packs/\(packId)/originals/\(itemId).bin",
         "mediaType": mediaType,
-        "byteCount": byteCount,
+        "byteCount": descriptor.byteCount,
       ]
       result["sha256"] = actualHash
       return result

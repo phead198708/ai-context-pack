@@ -108,6 +108,8 @@ class ContextNativeModule : Module() {
         throw NativeException(error.stableCode)
       } catch (_: ShareIngestionInterruptionException) {
         throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+      } catch (_: ShareIngestionIntegrityException) {
+        throw NativeException("ARTIFACT_INTEGRITY_FAILED")
       } catch (error: IllegalStateException) {
         if (error.message?.contains("RECOVERY_REQUIRED") == true) {
           throw NativeException("PIPELINE_RECOVERY_REQUIRED")

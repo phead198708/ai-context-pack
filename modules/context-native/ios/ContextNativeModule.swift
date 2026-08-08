@@ -123,6 +123,7 @@ public final class ContextNativeModule: Module {
         return try MainAppImportPublisher.publish(
           container: container,
           cacheRoot: cacheRoot,
+          ownedRoot: try ownedApplicationSupportRoot(),
           ingestionId: ingestionId,
           source: source,
           rawInputs: inputs
@@ -137,6 +138,7 @@ public final class ContextNativeModule: Module {
         case .recoveryRequired, .interrupted:
           throw NativeError("PIPELINE_RECOVERY_REQUIRED")
         case .storageWriteFailed: throw NativeError("STORAGE_WRITE_FAILED")
+        case .artifactIntegrityFailed: throw NativeError("ARTIFACT_INTEGRITY_FAILED")
         }
       } catch {
         throw NativeError("STORAGE_WRITE_FAILED")

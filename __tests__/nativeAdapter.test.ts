@@ -3,6 +3,7 @@ import {
   NativeBoundaryError,
 } from '../src/infrastructure/createNativeAdapter';
 import { MAIN_APP_IMPORT_MAX_TEXT_BYTES } from '../src/domain/mainAppImport';
+import type { ImportManifestV1 } from '../src/domain/contracts';
 
 describe('native adapter runtime boundary', () => {
   const mockNativeModule = {
@@ -479,5 +480,59 @@ describe('native adapter runtime boundary', () => {
     ).rejects.toMatchObject({
       code: 'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
     });
+  });
+
+  test('accepts only hash-bound app-owned failed-item retry sources', async () => {
+    const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
+    const packId = '223e4567-e89b-42d3-a456-426614174000';
+    const sourceItemId = '323e4567-e89b-42d3-a456-426614174000';
+    const itemId = '423e4567-e89b-42d3-a456-426614174000';
+    const input = {
+      id: itemId,
+      order: 0,
+      kind: 'owned-file' as const,
+      declaredMediaType: 'image/png',
+      byteCount: 8,
+      ownedRelativePath: `Packs/${packId}/originals/${sourceItemId}.bin`,
+      sha256: 'a'.repeat(64),
+    };
+    const returned: ImportManifestV1 = {
+      schemaVersion: 1,
+      ingestionId,
+      createdAt: '2026-08-09T00:00:00Z',
+      source: 'main-app-picker',
+      status: 'complete',
+      items: [
+        {
+          id: itemId,
+          order: 0,
+          mediaType: 'image/png',
+          status: 'copied',
+          byteCount: 8,
+          relativePath: `${itemId}.bin`,
+        },
+      ],
+    };
+    const native = {
+      ...mockNativeModule,
+      publishMainAppImport: jest.fn().mockResolvedValue(returned),
+    };
+    const guarded = createNativeAdapter(native);
+
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-picker', [input]),
+    ).resolves.toEqual(returned);
+    for (const invalid of [
+      { ...input, ownedRelativePath: '../private.bin' },
+      {
+        ...input,
+        ownedRelativePath: `Packs/${packId}/exports/${sourceItemId}.bin`,
+      },
+      { ...input, sha256: 'not-a-hash' },
+    ])
+      await expect(
+        guarded.publishMainAppImport(ingestionId, 'main-app-picker', [invalid]),
+      ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    expect(native.publishMainAppImport).toHaveBeenCalledTimes(1);
   });
 });

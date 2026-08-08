@@ -38,6 +38,11 @@ export interface InboxPersistedImportSummary {
     readonly mediaType: string;
     readonly status: ImportManifestV1['items'][number]['status'];
     readonly errorCode?: string;
+    readonly retrySource?: {
+      readonly relativePath: string;
+      readonly byteCount: number;
+      readonly sha256: string;
+    };
   }[];
 }
 
@@ -63,6 +68,7 @@ export class InboxEventWorkflow {
   private readonly failures = new Map<string, PendingShareEvent>();
   private readonly completes = new Map<string, PendingShareEvent>();
   private readonly blockers = new Map<string, string>();
+  private pickerCacheRecovered = false;
 
   constructor(
     private readonly native: NativeAdapter,
@@ -90,6 +96,11 @@ export class InboxEventWorkflow {
         await this.process(event, false, bootstrapManifests);
       this.lastScannedManifests = undefined;
     });
+  }
+
+  /** Pack creation stays fail-closed until native picker-cache recovery succeeds. */
+  isPickerCacheRecovered(): boolean {
+    return this.pickerCacheRecovered;
   }
 
   receive(value: unknown): Promise<void> {
@@ -127,7 +138,7 @@ export class InboxEventWorkflow {
       // latch. Other operational blockers remain visible and still make the result fail closed.
       const refreshed = await this.refresh(false, true);
       outcome =
-        refreshed && this.blockers.size === 0
+        refreshed && !this.hasOperationalBlocker()
           ? { ok: true }
           : { ok: false, code: this.latestBlockerCode() };
     });
@@ -305,9 +316,11 @@ export class InboxEventWorkflow {
   private async recoverPickerCache(retrying: boolean): Promise<boolean> {
     try {
       await this.native.recoverMainAppPickerCache();
+      this.pickerCacheRecovered = true;
       if (retrying) this.clear('main-app-picker-cache');
       return true;
     } catch (error) {
+      this.pickerCacheRecovered = false;
       this.latch(
         'main-app-picker-cache',
         error,

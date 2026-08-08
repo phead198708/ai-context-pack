@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +19,8 @@ const severityRank = new Map(
 );
 
 export const AUDIT_STDIN_LIMIT_BYTES = 2 * 1024 * 1024;
+export const APPROVED_LOCK_FINGERPRINT =
+  '667e53421e194ac6a4fb790d27652b6e4ec36bfcd008af80f5a86493ac76fe19';
 
 export const APPROVED_ADVISORIES = Object.freeze([
   Object.freeze({
@@ -606,6 +609,11 @@ function verifyExceptionLock(packageLock) {
   ) {
     fail('AUDIT_LOCK_INVALID');
   }
+  if (
+    createHash('sha256').update(JSON.stringify(packageLock)).digest('hex') !==
+    APPROVED_LOCK_FINGERPRINT
+  )
+    fail('AUDIT_EXCEPTION_LOCK_DRIFT');
   const packages = packageLock.packages;
   const root = packages[''];
   if (
@@ -657,6 +665,147 @@ function verifyExceptionLock(packageLock) {
         JSON.stringify(sortedRecord(expected.dependencies))
     ) {
       fail('AUDIT_EXCEPTION_LOCK_DRIFT');
+    }
+  }
+}
+
+function rootDependencyNames(packageLock) {
+  const root = packageLock.packages[''];
+  return new Set([
+    ...Object.keys(isRecord(root.dependencies) ? root.dependencies : {}),
+    ...Object.keys(isRecord(root.devDependencies) ? root.devDependencies : {}),
+    ...Object.keys(
+      isRecord(root.optionalDependencies) ? root.optionalDependencies : {},
+    ),
+  ]);
+}
+
+function lockNodesFor(name, vulnerability, packageLock) {
+  const suffix = `node_modules/${name}`;
+  const nodes = [...new Set(vulnerability.nodes)].sort();
+  if (
+    nodes.length === 0 ||
+    nodes.some(path => path !== suffix && !path.endsWith(`/${suffix}`))
+  ) {
+    fail('AUDIT_HIGH_GRAPH_DRIFT');
+  }
+  return nodes.map(path => {
+    const entry = packageLock.packages[path];
+    if (
+      !isRecord(entry) ||
+      typeof entry.version !== 'string' ||
+      typeof entry.resolved !== 'string' ||
+      typeof entry.integrity !== 'string' ||
+      typeof entry.license !== 'string'
+    ) {
+      fail('AUDIT_HIGH_GRAPH_DRIFT');
+    }
+    return entry;
+  });
+}
+
+function dependencyNames(entry) {
+  return new Set([
+    ...Object.keys(isRecord(entry.dependencies) ? entry.dependencies : {}),
+    ...Object.keys(
+      isRecord(entry.optionalDependencies) ? entry.optionalDependencies : {},
+    ),
+    ...Object.keys(
+      isRecord(entry.peerDependencies) ? entry.peerDependencies : {},
+    ),
+  ]);
+}
+
+function reachesApprovedAdvisory(name, vulnerabilities, visiting = new Set()) {
+  if (visiting.has(name)) return false;
+  const next = new Set(visiting);
+  next.add(name);
+  return vulnerabilities[name].via.some(via => {
+    if (typeof via !== 'string') {
+      const projected = advisoryProjection(via);
+      return APPROVED_ADVISORIES.some(
+        approved => JSON.stringify(projected) === JSON.stringify(approved),
+      );
+    }
+    return reachesApprovedAdvisory(via, vulnerabilities, next);
+  });
+}
+
+function connectedToFixTarget(
+  name,
+  fixName,
+  vulnerabilities,
+  visiting = new Set(),
+) {
+  if (name === fixName) return true;
+  if (visiting.has(name)) return false;
+  const next = new Set(visiting);
+  next.add(name);
+  const vulnerability = vulnerabilities[name];
+  if (!isRecord(vulnerability)) return false;
+  return [...vulnerability.via, ...vulnerability.effects].some(adjacent =>
+    typeof adjacent === 'string'
+      ? connectedToFixTarget(adjacent, fixName, vulnerabilities, next)
+      : false,
+  );
+}
+
+function approvedFixValues(name, vulnerabilities) {
+  const pinned = APPROVED_HIGH_FIX_OPTIONS.find(option => option.name === name);
+  if (pinned) return pinned.values;
+  return APPROVED_HIGH_FIX_OPTIONS.flatMap(option => option.values).filter(
+    (value, index, values) =>
+      values.findIndex(
+        candidate => JSON.stringify(candidate) === JSON.stringify(value),
+      ) === index && connectedToFixTarget(name, value.name, vulnerabilities),
+  );
+}
+
+function verifyPropagatedHighGraph(vulnerabilities, packageLock) {
+  const highNames = Object.keys(vulnerabilities).sort();
+  const highSet = new Set(highNames);
+  if (APPROVED_HIGH_PACKAGES.some(name => !highSet.has(name))) {
+    fail('AUDIT_HIGH_GRAPH_DRIFT');
+  }
+  const directNames = rootDependencyNames(packageLock);
+  for (const name of highNames) {
+    const vulnerability = vulnerabilities[name];
+    if (
+      vulnerability.severity !== 'high' ||
+      vulnerability.isDirect !== directNames.has(name) ||
+      vulnerability.range.length === 0 ||
+      !reachesApprovedAdvisory(name, vulnerabilities)
+    ) {
+      fail('AUDIT_HIGH_GRAPH_DRIFT');
+    }
+    const entries = lockNodesFor(name, vulnerability, packageLock);
+    for (const via of vulnerability.via) {
+      if (typeof via !== 'string') continue;
+      if (
+        !highSet.has(via) ||
+        !entries.some(entry => dependencyNames(entry).has(via))
+      ) {
+        fail('AUDIT_HIGH_GRAPH_DRIFT');
+      }
+    }
+    for (const effect of vulnerability.effects) {
+      if (
+        !highSet.has(effect) ||
+        !vulnerabilities[effect].via.some(via => via === name)
+      ) {
+        fail('AUDIT_HIGH_GRAPH_DRIFT');
+      }
+    }
+    const actualFix = fixProjection(vulnerability.fixAvailable);
+    const fixValues = approvedFixValues(name, vulnerabilities);
+    if (
+      !isRecord(actualFix) ||
+      actualFix.isSemVerMajor !== true ||
+      !fixValues.some(
+        approved => JSON.stringify(approved) === JSON.stringify(actualFix),
+      )
+    ) {
+      fail('AUDIT_FIX_GRAPH_DRIFT');
     }
   }
 }
@@ -774,9 +923,8 @@ export function verifyAuditReport(report, packageLock) {
     }
     return { highPackages: 0, exceptions: 0 };
   }
-  if (!exactStrings(highNames, APPROVED_HIGH_PACKAGES)) {
+  if (highNames.length !== Object.keys(vulnerabilities).length)
     fail('AUDIT_HIGH_GRAPH_DRIFT');
-  }
 
   directHighAdvisories.sort((left, right) => left.source - right.source);
   if (
@@ -785,33 +933,8 @@ export function verifyAuditReport(report, packageLock) {
     fail('AUDIT_UNAPPROVED_ADVISORY');
   }
 
-  const auditGraph = Object.keys(vulnerabilities)
-    .sort()
-    .map(name => highGraphProjection(name, vulnerabilities[name]));
-  if (
-    !APPROVED_AUDIT_GRAPHS.some(
-      approved => JSON.stringify(auditGraph) === JSON.stringify(approved),
-    )
-  ) {
-    fail('AUDIT_HIGH_GRAPH_DRIFT');
-  }
-
-  for (const [index, name] of highNames.entries()) {
-    const approved = APPROVED_HIGH_FIX_OPTIONS[index];
-    const actual = fixProjection(vulnerabilities[name].fixAvailable);
-    if (
-      !isRecord(actual) ||
-      actual.isSemVerMajor !== true ||
-      approved.name !== name ||
-      !approved.values.some(
-        value => JSON.stringify(value) === JSON.stringify(actual),
-      )
-    ) {
-      fail('AUDIT_FIX_GRAPH_DRIFT');
-    }
-  }
-
   verifyExceptionLock(packageLock);
+  verifyPropagatedHighGraph(vulnerabilities, packageLock);
   return {
     highPackages: highNames.length,
     exceptions: directHighAdvisories.length,

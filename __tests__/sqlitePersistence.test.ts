@@ -227,6 +227,9 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
                 status: 'copied',
                 error_code: null,
                 artifact_count: 1,
+                artifact_relative_path: `Packs/${packId}/originals/${itemId}.bin`,
+                artifact_byte_count: 4,
+                artifact_sha256: 'b'.repeat(64),
               },
               {
                 id: failedItemId,
@@ -234,7 +237,10 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
                 media_type: 'application/zip',
                 status: 'failed',
                 error_code: 'IMPORT_TYPE_UNSUPPORTED',
-                artifact_count: 0,
+                artifact_count: 1,
+                artifact_relative_path: `Packs/${packId}/originals/${failedItemId}.bin`,
+                artifact_byte_count: 7,
+                artifact_sha256: 'c'.repeat(64),
               },
             ]
           : []) as T[],
@@ -250,7 +256,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
         manifestFingerprint: 'a'.repeat(64),
         status: 'partial',
         itemCount: 2,
-        artifactCount: 1,
+        artifactCount: 2,
         createdAt: '2026-08-03T00:00:00Z',
         items: [
           {
@@ -265,6 +271,11 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
             mediaType: 'application/zip',
             status: 'failed',
             errorCode: 'IMPORT_TYPE_UNSUPPORTED',
+            retrySource: {
+              relativePath: `Packs/${packId}/originals/${failedItemId}.bin`,
+              byteCount: 7,
+              sha256: 'c'.repeat(64),
+            },
           },
         ],
       },

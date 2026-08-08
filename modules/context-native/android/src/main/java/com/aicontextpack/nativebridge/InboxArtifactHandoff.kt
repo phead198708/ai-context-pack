@@ -11,6 +11,11 @@ import java.util.UUID
 internal class InboxArtifactHandoffException(val stableCode: String) : Exception(stableCode)
 
 internal object InboxArtifactHandoff {
+  private data class SourceDescriptor(
+    val name: String,
+    val byteCount: Long,
+    val sha256: String?,
+  )
   enum class Point { BEFORE_COPY, DURING_COPY, AFTER_FILE_CLOSE, BEFORE_PUBLISH_RENAME }
   enum class AcknowledgementPoint {
     AFTER_RECEIPT_PUBLISH,
@@ -62,49 +67,37 @@ internal object InboxArtifactHandoff {
       ?: throw InboxArtifactHandoffException("SCHEMA_INVALID")
     val destinationDirectory = File(filesDir, "Packs/$packId/originals")
     var requiredFreeBytes = requiredHeadroomBytes
-    items.filter { it["status"] == "copied" }.forEach { item ->
+    items.forEach { item ->
       val itemId = item["id"] as? String
         ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val byteCount = (item["byteCount"] as? Number)?.toLong()
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       requireCanonicalUuid(itemId)
-      if (byteCount < 0) {
-        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      }
+      val descriptor = sourceDescriptor(sourceDirectory, item) ?: return@forEach
       if (File(destinationDirectory, "$itemId.bin").exists()) return@forEach
-      if (requiredFreeBytes > Long.MAX_VALUE - byteCount) {
+      if (requiredFreeBytes > Long.MAX_VALUE - descriptor.byteCount) {
         throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       }
-      requiredFreeBytes += byteCount
+      requiredFreeBytes += descriptor.byteCount
     }
     if (availableBytes(filesDir) < requiredFreeBytes) {
       throw InboxArtifactHandoffException("RESOURCE_LOW_DISK")
     }
     ensureDestinationHierarchy(filesDir, packId, directorySynchronizer)
     val artifacts: List<Map<String, Any>> = items.mapNotNull { item ->
-      if (item["status"] != "copied") return@mapNotNull null
       val itemId = item["id"] as? String
         ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       val mediaType = item["mediaType"] as? String
         ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val sourceName = item["relativePath"] as? String
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val byteCount = (item["byteCount"] as? Number)?.toLong()
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val expectedHash = item["sha256"] as? String
+      val descriptor = sourceDescriptor(sourceDirectory, item) ?: return@mapNotNull null
       requireCanonicalUuid(itemId)
-      if (sourceName != "$itemId.bin" || byteCount < 0) {
-        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      }
-      val source = File(sourceDirectory, sourceName)
+      val source = File(sourceDirectory, descriptor.name)
       val destination = File(destinationDirectory, "$itemId.bin")
       val partial = File(destinationDirectory, "$itemId.bin.partial")
       val actualHash = publish(
         source,
         partial,
         destination,
-        byteCount,
-        expectedHash,
+        descriptor.byteCount,
+        descriptor.sha256,
         operationHook,
         directorySynchronizer,
       )
@@ -113,7 +106,7 @@ internal object InboxArtifactHandoff {
         "itemId" to itemId,
         "relativePath" to "Packs/$packId/originals/$itemId.bin",
         "mediaType" to mediaType,
-        "byteCount" to byteCount,
+        "byteCount" to descriptor.byteCount,
       )
       result["sha256"] = actualHash
       result
@@ -128,6 +121,36 @@ internal object InboxArtifactHandoff {
       "manifestFingerprint" to manifestFingerprint,
       "artifacts" to artifacts,
     )
+  }
+
+  private fun sourceDescriptor(
+    sourceDirectory: File,
+    item: Map<String, Any?>,
+  ): SourceDescriptor? {
+    val itemId = item["id"] as? String
+      ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    requireCanonicalUuid(itemId)
+    if (item["status"] == "copied") {
+      val sourceName = item["relativePath"] as? String
+        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      val byteCount = (item["byteCount"] as? Number)?.toLong()
+        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      if (sourceName != "$itemId.bin" || byteCount < 0) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      return SourceDescriptor(sourceName, byteCount, item["sha256"] as? String)
+    }
+    if (item["status"] != "failed") {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    val source = File(sourceDirectory, "$itemId.retry")
+    if (!source.exists()) return null
+    val mode = runCatching { Os.lstat(source.path).st_mode }.getOrNull()
+      ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    if (!OsConstants.S_ISREG(mode) || OsConstants.S_ISLNK(mode) || source.length() < 0) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    return SourceDescriptor(source.name, source.length(), null)
   }
 
   fun acknowledge(

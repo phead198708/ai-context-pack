@@ -52,6 +52,11 @@ export interface PersistedImportItemSummary {
   readonly mediaType: string;
   readonly status: ImportManifestV1['items'][number]['status'];
   readonly errorCode?: DomainErrorCode;
+  readonly retrySource?: {
+    readonly relativePath: string;
+    readonly byteCount: number;
+    readonly sha256: string;
+  };
 }
 
 export interface PersistedImportDetail extends PersistedImportSummary {
