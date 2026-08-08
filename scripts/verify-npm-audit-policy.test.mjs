@@ -6,8 +6,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   APPROVED_ADVISORIES,
+  APPROVED_HIGH_FIX_OPTIONS,
+  APPROVED_HIGH_GRAPH,
+  APPROVED_HIGH_LOCK_TOPOLOGY,
   APPROVED_HIGH_PACKAGES,
-  APPROVED_INCOMPATIBLE_FIXES,
   AUDIT_STDIN_LIMIT_BYTES,
   AuditPolicyError,
   formatAuditPolicyError,
@@ -36,47 +38,67 @@ function makeLock() {
         dependencies: { expo: '57.0.11' },
         devDependencies: { jest: '29.7.0' },
       },
-      'node_modules/image-size': {
-        version: '1.2.1',
-        resolved:
-          'https://registry.npmjs.org/image-size/-/image-size-1.2.1.tgz',
-        integrity:
-          'sha512-rH+46sQJ2dlwfjfhCyNx5thzrv+dtmBIhPHk0zgRUukHzZ/kRueTJXoYYsclBaKcSMBWuGbOFXtioLpzTb5euw==',
-        license: 'MIT',
-      },
-      'node_modules/metro': {
-        version: '0.84.4',
-        dependencies: { 'image-size': '^1.0.2' },
-      },
+      ...Object.fromEntries(
+        APPROVED_HIGH_LOCK_TOPOLOGY.map(entry => [
+          entry.path,
+          {
+            version: entry.version,
+            resolved: entry.resolved,
+            integrity: entry.integrity,
+            license: entry.license,
+            dependencies: clone(entry.dependencies),
+          },
+        ]),
+      ),
     },
   };
 }
 
 function makeReport() {
   const vulnerabilities = Object.fromEntries(
-    APPROVED_HIGH_PACKAGES.map(name => [
-      name,
+    APPROVED_HIGH_GRAPH.map((entry, index) => [
+      entry.name,
       {
-        name,
+        name: entry.name,
         severity: 'high',
-        isDirect: false,
-        via:
-          name === 'image-size' ? clone(APPROVED_ADVISORIES) : ['image-size'],
-        effects: name === 'image-size' ? ['metro'] : [],
-        nodes: [`node_modules/${name}`],
-        range: name === 'image-size' ? '*' : 'synthetic',
-        fixAvailable:
-          name === 'image-size'
-            ? {
-                name: 'react-native',
-                version: '0.72.17',
-                isSemVerMajor: true,
-              }
-            : true,
+        isDirect: entry.isDirect,
+        via: entry.via.map(via => {
+          if (via.startsWith('package:')) return via.slice('package:'.length);
+          const source = Number(via.slice('advisory:'.length));
+          return clone(
+            APPROVED_ADVISORIES.find(advisory => advisory.source === source),
+          );
+        }),
+        effects: clone(entry.effects),
+        nodes: clone(entry.nodes),
+        range: entry.range,
+        fixAvailable: clone(APPROVED_HIGH_FIX_OPTIONS[index].values[0]),
       },
     ]),
   );
-  vulnerabilities['image-size'].nodes = ['node_modules/image-size'];
+  const referencedPackages = new Set(
+    APPROVED_HIGH_GRAPH.flatMap(entry =>
+      entry.via
+        .filter(via => via.startsWith('package:'))
+        .map(via => via.slice('package:'.length)),
+    ),
+  );
+  for (const name of referencedPackages) {
+    if (Object.hasOwn(vulnerabilities, name)) continue;
+    vulnerabilities[name] = {
+      name,
+      severity: 'moderate',
+      isDirect: false,
+      via: [],
+      effects: [],
+      nodes: [`node_modules/${name}`],
+      range: 'synthetic',
+      fixAvailable: false,
+    };
+  }
+  const moderateCount = Object.values(vulnerabilities).filter(
+    vulnerability => vulnerability.severity === 'moderate',
+  ).length;
   return {
     auditReportVersion: 2,
     vulnerabilities,
@@ -84,10 +106,10 @@ function makeReport() {
       vulnerabilities: {
         info: 0,
         low: 0,
-        moderate: 0,
+        moderate: moderateCount,
         high: APPROVED_HIGH_PACKAGES.length,
         critical: 0,
-        total: APPROVED_HIGH_PACKAGES.length,
+        total: Object.keys(vulnerabilities).length,
       },
     },
   };
@@ -111,6 +133,7 @@ test('approved image-size advisories pass only on the pinned Metro lock path', (
 test('a clean audit passes without consulting the temporary exception', () => {
   const report = makeReport();
   report.vulnerabilities = {};
+  report.metadata.vulnerabilities.moderate = 0;
   report.metadata.vulnerabilities.high = 0;
   report.metadata.vulnerabilities.total = 0;
   assert.deepEqual(verifyAuditReport(report, {}), {
@@ -148,6 +171,44 @@ test('unknown high and every critical finding fail closed', () => {
   );
 });
 
+test('nested high or critical advisories cannot hide below a lower top-level severity', () => {
+  for (const severity of ['high', 'critical']) {
+    const hidden = makeReport();
+    hidden.vulnerabilities = {
+      'synthetic-moderate': {
+        name: 'synthetic-moderate',
+        severity: 'moderate',
+        isDirect: false,
+        via: [
+          {
+            ...clone(APPROVED_ADVISORIES[0]),
+            source: 9999999,
+            severity,
+          },
+        ],
+        effects: [],
+        nodes: ['node_modules/synthetic-moderate'],
+        range: '*',
+        fixAvailable: false,
+      },
+    };
+    hidden.metadata.vulnerabilities = {
+      info: 0,
+      low: 0,
+      moderate: 1,
+      high: 0,
+      critical: 0,
+      total: 1,
+    };
+    expectRule(
+      () => verifyAuditReport(hidden, makeLock()),
+      severity === 'critical'
+        ? 'AUDIT_UNAPPROVED_CRITICAL'
+        : 'AUDIT_SEVERITY_INCONSISTENT',
+    );
+  }
+});
+
 test('advisory identity and severity metadata cannot drift', () => {
   const advisory = makeReport();
   advisory.vulnerabilities['image-size'].via[0].url =
@@ -170,27 +231,26 @@ test('runtime exposure, fix metadata, and dependency-path drift fail closed', ()
   direct.vulnerabilities['image-size'].isDirect = true;
   expectRule(
     () => verifyAuditReport(direct, makeLock()),
-    'AUDIT_EXCEPTION_SCOPE_DRIFT',
+    'AUDIT_HIGH_GRAPH_DRIFT',
   );
 
   const effect = makeReport();
   effect.vulnerabilities['image-size'].effects = ['runtime-consumer'];
   expectRule(
     () => verifyAuditReport(effect, makeLock()),
-    'AUDIT_EXCEPTION_SCOPE_DRIFT',
+    'AUDIT_HIGH_GRAPH_DRIFT',
   );
 
   const fix = makeReport();
   fix.vulnerabilities['image-size'].fixAvailable = true;
-  expectRule(
-    () => verifyAuditReport(fix, makeLock()),
-    'AUDIT_EXCEPTION_SCOPE_DRIFT',
-  );
+  expectRule(() => verifyAuditReport(fix, makeLock()), 'AUDIT_FIX_GRAPH_DRIFT');
 
-  for (const incompatibleFix of APPROVED_INCOMPATIBLE_FIXES) {
-    const report = makeReport();
-    report.vulnerabilities['image-size'].fixAvailable = clone(incompatibleFix);
-    assert.equal(verifyAuditReport(report, makeLock()).exceptions, 2);
+  for (const { name, values } of APPROVED_HIGH_FIX_OPTIONS) {
+    for (const value of values) {
+      const report = makeReport();
+      report.vulnerabilities[name].fixAvailable = clone(value);
+      assert.equal(verifyAuditReport(report, makeLock()).exceptions, 2);
+    }
   }
 
   const lock = makeLock();
@@ -199,6 +259,60 @@ test('runtime exposure, fix metadata, and dependency-path drift fail closed', ()
     () => verifyAuditReport(makeReport(), lock),
     'AUDIT_EXCEPTION_LOCK_DRIFT',
   );
+});
+
+test('compatible fixes on every propagated high package fail closed', () => {
+  for (const name of APPROVED_HIGH_PACKAGES) {
+    const report = makeReport();
+    report.vulnerabilities[name].fixAvailable = {
+      name,
+      version: '999.0.0',
+      isSemVerMajor: false,
+    };
+    expectRule(
+      () => verifyAuditReport(report, makeLock()),
+      'AUDIT_FIX_GRAPH_DRIFT',
+    );
+  }
+});
+
+test('the complete propagation topology and lock identities fail closed on drift', () => {
+  const changedVia = makeReport();
+  changedVia.vulnerabilities['@expo/metro'].via.push('image-size');
+  expectRule(
+    () => verifyAuditReport(changedVia, makeLock()),
+    'AUDIT_HIGH_GRAPH_DRIFT',
+  );
+
+  const alternateNode = makeReport();
+  alternateNode.vulnerabilities.metro.nodes.push(
+    'node_modules/synthetic/node_modules/metro',
+  );
+  expectRule(
+    () => verifyAuditReport(alternateNode, makeLock()),
+    'AUDIT_HIGH_GRAPH_DRIFT',
+  );
+
+  const alternateLockPath = makeLock();
+  alternateLockPath.packages['node_modules/synthetic/node_modules/metro'] =
+    clone(alternateLockPath.packages['node_modules/metro']);
+  expectRule(
+    () => verifyAuditReport(makeReport(), alternateLockPath),
+    'AUDIT_EXCEPTION_LOCK_DRIFT',
+  );
+
+  for (const path of [
+    'node_modules/metro',
+    'node_modules/@expo/metro',
+    'node_modules/expo',
+  ]) {
+    const changedIntegrity = makeLock();
+    changedIntegrity.packages[path].integrity = 'sha512-ATTACKER';
+    expectRule(
+      () => verifyAuditReport(makeReport(), changedIntegrity),
+      'AUDIT_EXCEPTION_LOCK_DRIFT',
+    );
+  }
 });
 
 test('malformed, oversized, and structurally incomplete input fails closed', async () => {

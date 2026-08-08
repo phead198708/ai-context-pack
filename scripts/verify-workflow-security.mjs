@@ -130,12 +130,76 @@ const expectedGatedExecutionDigests = {
     digest: 'b39d8b1e7b596fd4ef08bbf372b209fd1b0521953098c9f5cec405772d09f5af',
   },
 };
+const expectedNpmAuditJobDigest =
+  '899c9b0d4d8244c9d3b9938be03368fcf844db659a6a70f64d99a97b608e7bed';
 
 function parseWorkflow(source, name) {
   try {
     return parse(source, { maxAliasCount: 0, uniqueKeys: true });
   } catch {
     throw new Error(`WORKFLOW_YAML_INVALID:${name}`);
+  }
+}
+
+function assertNpmAuditPolicyWorkflow(source, name) {
+  const workflow = parseWorkflow(source, name);
+  const shared = workflow?.jobs?.shared;
+  if (
+    !isRecord(workflow) ||
+    !isRecord(workflow.jobs) ||
+    !isRecord(shared) ||
+    shared.name !== 'Shared' ||
+    shared['runs-on'] !== 'ubuntu-24.04' ||
+    shared['timeout-minutes'] !== 30 ||
+    !Array.isArray(shared.steps)
+  ) {
+    throw new Error(`WORKFLOW_NPM_AUDIT_POLICY_INVALID:${name}:structure`);
+  }
+  for (const property of [
+    'if',
+    'continue-on-error',
+    'needs',
+    'strategy',
+    'container',
+    'services',
+    'defaults',
+    'env',
+  ]) {
+    if (Object.hasOwn(shared, property)) {
+      throw new Error(
+        `WORKFLOW_NPM_AUDIT_POLICY_INVALID:${name}:shared:${property}`,
+      );
+    }
+  }
+
+  const references = [];
+  for (const [jobId, job] of Object.entries(workflow.jobs)) {
+    if (!isRecord(job) || !Array.isArray(job.steps)) continue;
+    for (const [index, step] of job.steps.entries()) {
+      if (!isRecord(step) || typeof step.run !== 'string') continue;
+      if (/\bnpm\s+audit\b/.test(step.run)) {
+        throw new Error(
+          `WORKFLOW_NPM_AUDIT_POLICY_INVALID:${name}:${jobId}:${index}:raw`,
+        );
+      }
+      if (/\baudit:ci\b/.test(step.run)) {
+        references.push({ jobId, index, step });
+      }
+    }
+  }
+  if (references.length !== 1) {
+    throw new Error(`WORKFLOW_NPM_AUDIT_POLICY_INVALID:${name}:count`);
+  }
+  const [{ jobId, index, step }] = references;
+  if (
+    jobId !== 'shared' ||
+    step.name !== 'Audit high-severity npm findings' ||
+    step.run.trim() !== 'npm run audit:ci' ||
+    JSON.stringify(Object.keys(step).sort()) !== JSON.stringify(['name', 'run'])
+  ) {
+    throw new Error(
+      `WORKFLOW_NPM_AUDIT_POLICY_INVALID:${name}:${jobId}:${index}:gate`,
+    );
   }
 }
 
@@ -1006,6 +1070,13 @@ if (
 const gatedJobStructureCases = [
   {
     source: linuxWorkflow,
+    name: 'linux-audit.yml',
+    jobId: 'shared',
+    digest: expectedNpmAuditJobDigest,
+    gateError: 'WORKFLOW_NPM_AUDIT_POLICY_INVALID',
+  },
+  {
+    source: linuxWorkflow,
     name: 'linux.yml',
     gateError: 'WORKFLOW_ANDROID_INSTRUMENTATION_GATE_INVALID',
     ...expectedGatedExecutionDigests['linux.yml'],
@@ -1147,6 +1218,65 @@ if (
 ) {
   throw new Error('WORKFLOW_EXPO_DOCTOR_PIN_INVALID');
 }
+
+assertNpmAuditPolicyWorkflow(linuxWorkflow, 'linux.yml');
+function auditWorkflowWithMutation(mutate) {
+  const workflow = parseWorkflow(linuxWorkflow, 'self-test-audit-source');
+  mutate(workflow);
+  return JSON.stringify(workflow);
+}
+const auditWorkflowRejectedExamples = [
+  auditWorkflowWithMutation(workflow => {
+    const step = workflow.jobs.shared.steps.find(
+      candidate => candidate.run === 'npm run audit:ci',
+    );
+    step.if = false;
+    workflow.jobs.shared.steps.push({
+      name: 'Weaker audit fallback',
+      run: 'npm audit --audit-level=critical',
+    });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const step = workflow.jobs.shared.steps.find(
+      candidate => candidate.run === 'npm run audit:ci',
+    );
+    step.run = 'npm audit --audit-level=critical';
+  }),
+  auditWorkflowWithMutation(workflow => {
+    workflow.jobs.shared.steps.push({
+      name: 'Duplicate policy gate',
+      run: 'npm run audit:ci',
+    });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    workflow.jobs.shared.if = false;
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const step = workflow.jobs.shared.steps.find(
+      candidate => candidate.run === 'npm run audit:ci',
+    );
+    step['continue-on-error'] = true;
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const step = workflow.jobs.shared.steps.find(
+      candidate => candidate.run === 'npm run audit:ci',
+    );
+    step.run = 'npm run audit:ci || true';
+  }),
+];
+for (const [index, example] of auditWorkflowRejectedExamples.entries()) {
+  let rejected = false;
+  try {
+    assertNpmAuditPolicyWorkflow(example, `self-test-audit-${index}`);
+  } catch (error) {
+    rejected =
+      error instanceof Error &&
+      error.message.startsWith('WORKFLOW_NPM_AUDIT_POLICY_INVALID:');
+  }
+  if (!rejected) {
+    throw new Error('WORKFLOW_NPM_AUDIT_POLICY_SELF_TEST_FAILED');
+  }
+}
 if (
   packageManifest.scripts?.['audit:ci'] !==
     'npm audit --json | node scripts/verify-npm-audit-policy.mjs' ||
@@ -1154,9 +1284,7 @@ if (
     'node --test scripts/verify-npm-audit-policy.test.mjs' ||
   !packageManifest.scripts?.['test:workflows']?.includes(
     'npm run test:npm-audit-policy',
-  ) ||
-  !linuxWorkflow.includes('run: npm run audit:ci') ||
-  linuxWorkflow.includes('npm audit --audit-level=high')
+  )
 ) {
   throw new Error('WORKFLOW_NPM_AUDIT_POLICY_INVALID');
 }

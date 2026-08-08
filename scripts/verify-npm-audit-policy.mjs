@@ -62,16 +62,392 @@ export const APPROVED_HIGH_PACKAGES = Object.freeze([
   'react-native',
 ]);
 
-export const APPROVED_INCOMPATIBLE_FIXES = Object.freeze([
+const expoDowngrade = Object.freeze({
+  name: 'expo',
+  version: '53.0.27',
+  isSemVerMajor: true,
+});
+const reactNativeDowngrade = Object.freeze({
+  name: 'react-native',
+  version: '0.72.17',
+  isSemVerMajor: true,
+});
+const newAppScreenDowngrade = Object.freeze({
+  name: '@react-native/new-app-screen',
+  version: '0.84.1',
+  isSemVerMajor: true,
+});
+
+export const APPROVED_HIGH_GRAPH = Object.freeze([
+  Object.freeze({
+    name: '@expo/cli',
+    isDirect: false,
+    via: Object.freeze([
+      'package:@expo/config',
+      'package:@expo/config-plugins',
+      'package:@expo/inline-modules',
+      'package:@expo/metro',
+      'package:@expo/metro-config',
+      'package:@expo/prebuild-config',
+    ]),
+    effects: Object.freeze([]),
+    nodes: Object.freeze(['node_modules/expo/node_modules/@expo/cli']),
+    range:
+      '<=0.0.0-canary-20231123-1b19f96-4 || >=0.0.1-canary-20231125-d600e44',
+  }),
+  Object.freeze({
+    name: '@expo/metro',
+    isDirect: false,
+    via: Object.freeze([
+      'package:metro',
+      'package:metro-config',
+      'package:metro-transform-worker',
+    ]),
+    effects: Object.freeze(['@expo/cli', '@expo/metro-config', 'expo']),
+    nodes: Object.freeze(['node_modules/@expo/metro']),
+    range: '*',
+  }),
+  Object.freeze({
+    name: '@expo/metro-config',
+    isDirect: false,
+    via: Object.freeze(['package:@expo/config', 'package:@expo/metro']),
+    effects: Object.freeze(['expo']),
+    nodes: Object.freeze(['node_modules/expo/node_modules/@expo/metro-config']),
+    range: '<=0.0.1-canary-20240418-8d74597 || >=0.1.49-alpha.0',
+  }),
+  Object.freeze({
+    name: '@react-native/community-cli-plugin',
+    isDirect: false,
+    via: Object.freeze([
+      'package:@react-native/metro-config',
+      'package:metro',
+      'package:metro-config',
+    ]),
+    effects: Object.freeze(['react-native']),
+    nodes: Object.freeze(['node_modules/@react-native/community-cli-plugin']),
+    range: '*',
+  }),
+  Object.freeze({
+    name: '@react-native/metro-config',
+    isDirect: true,
+    via: Object.freeze(['package:metro-config']),
+    effects: Object.freeze(['@react-native/community-cli-plugin']),
+    nodes: Object.freeze(['node_modules/@react-native/metro-config']),
+    range: '*',
+  }),
+  Object.freeze({
+    name: '@react-native/new-app-screen',
+    isDirect: true,
+    via: Object.freeze(['package:react-native']),
+    effects: Object.freeze([]),
+    nodes: Object.freeze(['node_modules/@react-native/new-app-screen']),
+    range: '>=0.85.0-nightly-20260108-1236b6be4',
+  }),
+  Object.freeze({
+    name: '@react-native/virtualized-lists',
+    isDirect: false,
+    via: Object.freeze(['package:react-native']),
+    effects: Object.freeze(['react-native']),
+    nodes: Object.freeze(['node_modules/@react-native/virtualized-lists']),
+    range: '>=0.85.0-nightly-20260108-1236b6be4',
+  }),
   Object.freeze({
     name: 'expo',
-    version: '53.0.27',
-    isSemVerMajor: true,
+    isDirect: true,
+    via: Object.freeze([
+      'package:@expo/cli',
+      'package:@expo/config',
+      'package:@expo/config-plugins',
+      'package:@expo/local-build-cache-provider',
+      'package:@expo/metro',
+      'package:@expo/metro-config',
+    ]),
+    effects: Object.freeze([]),
+    nodes: Object.freeze(['node_modules/expo']),
+    range: '46.0.5 || >=47.0.0-alpha.1',
+  }),
+  Object.freeze({
+    name: 'image-size',
+    isDirect: false,
+    via: Object.freeze(['advisory:1138808', 'advisory:1138809']),
+    effects: Object.freeze(['metro']),
+    nodes: Object.freeze(['node_modules/image-size']),
+    range: '*',
+  }),
+  Object.freeze({
+    name: 'metro',
+    isDirect: false,
+    via: Object.freeze([
+      'package:image-size',
+      'package:metro-config',
+      'package:metro-transform-worker',
+    ]),
+    effects: Object.freeze([
+      '@expo/metro',
+      '@react-native/community-cli-plugin',
+      'metro-config',
+      'metro-transform-worker',
+    ]),
+    nodes: Object.freeze(['node_modules/metro']),
+    range: '>=0.22.1',
+  }),
+  Object.freeze({
+    name: 'metro-config',
+    isDirect: false,
+    via: Object.freeze(['package:metro']),
+    effects: Object.freeze([
+      '@react-native/community-cli-plugin',
+      '@react-native/metro-config',
+      'metro',
+    ]),
+    nodes: Object.freeze(['node_modules/metro-config']),
+    range: '*',
+  }),
+  Object.freeze({
+    name: 'metro-transform-worker',
+    isDirect: false,
+    via: Object.freeze(['package:metro']),
+    effects: Object.freeze(['metro']),
+    nodes: Object.freeze(['node_modules/metro-transform-worker']),
+    range: '>=0.60.0',
   }),
   Object.freeze({
     name: 'react-native',
-    version: '0.72.17',
-    isSemVerMajor: true,
+    isDirect: true,
+    via: Object.freeze([
+      'package:@react-native/community-cli-plugin',
+      'package:@react-native/virtualized-lists',
+    ]),
+    effects: Object.freeze([
+      '@react-native/new-app-screen',
+      '@react-native/virtualized-lists',
+    ]),
+    nodes: Object.freeze(['node_modules/react-native']),
+    range: '>=0.73.0-nightly-20230506-1af868c52',
+  }),
+]);
+
+export const APPROVED_HIGH_FIX_OPTIONS = Object.freeze([
+  Object.freeze({
+    name: '@expo/cli',
+    values: Object.freeze([true, expoDowngrade]),
+  }),
+  Object.freeze({
+    name: '@expo/metro',
+    values: Object.freeze([expoDowngrade]),
+  }),
+  Object.freeze({
+    name: '@expo/metro-config',
+    values: Object.freeze([true, expoDowngrade]),
+  }),
+  Object.freeze({
+    name: '@react-native/community-cli-plugin',
+    values: Object.freeze([reactNativeDowngrade]),
+  }),
+  Object.freeze({
+    name: '@react-native/metro-config',
+    values: Object.freeze([reactNativeDowngrade]),
+  }),
+  Object.freeze({
+    name: '@react-native/new-app-screen',
+    values: Object.freeze([newAppScreenDowngrade]),
+  }),
+  Object.freeze({
+    name: '@react-native/virtualized-lists',
+    values: Object.freeze([reactNativeDowngrade]),
+  }),
+  Object.freeze({ name: 'expo', values: Object.freeze([expoDowngrade]) }),
+  Object.freeze({
+    name: 'image-size',
+    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+  }),
+  Object.freeze({
+    name: 'metro',
+    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+  }),
+  Object.freeze({
+    name: 'metro-config',
+    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+  }),
+  Object.freeze({
+    name: 'metro-transform-worker',
+    values: Object.freeze([expoDowngrade, reactNativeDowngrade]),
+  }),
+  Object.freeze({
+    name: 'react-native',
+    values: Object.freeze([reactNativeDowngrade]),
+  }),
+]);
+
+export const APPROVED_HIGH_LOCK_TOPOLOGY = Object.freeze([
+  Object.freeze({
+    name: '@expo/cli',
+    path: 'node_modules/expo/node_modules/@expo/cli',
+    version: '57.0.13',
+    resolved: 'https://registry.npmjs.org/@expo/cli/-/cli-57.0.13.tgz',
+    integrity:
+      'sha512-8gjLMyx+s0dLeDHlcfjM9D9x5yrCU5C6516rmC7q/Wiyuj1fxgr/cbDSmjdpQKkjlvvfvNwtRyMk2zhvhPohiw==',
+    license: 'MIT',
+    dependencies: Object.freeze({
+      '@expo/config': '~57.0.6',
+      '@expo/config-plugins': '~57.0.7',
+      '@expo/inline-modules': '^0.1.4',
+      '@expo/metro': '~56.0.0',
+      '@expo/metro-config': '~57.0.7',
+      '@expo/prebuild-config': '^57.0.10',
+    }),
+  }),
+  Object.freeze({
+    name: '@expo/metro',
+    path: 'node_modules/@expo/metro',
+    version: '56.0.0',
+    resolved: 'https://registry.npmjs.org/@expo/metro/-/metro-56.0.0.tgz',
+    integrity:
+      'sha512-5gIgQHtEpjjvsjKfVtIv23a98LLRV0/y07PDShEwYSytAMlE3FSF8RHXqtHc1sUJL6dn7hnuIBpIbrLXXuVi0A==',
+    license: 'MIT',
+    dependencies: Object.freeze({
+      metro: '0.84.4',
+      'metro-config': '0.84.4',
+      'metro-transform-worker': '0.84.4',
+    }),
+  }),
+  Object.freeze({
+    name: '@expo/metro-config',
+    path: 'node_modules/expo/node_modules/@expo/metro-config',
+    version: '57.0.7',
+    resolved:
+      'https://registry.npmjs.org/@expo/metro-config/-/metro-config-57.0.7.tgz',
+    integrity:
+      'sha512-bVfEkg4zF1cA62OqAdYXmFOooJ6TB/I+REi7Se6Ct+PbSC+89TwSqWXnYx34L08eIs4z+1ilgbATakTZpgefmQ==',
+    license: 'MIT',
+    dependencies: Object.freeze({
+      '@expo/config': '~57.0.6',
+      '@expo/metro': '~56.0.0',
+    }),
+  }),
+  Object.freeze({
+    name: '@react-native/community-cli-plugin',
+    path: 'node_modules/@react-native/community-cli-plugin',
+    version: '0.86.2',
+    resolved:
+      'https://registry.npmjs.org/@react-native/community-cli-plugin/-/community-cli-plugin-0.86.2.tgz',
+    integrity:
+      'sha512-YHXNKoM6Y/HjREySZ5arET2xgiHgg67r1MdwJB//MPJAJ0Xc5g0u6UHxY9VzsHO3Y07dre6s0BinYwjt1SEWvQ==',
+    license: 'MIT',
+    dependencies: Object.freeze({
+      metro: '^0.84.3',
+      'metro-config': '^0.84.3',
+    }),
+  }),
+  Object.freeze({
+    name: '@react-native/metro-config',
+    path: 'node_modules/@react-native/metro-config',
+    version: '0.86.2',
+    resolved:
+      'https://registry.npmjs.org/@react-native/metro-config/-/metro-config-0.86.2.tgz',
+    integrity:
+      'sha512-hJno256j+MS0b3JD1aD3ouTGZVacKNVBuXL2atMQQ8BZ060vl1ptnZ83y569aDW+/rgFSOcqn6ydKeSz4uUKQQ==',
+    license: 'MIT',
+    dependencies: Object.freeze({ 'metro-config': '^0.84.3' }),
+  }),
+  Object.freeze({
+    name: '@react-native/new-app-screen',
+    path: 'node_modules/@react-native/new-app-screen',
+    version: '0.86.2',
+    resolved:
+      'https://registry.npmjs.org/@react-native/new-app-screen/-/new-app-screen-0.86.2.tgz',
+    integrity:
+      'sha512-tUFp4Jd2+C6uQM/0hQ7LfPgjL1V/IA9k0KbVJeme8mxulM2v2E0CEWp7WVczOma++/znbjE5eAvZnCUBqrimJA==',
+    license: 'MIT',
+    dependencies: Object.freeze({}),
+  }),
+  Object.freeze({
+    name: '@react-native/virtualized-lists',
+    path: 'node_modules/@react-native/virtualized-lists',
+    version: '0.86.2',
+    resolved:
+      'https://registry.npmjs.org/@react-native/virtualized-lists/-/virtualized-lists-0.86.2.tgz',
+    integrity:
+      'sha512-uO0J72gh3EvE+1/GHRk18QRyBDTRHRB0AraAfojsRjbT7VMuJwKrZYaKGshavoaEud6aw00ZB9/8mTMIKjjcAw==',
+    license: 'MIT',
+    dependencies: Object.freeze({}),
+  }),
+  Object.freeze({
+    name: 'expo',
+    path: 'node_modules/expo',
+    version: '57.0.11',
+    resolved: 'https://registry.npmjs.org/expo/-/expo-57.0.11.tgz',
+    integrity:
+      'sha512-R97257N39Dw0kQFuI4/RvYx95GQ+dmePdo8hxcMOjDxAT4VcCckjILJeAWCE19Jxjb92hZ5NDXAfDPkkV1RB9w==',
+    license: 'MIT',
+    dependencies: Object.freeze({
+      '@expo/cli': '^57.0.13',
+      '@expo/config': '~57.0.6',
+      '@expo/config-plugins': '~57.0.7',
+      '@expo/local-build-cache-provider': '^57.0.5',
+      '@expo/metro': '~56.0.0',
+      '@expo/metro-config': '~57.0.7',
+    }),
+  }),
+  Object.freeze({
+    name: 'image-size',
+    path: 'node_modules/image-size',
+    version: '1.2.1',
+    resolved: 'https://registry.npmjs.org/image-size/-/image-size-1.2.1.tgz',
+    integrity:
+      'sha512-rH+46sQJ2dlwfjfhCyNx5thzrv+dtmBIhPHk0zgRUukHzZ/kRueTJXoYYsclBaKcSMBWuGbOFXtioLpzTb5euw==',
+    license: 'MIT',
+    dependencies: Object.freeze({}),
+  }),
+  Object.freeze({
+    name: 'metro',
+    path: 'node_modules/metro',
+    version: '0.84.4',
+    resolved: 'https://registry.npmjs.org/metro/-/metro-0.84.4.tgz',
+    integrity:
+      'sha512-8ETTubqfD6ornDy2zYDvRcKnVDOXdFJsjetYDBsY4oAsb6NJkiwFR+FaMESyGppFmQUyBQA4H4sFGxzcQSGtFA==',
+    license: 'MIT',
+    dependencies: Object.freeze({
+      'image-size': '^1.0.2',
+      'metro-config': '0.84.4',
+      'metro-transform-worker': '0.84.4',
+    }),
+  }),
+  Object.freeze({
+    name: 'metro-config',
+    path: 'node_modules/metro-config',
+    version: '0.84.4',
+    resolved:
+      'https://registry.npmjs.org/metro-config/-/metro-config-0.84.4.tgz',
+    integrity:
+      'sha512-PMotGDjXcXLWo2TMRH+VR99phFNgYTwqh4OoieIKK3yTJa1Jmkl+fZJxDO0jfBvNF+WESHciHvpNuBtXaF3B0Q==',
+    license: 'MIT',
+    dependencies: Object.freeze({ metro: '0.84.4' }),
+  }),
+  Object.freeze({
+    name: 'metro-transform-worker',
+    path: 'node_modules/metro-transform-worker',
+    version: '0.84.4',
+    resolved:
+      'https://registry.npmjs.org/metro-transform-worker/-/metro-transform-worker-0.84.4.tgz',
+    integrity:
+      'sha512-W1IYMvvXTu4MxYr7d9h7CeG2vpIr3bmLLIavkPY4O1ilzDrvS8z/NEe6y+pC44Ff7raMXQgYSfdqDUwN/i39gg==',
+    license: 'MIT',
+    dependencies: Object.freeze({ metro: '0.84.4' }),
+  }),
+  Object.freeze({
+    name: 'react-native',
+    path: 'node_modules/react-native',
+    version: '0.86.2',
+    resolved:
+      'https://registry.npmjs.org/react-native/-/react-native-0.86.2.tgz',
+    integrity:
+      'sha512-zbJXGZpwfZGA79Z9ob6Atvfx4nAQL8yJBa35s58E4Oo+khPykfQP2sTeumkKbjwajFYfVayg8pj7Il9nIfTk7A==',
+    license: 'MIT',
+    dependencies: Object.freeze({
+      '@react-native/community-cli-plugin': '0.86.2',
+      '@react-native/virtualized-lists': '0.86.2',
+    }),
   }),
 ]);
 
@@ -108,6 +484,7 @@ function advisoryProjection(value) {
     typeof value.title !== 'string' ||
     typeof value.url !== 'string' ||
     typeof value.severity !== 'string' ||
+    !allowedSeverities.has(value.severity) ||
     !Array.isArray(value.cwe) ||
     !value.cwe.every(item => typeof item === 'string') ||
     !isRecord(value.cvss) ||
@@ -133,6 +510,46 @@ function advisoryProjection(value) {
   };
 }
 
+function fixProjection(value) {
+  if (typeof value === 'boolean') return value;
+  if (
+    !isRecord(value) ||
+    JSON.stringify(Object.keys(value).sort()) !==
+      JSON.stringify(['isSemVerMajor', 'name', 'version']) ||
+    typeof value.name !== 'string' ||
+    typeof value.version !== 'string' ||
+    typeof value.isSemVerMajor !== 'boolean'
+  ) {
+    fail('AUDIT_REPORT_INVALID');
+  }
+  return {
+    name: value.name,
+    version: value.version,
+    isSemVerMajor: value.isSemVerMajor,
+  };
+}
+
+function sortedRecord(value) {
+  return Object.fromEntries(
+    Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function highGraphProjection(name, vulnerability) {
+  return {
+    name,
+    isDirect: vulnerability.isDirect,
+    via: vulnerability.via
+      .map(via =>
+        typeof via === 'string' ? `package:${via}` : `advisory:${via.source}`,
+      )
+      .sort(),
+    effects: [...vulnerability.effects].sort(),
+    nodes: [...vulnerability.nodes].sort(),
+    range: vulnerability.range,
+  };
+}
+
 function verifyExceptionLock(packageLock) {
   if (
     !isRecord(packageLock) ||
@@ -141,28 +558,51 @@ function verifyExceptionLock(packageLock) {
   ) {
     fail('AUDIT_LOCK_INVALID');
   }
-  const root = packageLock.packages[''];
-  const imageSize = packageLock.packages['node_modules/image-size'];
-  const metro = packageLock.packages['node_modules/metro'];
+  const packages = packageLock.packages;
+  const root = packages[''];
   if (
     !isRecord(root) ||
-    !isRecord(imageSize) ||
-    !isRecord(metro) ||
-    imageSize.version !== '1.2.1' ||
-    imageSize.resolved !==
-      'https://registry.npmjs.org/image-size/-/image-size-1.2.1.tgz' ||
-    imageSize.integrity !==
-      'sha512-rH+46sQJ2dlwfjfhCyNx5thzrv+dtmBIhPHk0zgRUukHzZ/kRueTJXoYYsclBaKcSMBWuGbOFXtioLpzTb5euw==' ||
-    imageSize.license !== 'MIT' ||
-    metro.version !== '0.84.4' ||
-    !isRecord(metro.dependencies) ||
-    metro.dependencies['image-size'] !== '^1.0.2' ||
     root.dependencies?.['image-size'] !== undefined ||
     root.devDependencies?.['image-size'] !== undefined ||
     root.optionalDependencies?.['image-size'] !== undefined ||
     root.peerDependencies?.['image-size'] !== undefined
   ) {
     fail('AUDIT_EXCEPTION_LOCK_DRIFT');
+  }
+
+  const relevantDependencies = new Set(
+    APPROVED_HIGH_LOCK_TOPOLOGY.flatMap(entry =>
+      Object.keys(entry.dependencies),
+    ),
+  );
+  for (const expected of APPROVED_HIGH_LOCK_TOPOLOGY) {
+    const entry = packages[expected.path];
+    const suffix = `node_modules/${expected.name}`;
+    const matchingPaths = Object.keys(packages)
+      .filter(path => path === suffix || path.endsWith(`/${suffix}`))
+      .sort();
+    const actualDependencies = isRecord(entry?.dependencies)
+      ? sortedRecord(
+          Object.fromEntries(
+            Object.entries(entry.dependencies).filter(([name]) =>
+              relevantDependencies.has(name),
+            ),
+          ),
+        )
+      : {};
+    if (
+      matchingPaths.length !== 1 ||
+      matchingPaths[0] !== expected.path ||
+      !isRecord(entry) ||
+      entry.version !== expected.version ||
+      entry.resolved !== expected.resolved ||
+      entry.integrity !== expected.integrity ||
+      entry.license !== expected.license ||
+      JSON.stringify(actualDependencies) !==
+        JSON.stringify(sortedRecord(expected.dependencies))
+    ) {
+      fail('AUDIT_EXCEPTION_LOCK_DRIFT');
+    }
   }
 }
 
@@ -181,6 +621,7 @@ function validateVulnerabilityRecord(name, vulnerability, vulnerabilities) {
   ) {
     fail('AUDIT_REPORT_INVALID');
   }
+  fixProjection(vulnerability.fixAvailable);
   for (const via of vulnerability.via) {
     if (typeof via === 'string') {
       if (!Object.hasOwn(vulnerabilities, via)) fail('AUDIT_REPORT_INVALID');
@@ -188,19 +629,6 @@ function validateVulnerabilityRecord(name, vulnerability, vulnerabilities) {
     }
     advisoryProjection(via);
   }
-}
-
-function reachesImageSize(name, vulnerabilities, visiting = new Set()) {
-  if (name === 'image-size') return true;
-  if (visiting.has(name)) return false;
-  visiting.add(name);
-  const vulnerability = vulnerabilities[name];
-  const reaches = vulnerability.via.some(
-    via =>
-      typeof via === 'string' &&
-      reachesImageSize(via, vulnerabilities, new Set(visiting)),
-  );
-  return reaches;
 }
 
 export function verifyAuditReport(report, packageLock) {
@@ -218,6 +646,27 @@ export function verifyAuditReport(report, packageLock) {
   const vulnerabilities = report.vulnerabilities;
   for (const [name, vulnerability] of Object.entries(vulnerabilities)) {
     validateVulnerabilityRecord(name, vulnerability, vulnerabilities);
+  }
+
+  const directHighAdvisories = [];
+  for (const vulnerability of Object.values(vulnerabilities)) {
+    for (const via of vulnerability.via) {
+      if (!isRecord(via)) continue;
+      const advisory = advisoryProjection(via);
+      if (advisory.severity === 'critical') {
+        fail('AUDIT_UNAPPROVED_CRITICAL');
+      }
+      if (
+        advisory.severity === 'high' &&
+        vulnerability.severity !== 'high' &&
+        vulnerability.severity !== 'critical'
+      ) {
+        fail('AUDIT_SEVERITY_INCONSISTENT');
+      }
+      if (advisory.severity === 'high') {
+        directHighAdvisories.push(advisory);
+      }
+    }
   }
 
   const criticalNames = Object.entries(vulnerabilities)
@@ -259,17 +708,6 @@ export function verifyAuditReport(report, packageLock) {
     fail('AUDIT_HIGH_GRAPH_DRIFT');
   }
 
-  const directHighAdvisories = [];
-  for (const vulnerability of Object.values(vulnerabilities)) {
-    for (const via of vulnerability.via) {
-      if (
-        isRecord(via) &&
-        (via.severity === 'high' || via.severity === 'critical')
-      ) {
-        directHighAdvisories.push(advisoryProjection(via));
-      }
-    }
-  }
   directHighAdvisories.sort((left, right) => left.source - right.source);
   if (
     JSON.stringify(directHighAdvisories) !== JSON.stringify(APPROVED_ADVISORIES)
@@ -277,29 +715,24 @@ export function verifyAuditReport(report, packageLock) {
     fail('AUDIT_UNAPPROVED_ADVISORY');
   }
 
-  const imageSize = vulnerabilities['image-size'];
-  if (
-    imageSize.isDirect !== false ||
-    !exactStrings(imageSize.effects, ['metro']) ||
-    !exactStrings(imageSize.nodes, ['node_modules/image-size']) ||
-    imageSize.range !== '*' ||
-    !isRecord(imageSize.fixAvailable) ||
-    !APPROVED_INCOMPATIBLE_FIXES.some(
-      fix => JSON.stringify(fix) === JSON.stringify(imageSize.fixAvailable),
-    ) ||
-    imageSize.via.some(via => !isRecord(via))
-  ) {
-    fail('AUDIT_EXCEPTION_SCOPE_DRIFT');
-  }
-  if (
-    highNames.some(
-      name =>
-        name !== 'image-size' &&
-        vulnerabilities[name].via.some(via => isRecord(via)),
-    ) ||
-    highNames.some(name => !reachesImageSize(name, vulnerabilities))
-  ) {
+  const highGraph = highNames.map(name =>
+    highGraphProjection(name, vulnerabilities[name]),
+  );
+  if (JSON.stringify(highGraph) !== JSON.stringify(APPROVED_HIGH_GRAPH)) {
     fail('AUDIT_HIGH_GRAPH_DRIFT');
+  }
+
+  for (const [index, name] of highNames.entries()) {
+    const approved = APPROVED_HIGH_FIX_OPTIONS[index];
+    const actual = fixProjection(vulnerabilities[name].fixAvailable);
+    if (
+      approved.name !== name ||
+      !approved.values.some(
+        value => JSON.stringify(value) === JSON.stringify(actual),
+      )
+    ) {
+      fail('AUDIT_FIX_GRAPH_DRIFT');
+    }
   }
 
   verifyExceptionLock(packageLock);
