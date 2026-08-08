@@ -769,6 +769,9 @@ export function verifyAuditReport(report, packageLock) {
   }
 
   if (highNames.length === 0) {
+    if (Object.keys(vulnerabilities).length !== 0) {
+      fail('AUDIT_HIGH_GRAPH_DRIFT');
+    }
     return { highPackages: 0, exceptions: 0 };
   }
   if (!exactStrings(highNames, APPROVED_HIGH_PACKAGES)) {

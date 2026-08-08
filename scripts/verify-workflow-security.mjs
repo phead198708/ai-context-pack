@@ -132,6 +132,14 @@ const expectedGatedExecutionDigests = {
 };
 const expectedNpmAuditJobDigest =
   '899c9b0d4d8244c9d3b9938be03368fcf844db659a6a70f64d99a97b608e7bed';
+const expectedLinuxJobDigests = Object.freeze({
+  android: 'b64bac1d872c9a52432d7fca81fcce8b23ae1b55b37ab8508fcbc4b0d2d02e46',
+  'contracts-privacy':
+    'd28c6ef86c5338c19f8694a9f1ddd2ea6ce32e526bed5f11f783f47f04cb8d19',
+  'dependency-review':
+    '4a790c64d44389bc94f9597dbf9a7dc7e3c4e894c495839da6c3094c53f527c3',
+  shared: expectedNpmAuditJobDigest,
+});
 
 function parseWorkflow(source, name) {
   try {
@@ -144,17 +152,55 @@ function parseWorkflow(source, name) {
 function containsRawNpmAudit(command) {
   const normalized = command.replace(/\\\r?\n/g, ' ');
   const segments = normalized.split(/(?:&&|\|\||[;|&()\n])/);
+  const normalizeShellWord = candidate => {
+    let result = '';
+    let quote = null;
+    for (let index = 0; index < candidate.length; index += 1) {
+      const character = candidate[index];
+      if (quote === "'") {
+        if (character === "'") quote = null;
+        else result += character;
+        continue;
+      }
+      if (quote === '"') {
+        if (character === '"') {
+          quote = null;
+        } else if (
+          character === '\\' &&
+          index + 1 < candidate.length &&
+          '$`"\\'.includes(candidate[index + 1])
+        ) {
+          result += candidate[index + 1];
+          index += 1;
+        } else {
+          result += character;
+        }
+        continue;
+      }
+      if (character === "'" || character === '"') {
+        quote = character;
+      } else if (character === '\\' && index + 1 < candidate.length) {
+        result += candidate[index + 1];
+        index += 1;
+      } else {
+        result += character;
+      }
+    }
+    return result;
+  };
   for (const segment of segments) {
     const tokens = segment.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) ?? [];
     for (const [index, rawToken] of tokens.entries()) {
-      const token = rawToken.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, '$1$2');
+      const token = normalizeShellWord(rawToken);
       if (token !== 'npm' && !token.endsWith('/npm')) continue;
-      const argumentsAfterNpm = tokens
-        .slice(index + 1)
-        .map(candidate =>
-          candidate.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, '$1$2'),
-        );
-      if (argumentsAfterNpm.includes('audit')) return true;
+      const argumentsAfterNpm = tokens.slice(index + 1).map(normalizeShellWord);
+      if (
+        argumentsAfterNpm.some(argument =>
+          ['aud', 'audi', 'audit'].includes(argument),
+        )
+      ) {
+        return true;
+      }
     }
   }
   return false;
@@ -166,6 +212,8 @@ function assertNpmAuditPolicyWorkflow(source, name) {
   if (
     !isRecord(workflow) ||
     !isRecord(workflow.jobs) ||
+    JSON.stringify(Object.keys(workflow.jobs).sort()) !==
+      JSON.stringify(Object.keys(expectedLinuxJobDigests).sort()) ||
     !isRecord(shared) ||
     shared.name !== 'Shared' ||
     shared['runs-on'] !== 'ubuntu-24.04' ||
@@ -218,6 +266,15 @@ function assertNpmAuditPolicyWorkflow(source, name) {
   ) {
     throw new Error(
       `WORKFLOW_NPM_AUDIT_POLICY_INVALID:${name}:${jobId}:${index}:gate`,
+    );
+  }
+  for (const [pinnedJobId, digest] of Object.entries(expectedLinuxJobDigests)) {
+    assertGatedExecutionStructure(
+      source,
+      name,
+      pinnedJobId,
+      digest,
+      'WORKFLOW_NPM_AUDIT_POLICY_INVALID',
     );
   }
 }
@@ -610,6 +667,9 @@ function assertMacosSharedTestStep(source, name) {
     throw new Error(
       `WORKFLOW_MACOS_SHARED_TEST_MISSING:${name}:${iosJobId}:step`,
     );
+  }
+  if (JSON.stringify(Object.keys(workflow.jobs).sort()) !== '["ios"]') {
+    throw new Error(`${gateError}:${name}:job-inventory`);
   }
   const [{ step, stepIndex }] = matches;
   for (const property of [
@@ -1038,6 +1098,18 @@ const macosSharedTestGateRejectedExamples = [
     workflow.jobs.ios.defaults = { run: { 'working-directory': 'nested' } };
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
+    workflow.jobs['unreviewed-audit'] = {
+      name: 'Unreviewed audit job',
+      'runs-on': 'macos-26',
+      steps: [
+        {
+          name: 'Computed weaker audit',
+          run: 'command_name=npm; "$command_name" audit --audit-level=critical',
+        },
+      ],
+    };
+  }),
+  macosSharedTestWorkflowWithMutation(workflow => {
     workflow.jobs.ios.steps[0].if = false;
   }),
   macosSharedTestWorkflowWithMutation(workflow => {
@@ -1244,6 +1316,31 @@ function auditWorkflowWithMutation(mutate) {
   mutate(workflow);
   return JSON.stringify(workflow);
 }
+for (const [index, command] of [
+  'npm audit --audit-level=critical',
+  'npm --silent audit --audit-level=critical',
+  '/usr/local/bin/npm --prefix . audit --audit-level=critical',
+  'npm aud --audit-level=critical',
+  'npm audi --audit-level=critical',
+  'npm au\\dit --audit-level=critical',
+  'npm a"udit" --audit-level=critical',
+].entries()) {
+  const source = auditWorkflowWithMutation(workflow => {
+    workflow.jobs['contracts-privacy'].steps.push({
+      name: `Raw audit tokenizer case ${index}`,
+      run: command,
+    });
+  });
+  let rejectedAsRaw = false;
+  try {
+    assertNpmAuditPolicyWorkflow(source, `self-test-raw-audit-${index}`);
+  } catch (error) {
+    rejectedAsRaw = error instanceof Error && error.message.endsWith(':raw');
+  }
+  if (!rejectedAsRaw) {
+    throw new Error('WORKFLOW_NPM_AUDIT_TOKENIZER_SELF_TEST_FAILED');
+  }
+}
 const auditWorkflowRejectedExamples = [
   auditWorkflowWithMutation(workflow => {
     const step = workflow.jobs.shared.steps.find(
@@ -1278,6 +1375,45 @@ const auditWorkflowRejectedExamples = [
       name: 'Weaker audit through explicit npm path',
       run: '/usr/local/bin/npm --prefix . audit --audit-level=critical',
     });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const [, nonSharedJob] = Object.entries(workflow.jobs).find(
+      ([jobId, job]) => jobId !== 'shared' && Array.isArray(job.steps),
+    );
+    nonSharedJob.steps.push({
+      name: 'Weaker abbreviated audit',
+      run: 'npm aud --audit-level=critical',
+    });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const [, nonSharedJob] = Object.entries(workflow.jobs).find(
+      ([jobId, job]) => jobId !== 'shared' && Array.isArray(job.steps),
+    );
+    nonSharedJob.steps.push({
+      name: 'Weaker escaped audit',
+      run: 'npm au\\dit --audit-level=critical',
+    });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const [, nonSharedJob] = Object.entries(workflow.jobs).find(
+      ([jobId, job]) => jobId !== 'shared' && Array.isArray(job.steps),
+    );
+    nonSharedJob.steps.push({
+      name: 'Weaker quote-composed audit',
+      run: 'npm a"udit" --audit-level=critical',
+    });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    workflow.jobs['unreviewed-audit'] = {
+      name: 'Unreviewed audit job',
+      'runs-on': 'ubuntu-24.04',
+      steps: [
+        {
+          name: 'Computed weaker audit',
+          run: 'command_name=npm; "$command_name" audit --audit-level=critical',
+        },
+      ],
+    };
   }),
   auditWorkflowWithMutation(workflow => {
     workflow.jobs.shared.steps.push({

@@ -162,6 +162,33 @@ test('a clean audit passes without consulting the temporary exception', () => {
   });
 });
 
+test('a no-high report must be completely clean across every severity', () => {
+  for (const severity of ['info', 'low', 'moderate']) {
+    const report = makeReport();
+    report.vulnerabilities = {
+      'unexpected-package': {
+        name: 'unexpected-package',
+        severity,
+        isDirect: false,
+        via: [],
+        effects: [],
+        nodes: ['node_modules/unexpected-package'],
+        range: '*',
+        fixAvailable: false,
+      },
+    };
+    report.metadata.vulnerabilities = {
+      info: severity === 'info' ? 1 : 0,
+      low: severity === 'low' ? 1 : 0,
+      moderate: severity === 'moderate' ? 1 : 0,
+      high: 0,
+      critical: 0,
+      total: 1,
+    };
+    expectRule(() => verifyAuditReport(report, {}), 'AUDIT_HIGH_GRAPH_DRIFT');
+  }
+});
+
 test('unknown high and every critical finding fail closed', () => {
   const unknown = makeReport();
   unknown.vulnerabilities['unknown-package'] = {
