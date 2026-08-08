@@ -5,14 +5,16 @@
   "packageManager": "npm@10.9.2",
   "scripts": {
     "android": "expo run:android",
+    "audit:ci": "npm audit --json | node scripts/verify-npm-audit-policy.mjs",
     "doctor": "expo-doctor",
     "ios": "PATH=\"$PWD/scripts/cocoapods-bin:$PATH\" BUNDLE_GEMFILE=\"$PWD/Gemfile\" RUBYOPT=-rlogger expo run:ios",
     "lint": "eslint .",
     "test:fixtures": "node scripts/verify-fixtures.mjs",
     "test:persistence-migrations": "node scripts/verify-persistence-migrations.mjs",
     "test:persistence-production": "node scripts/verify-production-persistence.mjs",
-    "test:v01-verification-policy": "node scripts/verify-v01-virtual-verification-policy.mjs",
-    "test:workflows": "node scripts/verify-workflow-security.mjs && npm run test:v01-verification-policy",
+    "test:npm-audit-policy": "node --test scripts/verify-npm-audit-policy.test.mjs",
+    "test:v01-verification-policy": "node --test scripts/verify-v01-virtual-verification-policy.test.mjs && node scripts/verify-v01-virtual-verification-policy.mjs",
+    "test:workflows": "node scripts/verify-workflow-security.mjs && npm run test:npm-audit-policy && npm run test:v01-verification-policy",
     "start": "expo start --dev-client",
     "test": "jest --runInBand",
     "typecheck": "tsc --noEmit",
@@ -20,7 +22,7 @@
   },
   "dependencies": {
     "@react-native/new-app-screen": "0.86.2",
-    "expo": "57.0.10",
+    "expo": "57.0.11",
     "expo-dev-client": "57.0.10",
     "expo-sqlite": "~57.0.1",
     "expo-status-bar": "57.0.1",
@@ -32,9 +34,10 @@
     "@babel/core": "7.29.7",
     "@babel/preset-env": "7.28.6",
     "@babel/runtime": "7.28.6",
-    "@react-native-community/cli": "20.1.0",
-    "@react-native-community/cli-platform-android": "20.1.0",
-    "@react-native-community/cli-platform-ios": "20.1.0",
+    "@expo/cli": "57.0.13",
+    "@react-native-community/cli": "20.2.0",
+    "@react-native-community/cli-platform-android": "20.2.0",
+    "@react-native-community/cli-platform-ios": "20.2.0",
     "@react-native/babel-preset": "0.86.2",
     "@react-native/eslint-config": "0.86.2",
     "@react-native/jest-preset": "0.86.2",
@@ -52,6 +55,14 @@
     "react-test-renderer": "19.2.3",
     "typescript": "6.0.3",
     "yaml": "2.9.0"
+  },
+  "optionalDependencies": {
+    "@expo/metro-config": "57.0.7"
+  },
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    }
   },
   "engines": {
     "node": "^22.13.0"

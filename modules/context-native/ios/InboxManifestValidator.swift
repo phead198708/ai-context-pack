@@ -20,6 +20,10 @@ enum InboxManifestValidationError: Error, Equatable {
 }
 
 enum InboxManifestValidator {
+  static let maximumItemCount = 128
+  static let maximumMediaTypeLength = 127
+  private static let maximumReceiptBytes = 262_144
+
   private enum ExactSchemaVersionResult {
     case supported
     case unsupported
@@ -43,6 +47,7 @@ enum InboxManifestValidator {
     "IMPORT_PROVIDER_PERMISSION_EXPIRED",
     "IMPORT_TYPE_UNSUPPORTED",
     "IMPORT_COPY_FAILED",
+    "IMPORT_SIZE_LIMIT_EXCEEDED",
     "IMPORT_PARTIAL_FAILURE",
     "PIPELINE_STAGE_FAILED",
     "PROCESSOR_OUTPUT_INVALID",
@@ -103,6 +108,57 @@ enum InboxManifestValidator {
     return manifest
   }
 
+  /** Validates a scanner-hidden acknowledgement tombstone against its original ID. */
+  static func readOwnedDirectory(
+    _ ingestion: URL,
+    ingestionId: String
+  ) throws -> [String: Any] {
+    guard canonicalUUID(ingestionId),
+          let values = try? ingestion.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+          ),
+          values.isDirectory == true,
+          values.isSymbolicLink != true else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    let children = try FileManager.default.contentsOfDirectory(
+      at: ingestion,
+      includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+      options: [.skipsHiddenFiles]
+    )
+    guard try children.allSatisfy({ child in
+      let childValues = try child.resourceValues(
+        forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+      )
+      return childValues.isDirectory != true && childValues.isSymbolicLink != true
+    }) else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    let manifestURL = ingestion.appendingPathComponent("manifest.json")
+    let data = try Data(contentsOf: manifestURL)
+    return try decodeAndValidate(data, ingestion: ingestion, id: ingestionId)
+  }
+
+  /** Reads a compact durable ACK receipt without requiring deleted Inbox artifacts. */
+  static func readAcknowledgementReceipt(
+    _ receipt: URL,
+    ingestionId: String
+  ) throws -> [String: Any] {
+    guard canonicalUUID(ingestionId),
+          let values = try? receipt.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+          ),
+          values.isRegularFile == true,
+          values.isSymbolicLink != true,
+          let size = values.fileSize,
+          size > 0,
+          size <= maximumReceiptBytes else {
+      throw InboxManifestValidationError.invalidManifest
+    }
+    let data = try Data(contentsOf: receipt, options: [.mappedIfSafe])
+    return try decodeAndValidate(data, ingestion: nil, id: ingestionId)
+  }
+
   private static func readIngestion(
     root: URL,
     ingestion: URL,
@@ -127,6 +183,14 @@ enum InboxManifestValidator {
     let manifestURL = ingestion.appendingPathComponent("manifest.json")
     guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
     let data = try Data(contentsOf: manifestURL)
+    return try decodeAndValidate(data, ingestion: ingestion, id: id)
+  }
+
+  private static func decodeAndValidate(
+    _ data: Data,
+    ingestion: URL?,
+    id: String
+  ) throws -> [String: Any] {
     let decoded: Any
     do { decoded = try JSONSerialization.jsonObject(with: data) }
     catch { throw InboxManifestValidationError.invalidManifest }
@@ -175,7 +239,7 @@ enum InboxManifestValidator {
   private static func validate(
     _ manifest: [String: Any],
     rawData: Data,
-    ingestion: URL,
+    ingestion: URL?,
     id: String
   ) throws {
     guard let schemaVersion = manifest["schemaVersion"] as? NSNumber,
@@ -199,11 +263,12 @@ enum InboxManifestValidator {
           let status = manifest["status"] as? String,
           ["complete", "partial", "failed"].contains(status),
           let items = manifest["items"] as? [[String: Any]],
-          !items.isEmpty else {
+          !items.isEmpty,
+          items.count <= maximumItemCount else {
       throw InboxManifestValidationError.invalidManifest
     }
 
-    let ownedDirectory = ingestion.resolvingSymlinksInPath().standardizedFileURL
+    let ownedDirectory = ingestion?.resolvingSymlinksInPath().standardizedFileURL
     var itemIds = Set<String>()
     var copied = 0
     var failed = 0
@@ -213,6 +278,7 @@ enum InboxManifestValidator {
             itemIds.insert(itemId).inserted,
             nonNegativeInteger(item["order"]) == Int64(order),
             let mediaType = item["mediaType"] as? String,
+            mediaType.utf8.count <= maximumMediaTypeLength,
             mediaType.range(of: "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$", options: .regularExpression) != nil,
             let itemStatus = item["status"] as? String else {
         throw InboxManifestValidationError.invalidManifest
@@ -230,24 +296,26 @@ enum InboxManifestValidator {
               item["providerUri"] == nil else {
           throw InboxManifestValidationError.invalidManifest
         }
-        let candidate = ingestion.appendingPathComponent(relativePath).standardizedFileURL
-        guard FileManager.default.fileExists(atPath: candidate.path) else {
-          throw InboxManifestValidationError.artifactIntegrityFailed
-        }
-        let file = candidate.resolvingSymlinksInPath().standardizedFileURL
-        guard file.deletingLastPathComponent() == ownedDirectory else {
-          throw InboxManifestValidationError.invalidManifest
-        }
-        guard let actualBytes = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              Int64(actualBytes) == byteCount else {
-          throw InboxManifestValidationError.artifactIntegrityFailed
-        }
-        if let expectedDigest = item["sha256"] as? String {
-          let actualDigest: String
-          do { actualDigest = try sha256(file) }
-          catch { throw InboxManifestValidationError.artifactIntegrityFailed }
-          guard actualDigest == expectedDigest else {
+        if let ingestion, let ownedDirectory {
+          let candidate = ingestion.appendingPathComponent(relativePath).standardizedFileURL
+          guard FileManager.default.fileExists(atPath: candidate.path) else {
             throw InboxManifestValidationError.artifactIntegrityFailed
+          }
+          let file = candidate.resolvingSymlinksInPath().standardizedFileURL
+          guard file.deletingLastPathComponent() == ownedDirectory else {
+            throw InboxManifestValidationError.invalidManifest
+          }
+          guard let actualBytes = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                Int64(actualBytes) == byteCount else {
+            throw InboxManifestValidationError.artifactIntegrityFailed
+          }
+          if let expectedDigest = item["sha256"] as? String {
+            let actualDigest: String
+            do { actualDigest = try sha256(file) }
+            catch { throw InboxManifestValidationError.artifactIntegrityFailed }
+            guard actualDigest == expectedDigest else {
+              throw InboxManifestValidationError.artifactIntegrityFailed
+            }
           }
         }
         copied += 1
@@ -424,11 +492,21 @@ enum InboxManifestValidator {
   }
 
   private static func sha256(_ file: URL) throws -> String {
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
+    guard let input = InputStream(url: file) else {
+      throw InboxManifestValidationError.artifactIntegrityFailed
+    }
+    let bufferSize = 64 * 1024
+    var buffer = [UInt8](repeating: 0, count: bufferSize)
     var hasher = SHA256()
-    while let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty {
-      hasher.update(data: data)
+    input.open()
+    defer { input.close() }
+    while true {
+      let count = input.read(&buffer, maxLength: bufferSize)
+      if count < 0 {
+        throw InboxManifestValidationError.artifactIntegrityFailed
+      }
+      guard count > 0 else { break }
+      hasher.update(data: Data(bytes: buffer, count: count))
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }

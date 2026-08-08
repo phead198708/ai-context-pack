@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aicontextpack.local/schemas/governance/v1/v01-verification-policy-v1.schema.json",
+  "title": "V01VerificationPolicyV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "release",
+    "verificationEnvironment",
+    "physicalDeviceEvidenceRequired",
+    "physicalDeviceGateLabel",
+    "githubInventory",
+    "evidence"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "release": { "const": "v0.1" },
+    "verificationEnvironment": { "const": "virtual-only" },
+    "physicalDeviceEvidenceRequired": { "const": false },
+    "physicalDeviceGateLabel": { "const": "test:device-required" },
+    "githubInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "requiredIssueNumbers",
+        "requireNonEmptyTitle",
+        "requireNonEmptyBody",
+        "requireValidLabels",
+        "forbiddenLabels"
+      ],
+      "properties": {
+        "repository": { "const": "phead198708/ai-context-pack" },
+        "requiredIssueNumbers": {
+          "const": [
+            2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            21, 22, 23, 24
+          ]
+        },
+        "requireNonEmptyTitle": { "const": true },
+        "requireNonEmptyBody": { "const": true },
+        "requireValidLabels": { "const": true },
+        "forbiddenLabels": { "const": ["test:device-required"] }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ios", "android", "physicalHardwareClaimsAllowed"],
+      "properties": {
+        "ios": { "const": "simulator" },
+        "android": { "const": "emulator" },
+        "physicalHardwareClaimsAllowed": { "const": false }
+      }
+    }
+  }
+}

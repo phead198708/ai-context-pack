@@ -14,12 +14,14 @@ let package = Package(
       path: ".",
       exclude: ["ContextNative.podspec", "ContextNativeModule.swift", "Tests"],
       sources: [
+        "InboxAcknowledgementStore.swift",
         "InboxArtifactHandoff.swift",
         "InboxManifestValidator.swift",
         "InboxRecoverySupport.swift",
         "InboxWriterOwnership.swift",
         "OwnedArtifactStore.swift",
         "PrivacySafeLogger.swift",
+        "ShareIngestion.swift",
       ]
     ),
     .testTarget(

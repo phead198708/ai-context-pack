@@ -90,6 +90,8 @@ The owner decision recorded in [Epic #2](https://github.com/phead198708/ai-conte
 
 This policy changes only the verification environment. It does not waive product behavior, platform parity, privacy/integrity, clean/release builds, store readiness, beta metrics, P0/P1, independent review, or final user acceptance.
 
+The canonical structured manifest at `governance/v01-verification-policy.json` and validated GitHub labels define whether physical-device evidence is a release gate. Free-form issue prose is descriptive, not the machine-executable source of verification policy. Epic #2 and Issues #3–#24 must still have non-empty title/body metadata and valid labels, but policy automation must not infer release gates from open-ended natural-language parsing. Conflicting prose requires human correction and review.
+
 ## Persistent execution model
 
 Work toward this Master Goal continuously across issues and PRs. A PR review pause does not clear or redefine the Goal.

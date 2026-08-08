@@ -6,7 +6,7 @@ PODS:
   - EXJSONUtils (57.0.1)
   - EXManifests (57.0.1):
     - ExpoModulesCore
-  - Expo (57.0.10):
+  - Expo (57.0.11):
     - ExpoModulesCore
     - ExpoModulesJSI
     - hermes-engine
@@ -180,11 +180,11 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
-  - ExpoAsset (57.0.8):
+  - ExpoAsset (57.0.9):
     - ExpoModulesCore
   - ExpoDomWebView (57.0.1):
     - ExpoModulesCore
-  - ExpoFileSystem (57.0.1):
+  - ExpoFileSystem (57.0.2):
     - ExpoModulesCore
   - ExpoFont (57.0.1):
     - ExpoModulesCore
@@ -192,7 +192,7 @@ PODS:
     - ExpoModulesCore
   - ExpoLogBox (57.0.2):
     - React-Core
-  - ExpoModulesCore (57.0.9):
+  - ExpoModulesCore (57.0.10):
     - ExpoModulesJSI
     - hermes-engine
     - RCTRequired
@@ -219,7 +219,7 @@ PODS:
   - ExpoModulesJSI (57.0.4):
     - React-Core
     - ReactCommon
-  - ExpoModulesWorklets (57.0.9):
+  - ExpoModulesWorklets (57.0.10):
     - ExpoModulesCore
     - ExpoModulesJSI
   - ExpoSQLite (57.0.1):
@@ -2123,7 +2123,7 @@ PODS:
 
 DEPENDENCIES:
   - ContextNative (from `../modules/context-native/ios`)
-  - EXConstants (from `../node_modules/expo/node_modules/expo-constants/ios`)
+  - EXConstants (from `../node_modules/expo-constants/ios`)
   - EXJSONUtils (from `../node_modules/expo-json-utils/ios`)
   - EXManifests (from `../node_modules/expo-manifests/ios`)
   - Expo (from `../node_modules/expo`)
@@ -2132,11 +2132,11 @@ DEPENDENCIES:
   - expo-dev-menu (from `../node_modules/expo-dev-menu`)
   - expo-dev-menu-interface (from `../node_modules/expo-dev-menu-interface/ios`)
   - ExpoAsset (from `../node_modules/expo/node_modules/expo-asset/ios`)
-  - "ExpoDomWebView (from `../node_modules/expo/node_modules/@expo/dom-webview/ios`)"
-  - ExpoFileSystem (from `../node_modules/expo-file-system/ios/ExpoFileSystem.podspec`)
-  - ExpoFont (from `../node_modules/expo/node_modules/expo-font/ios/ExpoFont.podspec`)
+  - "ExpoDomWebView (from `../node_modules/@expo/dom-webview/ios`)"
+  - ExpoFileSystem (from `../node_modules/expo/node_modules/expo-file-system/ios/ExpoFileSystem.podspec`)
+  - ExpoFont (from `../node_modules/expo-font/ios/ExpoFont.podspec`)
   - ExpoKeepAwake (from `../node_modules/expo/node_modules/expo-keep-awake/ios`)
-  - "ExpoLogBox (from `../node_modules/expo/node_modules/@expo/log-box`)"
+  - "ExpoLogBox (from `../node_modules/@expo/log-box`)"
   - ExpoModulesCore (from `../node_modules/expo-modules-core/ExpoModulesCore.podspec`)
   - ExpoModulesJSI (from `../node_modules/expo-modules-jsi/apple`)
   - ExpoModulesWorklets (from `../node_modules/expo-modules-core/ExpoModulesWorklets.podspec`)
@@ -2224,7 +2224,7 @@ EXTERNAL SOURCES:
   ContextNative:
     :path: "../modules/context-native/ios"
   EXConstants:
-    :path: "../node_modules/expo/node_modules/expo-constants/ios"
+    :path: "../node_modules/expo-constants/ios"
   EXJSONUtils:
     :path: "../node_modules/expo-json-utils/ios"
   EXManifests:
@@ -2242,15 +2242,15 @@ EXTERNAL SOURCES:
   ExpoAsset:
     :path: "../node_modules/expo/node_modules/expo-asset/ios"
   ExpoDomWebView:
-    :path: "../node_modules/expo/node_modules/@expo/dom-webview/ios"
+    :path: "../node_modules/@expo/dom-webview/ios"
   ExpoFileSystem:
-    :podspec: "../node_modules/expo-file-system/ios/ExpoFileSystem.podspec"
+    :podspec: "../node_modules/expo/node_modules/expo-file-system/ios/ExpoFileSystem.podspec"
   ExpoFont:
-    :podspec: "../node_modules/expo/node_modules/expo-font/ios/ExpoFont.podspec"
+    :podspec: "../node_modules/expo-font/ios/ExpoFont.podspec"
   ExpoKeepAwake:
     :path: "../node_modules/expo/node_modules/expo-keep-awake/ios"
   ExpoLogBox:
-    :path: "../node_modules/expo/node_modules/@expo/log-box"
+    :path: "../node_modules/@expo/log-box"
   ExpoModulesCore:
     :podspec: "../node_modules/expo-modules-core/ExpoModulesCore.podspec"
   ExpoModulesJSI:
@@ -2420,20 +2420,20 @@ SPEC CHECKSUMS:
   EXConstants: 4de2a921b65368dba903006a2106252512d6843e
   EXJSONUtils: 7a1683cfa2cbe6d11fca97097d51a496755b0287
   EXManifests: b9129302cc7af43d45c2f473fadb88e77f837273
-  Expo: 97acda04c5ed8488af8028d364d0af9f633b9689
+  Expo: 6bba498588721671482201071fb5906a67f104b0
   expo-dev-client: 239f21be7f2e8ab111edd0ba5a20e9ced929c5cd
   expo-dev-launcher: 1a257a8f5ce4b46f640ab7875e9e4675d7f0af27
   expo-dev-menu: 18b788b0364f56f8ffe1896ee56aba068cdc905f
   expo-dev-menu-interface: 7a59e803916fbfd1b96c75ff91ea8dddac7e722f
-  ExpoAsset: 30e087f60834271bf932173005914085074ce182
+  ExpoAsset: 21e4a9006373f2ede718ec1f440bbe40f95f6376
   ExpoDomWebView: fa9c72fe29dd4649197a7ecb07ddd870d55c4eda
-  ExpoFileSystem: 3030d5166d05eb90b8f40d433f6007797310861f
+  ExpoFileSystem: 5f22d602c86c37460df3b954cf1ceb00a5e5ca75
   ExpoFont: 17668fb7b4e06edf35e015183eb7bc09d83be637
   ExpoKeepAwake: 20a87dafdd9d84d68673e8eaf1a1c7eed8f92659
   ExpoLogBox: 40f17ecef6fcb296b5f5ee4d6ec85cc82ce6ba0f
-  ExpoModulesCore: f6b86657d1ed7c738d9ab2432d125637a3e49690
+  ExpoModulesCore: 122af65e4fa6aaf6e669d10f051cd0203d054233
   ExpoModulesJSI: 6cb6d299ace493e7dd20ba94c99e8c4799b07afd
-  ExpoModulesWorklets: 9ea512d97f44f89ef40f647f1f332b4643cca62b
+  ExpoModulesWorklets: b9ae1e07dbb9a2de570c18bc117f293e0310ed5c
   ExpoSQLite: b4b265ea48e563c08cf40931587f4b962b4a8941
   EXUpdatesInterface: 38eacf4b5c0d686727ccbfebaf4f76eab3766a63
   FBLazyVector: 3c3be9a019176b5699455f7f66c5444b78a411c6

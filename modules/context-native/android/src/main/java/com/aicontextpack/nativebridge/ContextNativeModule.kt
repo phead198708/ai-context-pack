@@ -236,6 +236,7 @@ class ContextNativeModule : Module() {
 }
 
 internal object InboxManifestScanner {
+  private const val maximumReceiptBytes = 262_144L
   private enum class ExactSchemaVersionResult {
     SUPPORTED,
     UNSUPPORTED,
@@ -266,6 +267,7 @@ internal object InboxManifestScanner {
     "IMPORT_PROVIDER_PERMISSION_EXPIRED",
     "IMPORT_TYPE_UNSUPPORTED",
     "IMPORT_COPY_FAILED",
+    "IMPORT_SIZE_LIMIT_EXCEEDED",
     "IMPORT_PARTIAL_FAILURE",
     "PIPELINE_STAGE_FAILED",
     "PROCESSOR_OUTPUT_INVALID",
@@ -316,7 +318,12 @@ internal object InboxManifestScanner {
       try {
         val rawManifest = file.readText()
         val manifest = strictJsonObject(rawManifest)
-        validateOwnedManifest(manifest, rawManifest, requireNotNull(file.parentFile))
+        validateManifest(
+          manifest,
+          rawManifest,
+          ingestion.name,
+          requireNotNull(file.parentFile),
+        )
         manifests += jsonObjectToMap(manifest)
       } catch (error: InboxManifestValidationException) {
         quarantineMalformed(inbox, ingestion)
@@ -341,22 +348,68 @@ internal object InboxManifestScanner {
     }
     if (!inbox.isDirectory || !inbox.canRead()) throw NativeException("INBOX_SCAN_FAILED")
     val ingestion = File(inbox, ingestionId)
-    val manifestFile = try {
+    try {
       check(ingestion.isDirectory && ingestion.parentFile?.canonicalFile == inbox.canonicalFile)
       check(ingestion.canonicalPath.startsWith(inbox.canonicalPath + File.separator))
       val children = ingestion.listFiles() ?: error("INBOX_SCAN_FAILED")
       check(children.none { it.isDirectory })
-      File(ingestion, "manifest.json").also { check(it.isFile) }
+      check(File(ingestion, "manifest.json").isFile)
     } catch (_: Exception) {
       throw NativeException("INBOX_SCAN_FAILED")
     }
+    return readOwnedDirectory(ingestion, ingestionId)
+  }
+
+  /** Validates a scanner-hidden acknowledgement tombstone against its original ID. */
+  fun readOwnedDirectory(ingestion: File, ingestionId: String): Map<String, Any?> {
+    if (!ingestionIdPattern.matches(ingestionId) ||
+      UUID.fromString(ingestionId).toString() != ingestionId
+    ) {
+      throw NativeException("SCHEMA_INVALID")
+    }
     return try {
+      check(ingestion.isDirectory && !isSymbolicLink(ingestion))
+      val children = ingestion.listFiles() ?: error("INBOX_SCAN_FAILED")
+      check(children.none { it.isDirectory || isSymbolicLink(it) })
+      val manifestFile = File(ingestion, "manifest.json").also { check(it.isFile) }
       val rawManifest = manifestFile.readText()
       val manifest = strictJsonObject(rawManifest)
-      validateOwnedManifest(manifest, rawManifest, ingestion)
+      validateManifest(manifest, rawManifest, ingestionId, ingestion)
       jsonObjectToMap(manifest)
     } catch (error: InboxManifestValidationException) {
       throw NativeException(error.stableCode)
+    } catch (error: NativeException) {
+      throw error
+    } catch (_: IOException) {
+      throw NativeException("INBOX_SCAN_FAILED")
+    } catch (_: SecurityException) {
+      throw NativeException("INBOX_SCAN_FAILED")
+    } catch (_: Exception) {
+      throw NativeException("SCHEMA_INVALID")
+    }
+  }
+
+  /** Reads a compact durable ACK receipt without requiring deleted Inbox artifacts. */
+  fun readAcknowledgementReceipt(receipt: File, ingestionId: String): Map<String, Any?> {
+    if (!ingestionIdPattern.matches(ingestionId) ||
+      UUID.fromString(ingestionId).toString() != ingestionId
+    ) {
+      throw NativeException("SCHEMA_INVALID")
+    }
+    return try {
+      check(
+        receipt.isFile &&
+          receipt.length() in 1..maximumReceiptBytes &&
+          !isSymbolicLink(receipt),
+      )
+      val rawManifest = receipt.readText()
+      val manifest = strictJsonObject(rawManifest)
+      validateManifest(manifest, rawManifest, ingestionId, ownedDirectory = null)
+      jsonObjectToMap(manifest)
+    } catch (error: InboxManifestValidationException) {
+      throw NativeException(error.stableCode)
+    } catch (error: NativeException) {
+      throw error
     } catch (_: IOException) {
       throw NativeException("INBOX_SCAN_FAILED")
     } catch (_: SecurityException) {
@@ -393,7 +446,12 @@ internal object InboxManifestScanner {
     try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
   }
 
-  private fun validateOwnedManifest(manifest: JSONObject, rawManifest: String, ingestion: File) {
+  private fun validateManifest(
+    manifest: JSONObject,
+    rawManifest: String,
+    expectedIngestionId: String,
+    ownedDirectory: File?,
+  ) {
     val schemaVersion = manifest.opt("schemaVersion")
     check(schemaVersion is Number)
     when (exactSchemaVersion(rawManifest)) {
@@ -406,14 +464,14 @@ internal object InboxManifestScanner {
     check(manifest.keys().asSequence().toSet() == manifestKeys)
     val ingestionId = manifest.getString("ingestionId")
     check(ingestionIdPattern.matches(ingestionId) && UUID.fromString(ingestionId).toString() == ingestionId)
-    check(ingestionId == ingestion.name)
+    check(ingestionId == expectedIngestionId)
     check(isIsoDateTime(manifest.getString("createdAt")))
     check(manifest.getString("source") in setOf("ios-share-extension", "android-share-intent"))
     val manifestStatus = manifest.getString("status")
     check(manifestStatus in setOf("complete", "partial", "failed"))
-    val ownedDirectory = ingestion.canonicalFile
+    val canonicalOwnedDirectory = ownedDirectory?.canonicalFile
     val items = manifest.getJSONArray("items")
-    check(items.length() > 0)
+    check(items.length() in 1..ShareIngestionWriter.maximumReportedItemCount)
     val ids = mutableSetOf<String>()
     var copied = 0
     var failed = 0
@@ -422,7 +480,11 @@ internal object InboxManifestScanner {
       val itemId = item.getString("id")
       check(ingestionIdPattern.matches(itemId) && UUID.fromString(itemId).toString() == itemId)
       check(ids.add(itemId) && nonNegativeInteger(item.opt("order")) == index.toLong())
-      check(mediaTypePattern.matches(item.getString("mediaType")))
+      val mediaType = item.getString("mediaType")
+      check(
+        mediaType.length <= ShareIngestionWriter.maximumMediaTypeLength &&
+          mediaTypePattern.matches(mediaType),
+      )
       when (item.getString("status")) {
         "copied" -> {
           val keys = item.keys().asSequence().toSet()
@@ -432,14 +494,16 @@ internal object InboxManifestScanner {
           check(relativePath == "$itemId.bin" && '/' !in relativePath && '\\' !in relativePath)
           check(!item.has("localUri") && !item.has("providerUri"))
           if (item.has("sha256")) check(sha256Pattern.matches(item.getString("sha256")))
-          val copiedFile = File(ownedDirectory, relativePath).canonicalFile
-          check(copiedFile.parentFile == ownedDirectory)
           val byteCount = requireNotNull(nonNegativeInteger(item.opt("byteCount")))
-          if (!copiedFile.isFile || copiedFile.length() != byteCount) {
-            throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
-          }
-          if (item.has("sha256") && sha256(copiedFile) != item.getString("sha256")) {
-            throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+          if (canonicalOwnedDirectory != null) {
+            val copiedFile = File(canonicalOwnedDirectory, relativePath).canonicalFile
+            check(copiedFile.parentFile == canonicalOwnedDirectory)
+            if (!copiedFile.isFile || copiedFile.length() != byteCount) {
+              throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+            }
+            if (item.has("sha256") && sha256(copiedFile) != item.getString("sha256")) {
+              throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+            }
           }
           copied += 1
         }

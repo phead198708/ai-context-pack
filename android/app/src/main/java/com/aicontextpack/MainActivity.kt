@@ -37,15 +37,15 @@ class MainActivity : ReactActivity() {
     val transactionStore = ShareIntentTransactionStore(applicationContext.filesDir)
     val coordinator = lifecycleCoordinator(transactionStore)
     coordinator.reconcile(activeWorkerIds.toSet())
-    if (intent?.action != Intent.ACTION_SEND) return
+    if (intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE) return
     setIntent(Intent(this, MainActivity::class.java).setAction(Intent.ACTION_MAIN))
-    if (restored || intent.type?.startsWith("image/") != true) return
+    if (restored) return
 
     val id = UUID.randomUUID().toString()
     val transaction = coordinator.acceptNew(id) ?: return
     activeWorkerIds += transaction.id
     try {
-      ShareInboxImporter.importIfSupportedAsync(
+      val accepted = ShareInboxImporter.importIfSupportedAsync(
         applicationContext,
         intent,
         transaction.id,
@@ -57,9 +57,19 @@ class MainActivity : ReactActivity() {
           activeWorkerIds -= transaction.id
         }
       }
+      if (!accepted) {
+        activeWorkerIds -= transaction.id
+        coordinator.completeWorker(
+          transaction.id,
+          ShareInboxImporter.Result(published = false, code = "SHARE_IMPORT_FAILED"),
+        )
+      }
     } catch (_: Exception) {
       activeWorkerIds -= transaction.id
-      coordinator.completeWorker(transaction.id, ShareInboxImporter.Result.FAILED)
+      coordinator.completeWorker(
+        transaction.id,
+        ShareInboxImporter.Result(published = false, code = "SHARE_IMPORT_FAILED"),
+      )
     }
   }
 

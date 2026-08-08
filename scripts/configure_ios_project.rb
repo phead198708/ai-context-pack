@@ -24,6 +24,23 @@ end
 extension_group = project.main_group.groups.find { |group| group.display_name == 'ShareExtension' }
 extension_group.path = 'ShareExtension' if extension_group
 
+shared_extension_sources = %w[
+  InboxWriterOwnership.swift
+  InboxManifestValidator.swift
+  ShareIngestion.swift
+]
+shared_extension_sources.each do |name|
+  path = "../../modules/context-native/ios/#{name}"
+  reference = extension_group.files.find { |file| file.path == path }
+  unless reference
+    reference = extension_group.new_file(path)
+    reference.name = name
+  end
+  unless extension_target.source_build_phase.files_references.include?(reference)
+    extension_target.add_file_references([reference])
+  end
+end
+
 main_target.build_configurations.each do |config|
   config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = 'com.example.aicontextpack'
   config.build_settings['CODE_SIGN_ENTITLEMENTS'] = 'AIContextPack/AIContextPack.entitlements'

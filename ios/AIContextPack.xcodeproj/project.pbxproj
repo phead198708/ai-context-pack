@@ -14,6 +14,9 @@
 		5058956ADA421705C3D235A4 /* libPods-AIContextPack.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 52DCECF11544C40566A92A15 /* libPods-AIContextPack.a */; };
 		71D600B6B0AF6284D2ECB57F /* MainInterface.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 59A8145554468FA331D44B7F /* MainInterface.storyboard */; };
 		A1C0DE010000000000000001 /* InboxWriterOwnership.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE020000000000000002 /* InboxWriterOwnership.swift */; };
+		A1C0DE030000000000000003 /* InboxManifestValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE040000000000000004 /* InboxManifestValidator.swift */; };
+		A1C0DE050000000000000005 /* InboxAcknowledgementStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE060000000000000006 /* InboxAcknowledgementStore.swift */; };
+		A99B9DDCD94AA80D8F6826AA /* ShareIngestion.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6B357DDF7FFC9154F3D833C /* ShareIngestion.swift */; };
 		AF149D2B37530138B77EB6D3 /* ShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 7388B094E59CA04A056B8170 /* ShareExtension.appex */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 		D66BA6BB611204C9A86D115D /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7CBF5D6B4C5CB5A3E79A3CC /* ShareViewController.swift */; };
@@ -57,9 +60,12 @@
 		7388B094E59CA04A056B8170 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A3AAA76E55A99D0E4966BC6 /* Pods-AIContextPack.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-AIContextPack.release.xcconfig"; path = "Target Support Files/Pods-AIContextPack/Pods-AIContextPack.release.xcconfig"; sourceTree = "<group>"; };
 		A1C0DE020000000000000002 /* InboxWriterOwnership.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = InboxWriterOwnership.swift; path = "../../modules/context-native/ios/InboxWriterOwnership.swift"; sourceTree = "<group>"; };
+		A1C0DE040000000000000004 /* InboxManifestValidator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = InboxManifestValidator.swift; path = "../../modules/context-native/ios/InboxManifestValidator.swift"; sourceTree = "<group>"; };
+		A1C0DE060000000000000006 /* InboxAcknowledgementStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = InboxAcknowledgementStore.swift; path = "../../modules/context-native/ios/InboxAcknowledgementStore.swift"; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = AIContextPack/SplashScreen.storyboard; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
 		D9404E3DA07F9E856D9B12EE /* Pods-AIContextPack.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-AIContextPack.debug.xcconfig"; path = "Target Support Files/Pods-AIContextPack/Pods-AIContextPack.debug.xcconfig"; sourceTree = "<group>"; };
+		E6B357DDF7FFC9154F3D833C /* ShareIngestion.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ShareIngestion.swift; path = "../../modules/context-native/ios/ShareIngestion.swift"; sourceTree = "<group>"; };
 		E7CBF5D6B4C5CB5A3E79A3CC /* ShareViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = AIContextPack/AppDelegate.swift; sourceTree = "<group>"; };
@@ -123,7 +129,10 @@
 			children = (
 				E7CBF5D6B4C5CB5A3E79A3CC /* ShareViewController.swift */,
 				A1C0DE020000000000000002 /* InboxWriterOwnership.swift */,
+				A1C0DE040000000000000004 /* InboxManifestValidator.swift */,
+				A1C0DE060000000000000006 /* InboxAcknowledgementStore.swift */,
 				59A8145554468FA331D44B7F /* MainInterface.storyboard */,
+				E6B357DDF7FFC9154F3D833C /* ShareIngestion.swift */,
 			);
 			name = ShareExtension;
 			path = ShareExtension;
@@ -440,6 +449,9 @@
 			files = (
 				D66BA6BB611204C9A86D115D /* ShareViewController.swift in Sources */,
 				A1C0DE010000000000000001 /* InboxWriterOwnership.swift in Sources */,
+				A1C0DE030000000000000003 /* InboxManifestValidator.swift in Sources */,
+				A1C0DE050000000000000005 /* InboxAcknowledgementStore.swift in Sources */,
+				A99B9DDCD94AA80D8F6826AA /* ShareIngestion.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

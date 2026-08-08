@@ -57,7 +57,7 @@ jobs:
       - name: Run Expo Doctor
         run: npm run doctor
       - name: Audit high-severity npm findings
-        run: npm audit --audit-level=high
+        run: npm run audit:ci
       - name: Upload synthetic shared reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -100,6 +100,7 @@ jobs:
           __tests__/stateMachines.test.ts
           __tests__/fixtureCorpus.test.ts
           __tests__/safeLogger.test.ts
+          __tests__/systemShareEntryPoints.test.ts
 
   android:
     name: Android

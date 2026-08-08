@@ -214,6 +214,54 @@ class InboxArtifactHandoffInstrumentedTest {
     assertTrue(tombstones.listFiles()?.isEmpty() == true)
   }
 
+  @Test fun acknowledgementCrashAfterReceiptCannotReopenAnAlreadyConsumedId() {
+    val ingestionId = uuid()
+    val itemId = uuid()
+    writeManifest(ingestionId, listOf(Item(itemId, "image/png", byteArrayOf(1, 2, 3))))
+    var interrupted = false
+
+    assertThrows(IllegalStateException::class.java) {
+      InboxArtifactHandoff.acknowledge(
+        root,
+        ingestionId,
+        operationHook = { point ->
+          if (!interrupted &&
+            point == InboxArtifactHandoff.AcknowledgementPoint.AFTER_RECEIPT_PUBLISH
+          ) {
+            interrupted = true
+            throw IllegalStateException("SIMULATED_INTERRUPTION")
+          }
+        },
+      )
+    }
+
+    assertTrue(interrupted)
+    assertTrue(File(root, "Inbox/$ingestionId").isDirectory)
+    assertTrue(File(root, "InboxAcknowledgements/$ingestionId.json").isFile)
+    val providerOpened = java.util.concurrent.atomic.AtomicBoolean(false)
+    val replay = ShareIngestionWriter.publish(
+      root,
+      ingestionId,
+      listOf(
+        ShareIngestionInput(
+          id = uuid(),
+          order = 0,
+          declaredMediaType = "image/png",
+          openStream = {
+            providerOpened.set(true)
+            ByteArray(8).inputStream()
+          },
+        ),
+      ),
+    )
+
+    assertTrue(replay.replayed)
+    assertFalse(providerOpened.get())
+    assertTrue(InboxArtifactHandoff.acknowledge(root, ingestionId))
+    assertFalse(File(root, "Inbox/$ingestionId").exists())
+    assertTrue(File(root, "InboxAcknowledgements/$ingestionId.json").isFile)
+  }
+
   @Test fun acknowledgementTombstoneDeletionIsBestEffortAndRetryable() {
     val ingestionId = uuid()
     writeManifest(ingestionId, listOf(Item(uuid(), "image/png", byteArrayOf(1))))

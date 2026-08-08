@@ -28,6 +28,17 @@
         <action android:name="android.intent.action.SEND"/>
         <category android:name="android.intent.category.DEFAULT"/>
         <data android:mimeType="image/*"/>
+        <data android:mimeType="application/pdf"/>
+        <data android:mimeType="text/plain"/>
+        <data android:mimeType="text/uri-list"/>
+        <!-- Generic single shares reach the same byte-validating receiver as mixed shares. -->
+        <data android:mimeType="*/*"/>
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND_MULTIPLE"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <!-- Mixed shares use */*; the receiver byte-validates and visibly rejects unsupported items. -->
+        <data android:mimeType="*/*"/>
       </intent-filter>
     </activity>
   </application>

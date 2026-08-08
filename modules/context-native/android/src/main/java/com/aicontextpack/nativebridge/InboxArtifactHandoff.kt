@@ -12,7 +12,11 @@ internal class InboxArtifactHandoffException(val stableCode: String) : Exception
 
 internal object InboxArtifactHandoff {
   enum class Point { BEFORE_COPY, DURING_COPY, AFTER_FILE_CLOSE, BEFORE_PUBLISH_RENAME }
-  enum class AcknowledgementPoint { AFTER_TOMBSTONE_RENAME, DURING_TOMBSTONE_DELETION }
+  enum class AcknowledgementPoint {
+    AFTER_RECEIPT_PUBLISH,
+    AFTER_TOMBSTONE_RENAME,
+    DURING_TOMBSTONE_DELETION,
+  }
   enum class TombstoneSweepPoint { AFTER_REMOVAL }
   data class TombstoneSweepResult(val scanned: Int, val removed: Int, val failed: Int)
 
@@ -141,7 +145,45 @@ internal object InboxArtifactHandoff {
       val inbox = File(filesDir, "Inbox")
       val directory = File(inbox, ingestionId)
       val tombstoneRoot = File(filesDir, "InboxAckTombstones")
+      var receipt = try {
+        InboxAcknowledgementStore.read(filesDir, ingestionId)
+      } catch (error: InboxAcknowledgementStoreException) {
+        throw InboxArtifactHandoffException(error.stableCode)
+      }
       if (!directory.exists()) {
+        if (receipt == null) {
+          val tombstones = try {
+            InboxAcknowledgementStore.matchingTombstones(filesDir, ingestionId)
+          } catch (error: InboxAcknowledgementStoreException) {
+            throw InboxArtifactHandoffException(error.stableCode)
+          }
+          tombstones.forEach { tombstone ->
+            try {
+              val manifestFile = File(tombstone, "manifest.json")
+              val manifestBytes = manifestFile.readBytes()
+              InboxManifestScanner.readOwnedDirectory(tombstone, ingestionId)
+              if (!manifestFile.readBytes().contentEquals(manifestBytes)) {
+                throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+              }
+              receipt = InboxAcknowledgementStore.publish(
+                filesDir,
+                ingestionId,
+                manifestBytes,
+                directorySynchronizer,
+              )
+            } catch (error: InboxAcknowledgementStoreException) {
+              throw InboxArtifactHandoffException(error.stableCode)
+            } catch (error: NativeException) {
+              throw InboxArtifactHandoffException(error.code)
+            } catch (_: Exception) {
+              throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+            }
+          }
+          if (receipt != null) operationHook(AcknowledgementPoint.AFTER_RECEIPT_PUBLISH)
+        }
+        // Acknowledging a never-published ID remains an idempotent no-op. A matching
+        // tombstone, however, must first produce a durable receipt or fail closed.
+        if (receipt == null) return@withRegistry true
         cleanupTombstones(
           tombstoneRoot,
           ingestionId,
@@ -151,6 +193,30 @@ internal object InboxArtifactHandoff {
         )
         return@withRegistry true
       }
+      val manifestBytes = try {
+        val manifestFile = File(directory, "manifest.json")
+        val snapshot = manifestFile.readBytes()
+        InboxManifestScanner.readPublished(inbox, ingestionId)
+        if (!manifestFile.readBytes().contentEquals(snapshot)) {
+          throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        }
+        snapshot
+      } catch (error: NativeException) {
+        throw InboxArtifactHandoffException(error.code)
+      } catch (_: Exception) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      try {
+        receipt = InboxAcknowledgementStore.publish(
+          filesDir,
+          ingestionId,
+          manifestBytes,
+          directorySynchronizer,
+        )
+      } catch (error: InboxAcknowledgementStoreException) {
+        throw InboxArtifactHandoffException(error.stableCode)
+      }
+      operationHook(AcknowledgementPoint.AFTER_RECEIPT_PUBLISH)
       ensureDurableDirectory(tombstoneRoot, directorySynchronizer)
       val tombstone = File(tombstoneRoot, "$ingestionId-${UUID.randomUUID()}.ack")
       atomicMove(directory, tombstone)
@@ -188,6 +254,22 @@ internal object InboxArtifactHandoff {
     var failed = 0
     candidates.forEach { tombstone ->
       val failure = runCatching {
+        val ingestionId = InboxAcknowledgementStore.tombstoneIngestionId(tombstone, root)
+          ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        if (InboxAcknowledgementStore.read(filesDir, ingestionId) == null) {
+          val manifestFile = File(tombstone, "manifest.json")
+          val manifestBytes = manifestFile.readBytes()
+          InboxManifestScanner.readOwnedDirectory(tombstone, ingestionId)
+          if (!manifestFile.readBytes().contentEquals(manifestBytes)) {
+            throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+          }
+          InboxAcknowledgementStore.publish(
+            filesDir,
+            ingestionId,
+            manifestBytes,
+            directorySynchronizer,
+          )
+        }
         if (!tombstoneRemover(tombstone) || tombstone.exists()) {
           throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
         }
@@ -310,9 +392,10 @@ internal object InboxArtifactHandoff {
     directorySynchronizer: (File) -> Unit,
     tombstoneRemover: (File) -> Boolean,
   ) {
-    root.listFiles()
-      ?.filter { it.name.startsWith("$ingestionId-") }
-      ?.forEach {
+    val filesDir = root.parentFile ?: return
+    runCatching { InboxAcknowledgementStore.matchingTombstones(filesDir, ingestionId) }
+      .getOrDefault(emptyList())
+      .forEach {
         cleanupTombstone(
           it,
           operationHook,
@@ -323,18 +406,7 @@ internal object InboxArtifactHandoff {
   }
 
   private fun validAcknowledgementTombstone(candidate: File, root: File): Boolean =
-    runCatching {
-      val name = candidate.name
-      if (!name.endsWith(".ack")) return@runCatching false
-      val stem = name.removeSuffix(".ack")
-      if (stem.length != 73 || stem[36] != '-') return@runCatching false
-      if (!canonicalUuid(stem.substring(0, 36)) || !canonicalUuid(stem.substring(37))) {
-        return@runCatching false
-      }
-      candidate.isDirectory &&
-        !OsConstants.S_ISLNK(Os.lstat(candidate.path).st_mode) &&
-        candidate.parentFile?.canonicalFile == root.canonicalFile
-    }.getOrDefault(false)
+    InboxAcknowledgementStore.tombstoneIngestionId(candidate, root) != null
 
   private fun cleanupTombstone(
     tombstone: File,

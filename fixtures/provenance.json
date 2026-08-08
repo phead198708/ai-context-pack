@@ -91,6 +91,14 @@
       "license": "MIT"
     },
     {
+      "path": "governance/v01-verification-policy-cases.json",
+      "sha256": "7daa24be8a766328e52baf79966683f8ce4b236873235e87ab2357d9210d5609",
+      "kind": "governance-policy",
+      "purpose": "structured v0.1 inventory and descriptive-prose invariants",
+      "source": "project-authored synthetic governance metadata",
+      "license": "MIT"
+    },
+    {
       "path": "malformed/import-manifest-path-traversal.json",
       "sha256": "3ebc4e9ced9837358f620106c0ecdea2b9526173c2917964a2cc66eced15d230",
       "kind": "malformed-contract",
