@@ -52,12 +52,19 @@ function draft(items: readonly MainAppImportInput[] = []): MainAppImportDraft {
   return { ingestionId, items };
 }
 
-async function render(
-  props: React.ComponentProps<typeof NewPackFlow>,
-): Promise<ReactTestRenderer> {
+type RenderProps = Omit<
+  React.ComponentProps<typeof NewPackFlow>,
+  'creationReady'
+> & {
+  readonly creationReady?: boolean;
+};
+
+async function render(props: RenderProps): Promise<ReactTestRenderer> {
   let renderer: ReactTestRenderer | undefined;
   await act(async () => {
-    renderer = TestRenderer.create(<NewPackFlow {...props} />);
+    renderer = TestRenderer.create(
+      <NewPackFlow {...props} creationReady={props.creationReady ?? true} />,
+    );
   });
   return renderer as ReactTestRenderer;
 }
@@ -90,6 +97,43 @@ async function change(node: ReactTestInstance, value: string): Promise<void> {
 }
 
 describe('NewPackFlow interactions', () => {
+  test('locks add and first-publication actions when operational readiness is revoked', async () => {
+    const native = nativeAdapter();
+    const input: MainAppImportInput = {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      kind: 'text',
+      declaredMediaType: 'text/plain',
+      byteCount: 7,
+      text: 'fixture',
+    };
+    const renderer = await render({
+      native,
+      picker: picker(),
+      creationReady: false,
+      onCancel: jest.fn(),
+      onImported: jest.fn(),
+      createDraft: () => draft([input]),
+    });
+
+    for (const label of [
+      'Add Photos',
+      'Add Files',
+      'Add Text',
+      'Add URL',
+      'Import Pack',
+    ])
+      expect(byLabel(renderer, label).props.accessibilityState).toEqual({
+        disabled: true,
+      });
+    expect(byLabel(renderer, 'Text to add').props.editable).toBe(false);
+    expect(byLabel(renderer, 'URL to add').props.editable).toBe(false);
+
+    await press(byLabel(renderer, 'Import Pack'));
+    expect(native.publishMainAppImport).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
   test('keeps empty import disabled and picker cancellation creates no Pack or temp cleanup', async () => {
     const native = nativeAdapter();
     const systemPicker = picker();

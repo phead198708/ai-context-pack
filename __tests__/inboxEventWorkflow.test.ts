@@ -82,13 +82,14 @@ describe('InboxEventWorkflow integration', () => {
     expect(h.native.ackPendingShareEvent).not.toHaveBeenCalledWith(ids[0]);
   });
 
-  test('complete then failed finishes with failure and retains its ID', async () => {
+  test('complete then failed retains the visible import with a warning and its ID', async () => {
     const h = harness();
     await h.workflow.receive(event(0, 'complete'));
     await h.workflow.receive(event(1, 'failed'));
     expect(h.states.at(-1)).toEqual({
-      kind: 'error',
-      code: 'SHARE_IMPORT_FAILED',
+      kind: 'ready',
+      manifests: [manifest],
+      warningCode: 'SHARE_IMPORT_FAILED',
     });
     await h.workflow.retry();
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledWith(ids[1]);
@@ -474,6 +475,37 @@ describe('InboxEventWorkflow integration', () => {
       code: 'SHARE_IMPORT_FAILED',
     });
     expect(h.workflow.isPackCreationReady()).toBe(true);
+  });
+
+  test('a failed share arriving last keeps persisted Packs visible with a warning', async () => {
+    const packs = [
+      {
+        id: ids[2]!,
+        schemaVersion: 1 as const,
+        title: 'Context Pack',
+        createdAt: '2026-08-03T00:00:00Z',
+        updatedAt: '2026-08-03T00:00:00Z',
+        state: 'draft' as const,
+        itemCount: 1,
+      },
+    ];
+    const h = harness(
+      {},
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks: jest.fn().mockResolvedValue(packs),
+      },
+    );
+    await h.workflow.bootstrap();
+
+    await h.workflow.receive(event(0, 'failed'));
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'ready',
+      manifests: [],
+      packs,
+      warningCode: 'SHARE_IMPORT_FAILED',
+    });
   });
 
   test('main-app refresh rejects with the latched persistence code and retries it', async () => {

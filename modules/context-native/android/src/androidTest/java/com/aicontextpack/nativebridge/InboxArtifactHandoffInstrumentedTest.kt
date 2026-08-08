@@ -2,6 +2,7 @@ package com.aicontextpack.nativebridge
 
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import android.system.Os
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -448,6 +449,42 @@ class InboxArtifactHandoffInstrumentedTest {
     assertEquals("ARTIFACT_INTEGRITY_FAILED", error.stableCode)
   }
 
+  @Test fun destinationAncestorsRejectPreexistingSymlinks() {
+    listOf("Packs", "pack", "originals").forEach { level ->
+      val caseRoot = File(root, "case-$level").also { assertTrue(it.mkdirs()) }
+      val outside = File(root, "outside-$level").also { assertTrue(it.mkdirs()) }
+      val ingestionId = uuid()
+      val packId = uuid()
+      val itemId = uuid()
+      writeManifest(
+        ingestionId,
+        listOf(Item(itemId, "image/png", byteArrayOf(1, 2, 3))),
+        caseRoot,
+      )
+      val packs = File(caseRoot, "Packs")
+      when (level) {
+        "Packs" -> Os.symlink(outside.path, packs.path)
+        "pack" -> {
+          assertTrue(packs.mkdir())
+          Os.symlink(outside.path, File(packs, packId).path)
+        }
+        else -> {
+          val pack = File(packs, packId)
+          assertTrue(pack.mkdirs())
+          Os.symlink(outside.path, File(pack, "originals").path)
+        }
+      }
+
+      val error = assertThrows(InboxArtifactHandoffException::class.java) {
+        InboxArtifactHandoff.handoff(
+          caseRoot, ingestionId, packId, 0, availableBytes = { Long.MAX_VALUE },
+        )
+      }
+      assertEquals("ARTIFACT_INTEGRITY_FAILED", error.stableCode)
+      assertFalse(File(outside, "$itemId.bin").exists())
+    }
+  }
+
   @Test fun twentyImageAndNearLimitPdfCopyBenchmarkDoesNotRunOcr() {
     val imageIngestion = uuid()
     val imagePack = uuid()
@@ -485,8 +522,12 @@ class InboxArtifactHandoffInstrumentedTest {
     assertTrue("near-limit PDF handoff took ${pdfDurationMs}ms", pdfDurationMs < 10_000)
   }
 
-  private fun writeManifest(ingestionId: String, items: List<Item>) {
-    val directory = File(root, "Inbox/$ingestionId")
+  private fun writeManifest(
+    ingestionId: String,
+    items: List<Item>,
+    filesRoot: File = root,
+  ) {
+    val directory = File(filesRoot, "Inbox/$ingestionId")
     assertTrue(directory.mkdirs())
     val payloadItems = JSONArray()
     items.forEachIndexed { index, item ->

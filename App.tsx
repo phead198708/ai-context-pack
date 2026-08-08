@@ -206,6 +206,7 @@ function App(): React.JSX.Element {
           {screen === 'new-pack' && (
             <NewPackFlow
               {...(retryDraft ? { createDraft: () => retryDraft } : {})}
+              creationReady={packCreationReady}
               key={retryDraft?.ingestionId ?? 'new-pack'}
               native={nativeAdapter}
               locale={locale}

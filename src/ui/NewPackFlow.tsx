@@ -27,6 +27,8 @@ import { colors, spacing, typography } from './tokens';
 export interface NewPackFlowProps {
   readonly native: NativeAdapter;
   readonly picker: MainAppPicker;
+  /** New publication is fail-closed while Inbox persistence is blocked. */
+  readonly creationReady: boolean;
   readonly onCancel: () => void;
   readonly onImported: (manifest: ImportManifestV1) => Promise<void>;
   readonly createDraft?: () => MainAppImportDraft;
@@ -44,6 +46,7 @@ export const NewPackFlow = React.forwardRef<
   {
     native,
     picker,
+    creationReady,
     onCancel,
     onImported,
     createDraft = createMainAppImportDraft,
@@ -148,7 +151,7 @@ export const NewPackFlow = React.forwardRef<
     );
 
   const pick = async (kind: 'photos' | 'files') => {
-    if (cleanupBlocked || busy) return;
+    if (!creationReady || cleanupBlocked || busy) return;
     setBusy(true);
     setMessage(undefined);
     try {
@@ -223,6 +226,7 @@ export const NewPackFlow = React.forwardRef<
   };
 
   const addEntry = (kind: 'text' | 'url') => {
+    if (!creationReady) return;
     const value = kind === 'text' ? textEntry : urlEntry;
     const edited = appendTextEntry(draft, kind, value);
     if (edited.error) {
@@ -280,7 +284,14 @@ export const NewPackFlow = React.forwardRef<
   };
 
   const commit = async () => {
-    if (draft.items.length === 0 || busy) return;
+    // A committed native publication remains retryable so durable files are
+    // never stranded; only its first publication is readiness-gated.
+    if (
+      draft.items.length === 0 ||
+      busy ||
+      (!creationReady && !publicationCommitted)
+    )
+      return;
     setBusy(true);
     setMessage(undefined);
     let nativePublicationReturned = false;
@@ -336,18 +347,19 @@ export const NewPackFlow = React.forwardRef<
       <Text style={styles.body}>{t(locale, 'newPackDetail')}</Text>
       <View style={styles.row}>
         <FlowButton
-          disabled={busy || cleanupBlocked}
+          disabled={!creationReady || busy || cleanupBlocked}
           label={t(locale, 'addPhotos')}
           onPress={() => pick('photos')}
         />
         <FlowButton
-          disabled={busy || cleanupBlocked}
+          disabled={!creationReady || busy || cleanupBlocked}
           label={t(locale, 'addFiles')}
           onPress={() => pick('files')}
         />
       </View>
       <TextInput
         accessibilityLabel={t(locale, 'textToAdd')}
+        editable={creationReady && !busy && !cleanupBlocked}
         multiline
         onChangeText={setTextEntry}
         placeholder={t(locale, 'textPlaceholder')}
@@ -356,7 +368,9 @@ export const NewPackFlow = React.forwardRef<
         value={textEntry}
       />
       <FlowButton
-        disabled={busy || cleanupBlocked || textEntry.length === 0}
+        disabled={
+          !creationReady || busy || cleanupBlocked || textEntry.length === 0
+        }
         label={t(locale, 'addText')}
         onPress={() => addEntry('text')}
       />
@@ -364,6 +378,7 @@ export const NewPackFlow = React.forwardRef<
         accessibilityLabel={t(locale, 'urlToAdd')}
         autoCapitalize="none"
         autoCorrect={false}
+        editable={creationReady && !busy && !cleanupBlocked}
         keyboardType="url"
         onChangeText={setUrlEntry}
         placeholder={t(locale, 'urlPlaceholder')}
@@ -372,7 +387,9 @@ export const NewPackFlow = React.forwardRef<
         value={urlEntry}
       />
       <FlowButton
-        disabled={busy || cleanupBlocked || urlEntry.length === 0}
+        disabled={
+          !creationReady || busy || cleanupBlocked || urlEntry.length === 0
+        }
         label={t(locale, 'addUrl')}
         onPress={() => addEntry('url')}
       />
@@ -447,6 +464,7 @@ export const NewPackFlow = React.forwardRef<
       <View style={styles.row}>
         <FlowButton
           disabled={
+            !creationReady ||
             busy ||
             draft.items.length === 0 ||
             pendingCleanupUris.length > 0 ||

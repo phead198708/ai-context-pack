@@ -177,6 +177,24 @@ test('registry-expanded propagation passes only through the pinned lock graph', 
     () => verifyAuditReport(compatibleFix, makeLock()),
     'AUDIT_FIX_GRAPH_DRIFT',
   );
+
+  const forgedRange = clone(report);
+  forgedRange.vulnerabilities['expo-image-picker'].range = '>=0.0.0';
+  expectRule(
+    () => verifyAuditReport(forgedRange, makeLock()),
+    'AUDIT_HIGH_GRAPH_DRIFT',
+  );
+
+  for (const target of ['@expo/cli', '@expo/metro-config']) {
+    const reachableFix = clone(report);
+    reachableFix.vulnerabilities['expo-image-picker'].fixAvailable = clone(
+      APPROVED_HIGH_FIX_OPTIONS.find(value => value.name === target).values[0],
+    );
+    expectRule(
+      () => verifyAuditReport(reachableFix, makeLock()),
+      'AUDIT_FIX_GRAPH_DRIFT',
+    );
+  }
 });
 
 test('a clean audit passes without consulting the temporary exception', () => {

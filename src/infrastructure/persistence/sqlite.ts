@@ -13,7 +13,10 @@ import type {
   ExportRecord,
   RiskFinding,
 } from '../../domain/models';
-import { isImportManifestV1 } from '../../domain/validation';
+import {
+  IMPORT_MANIFEST_MAX_ITEMS,
+  isImportManifestV1,
+} from '../../domain/validation';
 import {
   DEVELOPMENT_RESET_CONFIRMATION,
   PERSISTENCE_SCHEMA_VERSION,
@@ -284,7 +287,7 @@ export class ExpoSqlitePersistenceRepository
             if (
               !/^[0-9a-f]{64}$/.test(row.manifest_fingerprint) ||
               items.length === 0 ||
-              items.length > 20
+              items.length > IMPORT_MANIFEST_MAX_ITEMS
             )
               throw new DomainError('SCHEMA_INVALID');
             const decodedItems = items.map((item, index) => {
@@ -1697,15 +1700,19 @@ function validateCommitImport(input: CommitImportInput): void {
     !/^[0-9a-f]{64}$/.test(input.manifestFingerprint)
   )
     throw new DomainError('SCHEMA_INVALID');
-  const copiedItems = input.manifest.items.filter(
-    item => item.status === 'copied',
+  const artifactBackedItems = input.manifest.items.filter(
+    item =>
+      item.status === 'copied' ||
+      (item.status === 'failed' &&
+        item.retryByteCount !== undefined &&
+        item.retrySha256 !== undefined),
   );
   const itemsById = new Map(
     input.manifest.items.map(item => [item.id, item] as const),
   );
   const artifactIds = new Set(input.artifacts.map(artifact => artifact.id));
   if (
-    input.artifacts.length < copiedItems.length ||
+    input.artifacts.length < artifactBackedItems.length ||
     input.artifacts.length > input.manifest.items.length ||
     artifactIds.size !== input.artifacts.length ||
     input.artifacts.some(artifact => {
@@ -1720,13 +1727,18 @@ function validateCommitImport(input: CommitImportInput): void {
         !Number.isSafeInteger(artifact.byteCount) ||
         artifact.byteCount < 0 ||
         (item.status === 'copied' && artifact.byteCount !== item.byteCount) ||
+        (item.status === 'failed' &&
+          (item.retryByteCount === undefined ||
+            item.retrySha256 === undefined ||
+            artifact.byteCount !== item.retryByteCount)) ||
         !/^[0-9a-f]{64}$/.test(artifact.sha256) ||
         (item.status === 'copied' &&
           item.sha256 !== undefined &&
-          item.sha256 !== artifact.sha256)
+          item.sha256 !== artifact.sha256) ||
+        (item.status === 'failed' && item.retrySha256 !== artifact.sha256)
       );
     }) ||
-    copiedItems.some(
+    artifactBackedItems.some(
       item => !input.artifacts.some(artifact => artifact.itemId === item.id),
     )
   )

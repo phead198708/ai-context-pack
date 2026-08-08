@@ -1380,6 +1380,55 @@ final class InboxArtifactHandoffTests: XCTestCase {
     }
   }
 
+  func testDestinationAncestorsRejectPreexistingSymlinks() throws {
+    for level in ["Packs", "pack", "originals"] {
+      let packs = applicationSupport.appendingPathComponent("Packs", isDirectory: true)
+      try? FileManager.default.removeItem(at: packs)
+      let outside = applicationSupport.deletingLastPathComponent()
+        .appendingPathComponent("outside-\(level)", isDirectory: true)
+      try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+      let ingestionId = UUID().uuidString.lowercased()
+      let packId = UUID().uuidString.lowercased()
+      let itemId = UUID().uuidString.lowercased()
+      try writeManifest(
+        ingestionId: ingestionId,
+        items: [(itemId, "image/png", Data([1, 2, 3]))]
+      )
+
+      switch level {
+      case "Packs":
+        try FileManager.default.createSymbolicLink(at: packs, withDestinationURL: outside)
+      case "pack":
+        try FileManager.default.createDirectory(at: packs, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(
+          at: packs.appendingPathComponent(packId, isDirectory: true),
+          withDestinationURL: outside
+        )
+      default:
+        let pack = packs.appendingPathComponent(packId, isDirectory: true)
+        try FileManager.default.createDirectory(at: pack, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+          at: pack.appendingPathComponent("originals", isDirectory: true),
+          withDestinationURL: outside
+        )
+      }
+
+      XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+        container: container,
+        applicationSupport: applicationSupport,
+        ingestionId: ingestionId,
+        packId: packId,
+        requiredHeadroomBytes: 0,
+        availableBytes: { _ in Int64.max }
+      )) { error in
+        XCTAssertEqual(error as? InboxArtifactHandoffError, .integrityFailed, level)
+      }
+      XCTAssertFalse(FileManager.default.fileExists(
+        atPath: outside.appendingPathComponent("\(itemId).bin").path
+      ))
+    }
+  }
+
   func testTwentyImageAndNearLimitPdfCopyBenchmarkDoesNotRunOcr() throws {
     let imageIngestion = UUID().uuidString.lowercased()
     let imagePack = UUID().uuidString.lowercased()

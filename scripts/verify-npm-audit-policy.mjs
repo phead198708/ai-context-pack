@@ -86,6 +86,11 @@ const newAppScreenDowngrade = Object.freeze({
   version: '0.84.1',
   isSemVerMajor: true,
 });
+const newAppScreenDowngradeLegacy = Object.freeze({
+  name: '@react-native/new-app-screen',
+  version: '0.80.3',
+  isSemVerMajor: true,
+});
 const expoCliDowngrade = Object.freeze({
   name: '@expo/cli',
   version: '0.24.24',
@@ -281,7 +286,7 @@ export const APPROVED_HIGH_FIX_OPTIONS = Object.freeze([
   }),
   Object.freeze({
     name: '@react-native/new-app-screen',
-    values: Object.freeze([newAppScreenDowngrade]),
+    values: Object.freeze([newAppScreenDowngrade, newAppScreenDowngradeLegacy]),
   }),
   Object.freeze({
     name: '@react-native/virtualized-lists',
@@ -731,40 +736,20 @@ function reachesApprovedAdvisory(name, vulnerabilities, visiting = new Set()) {
   });
 }
 
-function reachesFixTargetThroughDependencies(
-  name,
-  fixName,
-  vulnerabilities,
-  visiting = new Set(),
-) {
-  if (name === fixName) return true;
-  if (visiting.has(name)) return false;
-  const next = new Set(visiting);
-  next.add(name);
-  const vulnerability = vulnerabilities[name];
-  if (!isRecord(vulnerability)) return false;
-  return vulnerability.via.some(adjacent =>
-    typeof adjacent === 'string'
-      ? reachesFixTargetThroughDependencies(
-          adjacent,
-          fixName,
-          vulnerabilities,
-          next,
-        )
-      : false,
-  );
-}
-
 function approvedFixValues(name, vulnerabilities) {
   const pinned = APPROVED_HIGH_FIX_OPTIONS.find(option => option.name === name);
   if (pinned) return pinned.values;
-  return APPROVED_HIGH_FIX_OPTIONS.flatMap(option => option.values).filter(
-    (value, index, values) =>
-      values.findIndex(
-        candidate => JSON.stringify(candidate) === JSON.stringify(value),
-      ) === index &&
-      reachesFixTargetThroughDependencies(name, value.name, vulnerabilities),
+  const directVia = new Set(
+    vulnerabilities[name].via.filter(value => typeof value === 'string'),
   );
+  return APPROVED_HIGH_FIX_OPTIONS.filter(option => directVia.has(option.name))
+    .flatMap(option => option.values)
+    .filter(
+      (value, index, values) =>
+        values.findIndex(
+          candidate => JSON.stringify(candidate) === JSON.stringify(value),
+        ) === index,
+    );
 }
 
 function verifyPinnedCoreProjection(name, vulnerability) {
@@ -827,6 +812,7 @@ function verifyPropagatedHighGraph(vulnerabilities, packageLock) {
       vulnerability.severity !== 'high' ||
       vulnerability.isDirect !== directNames.has(name) ||
       vulnerability.range.length === 0 ||
+      (!APPROVED_HIGH_PACKAGES.includes(name) && vulnerability.range !== '*') ||
       !reachesApprovedAdvisory(name, vulnerabilities)
     ) {
       fail('AUDIT_HIGH_GRAPH_DRIFT');

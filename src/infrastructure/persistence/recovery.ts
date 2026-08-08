@@ -78,15 +78,19 @@ export class InboxPersistenceCoordinator {
       artifacts.forEach(artifact =>
         assertOwnedArtifactPath(artifact.relativePath),
       );
-      const copiedItems = handoff.manifest.items.filter(
-        item => item.status === 'copied',
+      const artifactBackedItems = handoff.manifest.items.filter(
+        item =>
+          item.status === 'copied' ||
+          (item.status === 'failed' &&
+            item.retryByteCount !== undefined &&
+            item.retrySha256 !== undefined),
       );
       const itemsById = new Map(
         handoff.manifest.items.map(item => [item.id, item] as const),
       );
       const artifactIds = new Set(artifacts.map(artifact => artifact.itemId));
       if (
-        artifacts.length < copiedItems.length ||
+        artifacts.length < artifactBackedItems.length ||
         artifacts.length > handoff.manifest.items.length ||
         artifactIds.size !== artifacts.length ||
         artifacts.some(
@@ -101,11 +105,16 @@ export class InboxPersistenceCoordinator {
                 (item.status === 'copied' &&
                   (item.byteCount !== artifact.byteCount ||
                     (item.sha256 !== undefined &&
-                      item.sha256 !== artifact.sha256)))
+                      item.sha256 !== artifact.sha256))) ||
+                (item.status === 'failed' &&
+                  (item.retryByteCount === undefined ||
+                    item.retrySha256 === undefined ||
+                    item.retryByteCount !== artifact.byteCount ||
+                    item.retrySha256 !== artifact.sha256))
               );
             })(),
         ) ||
-        copiedItems.some(item => !artifactIds.has(item.id))
+        artifactBackedItems.some(item => !artifactIds.has(item.id))
       )
         throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
       phase = 'files-published';

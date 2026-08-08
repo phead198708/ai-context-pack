@@ -524,7 +524,8 @@ enum InboxArtifactHandoff {
   ) throws {
     var isDirectory: ObjCBool = false
     if FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
-      guard isDirectory.boolValue else { throw InboxArtifactHandoffError.writeFailed }
+      guard isDirectory.boolValue else { throw InboxArtifactHandoffError.integrityFailed }
+      try requireSafeDestinationDirectory(directory)
     } else {
       do {
         try FileManager.default.createDirectory(
@@ -532,8 +533,17 @@ enum InboxArtifactHandoff {
           withIntermediateDirectories: false
         )
       } catch {
-        throw InboxArtifactHandoffError.writeFailed
+        // A concurrent creator can win after the existence check. Accept only
+        // the intended directory; a symlink at any owned ancestor fails closed.
+        var racedIsDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+          atPath: directory.path,
+          isDirectory: &racedIsDirectory
+        ), racedIsDirectory.boolValue else {
+          throw InboxArtifactHandoffError.writeFailed
+        }
       }
+      try requireSafeDestinationDirectory(directory)
     }
     do {
       try directorySynchronizer(directory)
@@ -542,6 +552,17 @@ enum InboxArtifactHandoff {
       throw error
     } catch {
       throw InboxArtifactHandoffError.writeFailed
+    }
+  }
+
+  private static func requireSafeDestinationDirectory(_ directory: URL) throws {
+    let descriptor = Darwin.open(directory.path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw InboxArtifactHandoffError.integrityFailed }
+    defer { Darwin.close(descriptor) }
+    var metadata = stat()
+    guard Darwin.fstat(descriptor, &metadata) == 0,
+          (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
+      throw InboxArtifactHandoffError.integrityFailed
     }
   }
 

@@ -400,6 +400,14 @@ export class InboxEventWorkflow {
     const code = workflowErrorCode(error, fallback);
     if (this.blockers.get(key) === code) return;
     this.blockers.set(key, code);
+    if (
+      key.startsWith('failure:') &&
+      (this.lastPersistedPacks !== undefined ||
+        this.lastScannedManifests !== undefined)
+    ) {
+      this.show(this.lastScannedManifests ?? []);
+      return;
+    }
     this.view.setState({ kind: 'error', code });
   }
 

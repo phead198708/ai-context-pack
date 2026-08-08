@@ -722,6 +722,37 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('locks an already-open New Pack after an operational workflow failure', async () => {
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'button', 'New Pack'));
+    expect(
+      control(renderer, 'button', 'Add Photos').props.accessibilityState,
+    ).toEqual({ disabled: false });
+
+    await act(async () => {
+      inboxListener?.({
+        schemaVersion: 1,
+        id: eventId,
+        result: 'unknown',
+      });
+      await flushWorkflow();
+    });
+
+    for (const label of [
+      'Add Photos',
+      'Add Files',
+      'Add Text',
+      'Add URL',
+      'Import Pack',
+    ])
+      expect(
+        control(renderer, 'button', label).props.accessibilityState,
+      ).toEqual({ disabled: true });
+    expect(mockNative.publishMainAppImport).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
   test('keeps navigation and screen content in one Dynamic Type scroll surface', async () => {
     const renderer = await renderApp();
     const scrollSurface = renderer.root.findByType(ScrollView);

@@ -397,11 +397,14 @@ internal object InboxArtifactHandoff {
       ?: throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
     try {
       if (directory.exists()) {
-        if (!directory.isDirectory) {
-          throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
-        }
+        requireSafeDestinationDirectory(directory)
       } else {
-        if (!directory.mkdir()) throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+        if (!directory.mkdir()) {
+          // A concurrent creator may win. It is acceptable only when the
+          // resulting owned ancestor is a real directory, never a symlink.
+          requireSafeDestinationDirectory(directory)
+        }
+        requireSafeDestinationDirectory(directory)
       }
       directorySynchronizer(directory)
       directorySynchronizer(parent)
@@ -409,6 +412,32 @@ internal object InboxArtifactHandoff {
       throw error
     } catch (_: Exception) {
       throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    }
+  }
+
+  private fun requireSafeDestinationDirectory(directory: File) {
+    val mode = try { Os.lstat(directory.path).st_mode }
+    catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    if (OsConstants.S_ISLNK(mode) || !OsConstants.S_ISDIR(mode)) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    val descriptor = try {
+      Os.open(
+        directory.path,
+        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
+        0,
+      )
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    try {
+      if (!OsConstants.S_ISDIR(Os.fstat(descriptor).st_mode)) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+    } finally {
+      runCatching { Os.close(descriptor) }
     }
   }
 
