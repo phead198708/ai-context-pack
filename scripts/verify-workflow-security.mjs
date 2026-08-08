@@ -152,6 +152,53 @@ function parseWorkflow(source, name) {
 function containsRawNpmAudit(command) {
   const normalized = command.replace(/\\\r?\n/g, ' ');
   const segments = normalized.split(/(?:&&|\|\||[;|&()\n])/);
+  const decodeAnsiCEscape = (candidate, index) => {
+    const escape = candidate[index + 1];
+    const simpleEscapes = {
+      a: '\x07',
+      b: '\b',
+      e: '\x1b',
+      E: '\x1b',
+      f: '\f',
+      n: '\n',
+      r: '\r',
+      t: '\t',
+      v: '\v',
+      '\\': '\\',
+      "'": "'",
+      '"': '"',
+      '?': '?',
+    };
+    if (Object.hasOwn(simpleEscapes, escape)) {
+      return { value: simpleEscapes[escape], consumed: 2 };
+    }
+    const numericEscape = candidate.slice(index + 1);
+    const hexadecimal = numericEscape.match(/^x([0-9a-fA-F]{1,2})/);
+    if (hexadecimal) {
+      return {
+        value: String.fromCodePoint(Number.parseInt(hexadecimal[1], 16)),
+        consumed: hexadecimal[0].length + 1,
+      };
+    }
+    const unicode = numericEscape.match(
+      /^(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8}))/,
+    );
+    if (unicode) {
+      const codePoint = Number.parseInt(unicode[1] ?? unicode[2], 16);
+      return {
+        value: codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : '',
+        consumed: unicode[0].length + 1,
+      };
+    }
+    const octal = numericEscape.match(/^([0-7]{1,3})/);
+    if (octal) {
+      return {
+        value: String.fromCodePoint(Number.parseInt(octal[1], 8)),
+        consumed: octal[0].length + 1,
+      };
+    }
+    return { value: escape ?? '', consumed: escape === undefined ? 1 : 2 };
+  };
   const normalizeShellWord = candidate => {
     let result = '';
     let quote = null;
@@ -160,6 +207,18 @@ function containsRawNpmAudit(command) {
       if (quote === "'") {
         if (character === "'") quote = null;
         else result += character;
+        continue;
+      }
+      if (quote === 'ansi-c') {
+        if (character === "'") {
+          quote = null;
+        } else if (character === '\\') {
+          const decoded = decodeAnsiCEscape(candidate, index);
+          result += decoded.value;
+          index += decoded.consumed - 1;
+        } else {
+          result += character;
+        }
         continue;
       }
       if (quote === '"') {
@@ -177,7 +236,13 @@ function containsRawNpmAudit(command) {
         }
         continue;
       }
-      if (character === "'" || character === '"') {
+      if (character === '$' && candidate[index + 1] === "'") {
+        quote = 'ansi-c';
+        index += 1;
+      } else if (character === '$' && candidate[index + 1] === '"') {
+        quote = '"';
+        index += 1;
+      } else if (character === "'" || character === '"') {
         quote = character;
       } else if (character === '\\' && index + 1 < candidate.length) {
         result += candidate[index + 1];
@@ -1324,6 +1389,11 @@ for (const [index, command] of [
   'npm audi --audit-level=critical',
   'npm au\\dit --audit-level=critical',
   'npm a"udit" --audit-level=critical',
+  "npm $'aud' --audit-level=critical",
+  "npm $'a\\x75d' --audit-level=critical",
+  "npm $'\\141ud' --audit-level=critical",
+  "npm $'a\\u0075d' --audit-level=critical",
+  'npm $"aud" --audit-level=critical',
 ].entries()) {
   const source = auditWorkflowWithMutation(workflow => {
     workflow.jobs['contracts-privacy'].steps.push({
@@ -1401,6 +1471,15 @@ const auditWorkflowRejectedExamples = [
     nonSharedJob.steps.push({
       name: 'Weaker quote-composed audit',
       run: 'npm a"udit" --audit-level=critical',
+    });
+  }),
+  auditWorkflowWithMutation(workflow => {
+    const [, nonSharedJob] = Object.entries(workflow.jobs).find(
+      ([jobId, job]) => jobId !== 'shared' && Array.isArray(job.steps),
+    );
+    nonSharedJob.steps.push({
+      name: 'Weaker ANSI-C-quoted audit',
+      run: "npm $'aud' --audit-level=critical",
     });
   }),
   auditWorkflowWithMutation(workflow => {
