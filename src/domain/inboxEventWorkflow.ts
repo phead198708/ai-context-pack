@@ -145,8 +145,16 @@ export class InboxEventWorkflow {
       | { readonly ok: false; readonly code: string }
       | undefined;
     await this.enqueue(async () => {
-      // A retry from the locked import flow must be allowed to clear a prior scan/persistence
-      // latch. Other operational blockers remain visible and still make the result fail closed.
+      // Publication can race a live operational failure. The recovery-only UI has no Inbox
+      // Retry action, so clear those blockers here without acknowledging unrelated failed-share
+      // warnings. This keeps committed bytes recoverable without silently dismissing a failure.
+      if (
+        this.hasOperationalBlocker() &&
+        !(await this.retryQueued(false, false))
+      ) {
+        outcome = { ok: false, code: this.latestBlockerCode() };
+        return;
+      }
       const refreshed = await this.refresh(false, true);
       outcome =
         refreshed && !this.hasOperationalBlocker()
@@ -160,23 +168,28 @@ export class InboxEventWorkflow {
   }
 
   retry(): Promise<void> {
-    return this.enqueue(async () => {
-      if (!(await this.recoverPickerCache(true))) return;
-      let events: readonly PendingShareEvent[];
-      try {
-        events = await this.native.getPendingShareEvents();
-        this.clear('event-store');
-        this.clearPrefix('invalid:');
-      } catch (error) {
-        this.latch(
-          'event-store',
-          error,
-          'NATIVE_SHARE_EVENT_STORE_READ_FAILED',
-        );
-        return;
-      }
-      for (const event of events) await this.process(event, true);
+    return this.enqueue(() =>
+      this.retryQueued(true, true).then(() => undefined),
+    );
+  }
 
+  private async retryQueued(
+    acknowledgeFailures: boolean,
+    finalRefresh: boolean,
+  ): Promise<boolean> {
+    if (!(await this.recoverPickerCache(true))) return false;
+    let events: readonly PendingShareEvent[];
+    try {
+      events = await this.native.getPendingShareEvents();
+      this.clear('event-store');
+      this.clearPrefix('invalid:');
+    } catch (error) {
+      this.latch('event-store', error, 'NATIVE_SHARE_EVENT_STORE_READ_FAILED');
+      return false;
+    }
+    for (const event of events) await this.process(event, true);
+
+    if (acknowledgeFailures) {
       for (const [id, event] of [...this.failures]) {
         try {
           if (event.durable === false)
@@ -192,35 +205,39 @@ export class InboxEventWorkflow {
               ? 'NATIVE_EPHEMERAL_ACK_FAILED'
               : 'NATIVE_SHARE_ACK_FAILED',
           );
-          return;
+          return false;
         }
       }
+    }
 
-      try {
-        let recovery = await this.native.getPendingRecoveryEvent();
-        while (recovery) {
-          await this.native.ackRecoveryEvent(recovery.id);
-          this.clear(`recovery:${recovery.id}`);
-          recovery = await this.native.getPendingRecoveryEvent();
-        }
-        this.clear('recovery-ack');
-      } catch (error) {
-        this.latch('recovery-ack', error, 'NATIVE_RECOVERY_ACK_FAILED');
-        return;
+    try {
+      let recovery = await this.native.getPendingRecoveryEvent();
+      while (recovery) {
+        await this.native.ackRecoveryEvent(recovery.id);
+        this.clear(`recovery:${recovery.id}`);
+        recovery = await this.native.getPendingRecoveryEvent();
       }
+      this.clear('recovery-ack');
+    } catch (error) {
+      this.latch('recovery-ack', error, 'NATIVE_RECOVERY_ACK_FAILED');
+      return false;
+    }
 
-      let completedRefresh = false;
-      for (const event of [...this.completes.values()]) {
-        if (!(await this.finishComplete(event, true))) return;
-        completedRefresh = true;
-      }
-      if (
-        !completedRefresh &&
-        this.failures.size === 0 &&
-        this.completes.size === 0
-      )
-        await this.refresh(false, true);
-    });
+    let completedRefresh = false;
+    for (const event of [...this.completes.values()]) {
+      if (!(await this.finishComplete(event, true))) return false;
+      completedRefresh = true;
+    }
+    if (
+      finalRefresh &&
+      !completedRefresh &&
+      (!acknowledgeFailures || this.failures.size === 0) &&
+      this.completes.size === 0
+    )
+      await this.refresh(false, true);
+    // A successful pre-refresh retry clears every blocker that requires native event/ACK
+    // handling. A following retrying scan is still responsible for clearing scan/unexpected.
+    return true;
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {
@@ -400,13 +417,15 @@ export class InboxEventWorkflow {
     const code = workflowErrorCode(error, fallback);
     if (this.blockers.get(key) === code) return;
     this.blockers.set(key, code);
-    if (
-      key.startsWith('failure:') &&
-      (this.lastPersistedPacks !== undefined ||
-        this.lastScannedManifests !== undefined)
-    ) {
-      this.show(this.lastScannedManifests ?? []);
-      return;
+    if (key.startsWith('failure:')) {
+      if (this.hasOperationalBlocker()) return;
+      if (
+        this.lastPersistedPacks !== undefined ||
+        this.lastScannedManifests !== undefined
+      ) {
+        this.show(this.lastScannedManifests ?? []);
+        return;
+      }
     }
     this.view.setState({ kind: 'error', code });
   }

@@ -1,4 +1,5 @@
 import {
+  MAIN_APP_IMPORT_MAX_ITEMS,
   MAIN_APP_IMPORT_MAX_BINARY_BYTES,
   MAIN_APP_IMPORT_MAX_TEXT_BYTES,
   appendPickerAssets,
@@ -58,6 +59,24 @@ describe('main-app import draft', () => {
       selectedCount: 1,
       source: 'main-app-picker',
     });
+  });
+
+  test('rejects an oversized retry set instead of silently truncating it', () => {
+    const sources = Array.from(
+      { length: MAIN_APP_IMPORT_MAX_ITEMS + 1 },
+      (_, index) => ({
+        mediaType: 'image/png',
+        byteCount: 4,
+        ownedRelativePath: `Packs/${ingestionId}/originals/${String(
+          index + 2,
+        ).padStart(8, '0')}-e89b-42d3-a456-426614174000.bin`,
+        sha256: 'a'.repeat(64),
+      }),
+    );
+
+    expect(() => createRetryMainAppImportDraft(sources)).toThrow(
+      'IMPORT_ITEM_LIMIT_EXCEEDED',
+    );
   });
   test('preserves picker order and exposes count, types, size, and unsupported items', () => {
     const created = createMainAppImportDraft(() => ingestionId);

@@ -20,6 +20,7 @@ Category identifies the protection boundary. It does not contain user content.
 | `IMPORT_TYPE_UNSUPPORTED`            | user-action-required | input     |
 | `IMPORT_COPY_FAILED`                 | retryable            | resource  |
 | `IMPORT_SIZE_LIMIT_EXCEEDED`         | user-action-required | input     |
+| `IMPORT_ITEM_LIMIT_EXCEEDED`         | user-action-required | input     |
 | `IMPORT_PARTIAL_FAILURE`             | user-action-required | input     |
 | `PIPELINE_STAGE_FAILED`              | retryable            | state     |
 | `PROCESSOR_OUTPUT_INVALID`           | terminal             | integrity |

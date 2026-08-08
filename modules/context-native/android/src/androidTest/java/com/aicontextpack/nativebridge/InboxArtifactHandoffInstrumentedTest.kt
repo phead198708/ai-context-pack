@@ -485,6 +485,38 @@ class InboxArtifactHandoffInstrumentedTest {
     }
   }
 
+  @Test fun destinationAncestorSwapBeforeCopyFailsClosed() {
+    val ingestionId = uuid()
+    val packId = uuid()
+    val itemId = uuid()
+    writeManifest(ingestionId, listOf(Item(itemId, "image/png", byteArrayOf(1, 2, 3))))
+    val originals = File(root, "Packs/$packId/originals")
+    val displaced = File(root, "Packs/$packId/originals-displaced")
+    val outside = File(root, "outside-swap").also { assertTrue(it.mkdir()) }
+    var swapped = false
+
+    val error = assertThrows(InboxArtifactHandoffException::class.java) {
+      InboxArtifactHandoff.handoff(
+        root,
+        ingestionId,
+        packId,
+        0,
+        availableBytes = { Long.MAX_VALUE },
+        operationHook = { point ->
+          if (point == InboxArtifactHandoff.Point.BEFORE_COPY && !swapped) {
+            swapped = true
+            assertTrue(originals.renameTo(displaced))
+            Os.symlink(outside.path, originals.path)
+          }
+        },
+      )
+    }
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", error.stableCode)
+    assertTrue(swapped)
+    assertFalse(File(outside, "$itemId.bin").exists())
+    assertFalse(File(displaced, "$itemId.bin").exists())
+  }
+
   @Test fun twentyImageAndNearLimitPdfCopyBenchmarkDoesNotRunOcr() {
     val imageIngestion = uuid()
     val imagePack = uuid()

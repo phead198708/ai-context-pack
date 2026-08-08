@@ -447,6 +447,49 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('reports an oversized failed-item retry set without opening a truncated draft', async () => {
+    const failedItems = Array.from({ length: 21 }, (_, index) => {
+      const itemId = `${String(index + 10).padStart(
+        8,
+        '0',
+      )}-e89b-42d3-a456-426614174000`;
+      return {
+        id: itemId,
+        order: index,
+        mediaType: 'image/png',
+        status: 'failed' as const,
+        errorCode: 'IMPORT_COPY_FAILED',
+        retrySource: {
+          relativePath: `Packs/${persistedPack.id}/originals/${itemId}.bin`,
+          byteCount: 4,
+          sha256: 'a'.repeat(64),
+        },
+      };
+    });
+    mockNative.scanInbox.mockResolvedValue([]);
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
+      {
+        ...persistedPack,
+        itemCount: failedItems.length,
+        import: {
+          ingestionId,
+          status: 'failed',
+          items: failedItems,
+        },
+      },
+    ]);
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'tab', 'detail'));
+    await press(control(renderer, 'button', 'Retry failed items in New Pack'));
+
+    expect(renderedText(renderer)).toContain('IMPORT_ITEM_LIMIT_EXCEEDED');
+    expect(renderedText(renderer)).toContain('Import detail');
+    expect(renderedText(renderer)).not.toContain('21 selected');
+    expect(mockNative.publishMainAppImport).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
   test('keeps an ACKed import visible from persisted Packs across refresh and restart', async () => {
     mockNative.scanInbox
       .mockResolvedValueOnce([manifest])
@@ -716,6 +759,64 @@ describe('App interactions', () => {
 
     expect(mockNative.publishMainAppImport).toHaveBeenCalledTimes(2);
     expect(mockPersistenceInboxProcessor.process).toHaveBeenCalledTimes(3);
+    expect(renderedText(renderer).replace(/[·\s]+/g, ' ')).toContain(
+      'Import complete',
+    );
+    act(() => renderer.unmount());
+  });
+
+  test('committed recovery clears a raced live workflow blocker before completing', async () => {
+    const fileUri = 'file:///cache/raced-workflow-recovery.png';
+    const importedManifest: ImportManifestV1 = {
+      ...manifest,
+      source: 'main-app-picker',
+      items: [
+        {
+          id: eventId,
+          order: 0,
+          mediaType: 'image/png',
+          status: 'copied',
+          byteCount: 8,
+          relativePath: `${eventId}.bin`,
+        },
+      ],
+    };
+    mockMainAppPicker.pickPhotos.mockResolvedValue({
+      canceled: false,
+      assets: [{ uri: fileUri, mediaType: 'image/png', byteCount: 8 }],
+    });
+    let publicationCount = 0;
+    mockNative.publishMainAppImport.mockImplementation(async () => {
+      publicationCount += 1;
+      if (publicationCount === 1) {
+        inboxListener?.({
+          schemaVersion: 1,
+          id: eventId,
+          result: 'unknown',
+        });
+        await flushWorkflow();
+      }
+      return importedManifest;
+    });
+    const renderer = await renderApp();
+    mockNative.scanInbox.mockResolvedValue([importedManifest]);
+    mockNative.getPendingShareEvents.mockRejectedValueOnce(
+      new NativeBoundaryError('NATIVE_SHARE_EVENT_STORE_READ_FAILED'),
+    );
+
+    await press(control(renderer, 'button', 'New Pack'));
+    await press(control(renderer, 'button', 'Add Photos'));
+    await press(control(renderer, 'button', 'Import Pack'));
+
+    expect(renderedText(renderer)).toContain('Import recovery required');
+    expect(renderedText(renderer)).toContain(
+      'NATIVE_SHARE_EVENT_STORE_READ_FAILED',
+    );
+
+    await press(control(renderer, 'button', 'Retry Import Recovery'));
+
+    expect(mockNative.publishMainAppImport).toHaveBeenCalledTimes(2);
+    expect(mockNative.getPendingShareEvents).toHaveBeenCalledTimes(3);
     expect(renderedText(renderer).replace(/[·\s]+/g, ' ')).toContain(
       'Import complete',
     );

@@ -1429,6 +1429,55 @@ final class InboxArtifactHandoffTests: XCTestCase {
     }
   }
 
+  func testDestinationAncestorSwapBeforeCopyFailsClosed() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: ingestionId,
+      items: [(itemId, "image/png", Data([1, 2, 3]))]
+    )
+    let originals = applicationSupport.appendingPathComponent(
+      "Packs/\(packId)/originals",
+      isDirectory: true
+    )
+    let displaced = applicationSupport.appendingPathComponent(
+      "Packs/\(packId)/originals-displaced",
+      isDirectory: true
+    )
+    let outside = applicationSupport.deletingLastPathComponent()
+      .appendingPathComponent("outside-swap", isDirectory: true)
+    try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+    var swapped = false
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max },
+      operationHook: { point in
+        guard samePoint(point, .beforeCopy), !swapped else { return }
+        swapped = true
+        try FileManager.default.moveItem(at: originals, to: displaced)
+        try FileManager.default.createSymbolicLink(
+          at: originals,
+          withDestinationURL: outside
+        )
+      }
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .integrityFailed)
+    }
+    XCTAssertTrue(swapped)
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: outside.appendingPathComponent("\(itemId).bin").path
+    ))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: displaced.appendingPathComponent("\(itemId).bin").path
+    ))
+  }
+
   func testTwentyImageAndNearLimitPdfCopyBenchmarkDoesNotRunOcr() throws {
     let imageIngestion = UUID().uuidString.lowercased()
     let imagePack = UUID().uuidString.lowercased()

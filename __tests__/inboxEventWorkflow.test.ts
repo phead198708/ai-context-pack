@@ -508,6 +508,23 @@ describe('InboxEventWorkflow integration', () => {
     });
   });
 
+  test('a failed share cannot mask an already latched operational error', async () => {
+    const scan = jest
+      .fn()
+      .mockResolvedValueOnce([manifest])
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'));
+    const h = harness({ scanInbox: scan });
+    await h.workflow.bootstrap();
+
+    await h.workflow.appBecameActive();
+    await h.workflow.receive(event(0, 'failed'));
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'STORAGE_WRITE_FAILED',
+    });
+  });
+
   test('main-app refresh rejects with the latched persistence code and retries it', async () => {
     const process = jest
       .fn()
@@ -525,6 +542,35 @@ describe('InboxEventWorkflow integration', () => {
 
     await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
     expect(process).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('committed recovery clears a live invalid-event blocker before refreshing', async () => {
+    const h = harness();
+    await h.workflow.bootstrap();
+    await h.workflow.receive({
+      schemaVersion: 1,
+      id: ids[0],
+      result: 'unknown',
+    });
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+
+    expect(h.native.getPendingShareEvents).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('committed recovery retries a complete-event ACK blocker', async () => {
+    const ack = jest
+      .fn()
+      .mockRejectedValueOnce(new NativeBoundaryError('NATIVE_SHARE_ACK_FAILED'))
+      .mockResolvedValueOnce(undefined);
+    const h = harness({ ackPendingShareEvent: ack });
+    await h.workflow.receive(event(0, 'complete'));
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+
+    expect(ack).toHaveBeenCalledTimes(2);
     expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
   });
 

@@ -43,6 +43,7 @@ function App(): React.JSX.Element {
   const [creatingEmptyDraft, setCreatingEmptyDraft] = useState(false);
   const [packCreationReady, setPackCreationReady] = useState(false);
   const [retryDraft, setRetryDraft] = useState<MainAppImportDraft>();
+  const [retryDraftError, setRetryDraftError] = useState<string>();
   const scrollView = useRef<ScrollView | null>(null);
   const newPackFlow = useRef<NewPackFlowHandle | null>(null);
   const screenRef = useRef<Screen>('inbox');
@@ -135,6 +136,7 @@ function App(): React.JSX.Element {
                 label={t(locale, 'newPack')}
                 onPress={() => {
                   setRetryDraft(undefined);
+                  setRetryDraftError(undefined);
                   setScreen('new-pack');
                 }}
               />
@@ -194,10 +196,16 @@ function App(): React.JSX.Element {
           )}
           {screen === 'detail' && (
             <ImportDetail
+              {...(retryDraftError ? { retryError: retryDraftError } : {})}
               locale={locale}
               onRetryFailed={sources => {
-                setRetryDraft(createRetryMainAppImportDraft(sources));
-                setScreen('new-pack');
+                try {
+                  setRetryDraft(createRetryMainAppImportDraft(sources));
+                  setRetryDraftError(undefined);
+                  setScreen('new-pack');
+                } catch (error) {
+                  setRetryDraftError(appErrorCode(error));
+                }
               }}
               state={state}
             />
@@ -316,6 +324,7 @@ function Inbox({
 function ImportDetail({
   state,
   onRetryFailed,
+  retryError,
   locale,
 }: {
   state: LoadState;
@@ -327,6 +336,7 @@ function ImportDetail({
       readonly sha256: string;
     }[],
   ) => void;
+  retryError?: string;
   locale: AppLocale;
 }): React.JSX.Element {
   const pack = state.kind === 'ready' ? state.packs?.[0] : undefined;
@@ -379,6 +389,11 @@ function ImportDetail({
           label={t(locale, 'retryFailedItems')}
           onPress={() => onRetryFailed(retrySources)}
         />
+      ) : null}
+      {retryError ? (
+        <Text accessibilityRole="alert" style={styles.error}>
+          {retryError}
+        </Text>
       ) : null}
     </StateCard>
   );

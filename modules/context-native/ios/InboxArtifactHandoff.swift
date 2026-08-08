@@ -160,6 +160,8 @@ enum InboxArtifactHandoff {
       packId: packId,
       directorySynchronizer: directorySynchronizer
     )
+    let destinationDescriptor = try openDestinationDirectory(destinationDirectory)
+    defer { Darwin.close(destinationDescriptor) }
 
     let artifacts: [[String: Any]] = try items.compactMap { item -> [String: Any]? in
       guard let itemId = item["id"] as? String,
@@ -169,12 +171,11 @@ enum InboxArtifactHandoff {
       guard let descriptor = try sourceDescriptor(item) else { return nil }
       try requireCanonicalUUID(itemId)
       let source = sourceDirectory.appendingPathComponent(descriptor.name)
-      let destination = destinationDirectory.appendingPathComponent("\(itemId).bin")
-      let partial = destinationDirectory.appendingPathComponent("\(itemId).bin.partial")
       let actualHash = try publish(
         source: source,
-        partial: partial,
-        destination: destination,
+        destinationDirectory: destinationDirectory,
+        destinationDescriptor: destinationDescriptor,
+        itemId: itemId,
         byteCount: descriptor.byteCount,
         sha256: descriptor.sha256,
         operationHook: operationHook,
@@ -416,28 +417,52 @@ enum InboxArtifactHandoff {
 
   private static func publish(
     source: URL,
-    partial: URL,
-    destination: URL,
+    destinationDirectory: URL,
+    destinationDescriptor: Int32,
+    itemId: String,
     byteCount: Int64,
     sha256: String?,
     operationHook: (InboxArtifactHandoffPoint) throws -> Void,
     directorySynchronizer: (URL) throws -> Void
   ) throws -> String {
-    if FileManager.default.fileExists(atPath: destination.path) {
+    let destinationName = "\(itemId).bin"
+    let partialName = "\(destinationName).partial"
+    try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+    if Darwin.faccessat(destinationDescriptor, destinationName, F_OK, AT_SYMLINK_NOFOLLOW) == 0 {
       let sourceHash = try verify(url: source, byteCount: byteCount, sha256: sha256)
-      return try verify(url: destination, byteCount: byteCount, sha256: sourceHash)
+      let existingHash = try verify(
+        directoryDescriptor: destinationDescriptor,
+        name: destinationName,
+        byteCount: byteCount,
+        sha256: sourceHash
+      )
+      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      return existingHash
     }
-    if FileManager.default.fileExists(atPath: partial.path) {
-      do { try FileManager.default.removeItem(at: partial) }
-      catch { throw InboxArtifactHandoffError.writeFailed }
-    }
-    try operationHook(.beforeCopy)
-    guard FileManager.default.createFile(atPath: partial.path, contents: nil) else {
+    if Darwin.unlinkat(destinationDescriptor, partialName, 0) != 0 && errno != ENOENT {
       throw InboxArtifactHandoffError.writeFailed
     }
+    try operationHook(.beforeCopy)
+    try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+    let outputDescriptor = Darwin.openat(
+      destinationDescriptor,
+      partialName,
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+      mode_t(S_IRUSR | S_IWUSR)
+    )
+    guard outputDescriptor >= 0 else {
+      throw InboxArtifactHandoffError.writeFailed
+    }
+    var published = false
     do {
-      let input = try openRegularFile(source, byteCount: byteCount)
-      let output = try FileHandle(forWritingTo: partial)
+      let output = FileHandle(fileDescriptor: outputDescriptor, closeOnDealloc: true)
+      let input: FileHandle
+      do {
+        input = try openRegularFile(source, byteCount: byteCount)
+      } catch {
+        try? output.close()
+        throw error
+      }
       var firstChunk = true
       var total: Int64 = 0
       do {
@@ -450,6 +475,10 @@ enum InboxArtifactHandoff {
           if firstChunk {
             firstChunk = false
             try operationHook(.duringCopy)
+            try requireDestinationIdentity(
+              destinationDirectory,
+              descriptor: destinationDescriptor
+            )
           }
         }
         guard total == byteCount else {
@@ -464,14 +493,44 @@ enum InboxArtifactHandoff {
         throw error
       }
       try operationHook(.afterFileClose)
-      let actualHash = try verify(url: partial, byteCount: byteCount, sha256: sha256)
+      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      let actualHash = try verify(
+        directoryDescriptor: destinationDescriptor,
+        name: partialName,
+        byteCount: byteCount,
+        sha256: sha256
+      )
       try operationHook(.beforePublishRename)
-      try atomicMove(from: partial, to: destination)
-      try directorySynchronizer(destination.deletingLastPathComponent())
+      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      guard Darwin.renameat(
+        destinationDescriptor,
+        partialName,
+        destinationDescriptor,
+        destinationName
+      ) == 0 else {
+        throw InboxArtifactHandoffError.writeFailed
+      }
+      published = true
+      guard Darwin.fsync(destinationDescriptor) == 0 else {
+        throw InboxArtifactHandoffError.writeFailed
+      }
+      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      try directorySynchronizer(destinationDirectory)
+      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
       return actualHash
     } catch let error as InboxArtifactHandoffError {
+      _ = Darwin.unlinkat(
+        destinationDescriptor,
+        published ? destinationName : partialName,
+        0
+      )
       throw error
     } catch {
+      _ = Darwin.unlinkat(
+        destinationDescriptor,
+        published ? destinationName : partialName,
+        0
+      )
       throw InboxArtifactHandoffError.writeFailed
     }
   }
@@ -566,6 +625,43 @@ enum InboxArtifactHandoff {
     }
   }
 
+  private static func openDestinationDirectory(_ directory: URL) throws -> Int32 {
+    let descriptor = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw InboxArtifactHandoffError.integrityFailed }
+    do {
+      try requireDestinationIdentity(directory, descriptor: descriptor)
+      return descriptor
+    } catch {
+      Darwin.close(descriptor)
+      throw error
+    }
+  }
+
+  private static func requireDestinationIdentity(
+    _ directory: URL,
+    descriptor: Int32
+  ) throws {
+    var held = stat()
+    guard Darwin.fstat(descriptor, &held) == 0,
+          (held.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
+      throw InboxArtifactHandoffError.integrityFailed
+    }
+    let currentDescriptor = Darwin.open(
+      directory.path,
+      O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+    )
+    guard currentDescriptor >= 0 else {
+      throw InboxArtifactHandoffError.integrityFailed
+    }
+    defer { Darwin.close(currentDescriptor) }
+    var current = stat()
+    guard Darwin.fstat(currentDescriptor, &current) == 0,
+          current.st_dev == held.st_dev,
+          current.st_ino == held.st_ino else {
+      throw InboxArtifactHandoffError.integrityFailed
+    }
+  }
+
   private static func cleanupTombstones(
     root: URL,
     ingestionId: String,
@@ -610,6 +706,28 @@ enum InboxArtifactHandoff {
 
   private static func verify(url: URL, byteCount: Int64, sha256 expected: String?) throws -> String {
     let input = try openRegularFile(url, byteCount: byteCount)
+    return try verify(input: input, byteCount: byteCount, sha256: expected)
+  }
+
+  private static func verify(
+    directoryDescriptor: Int32,
+    name: String,
+    byteCount: Int64,
+    sha256 expected: String?
+  ) throws -> String {
+    let input = try openRegularFile(
+      directoryDescriptor: directoryDescriptor,
+      name: name,
+      byteCount: byteCount
+    )
+    return try verify(input: input, byteCount: byteCount, sha256: expected)
+  }
+
+  private static func verify(
+    input: FileHandle,
+    byteCount: Int64,
+    sha256 expected: String?
+  ) throws -> String {
     var digest = SHA256()
     var total: Int64 = 0
     do {
@@ -637,6 +755,23 @@ enum InboxArtifactHandoff {
 
   private static func openRegularFile(_ url: URL, byteCount: Int64) throws -> FileHandle {
     let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw InboxArtifactHandoffError.integrityFailed }
+    var metadata = stat()
+    guard Darwin.fstat(descriptor, &metadata) == 0,
+          (metadata.st_mode & S_IFMT) == S_IFREG,
+          metadata.st_size == byteCount else {
+      Darwin.close(descriptor)
+      throw InboxArtifactHandoffError.integrityFailed
+    }
+    return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+  }
+
+  private static func openRegularFile(
+    directoryDescriptor: Int32,
+    name: String,
+    byteCount: Int64
+  ) throws -> FileHandle {
+    let descriptor = Darwin.openat(directoryDescriptor, name, O_RDONLY | O_NOFOLLOW)
     guard descriptor >= 0 else { throw InboxArtifactHandoffError.integrityFailed }
     var metadata = stat()
     guard Darwin.fstat(descriptor, &metadata) == 0,

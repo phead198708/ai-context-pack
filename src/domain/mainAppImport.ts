@@ -1,4 +1,5 @@
 import { createCanonicalUuid } from './canonicalUuid';
+import { DomainError } from './errors';
 
 export const MAIN_APP_IMPORT_MAX_ITEMS = 20;
 export const MAIN_APP_IMPORT_MAX_BINARY_BYTES = 52_428_800;
@@ -103,9 +104,11 @@ export function createRetryMainAppImportDraft(
   sources: readonly MainAppRetrySource[],
   createId: () => string = createCanonicalUuid,
 ): MainAppImportDraft {
+  if (sources.length > MAIN_APP_IMPORT_MAX_ITEMS)
+    throw new DomainError('IMPORT_ITEM_LIMIT_EXCEEDED');
   return {
     ingestionId: createId(),
-    items: sources.slice(0, MAIN_APP_IMPORT_MAX_ITEMS).map((source, order) => ({
+    items: sources.map((source, order) => ({
       id: createId(),
       order,
       kind: 'owned-file',

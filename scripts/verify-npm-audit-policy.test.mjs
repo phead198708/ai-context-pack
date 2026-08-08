@@ -154,6 +154,25 @@ test('registry-expanded propagation passes only through the pinned lock graph', 
     exceptions: 2,
   });
 
+  const expandedNoFix = clone(report);
+  for (const name of ['expo-image-picker', 'expo-document-picker']) {
+    expandedNoFix.vulnerabilities[name].range = '';
+    expandedNoFix.vulnerabilities[name].fixAvailable = false;
+  }
+  assert.deepEqual(verifyAuditReport(expandedNoFix, makeLock()), {
+    highPackages: 15,
+    exceptions: 2,
+  });
+
+  const expandedCompatibleFix = clone(expandedNoFix);
+  expandedCompatibleFix.vulnerabilities[
+    'expo-image-picker'
+  ].fixAvailable = true;
+  expectRule(
+    () => verifyAuditReport(expandedCompatibleFix, makeLock()),
+    'AUDIT_FIX_GRAPH_DRIFT',
+  );
+
   const forged = clone(report);
   forged.vulnerabilities['expo-image-picker'].via = ['image-size'];
   expectRule(

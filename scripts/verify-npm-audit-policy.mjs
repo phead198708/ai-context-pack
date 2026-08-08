@@ -811,8 +811,9 @@ function verifyPropagatedHighGraph(vulnerabilities, packageLock) {
     if (
       vulnerability.severity !== 'high' ||
       vulnerability.isDirect !== directNames.has(name) ||
-      vulnerability.range.length === 0 ||
-      (!APPROVED_HIGH_PACKAGES.includes(name) && vulnerability.range !== '*') ||
+      (!APPROVED_HIGH_PACKAGES.includes(name) &&
+        vulnerability.range !== '*' &&
+        vulnerability.range !== '') ||
       !reachesApprovedAdvisory(name, vulnerabilities)
     ) {
       fail('AUDIT_HIGH_GRAPH_DRIFT');
@@ -840,12 +841,18 @@ function verifyPropagatedHighGraph(vulnerabilities, packageLock) {
     }
     const actualFix = fixProjection(vulnerability.fixAvailable);
     const fixValues = approvedFixValues(name, vulnerabilities);
+    // npm 10.9.2 alternates between a compact propagation report and an expanded report.
+    // Expanded, non-core records can carry the exact `false` no-fix sentinel and an empty
+    // range. `true` (a compatible fix) and every unpinned object still fail closed.
+    const approvedExpandedNoFix =
+      !APPROVED_HIGH_PACKAGES.includes(name) && actualFix === false;
     if (
-      !isRecord(actualFix) ||
-      actualFix.isSemVerMajor !== true ||
-      !fixValues.some(
-        approved => JSON.stringify(approved) === JSON.stringify(actualFix),
-      )
+      !approvedExpandedNoFix &&
+      (!isRecord(actualFix) ||
+        actualFix.isSemVerMajor !== true ||
+        !fixValues.some(
+          approved => JSON.stringify(approved) === JSON.stringify(actualFix),
+        ))
     ) {
       fail('AUDIT_FIX_GRAPH_DRIFT');
     }
