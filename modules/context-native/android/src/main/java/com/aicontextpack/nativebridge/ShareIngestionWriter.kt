@@ -72,6 +72,7 @@ object ShareIngestionWriter {
     filesDir: File,
     ingestionId: String,
     inputs: List<ShareIngestionInput>,
+    source: String = "android-share-intent",
     now: () -> Date = { Date() },
     operationHook: (Point) -> Unit = {},
   ): ShareIngestionSummary {
@@ -80,6 +81,7 @@ object ShareIngestionWriter {
     require(inputs.size <= maximumReportedItemCount)
     require(inputs.map { it.order } == inputs.indices.toList())
     require(inputs.map { it.id }.distinct().size == inputs.size)
+    require(source in allowedSources)
     inputs.forEach { requireCanonicalUuid(it.id) }
 
     val inbox = File(filesDir, "Inbox")
@@ -124,7 +126,7 @@ object ShareIngestionWriter {
           .put("schemaVersion", 1)
           .put("ingestionId", ingestionId)
           .put("createdAt", isoTimestamp(now()))
-          .put("source", "android-share-intent")
+          .put("source", source)
           .put("status", status)
           .put("items", JSONArray(items))
         val partialManifest = File(staging, "manifest.partial")
@@ -506,6 +508,12 @@ object ShareIngestionWriter {
     "IMPORT_TYPE_UNSUPPORTED",
     "IMPORT_COPY_FAILED",
     "IMPORT_SIZE_LIMIT_EXCEEDED",
+  )
+
+  private val allowedSources = setOf(
+    "android-share-intent",
+    "main-app-picker",
+    "main-app-text",
   )
 }
 

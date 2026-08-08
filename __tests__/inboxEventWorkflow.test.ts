@@ -39,6 +39,8 @@ function harness(
     ackRecoveryEvent: jest.fn().mockResolvedValue(undefined),
     handoffInbox: jest.fn().mockResolvedValue([]),
     acknowledgeInbox: jest.fn().mockResolvedValue(undefined),
+    publishMainAppImport: jest.fn(),
+    discardMainAppPickerFiles: jest.fn(),
     publishArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
     listOwnedArtifacts: jest.fn(),

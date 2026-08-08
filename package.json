@@ -24,6 +24,8 @@
     "@react-native/new-app-screen": "0.86.2",
     "expo": "57.0.11",
     "expo-dev-client": "57.0.10",
+    "expo-document-picker": "57.0.1",
+    "expo-image-picker": "57.0.8",
     "expo-sqlite": "~57.0.1",
     "expo-status-bar": "57.0.1",
     "react": "19.2.3",

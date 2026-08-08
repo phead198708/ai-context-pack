@@ -1,0 +1,206 @@
+import Foundation
+
+enum MainAppImportError: Error, Equatable {
+  case invalidInput
+  case cleanupFailed
+
+  var stableCode: String {
+    switch self {
+    case .invalidInput: return "MAIN_APP_IMPORT_INPUT_INVALID"
+    case .cleanupFailed: return "MAIN_APP_IMPORT_CLEANUP_FAILED"
+    }
+  }
+}
+
+/**
+ Converts controlled picker-cache URLs and inline UTF-8 entries into the same atomic Inbox
+ session used by the iOS Share Extension. Provider paths and display filenames are never durable.
+ */
+enum MainAppImportPublisher {
+  static func publish(
+    container: URL,
+    cacheRoot: URL,
+    ingestionId: String,
+    source: String,
+    rawInputs: [[String: Any]],
+    removeCacheFile: @escaping (URL) throws -> Void = {
+      try FileManager.default.removeItem(at: $0)
+    },
+    operationHook: @escaping (ShareIngestionSession.Point) throws -> Void = { _ in }
+  ) throws -> [String: Any] {
+    guard ["main-app-picker", "main-app-text"].contains(source),
+          !rawInputs.isEmpty,
+          rawInputs.count <= ShareIngestionSession.maximumItemCount else {
+      throw MainAppImportError.invalidInput
+    }
+    let decoded = try rawInputs.enumerated().map { index, raw in
+      try decode(raw, expectedOrder: index, cacheRoot: cacheRoot)
+    }
+    guard Set(decoded.map(\.id)).count == decoded.count else {
+      throw MainAppImportError.invalidInput
+    }
+    let pickerFiles = decoded.compactMap(\.file)
+    guard (source == "main-app-picker") == !pickerFiles.isEmpty else {
+      throw MainAppImportError.invalidInput
+    }
+    let session = try ShareIngestionSession(
+      container: container,
+      ingestionId: ingestionId,
+      source: source,
+      operationHook: operationHook
+    )
+    for item in decoded {
+      switch item.value {
+      case .file(let file, let mediaType):
+        if FileManager.default.fileExists(atPath: file.path) {
+          try session.recordFile(
+            id: item.id,
+            order: item.order,
+            declaredMediaType: mediaType,
+            source: file
+          )
+        } else {
+          try session.recordFailure(
+            id: item.id,
+            order: item.order,
+            declaredMediaType: mediaType,
+            code: "IMPORT_PROVIDER_PERMISSION_EXPIRED"
+          )
+        }
+      case .text(let text, let mediaType):
+        try session.recordData(
+          id: item.id,
+          order: item.order,
+          declaredMediaType: mediaType,
+          data: Data(text.utf8)
+        )
+      }
+    }
+    let manifest = try session.finish().manifest
+    // Only a committed/replayed Inbox owns immutable bytes. A failed attempt keeps picker
+    // cache files so the visible draft can retry or explicitly discard them.
+    for file in Set(pickerFiles) where FileManager.default.fileExists(atPath: file.path) {
+      do { try removeCacheFile(file) }
+      catch { throw MainAppImportError.cleanupFailed }
+    }
+    return manifest
+  }
+
+  static func discard(cacheRoot: URL, fileUris: [String]) throws -> Bool {
+    for value in fileUris {
+      let file = try controlledCacheFile(value, cacheRoot: cacheRoot)
+      if FileManager.default.fileExists(atPath: file.path) {
+        do { try FileManager.default.removeItem(at: file) }
+        catch { throw MainAppImportError.cleanupFailed }
+      }
+    }
+    return true
+  }
+
+  private enum Value {
+    case file(URL, String)
+    case text(String, String)
+  }
+
+  private struct Input {
+    let id: String
+    let order: Int
+    let value: Value
+
+    var file: URL? {
+      if case .file(let file, _) = value { return file }
+      return nil
+    }
+  }
+
+  private static func decode(
+    _ raw: [String: Any],
+    expectedOrder: Int,
+    cacheRoot: URL
+  ) throws -> Input {
+    guard let kind = raw["kind"] as? String,
+          Set(raw.keys) == (kind == "file" ? fileKeys : textKeys),
+          let id = raw["id"] as? String,
+          canonicalUUID(id),
+          try exactNonNegativeInteger(raw["order"]) == expectedOrder,
+          (try exactNonNegativeInteger(raw["byteCount"])) <= 9_007_199_254_740_991,
+          let mediaType = raw["declaredMediaType"] as? String,
+          mediaType.utf8.count <= 127,
+          mediaType.range(of: mediaTypePattern, options: .regularExpression) != nil else {
+      throw MainAppImportError.invalidInput
+    }
+
+    if kind == "file" {
+      guard let value = raw["fileUri"] as? String else {
+        throw MainAppImportError.invalidInput
+      }
+      let file = try controlledCacheFile(value, cacheRoot: cacheRoot)
+      return Input(id: id, order: expectedOrder, value: .file(file, mediaType))
+    }
+
+    let exactByteCount = try exactNonNegativeInteger(raw["byteCount"])
+    guard ["text", "url"].contains(kind),
+          let text = raw["text"] as? String,
+          !text.isEmpty,
+          mediaType == (kind == "url" ? "text/uri-list" : "text/plain"),
+          Int64(Data(text.utf8).count) == exactByteCount,
+          kind != "url" || supportedWebURL(text) else {
+      throw MainAppImportError.invalidInput
+    }
+    return Input(id: id, order: expectedOrder, value: .text(text, mediaType))
+  }
+
+  private static func controlledCacheFile(_ value: String, cacheRoot: URL) throws -> URL {
+    guard let unresolved = URL(string: value), unresolved.isFileURL else {
+      throw MainAppImportError.invalidInput
+    }
+    if FileManager.default.fileExists(atPath: unresolved.path) {
+      let values = try unresolved.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+      guard values.isSymbolicLink != true, values.isDirectory != true else {
+        throw MainAppImportError.invalidInput
+      }
+    }
+    let root = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
+    let file = unresolved.resolvingSymlinksInPath().standardizedFileURL
+    guard file.path.hasPrefix(root.path + "/") else {
+      throw MainAppImportError.invalidInput
+    }
+    return file
+  }
+
+  private static func exactNonNegativeInteger(_ value: Any?) throws -> Int64 {
+    guard let number = value as? NSNumber,
+          CFGetTypeID(number) != CFBooleanGetTypeID(),
+          number.doubleValue.isFinite,
+          number.doubleValue >= 0,
+          number.doubleValue.rounded(.towardZero) == number.doubleValue,
+          number.doubleValue <= 9_007_199_254_740_991 else {
+      throw MainAppImportError.invalidInput
+    }
+    return number.int64Value
+  }
+
+  private static func canonicalUUID(_ value: String) -> Bool {
+    guard let uuid = UUID(uuidString: value) else { return false }
+    return uuid.uuidString.lowercased() == value
+  }
+
+  private static func supportedWebURL(_ value: String) -> Bool {
+    guard let components = URLComponents(string: value),
+          let scheme = components.scheme?.lowercased(),
+          ["http", "https"].contains(scheme),
+          components.host?.isEmpty == false else {
+      return false
+    }
+    return true
+  }
+
+  private static let mediaTypePattern =
+    "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$"
+  private static let fileKeys: Set<String> = [
+    "id", "order", "kind", "declaredMediaType", "byteCount", "fileUri",
+  ]
+  private static let textKeys: Set<String> = [
+    "id", "order", "kind", "declaredMediaType", "byteCount", "text",
+  ]
+}

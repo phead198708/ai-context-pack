@@ -8,6 +8,8 @@ import type {
   NativeQuarantinePurgeResult,
   NativeQuarantinedArtifact,
 } from '../domain/nativeAdapter';
+import type { MainAppImportInput } from '../domain/mainAppImport';
+import { utf8ByteCount } from '../domain/mainAppImport';
 import { newestManifestsFirst } from '../domain/importOrdering';
 import {
   isImportManifestV1,
@@ -37,6 +39,12 @@ export interface NativeMethods {
     requiredHeadroomBytes: number,
   ): Promise<unknown>;
   acknowledgeInbox?(ingestionId: string): Promise<unknown>;
+  publishMainAppImport?(
+    ingestionId: string,
+    source: 'main-app-picker' | 'main-app-text',
+    inputs: readonly MainAppImportInput[],
+  ): Promise<unknown>;
+  discardMainAppPickerFiles?(fileUris: readonly string[]): Promise<unknown>;
   publishArtifact?(
     sourceFileUri: string,
     relativePath: string,
@@ -136,6 +144,46 @@ export const createNativeAdapter = (
             throw new NativeBoundaryError('NATIVE_INBOX_ACK_UNAVAILABLE');
           if ((await nativeModule.acknowledgeInbox(ingestionId)) !== true)
             throw new NativeBoundaryError('NATIVE_INBOX_ACK_FAILED');
+        },
+        publishMainAppImport: async (ingestionId, source, inputs) => {
+          if (!nativeModule.publishMainAppImport)
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_UNAVAILABLE');
+          if (!isValidMainAppImportInput(ingestionId, source, inputs))
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_INVALID');
+          const value = await nativeModule.publishMainAppImport(
+            ingestionId,
+            source,
+            inputs,
+          );
+          if (
+            !isImportManifestV1(value) ||
+            value.ingestionId !== ingestionId ||
+            value.source !== source ||
+            value.items.length !== inputs.length ||
+            value.items.some(
+              (item, index) =>
+                item.id !== inputs[index]?.id || item.order !== index,
+            )
+          )
+            throw new NativeBoundaryError(
+              'NATIVE_MAIN_APP_IMPORT_RESULT_INVALID',
+            );
+          return value;
+        },
+        discardMainAppPickerFiles: async fileUris => {
+          if (!nativeModule.discardMainAppPickerFiles)
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_UNAVAILABLE');
+          if (
+            !Array.isArray(fileUris) ||
+            fileUris.some(
+              uri => typeof uri !== 'string' || !uri.startsWith('file://'),
+            )
+          )
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_INVALID');
+          if ((await nativeModule.discardMainAppPickerFiles(fileUris)) !== true)
+            throw new NativeBoundaryError(
+              'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
+            );
         },
         publishArtifact: async (
           sourceFileUri,
@@ -246,6 +294,12 @@ export const createNativeAdapter = (
         acknowledgeInbox: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
+        publishMainAppImport: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        discardMainAppPickerFiles: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
         publishArtifact: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
@@ -274,6 +328,71 @@ export const createNativeAdapter = (
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
       };
+
+function isValidMainAppImportInput(
+  ingestionId: string,
+  source: string,
+  inputs: readonly MainAppImportInput[],
+): boolean {
+  if (
+    !isCanonicalUuid(ingestionId) ||
+    (source !== 'main-app-picker' && source !== 'main-app-text') ||
+    !Array.isArray(inputs) ||
+    inputs.length === 0 ||
+    inputs.length > 20 ||
+    new Set(inputs.map(input => input.id)).size !== inputs.length
+  )
+    return false;
+  const containsFile = inputs.some(input => input.kind === 'file');
+  if ((source === 'main-app-picker') !== containsFile) return false;
+  return inputs.every((input, index) => {
+    const baseValid =
+      isCanonicalUuid(input.id) &&
+      input.order === index &&
+      typeof input.declaredMediaType === 'string' &&
+      input.declaredMediaType.length > 0 &&
+      input.declaredMediaType.length <= 127 &&
+      /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(
+        input.declaredMediaType,
+      ) &&
+      Number.isSafeInteger(input.byteCount) &&
+      input.byteCount >= 0;
+    if (!baseValid) return false;
+    if (input.kind === 'file')
+      return (
+        Object.keys(input).length === 6 &&
+        typeof input.fileUri === 'string' &&
+        input.fileUri.startsWith('file://')
+      );
+    if (
+      (input.kind !== 'text' && input.kind !== 'url') ||
+      Object.keys(input).length !== 6 ||
+      typeof input.text !== 'string' ||
+      input.text.length === 0 ||
+      input.byteCount !== utf8ByteCount(input.text) ||
+      input.declaredMediaType !==
+        (input.kind === 'url' ? 'text/uri-list' : 'text/plain')
+    )
+      return false;
+    if (input.kind === 'url') {
+      try {
+        if (
+          input.text !== input.text.trim() ||
+          !/^https?:\/\//i.test(input.text)
+        )
+          return false;
+        const parsed = new URL(input.text);
+        return (
+          (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+          parsed.host.length > 0
+        );
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  });
+}
 
 function nativeErrorCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined;

@@ -1,5 +1,7 @@
 import type { ImportManifestV1 } from '../../domain/contracts';
+import { createCanonicalUuid } from '../../domain/canonicalUuid';
 import { DomainError } from '../../domain/errors';
+import type { ContextPack } from '../../domain/models';
 import type {
   InboxManifestProcessor,
   InboxPackSummary,
@@ -21,7 +23,7 @@ export class ProductionInboxManifestProcessor
   implements InboxManifestProcessor
 {
   private chain = Promise.resolve();
-  private readonly cleanupOwnerId = createInternalUuid();
+  private readonly cleanupOwnerId = createCanonicalUuid();
   private integrityAuditComplete = false;
 
   constructor(
@@ -110,15 +112,42 @@ export function productionRepository(): Promise<ProductionPersistenceRepository>
 export const persistenceInboxProcessor: InboxManifestProcessor =
   new ProductionInboxManifestProcessor();
 
-function createInternalUuid(): string {
-  const values = Array.from({ length: 32 }, () =>
-    Math.floor(Math.random() * 16).toString(16),
-  );
-  values[12] = '4';
-  values[16] = (8 + Math.floor(Math.random() * 4)).toString(16);
-  return `${values.slice(0, 8).join('')}-${values
-    .slice(8, 12)
-    .join('')}-${values.slice(12, 16).join('')}-${values
-    .slice(16, 20)
-    .join('')}-${values.slice(20).join('')}`;
+export async function createEmptyDraftPack(
+  now: () => Date = () => new Date(),
+  createId: () => string = createCanonicalUuid,
+  getRepository: () => Promise<ProductionPersistenceRepository> = productionRepository,
+): Promise<InboxPackSummary> {
+  const id = createId();
+  const timestamp = now().toISOString();
+  const pack: ContextPack = {
+    id,
+    schemaVersion: 1,
+    title: 'Context Pack',
+    userInstruction: '',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    state: 'draft',
+    budget: {
+      preset: 'balanced',
+      maxOutputBytes: 10_485_760,
+      minimumImageLongestEdge: 1_280,
+      imageQuality: 0.82,
+      estimatorVersion: 'v1',
+    },
+    estimatedTokens: 0,
+    orderedItemIds: [],
+    exportRecordIds: [],
+    warningCodes: [],
+  };
+  const repository = await getRepository();
+  await repository.savePackGraph({ pack, items: [] });
+  return {
+    id,
+    schemaVersion: 1,
+    title: pack.title,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    state: 'draft',
+    itemCount: 0,
+  };
 }
