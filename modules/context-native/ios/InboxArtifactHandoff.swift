@@ -117,15 +117,26 @@ enum InboxArtifactHandoff {
       }
       let name = "\(itemId).retry"
       let source = sourceDirectory.appendingPathComponent(name)
-      guard FileManager.default.fileExists(atPath: source.path) else { return nil }
-      let values = try source.resourceValues(
+      let values = try? source.resourceValues(
         forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
       )
-      guard values.isRegularFile == true, values.isSymbolicLink != true,
-            let size = values.fileSize, size >= 0 else {
+      let retryByteCount = (item["retryByteCount"] as? NSNumber)?.int64Value
+      let retrySha256 = item["retrySha256"] as? String
+      if retryByteCount == nil && retrySha256 == nil && values == nil { return nil }
+      guard values?.isRegularFile == true, values?.isSymbolicLink != true,
+            let size = values?.fileSize,
+            let retryByteCount,
+            retryByteCount >= 0,
+            retryByteCount <= Int64(ShareIngestionSession.maximumBinaryBytes),
+            Int64(size) == retryByteCount,
+            let retrySha256,
+            retrySha256.range(
+              of: "^[0-9a-f]{64}$",
+              options: .regularExpression
+            ) != nil else {
         throw InboxArtifactHandoffError.integrityFailed
       }
-      return (name, Int64(size), nil)
+      return (name, retryByteCount, retrySha256)
     }
     var requiredFreeBytes = requiredHeadroomBytes
     for item in items {
@@ -425,16 +436,24 @@ enum InboxArtifactHandoff {
       throw InboxArtifactHandoffError.writeFailed
     }
     do {
-      let input = try FileHandle(forReadingFrom: source)
+      let input = try openRegularFile(source, byteCount: byteCount)
       let output = try FileHandle(forWritingTo: partial)
       var firstChunk = true
+      var total: Int64 = 0
       do {
         while let data = try input.read(upToCount: 64 * 1024), !data.isEmpty {
+          total += Int64(data.count)
+          guard total <= byteCount else {
+            throw InboxArtifactHandoffError.integrityFailed
+          }
           try output.write(contentsOf: data)
           if firstChunk {
             firstChunk = false
             try operationHook(.duringCopy)
           }
+        }
+        guard total == byteCount else {
+          throw InboxArtifactHandoffError.integrityFailed
         }
         try output.synchronize()
         try input.close()
@@ -569,17 +588,19 @@ enum InboxArtifactHandoff {
   }
 
   private static func verify(url: URL, byteCount: Int64, sha256 expected: String?) throws -> String {
-    let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-    guard values?.isRegularFile == true, Int64(values?.fileSize ?? -1) == byteCount else {
-      throw InboxArtifactHandoffError.integrityFailed
-    }
-    let input: FileHandle
-    do { input = try FileHandle(forReadingFrom: url) }
-    catch { throw InboxArtifactHandoffError.integrityFailed }
+    let input = try openRegularFile(url, byteCount: byteCount)
     var digest = SHA256()
+    var total: Int64 = 0
     do {
       while let data = try input.read(upToCount: 64 * 1024), !data.isEmpty {
+        total += Int64(data.count)
+        guard total <= byteCount else {
+          throw InboxArtifactHandoffError.integrityFailed
+        }
         digest.update(data: data)
+      }
+      guard total == byteCount else {
+        throw InboxArtifactHandoffError.integrityFailed
       }
       try input.close()
     } catch {
@@ -591,6 +612,19 @@ enum InboxArtifactHandoff {
       throw InboxArtifactHandoffError.integrityFailed
     }
     return actual
+  }
+
+  private static func openRegularFile(_ url: URL, byteCount: Int64) throws -> FileHandle {
+    let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw InboxArtifactHandoffError.integrityFailed }
+    var metadata = stat()
+    guard Darwin.fstat(descriptor, &metadata) == 0,
+          (metadata.st_mode & S_IFMT) == S_IFREG,
+          metadata.st_size == byteCount else {
+      Darwin.close(descriptor)
+      throw InboxArtifactHandoffError.integrityFailed
+    }
+    return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
   }
 
   private static func synchronizeDirectory(_ directory: URL) throws {

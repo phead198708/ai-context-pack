@@ -255,6 +255,17 @@ object ShareIngestionWriter {
       }
       val detectedMediaType = detectMediaType(partial)
       if (!declaredTypeAllows(input.declaredMediaType, detectedMediaType)) {
+        if (input.retainFailedSource) {
+          val retry = File(staging, "${input.id}.retry")
+          atomicRename(partial, retry)
+          synchronizeDirectory(staging)
+          throw ShareInputException(
+            "IMPORT_TYPE_UNSUPPORTED",
+            detectedMediaType,
+            byteCount,
+            actualHash,
+          )
+        }
         throw ShareInputException("IMPORT_TYPE_UNSUPPORTED", detectedMediaType)
       }
       operationHook(Point.BEFORE_ITEM_PUBLISH)
@@ -276,8 +287,13 @@ object ShareIngestionWriter {
       throw error
     } catch (error: ShareInputException) {
       partial.delete()
-      if (input.retainFailedSource) retainRetrySource(staging, input)
-      failedItem(input, error.stableCode, error.detectedMediaType)
+      failedItem(
+        input,
+        error.stableCode,
+        error.detectedMediaType,
+        error.retryByteCount,
+        error.retrySha256,
+      )
     } catch (_: SecurityException) {
       partial.delete()
       failedItem(input, "IMPORT_PROVIDER_PERMISSION_EXPIRED")
@@ -287,47 +303,6 @@ object ShareIngestionWriter {
     } catch (_: Exception) {
       partial.delete()
       failedItem(input, "IMPORT_COPY_FAILED")
-    }
-  }
-
-  /** Retains only a complete bounded source; an oversized or revoked source has no retry payload. */
-  private fun retainRetrySource(staging: File, input: ShareIngestionInput) {
-    val source = try {
-      input.openStream?.invoke()
-    } catch (_: Exception) {
-      null
-    } ?: return
-    val partial = File(staging, "${input.id}.retry.partial")
-    val destination = File(staging, "${input.id}.retry")
-    try {
-      var oversized = false
-      source.use { stream ->
-        FileOutputStream(partial).use { output ->
-          val buffer = ByteArray(64 * 1024)
-          var total = 0L
-          while (true) {
-            val count = stream.read(buffer)
-            if (count < 0) break
-            if (count == 0) continue
-            total += count
-            if (total > maximumBinaryBytes) {
-              oversized = true
-              break
-            }
-            output.write(buffer, 0, count)
-          }
-          output.fd.sync()
-        }
-      }
-      if (oversized) {
-        partial.delete()
-        return
-      }
-      atomicRename(partial, destination)
-      synchronizeDirectory(staging)
-    } catch (_: Exception) {
-      partial.delete()
-      throw ShareIngestionStorageException()
     }
   }
 
@@ -354,16 +329,25 @@ object ShareIngestionWriter {
     input: ShareIngestionInput,
     code: String,
     detectedMediaType: String? = null,
-  ): JSONObject = JSONObject()
-    .put("id", input.id)
-    .put("order", input.order)
-    .put(
-      "mediaType",
-      detectedMediaType ?: concreteOrFallbackMediaType(input.declaredMediaType),
-    )
-    .put("status", "failed")
-    .put("byteCount", 0)
-    .put("errorCode", code)
+    retryByteCount: Long? = null,
+    retrySha256: String? = null,
+  ): JSONObject {
+    val item = JSONObject()
+      .put("id", input.id)
+      .put("order", input.order)
+      .put(
+        "mediaType",
+        detectedMediaType ?: concreteOrFallbackMediaType(input.declaredMediaType),
+      )
+      .put("status", "failed")
+      .put("byteCount", 0)
+      .put("errorCode", code)
+    if (retryByteCount != null && retrySha256 != null) {
+      item.put("retryByteCount", retryByteCount)
+      item.put("retrySha256", retrySha256)
+    }
+    return item
+  }
 
   private fun summary(manifest: Map<String, Any?>, replayed: Boolean): ShareIngestionSummary {
     @Suppress("UNCHECKED_CAST")
@@ -574,6 +558,8 @@ object ShareIngestionWriter {
 private class ShareInputException(
   val stableCode: String,
   val detectedMediaType: String? = null,
+  val retryByteCount: Long? = null,
+  val retrySha256: String? = null,
 ) : Exception(stableCode)
 
 private class ShareIngestionStorageException : Exception("SHARE_INGESTION_STORAGE_FAILED")

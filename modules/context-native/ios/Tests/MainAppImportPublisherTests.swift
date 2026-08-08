@@ -207,22 +207,49 @@ final class MainAppImportPublisherTests: XCTestCase {
     let firstIngestionId = id()
     let failedItemId = id()
     let bytes = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    let replacement = Data(repeating: 0x41, count: bytes.count)
     let image = try cached("persisted-retry.bin", bytes: bytes)
     let failed = try MainAppImportPublisher.publish(
       container: root,
       cacheRoot: cache,
       ingestionId: firstIngestionId,
       source: "main-app-picker",
-      rawInputs: [file(failedItemId, 0, "application/pdf", image)]
+      rawInputs: [file(failedItemId, 0, "application/pdf", image)],
+      operationHook: { point in
+        if case .afterFirstChunk = point { try replacement.write(to: image) }
+      }
     )
     let failedItems = try XCTUnwrap(failed["items"] as? [[String: Any]])
     XCTAssertEqual(failedItems[0]["status"] as? String, "failed")
     XCTAssertEqual(failedItems[0]["mediaType"] as? String, "image/png")
-    XCTAssertTrue(FileManager.default.fileExists(
-      atPath: root.appendingPathComponent("Inbox/\(firstIngestionId)/\(failedItemId).retry").path
-    ))
+    XCTAssertEqual((failedItems[0]["retryByteCount"] as? NSNumber)?.intValue, bytes.count)
+    XCTAssertEqual((failedItems[0]["retrySha256"] as? String)?.count, 64)
+    let retry = root.appendingPathComponent(
+      "Inbox/\(firstIngestionId)/\(failedItemId).retry"
+    )
+    XCTAssertEqual(try Data(contentsOf: retry), bytes)
 
     let ownedRoot = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+    let outside = root.appendingPathComponent("outside-retry.bin")
+    try bytes.write(to: outside)
+    XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+      container: root,
+      applicationSupport: ownedRoot,
+      ingestionId: firstIngestionId,
+      packId: firstIngestionId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max },
+      operationHook: { point in
+        if case .beforeCopy = point {
+          try FileManager.default.removeItem(at: retry)
+          try FileManager.default.createSymbolicLink(at: retry, withDestinationURL: outside)
+        }
+      }
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .integrityFailed)
+    }
+    try FileManager.default.removeItem(at: retry)
+    try bytes.write(to: retry)
     let handoff = try InboxArtifactHandoff.handoff(
       container: root,
       applicationSupport: ownedRoot,

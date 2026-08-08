@@ -203,6 +203,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
 
   test('rehydrates durable partial-item failures for Inbox visibility', async () => {
     const failedItemId = '423e4567-e89b-42d3-a456-426614174000';
+    let swapRetryOwner = false;
     const connection = {
       exec: async () => undefined,
       run: async () => ({ changes: 0 }),
@@ -238,7 +239,9 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
                 status: 'failed',
                 error_code: 'IMPORT_TYPE_UNSUPPORTED',
                 artifact_count: 1,
-                artifact_relative_path: `Packs/${packId}/originals/${failedItemId}.bin`,
+                artifact_relative_path: swapRetryOwner
+                  ? `Packs/${packId}/originals/${itemId}.bin`
+                  : `Packs/${packId}/originals/${failedItemId}.bin`,
                 artifact_byte_count: 7,
                 artifact_sha256: 'c'.repeat(64),
               },
@@ -280,6 +283,11 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
         ],
       },
     ]);
+
+    swapRetryOwner = true;
+    await expect(repository.listImportDetails()).rejects.toMatchObject({
+      code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
   });
 
   test('registers an exact verified derivative and rejects immutable replacement', async () => {

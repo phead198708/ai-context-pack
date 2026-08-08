@@ -731,7 +731,7 @@ function reachesApprovedAdvisory(name, vulnerabilities, visiting = new Set()) {
   });
 }
 
-function connectedToFixTarget(
+function reachesFixTargetThroughDependencies(
   name,
   fixName,
   vulnerabilities,
@@ -743,9 +743,14 @@ function connectedToFixTarget(
   next.add(name);
   const vulnerability = vulnerabilities[name];
   if (!isRecord(vulnerability)) return false;
-  return [...vulnerability.via, ...vulnerability.effects].some(adjacent =>
+  return vulnerability.via.some(adjacent =>
     typeof adjacent === 'string'
-      ? connectedToFixTarget(adjacent, fixName, vulnerabilities, next)
+      ? reachesFixTargetThroughDependencies(
+          adjacent,
+          fixName,
+          vulnerabilities,
+          next,
+        )
       : false,
   );
 }
@@ -757,14 +762,62 @@ function approvedFixValues(name, vulnerabilities) {
     (value, index, values) =>
       values.findIndex(
         candidate => JSON.stringify(candidate) === JSON.stringify(value),
-      ) === index && connectedToFixTarget(name, value.name, vulnerabilities),
+      ) === index &&
+      reachesFixTargetThroughDependencies(name, value.name, vulnerabilities),
   );
+}
+
+function verifyPinnedCoreProjection(name, vulnerability) {
+  const expected = APPROVED_HIGH_GRAPH.find(entry => entry.name === name);
+  if (!expected) return;
+  if (
+    vulnerability.isDirect !== expected.isDirect ||
+    !exactStrings(
+      vulnerability.via.map(via =>
+        typeof via === 'string' ? `package:${via}` : `advisory:${via.source}`,
+      ),
+      expected.via,
+    ) ||
+    !exactStrings(vulnerability.nodes, expected.nodes) ||
+    vulnerability.range !== expected.range
+  ) {
+    fail('AUDIT_HIGH_GRAPH_DRIFT');
+  }
+  const coreEffects = vulnerability.effects.filter(effect =>
+    APPROVED_HIGH_PACKAGES.includes(effect),
+  );
+  const allowedCoreEffects = APPROVED_AUDIT_GRAPHS.map(
+    graph => graph.find(entry => entry.name === name)?.effects ?? [],
+  );
+  if (!allowedCoreEffects.some(effects => exactStrings(coreEffects, effects))) {
+    fail('AUDIT_HIGH_GRAPH_DRIFT');
+  }
 }
 
 function verifyPropagatedHighGraph(vulnerabilities, packageLock) {
   const highNames = Object.keys(vulnerabilities).sort();
   const highSet = new Set(highNames);
   if (APPROVED_HIGH_PACKAGES.some(name => !highSet.has(name))) {
+    fail('AUDIT_HIGH_GRAPH_DRIFT');
+  }
+  const coreEffects = Object.fromEntries(
+    APPROVED_HIGH_PACKAGES.map(name => [
+      name,
+      vulnerabilities[name].effects
+        .filter(effect => APPROVED_HIGH_PACKAGES.includes(effect))
+        .sort(),
+    ]),
+  );
+  const allowedCoreEffects = APPROVED_AUDIT_GRAPHS.map(graph =>
+    Object.fromEntries(
+      graph.map(entry => [entry.name, [...entry.effects].sort()]),
+    ),
+  );
+  if (
+    !allowedCoreEffects.some(
+      expected => JSON.stringify(expected) === JSON.stringify(coreEffects),
+    )
+  ) {
     fail('AUDIT_HIGH_GRAPH_DRIFT');
   }
   const directNames = rootDependencyNames(packageLock);
@@ -778,12 +831,15 @@ function verifyPropagatedHighGraph(vulnerabilities, packageLock) {
     ) {
       fail('AUDIT_HIGH_GRAPH_DRIFT');
     }
+    verifyPinnedCoreProjection(name, vulnerability);
     const entries = lockNodesFor(name, vulnerability, packageLock);
     for (const via of vulnerability.via) {
       if (typeof via !== 'string') continue;
       if (
         !highSet.has(via) ||
-        !entries.some(entry => dependencyNames(entry).has(via))
+        !entries.some(entry => dependencyNames(entry).has(via)) ||
+        (!APPROVED_HIGH_PACKAGES.includes(name) &&
+          !vulnerabilities[via].effects.includes(name))
       ) {
         fail('AUDIT_HIGH_GRAPH_DRIFT');
       }

@@ -74,8 +74,9 @@ describe('InboxEventWorkflow integration', () => {
     await h.workflow.receive(event(0, 'failed'));
     await h.workflow.receive(event(1, 'complete'));
     expect(h.states.at(-1)).toEqual({
-      kind: 'error',
-      code: 'SHARE_IMPORT_FAILED',
+      kind: 'ready',
+      manifests: [manifest],
+      warningCode: 'SHARE_IMPORT_FAILED',
     });
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledWith(ids[1]);
     expect(h.native.ackPendingShareEvent).not.toHaveBeenCalledWith(ids[0]);
@@ -452,9 +453,27 @@ describe('InboxEventWorkflow integration', () => {
       kind: 'error',
       code: 'NATIVE_MANIFEST_INVALID',
     });
+    expect(h.workflow.isPackCreationReady()).toBe(false);
 
     await h.workflow.retry();
     expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+    expect(h.workflow.isPackCreationReady()).toBe(true);
+  });
+
+  test('a visible failed-share item does not block unrelated Pack creation', async () => {
+    const h = harness();
+    await h.workflow.bootstrap();
+    expect(h.workflow.isPackCreationReady()).toBe(true);
+
+    await h.workflow.receive(
+      event(0, 'failed', { code: 'SHARE_IMPORT_FAILED' }),
+    );
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'SHARE_IMPORT_FAILED',
+    });
+    expect(h.workflow.isPackCreationReady()).toBe(true);
   });
 
   test('main-app refresh rejects with the latched persistence code and retries it', async () => {
@@ -485,6 +504,11 @@ describe('InboxEventWorkflow integration', () => {
 
     await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
     expect(h.native.scanInbox).toHaveBeenCalledTimes(1);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'ready',
+      manifests: [manifest],
+      warningCode: 'SHARE_IMPORT_FAILED',
+    });
   });
 
   test('durable persistence completes before a successful share event is ACKed', async () => {

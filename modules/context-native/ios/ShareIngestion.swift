@@ -279,6 +279,7 @@ final class ShareIngestionSession {
         id: id,
         order: order,
         declaredMediaType: declaredMediaType,
+        retainFailedSource: retainFailedSource,
         expectedByteCount: expectedByteCount,
         expectedSha256: expectedSha256,
         read: {
@@ -297,39 +298,12 @@ final class ShareIngestionSession {
         id: id,
         order: order,
         mediaType: failure.detectedMediaType ?? declaredMediaType,
-        code: failure.code
+        code: failure.code,
+        retryByteCount: failure.retryByteCount,
+        retrySha256: failure.retrySha256
       )
-      if retainFailedSource { try retainRetrySource(id: id, source: source) }
     } catch {
       appendFailure(id: id, order: order, mediaType: declaredMediaType, code: "IMPORT_COPY_FAILED")
-    }
-  }
-
-  /** Retains only bounded regular files; oversized/provider-expired inputs remain non-retryable. */
-  private func retainRetrySource(id: String, source: URL) throws {
-    guard let values = try? source.resourceValues(
-      forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
-    ), values.isRegularFile == true, values.isSymbolicLink != true,
-      let size = values.fileSize, size >= 0, size <= Self.maximumBinaryBytes else {
-      return
-    }
-    let partial = staging.appendingPathComponent("\(id).retry.partial")
-    let destination = staging.appendingPathComponent("\(id).retry")
-    do {
-      try FileManager.default.copyItem(at: source, to: partial)
-      let copied = try partial.resourceValues(forKeys: [.fileSizeKey])
-      guard copied.fileSize == size else {
-        try? FileManager.default.removeItem(at: partial)
-        return
-      }
-      let handle = try FileHandle(forWritingTo: partial)
-      try handle.synchronize()
-      try handle.close()
-      try Self.atomicRename(partial, destination)
-      try Self.synchronizeDirectory(staging)
-    } catch {
-      try? FileManager.default.removeItem(at: partial)
-      throw ShareIngestionFatalError.storageWriteFailed
     }
   }
 
@@ -441,6 +415,7 @@ final class ShareIngestionSession {
     id: String,
     order: Int,
     declaredMediaType: String?,
+    retainFailedSource: Bool = false,
     expectedByteCount: Int64? = nil,
     expectedSha256: String? = nil,
     read: () throws -> Data
@@ -478,6 +453,21 @@ final class ShareIngestionSession {
     }
     let detectedMediaType = try Self.detectMediaType(partial)
     guard Self.declaredTypeAllows(declaredMediaType, detected: detectedMediaType) else {
+      if retainFailedSource {
+        let retry = staging.appendingPathComponent("\(id).retry")
+        do {
+          try Self.atomicRename(partial, retry)
+          try Self.synchronizeDirectory(staging)
+        } catch {
+          throw ShareIngestionFatalError.storageWriteFailed
+        }
+        throw ShareInputFailure(
+          "IMPORT_TYPE_UNSUPPORTED",
+          detectedMediaType: detectedMediaType,
+          retryByteCount: byteCount,
+          retrySha256: digest
+        )
+      }
       throw ShareInputFailure("IMPORT_TYPE_UNSUPPORTED", detectedMediaType: detectedMediaType)
     }
     try operationHook(.beforeItemPublish)
@@ -506,16 +496,23 @@ final class ShareIngestionSession {
     id: String,
     order: Int,
     mediaType: String?,
-    code: String
+    code: String,
+    retryByteCount: Int? = nil,
+    retrySha256: String? = nil
   ) {
-    items.append([
+    var item: [String: Any] = [
       "id": id,
       "order": order,
       "mediaType": Self.concreteOrFallbackMediaType(mediaType),
       "status": "failed",
       "byteCount": 0,
       "errorCode": code,
-    ])
+    ]
+    if let retryByteCount, let retrySha256 {
+      item["retryByteCount"] = retryByteCount
+      item["retrySha256"] = retrySha256
+    }
+    items.append(item)
   }
 
   private static func summary(
@@ -733,9 +730,18 @@ final class ShareIngestionSession {
 private struct ShareInputFailure: Error {
   let code: String
   let detectedMediaType: String?
+  let retryByteCount: Int?
+  let retrySha256: String?
 
-  init(_ code: String, detectedMediaType: String? = nil) {
+  init(
+    _ code: String,
+    detectedMediaType: String? = nil,
+    retryByteCount: Int? = nil,
+    retrySha256: String? = nil
+  ) {
     self.code = code
     self.detectedMediaType = detectedMediaType
+    self.retryByteCount = retryByteCount
+    self.retrySha256 = retrySha256
   }
 }

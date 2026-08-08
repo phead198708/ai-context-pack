@@ -145,6 +145,7 @@ test('registry-expanded propagation passes only through the pinned lock graph', 
           .values[0],
       ),
     };
+    report.vulnerabilities.expo.effects.push(name);
     report.metadata.vulnerabilities.high += 1;
     report.metadata.vulnerabilities.total += 1;
   }
@@ -158,6 +159,23 @@ test('registry-expanded propagation passes only through the pinned lock graph', 
   expectRule(
     () => verifyAuditReport(forged, makeLock()),
     'AUDIT_HIGH_GRAPH_DRIFT',
+  );
+
+  const swappedFix = clone(report);
+  swappedFix.vulnerabilities['expo-image-picker'].fixAvailable = clone(
+    APPROVED_HIGH_FIX_OPTIONS.find(value => value.name === 'react-native')
+      .values[0],
+  );
+  expectRule(
+    () => verifyAuditReport(swappedFix, makeLock()),
+    'AUDIT_FIX_GRAPH_DRIFT',
+  );
+
+  const compatibleFix = clone(report);
+  compatibleFix.vulnerabilities['expo-image-picker'].fixAvailable = true;
+  expectRule(
+    () => verifyAuditReport(compatibleFix, makeLock()),
+    'AUDIT_FIX_GRAPH_DRIFT',
   );
 });
 
@@ -393,6 +411,23 @@ test('the complete propagation topology and lock identities fail closed on drift
   changedVia.vulnerabilities['@expo/metro'].via.push('image-size');
   expectRule(
     () => verifyAuditReport(changedVia, makeLock()),
+    'AUDIT_HIGH_GRAPH_DRIFT',
+  );
+
+  const changedRange = makeReport();
+  changedRange.vulnerabilities['@expo/cli'].range = 'forged-range';
+  expectRule(
+    () => verifyAuditReport(changedRange, makeLock()),
+    'AUDIT_HIGH_GRAPH_DRIFT',
+  );
+
+  const missingEffect = makeReport();
+  missingEffect.vulnerabilities['@expo/metro'].effects =
+    missingEffect.vulnerabilities['@expo/metro'].effects.filter(
+      effect => effect !== '@expo/cli',
+    );
+  expectRule(
+    () => verifyAuditReport(missingEffect, makeLock()),
     'AUDIT_HIGH_GRAPH_DRIFT',
   );
 

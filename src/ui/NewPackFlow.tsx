@@ -60,15 +60,29 @@ export const NewPackFlow = React.forwardRef<
   const [publicationCommitted, setPublicationCommitted] = useState(false);
   const [transientCleanupRequired, setTransientCleanupRequired] =
     useState(false);
+  const [pickerCacheRecoveryRequired, setPickerCacheRecoveryRequired] =
+    useState(false);
   const [pendingCleanupUris, setPendingCleanupUris] = useState<
     readonly string[]
   >([]);
   const summary = useMemo(() => summarizeMainAppImport(draft), [draft]);
+  const cleanupBlocked =
+    pickerCacheRecoveryRequired ||
+    transientCleanupRequired ||
+    pendingCleanupUris.length > 0;
 
   const cancel = useCallback(async () => {
     if (busy || publicationCommitted) return;
     setBusy(true);
     try {
+      if (pickerCacheRecoveryRequired) {
+        await native.recoverMainAppPickerCache();
+        setPickerCacheRecoveryRequired(false);
+        setTransientCleanupRequired(false);
+        setPendingCleanupUris([]);
+        onCancel();
+        return;
+      }
       if (transientCleanupRequired) {
         await native.cleanupMainAppPickerTransients();
         setTransientCleanupRequired(false);
@@ -88,6 +102,7 @@ export const NewPackFlow = React.forwardRef<
     native,
     onCancel,
     pendingCleanupUris,
+    pickerCacheRecoveryRequired,
     publicationCommitted,
     transientCleanupRequired,
   ]);
@@ -133,6 +148,7 @@ export const NewPackFlow = React.forwardRef<
     );
 
   const pick = async (kind: 'photos' | 'files') => {
+    if (cleanupBlocked || busy) return;
     setBusy(true);
     setMessage(undefined);
     try {
@@ -172,6 +188,25 @@ export const NewPackFlow = React.forwardRef<
       setDraft(edited.draft);
     } catch (error) {
       const pickerCode = stableErrorCode(error, 'PICKER_FAILED');
+      if (pickerCode === 'NATIVE_MAIN_APP_PICKER_STAGE_INVALID') {
+        try {
+          // Native completed an atomic staging rename, but the bridge result could not identify
+          // that transaction safely. Full recovery is the only fail-closed cleanup boundary;
+          // it also invalidates every older picker-cache file, so remove those draft inputs.
+          await native.recoverMainAppPickerCache();
+          setDraft(current => removePickerFileInputs(current));
+          setPendingCleanupUris([]);
+          setTransientCleanupRequired(false);
+          setPickerCacheRecoveryRequired(false);
+          setMessage(pickerCode);
+        } catch (cleanupError) {
+          setPickerCacheRecoveryRequired(true);
+          setMessage(
+            stableErrorCode(cleanupError, 'MAIN_APP_IMPORT_CLEANUP_FAILED'),
+          );
+        }
+        return;
+      }
       try {
         await native.cleanupMainAppPickerTransients();
         setTransientCleanupRequired(false);
@@ -217,10 +252,18 @@ export const NewPackFlow = React.forwardRef<
   };
 
   const retryPendingCleanup = async () => {
-    if ((pendingCleanupUris.length === 0 && !transientCleanupRequired) || busy)
-      return;
+    if (!cleanupBlocked || busy) return;
     setBusy(true);
     try {
+      if (pickerCacheRecoveryRequired) {
+        await native.recoverMainAppPickerCache();
+        setDraft(current => removePickerFileInputs(current));
+        setPickerCacheRecoveryRequired(false);
+        setTransientCleanupRequired(false);
+        setPendingCleanupUris([]);
+        setMessage(undefined);
+        return;
+      }
       if (transientCleanupRequired) {
         await native.cleanupMainAppPickerTransients();
         setTransientCleanupRequired(false);
@@ -293,12 +336,12 @@ export const NewPackFlow = React.forwardRef<
       <Text style={styles.body}>{t(locale, 'newPackDetail')}</Text>
       <View style={styles.row}>
         <FlowButton
-          disabled={busy}
+          disabled={busy || cleanupBlocked}
           label={t(locale, 'addPhotos')}
           onPress={() => pick('photos')}
         />
         <FlowButton
-          disabled={busy}
+          disabled={busy || cleanupBlocked}
           label={t(locale, 'addFiles')}
           onPress={() => pick('files')}
         />
@@ -313,7 +356,7 @@ export const NewPackFlow = React.forwardRef<
         value={textEntry}
       />
       <FlowButton
-        disabled={busy || textEntry.length === 0}
+        disabled={busy || cleanupBlocked || textEntry.length === 0}
         label={t(locale, 'addText')}
         onPress={() => addEntry('text')}
       />
@@ -329,7 +372,7 @@ export const NewPackFlow = React.forwardRef<
         value={urlEntry}
       />
       <FlowButton
-        disabled={busy || urlEntry.length === 0}
+        disabled={busy || cleanupBlocked || urlEntry.length === 0}
         label={t(locale, 'addUrl')}
         onPress={() => addEntry('url')}
       />
@@ -361,21 +404,25 @@ export const NewPackFlow = React.forwardRef<
             </Text>
             <View style={styles.row}>
               <FlowButton
-                disabled={busy || item.order === 0}
+                disabled={busy || cleanupBlocked || item.order === 0}
                 label={t(locale, 'moveUp', { item: label })}
                 onPress={() =>
                   setDraft(current => moveImportItem(current, item.id, -1))
                 }
               />
               <FlowButton
-                disabled={busy || item.order === summary.items.length - 1}
+                disabled={
+                  busy ||
+                  cleanupBlocked ||
+                  item.order === summary.items.length - 1
+                }
                 label={t(locale, 'moveDown', { item: label })}
                 onPress={() =>
                   setDraft(current => moveImportItem(current, item.id, 1))
                 }
               />
               <FlowButton
-                disabled={busy}
+                disabled={busy || cleanupBlocked}
                 label={t(locale, 'removeItem', { item: label })}
                 onPress={() => remove(item.id)}
               />
@@ -389,7 +436,7 @@ export const NewPackFlow = React.forwardRef<
           {message}
         </Text>
       ) : null}
-      {pendingCleanupUris.length > 0 || transientCleanupRequired ? (
+      {cleanupBlocked ? (
         <FlowButton
           disabled={busy}
           label={t(locale, 'retryTemporaryCleanup')}
@@ -403,7 +450,8 @@ export const NewPackFlow = React.forwardRef<
             busy ||
             draft.items.length === 0 ||
             pendingCleanupUris.length > 0 ||
-            transientCleanupRequired
+            transientCleanupRequired ||
+            pickerCacheRecoveryRequired
           }
           label={t(locale, 'importPack')}
           onPress={commit}
@@ -455,6 +503,12 @@ function uniqueUris(
   second: readonly string[],
 ): readonly string[] {
   return [...new Set([...first, ...second])];
+}
+
+function removePickerFileInputs(draft: MainAppImportDraft): MainAppImportDraft {
+  return draft.items
+    .filter(item => item.kind === 'file')
+    .reduce((current, item) => removeImportItem(current, item.id), draft);
 }
 
 function formatBytes(value: number): string {

@@ -4,6 +4,7 @@ import android.os.Build
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
@@ -144,13 +145,23 @@ internal object InboxArtifactHandoff {
       throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
     }
     val source = File(sourceDirectory, "$itemId.retry")
-    if (!source.exists()) return null
     val mode = runCatching { Os.lstat(source.path).st_mode }.getOrNull()
-      ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-    if (!OsConstants.S_ISREG(mode) || OsConstants.S_ISLNK(mode) || source.length() < 0) {
+    val retryByteCount = (item["retryByteCount"] as? Number)?.toLong()
+    val retrySha256 = item["retrySha256"] as? String
+    if (mode == null && retryByteCount == null && retrySha256 == null) return null
+    if (
+      mode == null ||
+      !OsConstants.S_ISREG(mode) ||
+      OsConstants.S_ISLNK(mode) ||
+      retryByteCount == null ||
+      retryByteCount !in 0..ShareIngestionWriter.maximumBinaryBytes ||
+      source.length() != retryByteCount ||
+      retrySha256 == null ||
+      !Regex("^[0-9a-f]{64}$").matches(retrySha256)
+    ) {
       throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
     }
-    return SourceDescriptor(source.name, source.length(), null)
+    return SourceDescriptor(source.name, retryByteCount, retrySha256)
   }
 
   fun acknowledge(
@@ -326,18 +337,26 @@ internal object InboxArtifactHandoff {
     }
     operationHook(Point.BEFORE_COPY)
     try {
-      source.inputStream().buffered().use { input ->
+      openRegularInput(source, byteCount).buffered().use { input ->
         FileOutputStream(partial).buffered().use { output ->
           val buffer = ByteArray(64 * 1024)
           var firstChunk = true
+          var total = 0L
           while (true) {
             val count = input.read(buffer)
             if (count < 0) break
+            total += count
+            if (total > byteCount) {
+              throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+            }
             output.write(buffer, 0, count)
             if (firstChunk) {
               firstChunk = false
               operationHook(Point.DURING_COPY)
             }
+          }
+          if (total != byteCount) {
+            throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
           }
           output.flush()
         }
@@ -449,27 +468,53 @@ internal object InboxArtifactHandoff {
   }
 
   private fun verify(file: File, byteCount: Long, expectedHash: String?): String {
-    if (!file.isFile || file.length() != byteCount) {
-      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    val digest = MessageDigest.getInstance("SHA-256")
+    openRegularInput(file, byteCount).buffered().use { input ->
+      val buffer = ByteArray(64 * 1024)
+      var total = 0L
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        total += count
+        if (total > byteCount) {
+          throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        }
+        digest.update(buffer, 0, count)
+      }
+      if (total != byteCount) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
     }
-    val actualHash = sha256(file)
+    val actualHash = digest.digest().joinToString("") {
+      "%02x".format(it.toInt() and 0xff)
+    }
     if (expectedHash != null && actualHash != expectedHash) {
       throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
     }
     return actualHash
   }
 
-  private fun sha256(file: File): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    file.inputStream().buffered().use { input ->
-      val buffer = ByteArray(64 * 1024)
-      while (true) {
-        val count = input.read(buffer)
-        if (count < 0) break
-        digest.update(buffer, 0, count)
-      }
+  private fun openRegularInput(file: File, byteCount: Long): FileInputStream {
+    val descriptor = try {
+      Os.open(
+        file.path,
+        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
+        0,
+      )
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
     }
-    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    try {
+      val stat = Os.fstat(descriptor)
+      if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_size != byteCount) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      return FileInputStream(descriptor)
+    } catch (error: Exception) {
+      runCatching { Os.close(descriptor) }
+      if (error is InboxArtifactHandoffException) throw error
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
   }
 
   private fun sha256(bytes: ByteArray): String =

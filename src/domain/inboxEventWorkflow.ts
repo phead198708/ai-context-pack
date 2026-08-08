@@ -9,12 +9,14 @@ import type { NativeAdapter } from './nativeAdapter';
 
 export type InboxWorkflowState =
   | { readonly kind: 'loading' }
-  | { readonly kind: 'empty' }
+  | { readonly kind: 'empty'; readonly warningCode?: string }
   | {
       readonly kind: 'ready';
       readonly manifests: readonly ImportManifestV1[];
       /** Present in production; persisted Packs are the display source of truth. */
       readonly packs?: readonly InboxPackSummary[];
+      /** A failed share item remains retryable without hiding successfully persisted Packs. */
+      readonly warningCode?: string;
     }
   | { readonly kind: 'error'; readonly code: string };
 
@@ -101,6 +103,15 @@ export class InboxEventWorkflow {
   /** Pack creation stays fail-closed until native picker-cache recovery succeeds. */
   isPickerCacheRecovered(): boolean {
     return this.pickerCacheRecovered;
+  }
+
+  /**
+   * Pack creation also stays closed while an operational Inbox failure is latched. A failed
+   * share item is user-visible and independently retryable, so it does not poison unrelated
+   * main-app imports.
+   */
+  isPackCreationReady(): boolean {
+    return this.pickerCacheRecovered && !this.hasOperationalBlocker();
   }
 
   receive(value: unknown): Promise<void> {
@@ -269,7 +280,7 @@ export class InboxEventWorkflow {
       );
       return false;
     }
-    if (this.blockers.size === 0) {
+    if (!this.hasOperationalBlocker()) {
       this.show(manifests);
       if (manifests.length > 0) this.view.showNewestImport();
     }
@@ -283,7 +294,7 @@ export class InboxEventWorkflow {
     const manifests = await this.scan(retrying);
     if (!manifests) return false;
     if (retrying) this.clear('unexpected');
-    if (this.blockers.size === 0) {
+    if (!this.hasOperationalBlocker()) {
       this.show(manifests);
       if (showNewest && manifests.length > 0) this.view.showNewestImport();
     }
@@ -346,20 +357,28 @@ export class InboxEventWorkflow {
   }
 
   private show(manifests: readonly ImportManifestV1[]): void {
+    const warningCode = this.latestFailureBlockerCode();
     if (this.lastPersistedPacks !== undefined) {
       this.view.setState(
         this.lastPersistedPacks.length === 0
-          ? { kind: 'empty' }
+          ? { kind: 'empty', ...(warningCode ? { warningCode } : {}) }
           : {
               kind: 'ready',
               manifests,
               packs: this.lastPersistedPacks,
+              ...(warningCode ? { warningCode } : {}),
             },
       );
       return;
     }
     this.view.setState(
-      manifests.length === 0 ? { kind: 'empty' } : { kind: 'ready', manifests },
+      manifests.length === 0
+        ? { kind: 'empty', ...(warningCode ? { warningCode } : {}) }
+        : {
+            kind: 'ready',
+            manifests,
+            ...(warningCode ? { warningCode } : {}),
+          },
     );
   }
 
@@ -369,6 +388,12 @@ export class InboxEventWorkflow {
 
   private latestBlockerCode(): string {
     return [...this.blockers.values()].at(-1) ?? 'INBOX_SCAN_FAILED';
+  }
+
+  private latestFailureBlockerCode(): string | undefined {
+    return [...this.blockers]
+      .filter(([key]) => key.startsWith('failure:'))
+      .at(-1)?.[1];
   }
 
   private latch(key: string, error: unknown, fallback: string): void {

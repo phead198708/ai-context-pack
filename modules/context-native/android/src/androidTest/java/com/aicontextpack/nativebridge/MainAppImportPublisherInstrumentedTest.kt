@@ -202,6 +202,7 @@ class MainAppImportPublisherInstrumentedTest {
     val firstIngestionId = id()
     val failedItemId = id()
     val bytes = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    val replacement = ByteArray(bytes.size) { 0x41 }
     val image = cached("persisted-retry.bin", bytes)
     val failed = MainAppImportPublisher.publish(
       root,
@@ -209,13 +210,40 @@ class MainAppImportPublisherInstrumentedTest {
       firstIngestionId,
       "main-app-picker",
       listOf(file(failedItemId, 0, "application/pdf", image)),
+      operationHook = { point ->
+        if (point == ShareIngestionWriter.Point.AFTER_FIRST_CHUNK) {
+          image.writeBytes(replacement)
+        }
+      },
     )
     @Suppress("UNCHECKED_CAST")
     val failedItems = failed["items"] as List<Map<String, Any?>>
     assertEquals("failed", failedItems[0]["status"])
     assertEquals("image/png", failedItems[0]["mediaType"])
-    assertTrue(File(root, "Inbox/$firstIngestionId/$failedItemId.retry").isFile)
+    assertEquals(bytes.size.toLong(), (failedItems[0]["retryByteCount"] as Number).toLong())
+    assertEquals(64, (failedItems[0]["retrySha256"] as String).length)
+    val retry = File(root, "Inbox/$firstIngestionId/$failedItemId.retry")
+    assertTrue(retry.readBytes().contentEquals(bytes))
 
+    val outside = File(root, "outside-retry.bin").apply { writeBytes(bytes) }
+    val integrityFailure = assertThrows(InboxArtifactHandoffException::class.java) {
+      InboxArtifactHandoff.handoff(
+        root,
+        firstIngestionId,
+        firstIngestionId,
+        0,
+        availableBytes = { Long.MAX_VALUE },
+        operationHook = { point ->
+          if (point == InboxArtifactHandoff.Point.BEFORE_COPY) {
+            assertTrue(retry.delete())
+            Os.symlink(outside.path, retry.path)
+          }
+        },
+      )
+    }
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", integrityFailure.stableCode)
+    assertTrue(retry.delete())
+    retry.writeBytes(bytes)
     val handoff = InboxArtifactHandoff.handoff(
       root,
       firstIngestionId,

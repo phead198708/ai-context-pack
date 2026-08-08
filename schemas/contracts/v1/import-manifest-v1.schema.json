@@ -183,6 +183,10 @@
         "byteCount",
         "errorCode"
       ],
+      "dependentRequired": {
+        "retryByteCount": ["retrySha256"],
+        "retrySha256": ["retryByteCount"]
+      },
       "properties": {
         "id": { "$ref": "#/$defs/uuid" },
         "order": {
@@ -193,7 +197,16 @@
         "mediaType": { "$ref": "#/$defs/mediaType" },
         "status": { "const": "failed" },
         "byteCount": { "const": 0 },
-        "errorCode": { "$ref": "#/$defs/errorCode" }
+        "errorCode": { "$ref": "#/$defs/errorCode" },
+        "retryByteCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 52428800
+        },
+        "retrySha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     }
   }

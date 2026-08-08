@@ -533,6 +533,33 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('keeps Pack creation locked after recovery when Inbox operations still fail', async () => {
+    mockNative.scanInbox
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'))
+      .mockResolvedValue([]);
+    const renderer = await renderApp();
+
+    expect(renderedText(renderer)).toContain('STORAGE_WRITE_FAILED');
+    expect(
+      control(renderer, 'button', 'New Pack').props.accessibilityState,
+    ).toEqual({ disabled: true });
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: true });
+
+    await press(control(renderer, 'button', 'Retry'));
+
+    expect(
+      control(renderer, 'button', 'New Pack').props.accessibilityState,
+    ).toEqual({ disabled: false });
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: false });
+    act(() => renderer.unmount());
+  });
+
   test('switches the shared interface and New Pack interaction labels to Simplified Chinese', async () => {
     const renderer = await renderApp();
 

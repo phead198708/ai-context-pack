@@ -41,18 +41,22 @@ function App(): React.JSX.Element {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const [emptyDraftError, setEmptyDraftError] = useState<string>();
   const [creatingEmptyDraft, setCreatingEmptyDraft] = useState(false);
-  const [pickerCacheRecovered, setPickerCacheRecovered] = useState(false);
+  const [packCreationReady, setPackCreationReady] = useState(false);
   const [retryDraft, setRetryDraft] = useState<MainAppImportDraft>();
   const scrollView = useRef<ScrollView | null>(null);
   const newPackFlow = useRef<NewPackFlowHandle | null>(null);
   const screenRef = useRef<Screen>('inbox');
+  const workflow = useRef<InboxEventWorkflow | null>(null);
   screenRef.current = screen;
   const setWorkflowState = useCallback((value: LoadState) => {
     setState(value);
+    setPackCreationReady(
+      value.kind !== 'loading' &&
+        workflow.current?.isPackCreationReady() === true,
+    );
     if (value.kind === 'error' && screenRef.current !== 'new-pack')
       setScreen('inbox');
   }, []);
-  const workflow = useRef<InboxEventWorkflow | null>(null);
   if (!workflow.current)
     workflow.current = new InboxEventWorkflow(
       nativeAdapter,
@@ -68,9 +72,7 @@ function App(): React.JSX.Element {
     let mounted = true;
     workflow.current?.bootstrap().finally(() => {
       if (mounted)
-        setPickerCacheRecovered(
-          workflow.current?.isPickerCacheRecovered() === true,
-        );
+        setPackCreationReady(workflow.current?.isPackCreationReady() === true);
     });
     const subscription = AppState.addEventListener('change', next => {
       if (next === 'active') workflow.current?.appBecameActive();
@@ -129,7 +131,7 @@ function App(): React.JSX.Element {
           {screen !== 'new-pack' ? (
             <View style={styles.headerActions}>
               <Action
-                disabled={!pickerCacheRecovered}
+                disabled={!packCreationReady}
                 label={t(locale, 'newPack')}
                 onPress={() => {
                   setRetryDraft(undefined);
@@ -137,7 +139,7 @@ function App(): React.JSX.Element {
                 }}
               />
               <Action
-                disabled={creatingEmptyDraft || !pickerCacheRecovered}
+                disabled={creatingEmptyDraft || !packCreationReady}
                 label={t(locale, 'createEmptyDraft')}
                 onPress={async () => {
                   setCreatingEmptyDraft(true);
@@ -183,8 +185,8 @@ function App(): React.JSX.Element {
               state={state}
               onRetry={() => {
                 workflow.current?.retry().finally(() => {
-                  setPickerCacheRecovered(
-                    workflow.current?.isPickerCacheRecovered() === true,
+                  setPackCreationReady(
+                    workflow.current?.isPackCreationReady() === true,
                   );
                 });
               }}
@@ -247,14 +249,32 @@ function Inbox({
     );
   if (state.kind === 'empty')
     return (
-      <StateCard
-        title={t(locale, 'inboxEmpty')}
-        detail={t(locale, 'inboxEmptyDetail')}
-      />
+      <View>
+        {state.warningCode ? (
+          <StateCard
+            title={t(locale, 'inboxUnavailable')}
+            detail={state.warningCode}
+          >
+            <Action label={t(locale, 'retry')} onPress={onRetry} />
+          </StateCard>
+        ) : null}
+        <StateCard
+          title={t(locale, 'inboxEmpty')}
+          detail={t(locale, 'inboxEmptyDetail')}
+        />
+      </View>
     );
   if (state.packs)
     return (
       <View>
+        {state.warningCode ? (
+          <StateCard
+            title={t(locale, 'inboxUnavailable')}
+            detail={state.warningCode}
+          >
+            <Action label={t(locale, 'retry')} onPress={onRetry} />
+          </StateCard>
+        ) : null}
         {state.packs.map(pack => (
           <StateCard
             key={pack.id}
@@ -273,6 +293,14 @@ function Inbox({
     );
   return (
     <View>
+      {state.warningCode ? (
+        <StateCard
+          title={t(locale, 'inboxUnavailable')}
+          detail={state.warningCode}
+        >
+          <Action label={t(locale, 'retry')} onPress={onRetry} />
+        </StateCard>
+      ) : null}
       {state.manifests.map(manifest => (
         <StateCard
           key={manifest.ingestionId}

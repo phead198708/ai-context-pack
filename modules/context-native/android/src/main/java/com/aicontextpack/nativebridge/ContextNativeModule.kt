@@ -316,6 +316,7 @@ internal object InboxManifestScanner {
   private val failedItemKeys = setOf(
     "id", "order", "mediaType", "status", "byteCount", "errorCode",
   )
+  private val failedRetryItemKeys = setOf("retryByteCount", "retrySha256")
   private val stableErrorCodes = setOf(
     "DOMAIN_INVALID_TRANSITION",
     "SCHEMA_INVALID",
@@ -572,9 +573,42 @@ internal object InboxManifestScanner {
           copied += 1
         }
         "failed" -> {
-          check(item.keys().asSequence().toSet() == failedItemKeys)
+          val itemKeys = item.keys().asSequence().toSet()
+          val retryByteCount = nonNegativeInteger(item.opt("retryByteCount"))
+          val retrySha256 = item.opt("retrySha256") as? String
+          val hasRetryMetadata = retryByteCount != null || retrySha256 != null
+          check(
+            itemKeys == failedItemKeys ||
+              itemKeys == failedItemKeys + failedRetryItemKeys,
+          )
           check(nonNegativeInteger(item.opt("byteCount")) == 0L)
           check(item.getString("errorCode") in stableErrorCodes)
+          check(
+            !hasRetryMetadata ||
+              (
+                retryByteCount != null &&
+                  retryByteCount <= ShareIngestionWriter.maximumBinaryBytes &&
+                  retrySha256 != null &&
+                  sha256Pattern.matches(retrySha256)
+              ),
+          )
+          if (ownedDirectory != null) {
+            val retry = File(ownedDirectory, "$itemId.retry")
+            val stat = runCatching { Os.lstat(retry.path) }.getOrNull()
+            if (retryByteCount != null && retrySha256 != null) {
+              if (
+                stat == null ||
+                !OsConstants.S_ISREG(stat.st_mode) ||
+                OsConstants.S_ISLNK(stat.st_mode) ||
+                stat.st_size != retryByteCount ||
+                sha256(retry) != retrySha256
+              ) {
+                throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+              }
+            } else if (stat != null) {
+              throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+            }
+          }
           failed += 1
         }
         else -> throw InboxManifestValidationException("SCHEMA_INVALID")

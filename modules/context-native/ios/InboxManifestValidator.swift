@@ -39,6 +39,9 @@ enum InboxManifestValidator {
   private static let failedItemKeys: Set<String> = [
     "id", "order", "mediaType", "status", "byteCount", "errorCode",
   ]
+  private static let failedRetryItemKeys: Set<String> = [
+    "retryByteCount", "retrySha256",
+  ]
   private static let stableErrorCodes: Set<String> = [
     "DOMAIN_INVALID_TRANSITION",
     "SCHEMA_INVALID",
@@ -323,11 +326,41 @@ enum InboxManifestValidator {
         }
         copied += 1
       } else if itemStatus == "failed" {
-        guard Set(item.keys) == failedItemKeys,
+        let itemKeys = Set(item.keys)
+        let retryByteCount = nonNegativeInteger(item["retryByteCount"])
+        let retrySha256 = item["retrySha256"] as? String
+        let hasRetryMetadata = retryByteCount != nil || retrySha256 != nil
+        let validRetryMetadata = retryByteCount.map {
+          $0 <= Int64(ShareIngestionSession.maximumBinaryBytes)
+        } == true && retrySha256.map(validSHA256) == true
+        guard (itemKeys == failedItemKeys ||
+                itemKeys == failedItemKeys.union(failedRetryItemKeys)),
               nonNegativeInteger(item["byteCount"]) == 0,
               let errorCode = item["errorCode"] as? String,
-              stableErrorCodes.contains(errorCode) else {
+              stableErrorCodes.contains(errorCode),
+              !hasRetryMetadata || validRetryMetadata else {
           throw InboxManifestValidationError.invalidManifest
+        }
+        if let ingestion {
+          let retry = ingestion.appendingPathComponent("\(itemId).retry")
+          let values = try? retry.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+          )
+          if let retryByteCount, let retrySha256 {
+            guard values?.isRegularFile == true,
+                  values?.isSymbolicLink != true,
+                  Int64(values?.fileSize ?? -1) == retryByteCount else {
+              throw InboxManifestValidationError.artifactIntegrityFailed
+            }
+            let actualDigest: String
+            do { actualDigest = try sha256(retry) }
+            catch { throw InboxManifestValidationError.artifactIntegrityFailed }
+            guard actualDigest == retrySha256 else {
+              throw InboxManifestValidationError.artifactIntegrityFailed
+            }
+          } else if values != nil {
+            throw InboxManifestValidationError.artifactIntegrityFailed
+          }
         }
         failed += 1
       } else {

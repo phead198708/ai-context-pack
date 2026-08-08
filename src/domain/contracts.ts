@@ -25,6 +25,9 @@ export interface FailedImportItemV1 extends ImportItemBaseV1 {
   readonly status: 'failed';
   readonly byteCount: 0;
   readonly errorCode: DomainErrorCode;
+  /** Present only when complete bounded retry bytes were retained in the atomic Inbox. */
+  readonly retryByteCount?: number;
+  readonly retrySha256?: string;
 }
 
 export type ImportItemV1 = CopiedImportItemV1 | FailedImportItemV1;

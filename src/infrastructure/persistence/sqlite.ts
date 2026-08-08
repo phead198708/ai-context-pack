@@ -313,6 +313,8 @@ export class ExpoSqlitePersistenceRepository
                     artifactSha256 !== null)) ||
                 (item.artifact_count === 1 &&
                   (typeof artifactRelativePath !== 'string' ||
+                    artifactRelativePath !==
+                      ownedOriginalPath(row.pack_id, item.id) ||
                     !Number.isSafeInteger(artifactByteCount) ||
                     (artifactByteCount ?? -1) < 0 ||
                     typeof artifactSha256 !== 'string' ||

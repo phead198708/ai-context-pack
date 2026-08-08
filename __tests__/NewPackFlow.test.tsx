@@ -424,6 +424,123 @@ describe('NewPackFlow interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('fully recovers completed staging when the bridge rejects its result', async () => {
+    const native = nativeAdapter();
+    const systemPicker = picker();
+    const existingFile: MainAppImportInput = {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      kind: 'file',
+      declaredMediaType: 'image/png',
+      byteCount: 4,
+      fileUri: 'file:///cache/existing.bin',
+    };
+    const retainedText: MainAppImportInput = {
+      id: '323e4567-e89b-42d3-a456-426614174000',
+      order: 1,
+      kind: 'text',
+      declaredMediaType: 'text/plain',
+      byteCount: 7,
+      text: 'fixture',
+    };
+    systemPicker.pickFiles.mockResolvedValue({
+      canceled: false,
+      assets: [
+        {
+          uri: 'file:///cache/provider.bin',
+          mediaType: 'application/pdf',
+          byteCount: 8,
+        },
+      ],
+    });
+    native.stageMainAppPickerFiles.mockRejectedValue({
+      code: 'NATIVE_MAIN_APP_PICKER_STAGE_INVALID',
+    });
+    const renderer = await render({
+      native,
+      picker: systemPicker,
+      onCancel: jest.fn(),
+      onImported: jest.fn(),
+      createDraft: () => draft([existingFile, retainedText]),
+    });
+
+    await press(byLabel(renderer, 'Add Files'));
+
+    expect(native.recoverMainAppPickerCache).toHaveBeenCalledTimes(1);
+    expect(text(renderer)).toContain('NATIVE_MAIN_APP_PICKER_STAGE_INVALID');
+    expect(text(renderer).replace(/\s+/g, ' ')).toContain('1 selected');
+    expect(text(renderer)).toContain('Text 1');
+    expect(text(renderer)).not.toContain('Photo 1');
+    expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
+      disabled: false,
+    });
+    act(() => renderer.unmount());
+  });
+
+  test('locks the whole draft until rejected completed staging is recovered', async () => {
+    const native = nativeAdapter();
+    const systemPicker = picker();
+    const existingFile: MainAppImportInput = {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      kind: 'file',
+      declaredMediaType: 'image/png',
+      byteCount: 4,
+      fileUri: 'file:///cache/existing.bin',
+    };
+    systemPicker.pickFiles.mockResolvedValue({
+      canceled: false,
+      assets: [
+        {
+          uri: 'file:///cache/provider.bin',
+          mediaType: 'application/pdf',
+          byteCount: 8,
+        },
+      ],
+    });
+    native.stageMainAppPickerFiles.mockRejectedValue({
+      code: 'NATIVE_MAIN_APP_PICKER_STAGE_INVALID',
+    });
+    native.recoverMainAppPickerCache
+      .mockRejectedValueOnce({ code: 'MAIN_APP_IMPORT_CLEANUP_FAILED' })
+      .mockResolvedValueOnce(undefined);
+    const renderer = await render({
+      native,
+      picker: systemPicker,
+      onCancel: jest.fn(),
+      onImported: jest.fn(),
+      createDraft: () => draft([existingFile]),
+    });
+
+    await press(byLabel(renderer, 'Add Files'));
+
+    expect(text(renderer)).toContain('MAIN_APP_IMPORT_CLEANUP_FAILED');
+    expect(byLabel(renderer, 'Retry Temporary Cleanup')).toBeDefined();
+    expect(byLabel(renderer, 'Add Files').props.accessibilityState).toEqual({
+      disabled: true,
+    });
+    expect(
+      byLabel(renderer, 'Remove Photo 1').props.accessibilityState,
+    ).toEqual({ disabled: true });
+    expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
+      disabled: true,
+    });
+
+    await press(byLabel(renderer, 'Retry Temporary Cleanup'));
+
+    expect(native.recoverMainAppPickerCache).toHaveBeenCalledTimes(2);
+    expect(text(renderer).replace(/\s+/g, ' ')).toContain('0 selected');
+    expect(
+      renderer.root.findAll(
+        node => node.props.accessibilityLabel === 'Retry Temporary Cleanup',
+      ),
+    ).toHaveLength(0);
+    expect(byLabel(renderer, 'Add Files').props.accessibilityState).toEqual({
+      disabled: false,
+    });
+    act(() => renderer.unmount());
+  });
+
   test('rejects oversized inline text without retaining or publishing it', async () => {
     const native = nativeAdapter();
     const renderer = await render({
