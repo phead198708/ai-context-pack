@@ -1148,6 +1148,19 @@ if (
   throw new Error('WORKFLOW_EXPO_DOCTOR_PIN_INVALID');
 }
 if (
+  packageManifest.scripts?.['audit:ci'] !==
+    'npm audit --json | node scripts/verify-npm-audit-policy.mjs' ||
+  packageManifest.scripts?.['test:npm-audit-policy'] !==
+    'node --test scripts/verify-npm-audit-policy.test.mjs' ||
+  !packageManifest.scripts?.['test:workflows']?.includes(
+    'npm run test:npm-audit-policy',
+  ) ||
+  !linuxWorkflow.includes('run: npm run audit:ci') ||
+  linuxWorkflow.includes('npm audit --audit-level=high')
+) {
+  throw new Error('WORKFLOW_NPM_AUDIT_POLICY_INVALID');
+}
+if (
   packageManifest.devDependencies?.yaml !== '2.9.0' ||
   packageLock.packages?.['']?.devDependencies?.yaml !== '2.9.0' ||
   packageLock.packages?.['node_modules/yaml']?.version !== '2.9.0' ||
