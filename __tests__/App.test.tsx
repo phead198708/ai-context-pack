@@ -40,6 +40,9 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
     handoffInbox: jest.fn(),
     acknowledgeInbox: jest.fn(),
     publishMainAppImport: jest.fn(),
+    stageMainAppPickerFiles: jest.fn(),
+    cleanupMainAppPickerTransients: jest.fn(),
+    recoverMainAppPickerCache: jest.fn(),
     discardMainAppPickerFiles: jest.fn(),
     publishArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
@@ -161,7 +164,7 @@ function instanceText(node: ReactTestInstance): string {
 
 function control(
   renderer: ReactTestRenderer,
-  role: 'button' | 'tab',
+  role: 'button' | 'radio' | 'tab',
   label: string,
 ): ReactTestInstance {
   const match = renderer.root
@@ -224,6 +227,11 @@ describe('App interactions', () => {
     mockNative.getPendingRecoveryEvent.mockResolvedValue(null);
     mockNative.ackRecoveryEvent.mockResolvedValue(undefined);
     mockNative.acknowledgeInbox.mockResolvedValue(undefined);
+    mockNative.stageMainAppPickerFiles.mockImplementation(async fileUris =>
+      fileUris.map((_, index) => `file:///cache/staged-${index}.bin`),
+    );
+    mockNative.cleanupMainAppPickerTransients.mockResolvedValue(undefined);
+    mockNative.recoverMainAppPickerCache.mockResolvedValue(undefined);
     mockCreateEmptyDraftPack.mockResolvedValue(persistedPack);
   });
 
@@ -370,6 +378,38 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('keeps persisted rejected and failed item codes visible with a retry target', async () => {
+    mockNative.scanInbox.mockResolvedValue([]);
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
+      {
+        ...persistedPack,
+        itemCount: partialManifest.items.length,
+        import: {
+          ingestionId,
+          status: partialManifest.status,
+          items: partialManifest.items.map(item => ({
+            id: item.id,
+            order: item.order,
+            mediaType: item.mediaType,
+            status: item.status,
+            ...(item.status === 'failed' ? { errorCode: item.errorCode } : {}),
+          })),
+        },
+      },
+    ]);
+    const renderer = await renderApp();
+
+    expect(renderedText(renderer)).toContain(
+      '1 accepted · 1 rejected · 1 failed · partial',
+    );
+    await press(control(renderer, 'tab', 'detail'));
+    expect(renderedText(renderer)).toContain('IMPORT_TYPE_UNSUPPORTED');
+    expect(renderedText(renderer)).toContain('IMPORT_COPY_FAILED');
+    await press(control(renderer, 'button', 'Retry failed items in New Pack'));
+    expect(renderedText(renderer)).toContain('New Pack');
+    act(() => renderer.unmount());
+  });
+
   test('keeps an ACKed import visible from persisted Packs across refresh and restart', async () => {
     mockNative.scanInbox
       .mockResolvedValueOnce([manifest])
@@ -428,6 +468,58 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('keeps every Pack creation entry locked until native picker-cache recovery succeeds', async () => {
+    mockNative.recoverMainAppPickerCache
+      .mockRejectedValueOnce(
+        new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED'),
+      )
+      .mockResolvedValue(undefined);
+    const renderer = await renderApp();
+
+    expect(renderedText(renderer)).toContain(
+      'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
+    );
+    expect(
+      control(renderer, 'button', 'New Pack').props.accessibilityState,
+    ).toEqual({ disabled: true });
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: true });
+    expect(mockCreateEmptyDraftPack).not.toHaveBeenCalled();
+
+    await press(control(renderer, 'button', 'Retry'));
+
+    expect(
+      control(renderer, 'button', 'New Pack').props.accessibilityState,
+    ).toEqual({ disabled: false });
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: false });
+    act(() => renderer.unmount());
+  });
+
+  test('switches the shared interface and New Pack interaction labels to Simplified Chinese', async () => {
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'radio', '简体中文'));
+
+    expect(renderedText(renderer)).toContain('收件箱为空');
+    expect(
+      control(renderer, 'radio', '简体中文').props.accessibilityState,
+    ).toEqual({
+      disabled: false,
+      selected: true,
+    });
+    await press(control(renderer, 'button', '新建上下文包'));
+    expect(renderedText(renderer)).toContain(
+      '添加照片、PDF 或文本文件、粘贴文本以及 HTTP(S) URL',
+    );
+    expect(control(renderer, 'button', '导入上下文包')).toBeDefined();
+    act(() => renderer.unmount());
+  });
+
   test('routes Android hardware back through selected-file cleanup before returning to Inbox', async () => {
     const fileUri = 'file:///cache/hardware-back.png';
     mockMainAppPicker.pickPhotos.mockResolvedValue({
@@ -454,7 +546,7 @@ describe('App interactions', () => {
     });
 
     expect(mockNative.discardMainAppPickerFiles).toHaveBeenCalledWith([
-      fileUri,
+      'file:///cache/staged-0.bin',
     ]);
     expect(renderedText(renderer)).toContain('Inbox is empty');
     expect(renderedText(renderer)).not.toContain(
@@ -505,10 +597,68 @@ describe('App interactions', () => {
 
     await press(control(renderer, 'button', 'Cancel New Pack'));
     expect(mockNative.discardMainAppPickerFiles).toHaveBeenCalledWith([
-      fileUri,
+      'file:///cache/staged-0.bin',
     ]);
     expect(renderedText(renderer)).toContain('Share import');
     expect(renderedText(renderer)).not.toContain('Cancel New Pack');
+    act(() => renderer.unmount());
+  });
+
+  test('keeps a committed main-app import in recovery when persistence refresh fails', async () => {
+    const fileUri = 'file:///cache/persistence-recovery.png';
+    const importedManifest: ImportManifestV1 = {
+      ...manifest,
+      source: 'main-app-picker',
+      items: [
+        {
+          id: eventId,
+          order: 0,
+          mediaType: 'image/png',
+          status: 'copied',
+          byteCount: 8,
+          relativePath: `${eventId}.bin`,
+        },
+      ],
+    };
+    mockMainAppPicker.pickPhotos.mockResolvedValue({
+      canceled: false,
+      assets: [{ uri: fileUri, mediaType: 'image/png', byteCount: 8 }],
+    });
+    mockNative.publishMainAppImport.mockResolvedValue(importedManifest);
+    mockPersistenceInboxProcessor.process
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'))
+      .mockResolvedValue(undefined);
+    const renderer = await renderApp();
+    mockNative.scanInbox.mockResolvedValue([importedManifest]);
+
+    await press(control(renderer, 'button', 'New Pack'));
+    await press(control(renderer, 'button', 'Add Photos'));
+    await press(control(renderer, 'button', 'Import Pack'));
+
+    expect(renderedText(renderer)).toContain('Import recovery required');
+    expect(renderedText(renderer)).toContain('STORAGE_WRITE_FAILED');
+    expect(
+      renderer.root.findAll(
+        node => node.props.accessibilityLabel === 'Cancel New Pack',
+      ),
+    ).toHaveLength(0);
+    await act(async () => {
+      expect(hardwareBack?.({ type: 'hardwareBackPress', timeStamp: 0 })).toBe(
+        true,
+      );
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer)).toContain('Import recovery required');
+    expect(mockNative.discardMainAppPickerFiles).not.toHaveBeenCalled();
+
+    await press(control(renderer, 'button', 'Retry Import Recovery'));
+
+    expect(mockNative.publishMainAppImport).toHaveBeenCalledTimes(2);
+    expect(mockPersistenceInboxProcessor.process).toHaveBeenCalledTimes(3);
+    expect(renderedText(renderer).replace(/[·\s]+/g, ' ')).toContain(
+      'Import complete',
+    );
     act(() => renderer.unmount());
   });
 

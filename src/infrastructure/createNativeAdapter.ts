@@ -9,7 +9,10 @@ import type {
   NativeQuarantinedArtifact,
 } from '../domain/nativeAdapter';
 import type { MainAppImportInput } from '../domain/mainAppImport';
-import { utf8ByteCount } from '../domain/mainAppImport';
+import {
+  MAIN_APP_IMPORT_MAX_TEXT_BYTES,
+  utf8ByteCount,
+} from '../domain/mainAppImport';
 import { newestManifestsFirst } from '../domain/importOrdering';
 import {
   isImportManifestV1,
@@ -44,6 +47,9 @@ export interface NativeMethods {
     source: 'main-app-picker' | 'main-app-text',
     inputs: readonly MainAppImportInput[],
   ): Promise<unknown>;
+  stageMainAppPickerFiles?(fileUris: readonly string[]): Promise<unknown>;
+  cleanupMainAppPickerTransients?(): Promise<unknown>;
+  recoverMainAppPickerCache?(): Promise<unknown>;
   discardMainAppPickerFiles?(fileUris: readonly string[]): Promise<unknown>;
   publishArtifact?(
     sourceFileUri: string,
@@ -170,16 +176,52 @@ export const createNativeAdapter = (
             );
           return value;
         },
+        stageMainAppPickerFiles: async fileUris => {
+          if (!nativeModule.stageMainAppPickerFiles)
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_UNAVAILABLE');
+          requireFileUris(fileUris);
+          if (
+            fileUris.length === 0 ||
+            fileUris.length > 20 ||
+            new Set(fileUris).size !== fileUris.length
+          )
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_INVALID');
+          const value = await nativeModule.stageMainAppPickerFiles(fileUris);
+          if (
+            !Array.isArray(value) ||
+            value.length !== fileUris.length ||
+            value.length === 0 ||
+            value.length > 20 ||
+            value.some(
+              uri => typeof uri !== 'string' || !uri.startsWith('file://'),
+            ) ||
+            new Set(value).size !== value.length
+          )
+            throw new NativeBoundaryError(
+              'NATIVE_MAIN_APP_PICKER_STAGE_INVALID',
+            );
+          return value;
+        },
+        cleanupMainAppPickerTransients: async () => {
+          if (!nativeModule.cleanupMainAppPickerTransients)
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_UNAVAILABLE');
+          if ((await nativeModule.cleanupMainAppPickerTransients()) !== true)
+            throw new NativeBoundaryError(
+              'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
+            );
+        },
+        recoverMainAppPickerCache: async () => {
+          if (!nativeModule.recoverMainAppPickerCache)
+            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_UNAVAILABLE');
+          if ((await nativeModule.recoverMainAppPickerCache()) !== true)
+            throw new NativeBoundaryError(
+              'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
+            );
+        },
         discardMainAppPickerFiles: async fileUris => {
           if (!nativeModule.discardMainAppPickerFiles)
             throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_UNAVAILABLE');
-          if (
-            !Array.isArray(fileUris) ||
-            fileUris.some(
-              uri => typeof uri !== 'string' || !uri.startsWith('file://'),
-            )
-          )
-            throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_INVALID');
+          requireFileUris(fileUris);
           if ((await nativeModule.discardMainAppPickerFiles(fileUris)) !== true)
             throw new NativeBoundaryError(
               'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
@@ -297,6 +339,15 @@ export const createNativeAdapter = (
         publishMainAppImport: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
+        stageMainAppPickerFiles: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        cleanupMainAppPickerTransients: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        recoverMainAppPickerCache: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
         discardMainAppPickerFiles: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
@@ -369,6 +420,7 @@ function isValidMainAppImportInput(
       Object.keys(input).length !== 6 ||
       typeof input.text !== 'string' ||
       input.text.length === 0 ||
+      input.byteCount > MAIN_APP_IMPORT_MAX_TEXT_BYTES ||
       input.byteCount !== utf8ByteCount(input.text) ||
       input.declaredMediaType !==
         (input.kind === 'url' ? 'text/uri-list' : 'text/plain')
@@ -402,6 +454,14 @@ function nativeErrorCode(error: unknown): string | undefined {
     value.message.includes('INBOX_RECOVERY_REQUIRED')
     ? 'INBOX_RECOVERY_REQUIRED'
     : undefined;
+}
+
+function requireFileUris(fileUris: readonly string[]): void {
+  if (
+    !Array.isArray(fileUris) ||
+    fileUris.some(uri => typeof uri !== 'string' || !uri.startsWith('file://'))
+  )
+    throw new NativeBoundaryError('NATIVE_MAIN_APP_IMPORT_INVALID');
 }
 
 function isNativeHandoffArtifact(value: unknown): boolean {

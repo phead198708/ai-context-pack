@@ -201,6 +201,76 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
     expect(statements).toEqual([]);
   });
 
+  test('rehydrates durable partial-item failures for Inbox visibility', async () => {
+    const failedItemId = '423e4567-e89b-42d3-a456-426614174000';
+    const connection = {
+      exec: async () => undefined,
+      run: async () => ({ changes: 0 }),
+      first: async <T>() => null as T | null,
+      all: async <T>(source: string) =>
+        (source.includes('FROM imports ORDER BY')
+          ? [
+              {
+                ingestion_id: ingestionId,
+                pack_id: packId,
+                manifest_fingerprint: 'a'.repeat(64),
+                status: 'partial',
+                created_at: '2026-08-03T00:00:00Z',
+              },
+            ]
+          : source.includes('FROM import_items item')
+          ? [
+              {
+                id: itemId,
+                sort_index: 0,
+                media_type: 'image/png',
+                status: 'copied',
+                error_code: null,
+                artifact_count: 1,
+              },
+              {
+                id: failedItemId,
+                sort_index: 1,
+                media_type: 'application/zip',
+                status: 'failed',
+                error_code: 'IMPORT_TYPE_UNSUPPORTED',
+                artifact_count: 0,
+              },
+            ]
+          : []) as T[],
+      exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
+        task(connection),
+    };
+    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      {
+        ingestionId,
+        packId,
+        manifestFingerprint: 'a'.repeat(64),
+        status: 'partial',
+        itemCount: 2,
+        artifactCount: 1,
+        createdAt: '2026-08-03T00:00:00Z',
+        items: [
+          {
+            id: itemId,
+            order: 0,
+            mediaType: 'image/png',
+            status: 'copied',
+          },
+          {
+            id: failedItemId,
+            order: 1,
+            mediaType: 'application/zip',
+            status: 'failed',
+            errorCode: 'IMPORT_TYPE_UNSUPPORTED',
+          },
+        ],
+      },
+    ]);
+  });
+
   test('registers an exact verified derivative and rejects immutable replacement', async () => {
     const artifactId = '423e4567-e89b-42d3-a456-426614174000';
     const value: Artifact = {

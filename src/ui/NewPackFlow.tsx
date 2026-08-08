@@ -17,9 +17,11 @@ import {
   removeImportItem,
   summarizeMainAppImport,
   type MainAppImportDraft,
+  type MainAppImportInput,
 } from '../domain/mainAppImport';
 import type { NativeAdapter } from '../domain/nativeAdapter';
 import type { MainAppPicker } from '../infrastructure/mainAppPickers';
+import { t, type AppLocale } from './i18n';
 import { colors, spacing, typography } from './tokens';
 
 export interface NewPackFlowProps {
@@ -28,6 +30,7 @@ export interface NewPackFlowProps {
   readonly onCancel: () => void;
   readonly onImported: (manifest: ImportManifestV1) => Promise<void>;
   readonly createDraft?: () => MainAppImportDraft;
+  readonly locale?: AppLocale;
 }
 
 export interface NewPackFlowHandle {
@@ -44,6 +47,7 @@ export const NewPackFlow = React.forwardRef<
     onCancel,
     onImported,
     createDraft = createMainAppImportDraft,
+    locale = 'en',
   },
   ref,
 ): React.JSX.Element {
@@ -53,15 +57,22 @@ export const NewPackFlow = React.forwardRef<
   const [message, setMessage] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ImportManifestV1>();
+  const [publicationCommitted, setPublicationCommitted] = useState(false);
+  const [transientCleanupRequired, setTransientCleanupRequired] =
+    useState(false);
   const [pendingCleanupUris, setPendingCleanupUris] = useState<
     readonly string[]
   >([]);
   const summary = useMemo(() => summarizeMainAppImport(draft), [draft]);
 
   const cancel = useCallback(async () => {
-    if (busy) return;
+    if (busy || publicationCommitted) return;
     setBusy(true);
     try {
+      if (transientCleanupRequired) {
+        await native.cleanupMainAppPickerTransients();
+        setTransientCleanupRequired(false);
+      }
       const fileUris = uniqueUris(pickerFileUris(draft), pendingCleanupUris);
       if (fileUris.length > 0) await native.discardMainAppPickerFiles(fileUris);
       setPendingCleanupUris([]);
@@ -71,7 +82,15 @@ export const NewPackFlow = React.forwardRef<
     } finally {
       setBusy(false);
     }
-  }, [busy, draft, native, onCancel, pendingCleanupUris]);
+  }, [
+    busy,
+    draft,
+    native,
+    onCancel,
+    pendingCleanupUris,
+    publicationCommitted,
+    transientCleanupRequired,
+  ]);
 
   React.useImperativeHandle(
     ref,
@@ -85,23 +104,31 @@ export const NewPackFlow = React.forwardRef<
     return (
       <View accessibilityLiveRegion="polite" style={styles.section}>
         <Text accessibilityRole="header" style={styles.heading}>
-          Import {result.status}
+          {t(locale, 'importStatusTitle', {
+            status: localizedImportStatus(locale, result.status),
+          })}
         </Text>
         <Text style={styles.body}>
           {result.items.filter(item => item.status === 'copied').length}{' '}
-          accepted ·{' '}
-          {result.items.filter(item => item.status === 'failed').length} failed
+          {t(locale, 'accepted')} ·{' '}
+          {result.items.filter(item => item.status === 'failed').length}{' '}
+          {t(locale, 'failed')}
         </Text>
         {result.items.map(item => (
           <View key={item.id} style={styles.item}>
-            <Text style={styles.itemTitle}>Item {item.order + 1}</Text>
+            <Text style={styles.itemTitle}>
+              {t(locale, 'item')} {item.order + 1}
+            </Text>
             <Text style={styles.body}>
-              {item.mediaType} · {item.status}
+              {item.mediaType} ·{' '}
+              {item.status === 'copied'
+                ? t(locale, 'copied')
+                : t(locale, 'failed')}
               {item.status === 'failed' ? ` · ${item.errorCode}` : ''}
             </Text>
           </View>
         ))}
-        <FlowButton label="Done" onPress={onCancel} />
+        <FlowButton label={t(locale, 'done')} onPress={onCancel} />
       </View>
     );
 
@@ -109,19 +136,30 @@ export const NewPackFlow = React.forwardRef<
     setBusy(true);
     setMessage(undefined);
     try {
+      // Completed selections live in our isolated staging directory. The Expo-owned transient
+      // directories can therefore be swept before and after every picker operation without
+      // deleting an existing draft selection.
+      await native.cleanupMainAppPickerTransients();
+      setTransientCleanupRequired(false);
       const picked =
         kind === 'photos'
           ? await picker.pickPhotos()
           : await picker.pickFiles();
       if (picked.canceled) {
-        setMessage(
-          'Selection canceled. No Pack or temporary item was created.',
-        );
+        await native.cleanupMainAppPickerTransients();
+        setMessage(t(locale, 'selectionCanceled'));
         return;
       }
-      const edited = appendPickerAssets(draft, picked.assets);
+      const stagedUris = await native.stageMainAppPickerFiles(
+        picked.assets.map(asset => asset.uri),
+      );
+      const stagedAssets = picked.assets.map((asset, index) => ({
+        ...asset,
+        uri: stagedUris[index]!,
+      }));
+      const edited = appendPickerAssets(draft, stagedAssets);
       if (edited.error) {
-        const rejectedUris = picked.assets.map(asset => asset.uri);
+        const rejectedUris = stagedAssets.map(asset => asset.uri);
         try {
           await native.discardMainAppPickerFiles(rejectedUris);
         } catch (error) {
@@ -133,7 +171,17 @@ export const NewPackFlow = React.forwardRef<
       }
       setDraft(edited.draft);
     } catch (error) {
-      setMessage(stableErrorCode(error, 'PICKER_FAILED'));
+      const pickerCode = stableErrorCode(error, 'PICKER_FAILED');
+      try {
+        await native.cleanupMainAppPickerTransients();
+        setTransientCleanupRequired(false);
+        setMessage(pickerCode);
+      } catch (cleanupError) {
+        setTransientCleanupRequired(true);
+        setMessage(
+          stableErrorCode(cleanupError, 'MAIN_APP_IMPORT_CLEANUP_FAILED'),
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -169,10 +217,16 @@ export const NewPackFlow = React.forwardRef<
   };
 
   const retryPendingCleanup = async () => {
-    if (pendingCleanupUris.length === 0 || busy) return;
+    if ((pendingCleanupUris.length === 0 && !transientCleanupRequired) || busy)
+      return;
     setBusy(true);
     try {
-      await native.discardMainAppPickerFiles(pendingCleanupUris);
+      if (transientCleanupRequired) {
+        await native.cleanupMainAppPickerTransients();
+        setTransientCleanupRequired(false);
+      }
+      if (pendingCleanupUris.length > 0)
+        await native.discardMainAppPickerFiles(pendingCleanupUris);
       setPendingCleanupUris([]);
       setMessage(undefined);
     } catch (error) {
@@ -186,127 +240,159 @@ export const NewPackFlow = React.forwardRef<
     if (draft.items.length === 0 || busy) return;
     setBusy(true);
     setMessage(undefined);
+    let nativePublicationReturned = false;
     try {
       const manifest = await native.publishMainAppImport(
         draft.ingestionId,
         summary.source,
         draft.items,
       );
+      nativePublicationReturned = true;
+      setPublicationCommitted(true);
       await onImported(manifest);
       setResult(manifest);
     } catch (error) {
-      setMessage(stableErrorCode(error, 'MAIN_APP_IMPORT_FAILED'));
+      const code = stableErrorCode(error, 'MAIN_APP_IMPORT_FAILED');
+      if (
+        nativePublicationReturned ||
+        code === 'MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED'
+      )
+        setPublicationCommitted(true);
+      setMessage(code);
     } finally {
       setBusy(false);
     }
   };
 
+  if (publicationCommitted)
+    return (
+      <View accessibilityLiveRegion="polite" style={styles.section}>
+        <Text accessibilityRole="header" style={styles.heading}>
+          {t(locale, 'recoveryRequired')}
+        </Text>
+        <Text style={styles.body}>{t(locale, 'recoveryDetail')}</Text>
+        {message ? (
+          <Text accessibilityRole="alert" style={styles.error}>
+            {message}
+          </Text>
+        ) : null}
+        {busy ? <ActivityIndicator color={colors.accent} /> : null}
+        <FlowButton
+          disabled={busy}
+          label={t(locale, 'retryImportRecovery')}
+          onPress={commit}
+        />
+      </View>
+    );
+
   return (
     <View style={styles.section}>
       <Text accessibilityRole="header" style={styles.heading}>
-        New Pack
+        {t(locale, 'newPack')}
       </Text>
-      <Text style={styles.body}>
-        Add photos, PDF or text files, pasted text, and HTTP(S) URLs. Supported
-        content is copied locally before processing.
-      </Text>
+      <Text style={styles.body}>{t(locale, 'newPackDetail')}</Text>
       <View style={styles.row}>
         <FlowButton
           disabled={busy}
-          label="Add Photos"
+          label={t(locale, 'addPhotos')}
           onPress={() => pick('photos')}
         />
         <FlowButton
           disabled={busy}
-          label="Add Files"
+          label={t(locale, 'addFiles')}
           onPress={() => pick('files')}
         />
       </View>
       <TextInput
-        accessibilityLabel="Text to add"
+        accessibilityLabel={t(locale, 'textToAdd')}
         multiline
         onChangeText={setTextEntry}
-        placeholder="Paste text, code, 中文, or emoji"
+        placeholder={t(locale, 'textPlaceholder')}
         placeholderTextColor={colors.muted}
         style={[styles.input, styles.multiline]}
         value={textEntry}
       />
       <FlowButton
         disabled={busy || textEntry.length === 0}
-        label="Add Text"
+        label={t(locale, 'addText')}
         onPress={() => addEntry('text')}
       />
       <TextInput
-        accessibilityLabel="URL to add"
+        accessibilityLabel={t(locale, 'urlToAdd')}
         autoCapitalize="none"
         autoCorrect={false}
         keyboardType="url"
         onChangeText={setUrlEntry}
-        placeholder="https://example.invalid/path"
+        placeholder={t(locale, 'urlPlaceholder')}
         placeholderTextColor={colors.muted}
         style={styles.input}
         value={urlEntry}
       />
       <FlowButton
         disabled={busy || urlEntry.length === 0}
-        label="Add URL"
+        label={t(locale, 'addUrl')}
         onPress={() => addEntry('url')}
       />
 
       <View accessibilityLiveRegion="polite" style={styles.summary}>
         <Text style={styles.itemTitle}>
-          {summary.selectedCount} selected ·{' '}
-          {formatBytes(summary.estimatedByteCount)} estimated
+          {t(locale, 'selected', {
+            count: summary.selectedCount,
+            bytes: formatBytes(summary.estimatedByteCount),
+          })}
         </Text>
         <Text style={styles.body}>
           {summary.typeCounts.length === 0
-            ? 'Supported types: images, PDF, plain text, URLs'
+            ? t(locale, 'supportedTypes')
             : summary.typeCounts
                 .map(value => `${value.mediaType} × ${value.count}`)
                 .join(' · ')}
         </Text>
       </View>
 
-      {summary.items.map(item => (
-        <View key={item.id} style={styles.item}>
-          <Text style={styles.itemTitle}>{item.label}</Text>
-          <Text style={styles.body}>
-            {item.mediaType} · {formatBytes(item.byteCount)}
-            {item.code ? ` · ${item.code}` : ''}
-          </Text>
-          <View style={styles.row}>
-            <FlowButton
-              disabled={busy || item.order === 0}
-              label={`Move ${item.label} up`}
-              onPress={() =>
-                setDraft(current => moveImportItem(current, item.id, -1))
-              }
-            />
-            <FlowButton
-              disabled={busy || item.order === summary.items.length - 1}
-              label={`Move ${item.label} down`}
-              onPress={() =>
-                setDraft(current => moveImportItem(current, item.id, 1))
-              }
-            />
-            <FlowButton
-              disabled={busy}
-              label={`Remove ${item.label}`}
-              onPress={() => remove(item.id)}
-            />
+      {summary.items.map(item => {
+        const label = localizedItemLabel(locale, draft.items[item.order]!);
+        return (
+          <View key={item.id} style={styles.item}>
+            <Text style={styles.itemTitle}>{label}</Text>
+            <Text style={styles.body}>
+              {item.mediaType} · {formatBytes(item.byteCount)}
+              {item.code ? ` · ${item.code}` : ''}
+            </Text>
+            <View style={styles.row}>
+              <FlowButton
+                disabled={busy || item.order === 0}
+                label={t(locale, 'moveUp', { item: label })}
+                onPress={() =>
+                  setDraft(current => moveImportItem(current, item.id, -1))
+                }
+              />
+              <FlowButton
+                disabled={busy || item.order === summary.items.length - 1}
+                label={t(locale, 'moveDown', { item: label })}
+                onPress={() =>
+                  setDraft(current => moveImportItem(current, item.id, 1))
+                }
+              />
+              <FlowButton
+                disabled={busy}
+                label={t(locale, 'removeItem', { item: label })}
+                onPress={() => remove(item.id)}
+              />
+            </View>
           </View>
-        </View>
-      ))}
+        );
+      })}
 
       {message ? (
         <Text accessibilityRole="alert" style={styles.error}>
           {message}
         </Text>
       ) : null}
-      {pendingCleanupUris.length > 0 ? (
+      {pendingCleanupUris.length > 0 || transientCleanupRequired ? (
         <FlowButton
           disabled={busy}
-          label="Retry Temporary Cleanup"
+          label={t(locale, 'retryTemporaryCleanup')}
           onPress={retryPendingCleanup}
         />
       ) : null}
@@ -314,18 +400,22 @@ export const NewPackFlow = React.forwardRef<
       <View style={styles.row}>
         <FlowButton
           disabled={
-            busy || draft.items.length === 0 || pendingCleanupUris.length > 0
+            busy ||
+            draft.items.length === 0 ||
+            pendingCleanupUris.length > 0 ||
+            transientCleanupRequired
           }
-          label="Import Pack"
+          label={t(locale, 'importPack')}
           onPress={commit}
         />
-        <FlowButton disabled={busy} label="Cancel New Pack" onPress={cancel} />
+        <FlowButton
+          disabled={busy}
+          label={t(locale, 'cancelNewPack')}
+          onPress={cancel}
+        />
       </View>
       {draft.items.length === 0 ? (
-        <Text style={styles.body}>
-          Import is disabled until at least one item is selected. Use the
-          separate Empty Draft action if you want an intentionally empty Pack.
-        </Text>
+        <Text style={styles.body}>{t(locale, 'emptyImportHelp')}</Text>
       ) : null}
     </View>
   );
@@ -371,6 +461,29 @@ function formatBytes(value: number): string {
   if (value < 1_024) return `${value} B`;
   if (value < 1_048_576) return `${(value / 1_024).toFixed(1)} KB`;
   return `${(value / 1_048_576).toFixed(1)} MB`;
+}
+
+function localizedImportStatus(
+  locale: AppLocale,
+  status: ImportManifestV1['status'],
+): string {
+  if (status === 'complete') return t(locale, 'statusComplete');
+  if (status === 'partial') return t(locale, 'statusPartial');
+  return t(locale, 'statusFailed');
+}
+
+function localizedItemLabel(
+  locale: AppLocale,
+  item: MainAppImportInput,
+): string {
+  const position = item.order + 1;
+  if (item.kind === 'text') return t(locale, 'textItem', { position });
+  if (item.kind === 'url') return t(locale, 'urlItem', { position });
+  return t(
+    locale,
+    item.declaredMediaType.startsWith('image/') ? 'photoItem' : 'fileItem',
+    { position },
+  );
 }
 
 const styles = StyleSheet.create({

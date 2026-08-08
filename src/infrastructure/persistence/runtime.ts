@@ -42,16 +42,37 @@ export class ProductionInboxManifestProcessor
 
   async listPersistedPacks(): Promise<readonly InboxPackSummary[]> {
     const repository = await this.getRepository();
+    // Expo SQLite exposes one connection; keep snapshot reads serialized instead of starting
+    // overlapping exclusive transactions on that connection.
     const graphs = await repository.listPackGraphs();
-    return graphs.map(({ pack, items }) => ({
-      id: pack.id,
-      schemaVersion: pack.schemaVersion,
-      title: pack.title,
-      createdAt: pack.createdAt,
-      updatedAt: pack.updatedAt,
-      state: pack.state,
-      itemCount: items.length,
-    }));
+    const imports = await repository.listImportDetails();
+    const importsByPack = new Map<string, (typeof imports)[number]>();
+    // listImportDetails is newest-first. Preserve the newest durable result if future
+    // workflows append more than one import to a Pack.
+    for (const value of imports)
+      if (!importsByPack.has(value.packId))
+        importsByPack.set(value.packId, value);
+    return graphs.map(({ pack, items }) => {
+      const imported = importsByPack.get(pack.id);
+      return {
+        id: pack.id,
+        schemaVersion: pack.schemaVersion,
+        title: pack.title,
+        createdAt: pack.createdAt,
+        updatedAt: pack.updatedAt,
+        state: pack.state,
+        itemCount: items.length,
+        ...(imported
+          ? {
+              import: {
+                ingestionId: imported.ingestionId,
+                status: imported.status,
+                items: imported.items,
+              },
+            }
+          : {}),
+      };
+    });
   }
 
   private async processSerially(

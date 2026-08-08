@@ -1,5 +1,6 @@
 import {
   MAIN_APP_IMPORT_MAX_BINARY_BYTES,
+  MAIN_APP_IMPORT_MAX_TEXT_BYTES,
   appendPickerAssets,
   appendTextEntry,
   createMainAppImportDraft,
@@ -121,6 +122,22 @@ describe('main-app import draft', () => {
     expect(overflow).toEqual({
       draft: full,
       error: 'IMPORT_ITEM_LIMIT_EXCEEDED',
+    });
+  });
+
+  test('rejects oversized inline content before it enters the draft', () => {
+    const empty = createMainAppImportDraft(() => ingestionId);
+    const oversized = 'x'.repeat(MAIN_APP_IMPORT_MAX_TEXT_BYTES + 1);
+
+    expect(appendTextEntry(empty, 'text', oversized)).toEqual({
+      draft: empty,
+      error: 'IMPORT_SIZE_LIMIT_EXCEEDED',
+    });
+    expect(
+      appendTextEntry(empty, 'url', `https://example.invalid/${oversized}`),
+    ).toEqual({
+      draft: empty,
+      error: 'IMPORT_SIZE_LIMIT_EXCEEDED',
     });
   });
 

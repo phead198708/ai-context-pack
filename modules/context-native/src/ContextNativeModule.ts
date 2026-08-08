@@ -35,6 +35,11 @@ declare class ContextNativeModule extends NativeModule {
     source: 'main-app-picker' | 'main-app-text',
     inputs: readonly MainAppImportInput[],
   ): Promise<ImportManifestV1>;
+  stageMainAppPickerFiles(
+    fileUris: readonly string[],
+  ): Promise<readonly string[]>;
+  cleanupMainAppPickerTransients(): Promise<boolean>;
+  recoverMainAppPickerCache(): Promise<boolean>;
   discardMainAppPickerFiles(fileUris: readonly string[]): Promise<boolean>;
   publishArtifact(
     sourceFileUri: string,

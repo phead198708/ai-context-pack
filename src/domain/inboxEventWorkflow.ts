@@ -26,6 +26,19 @@ export interface InboxPackSummary {
   readonly updatedAt: string;
   readonly state: ContextPack['state'];
   readonly itemCount: number;
+  readonly import?: InboxPersistedImportSummary;
+}
+
+export interface InboxPersistedImportSummary {
+  readonly ingestionId: string;
+  readonly status: ImportManifestV1['status'];
+  readonly items: readonly {
+    readonly id: string;
+    readonly order: number;
+    readonly mediaType: string;
+    readonly status: ImportManifestV1['items'][number]['status'];
+    readonly errorCode?: string;
+  }[];
 }
 
 export interface InboxWorkflowView {
@@ -59,6 +72,7 @@ export class InboxEventWorkflow {
 
   bootstrap(): Promise<void> {
     return this.enqueue(async () => {
+      if (!(await this.recoverPickerCache(false))) return;
       await this.refresh(false, false);
       const bootstrapManifests = this.lastScannedManifests;
       let events: readonly PendingShareEvent[];
@@ -98,8 +112,34 @@ export class InboxEventWorkflow {
     });
   }
 
+  /**
+   * Refreshes a just-published main-app import and reports persistence failure to its caller.
+   * Lifecycle refreshes intentionally latch errors for the Inbox UI, while the import flow must
+   * also know that publication is not yet complete so it cannot display a false success state.
+   */
+  async refreshForMainAppImport(): Promise<void> {
+    let outcome:
+      | { readonly ok: true }
+      | { readonly ok: false; readonly code: string }
+      | undefined;
+    await this.enqueue(async () => {
+      // A retry from the locked import flow must be allowed to clear a prior scan/persistence
+      // latch. Other operational blockers remain visible and still make the result fail closed.
+      const refreshed = await this.refresh(false, true);
+      outcome =
+        refreshed && this.blockers.size === 0
+          ? { ok: true }
+          : { ok: false, code: this.latestBlockerCode() };
+    });
+    if (!outcome || !outcome.ok)
+      throw new InboxWorkflowRefreshError(
+        outcome?.code ?? this.latestBlockerCode(),
+      );
+  }
+
   retry(): Promise<void> {
     return this.enqueue(async () => {
+      if (!(await this.recoverPickerCache(true))) return;
       let events: readonly PendingShareEvent[];
       try {
         events = await this.native.getPendingShareEvents();
@@ -262,6 +302,21 @@ export class InboxEventWorkflow {
     }
   }
 
+  private async recoverPickerCache(retrying: boolean): Promise<boolean> {
+    try {
+      await this.native.recoverMainAppPickerCache();
+      if (retrying) this.clear('main-app-picker-cache');
+      return true;
+    } catch (error) {
+      this.latch(
+        'main-app-picker-cache',
+        error,
+        'MAIN_APP_IMPORT_CLEANUP_FAILED',
+      );
+      return false;
+    }
+  }
+
   private lastScannedManifests: readonly ImportManifestV1[] | undefined;
   private lastPersistedPacks: readonly InboxPackSummary[] | undefined;
 
@@ -299,6 +354,10 @@ export class InboxEventWorkflow {
     return [...this.blockers.keys()].some(key => !key.startsWith('failure:'));
   }
 
+  private latestBlockerCode(): string {
+    return [...this.blockers.values()].at(-1) ?? 'INBOX_SCAN_FAILED';
+  }
+
   private latch(key: string, error: unknown, fallback: string): void {
     const code = workflowErrorCode(error, fallback);
     if (this.blockers.get(key) === code) return;
@@ -313,6 +372,16 @@ export class InboxEventWorkflow {
   private clearPrefix(prefix: string): void {
     for (const key of this.blockers.keys())
       if (key.startsWith(prefix)) this.blockers.delete(key);
+  }
+}
+
+class InboxWorkflowRefreshError extends Error {
+  readonly code: string;
+
+  constructor(code: string) {
+    super(code);
+    this.name = 'InboxWorkflowRefreshError';
+    this.code = code;
   }
 }
 

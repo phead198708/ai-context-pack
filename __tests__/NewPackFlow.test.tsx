@@ -9,6 +9,7 @@ import type {
   MainAppImportDraft,
   MainAppImportInput,
 } from '../src/domain/mainAppImport';
+import { MAIN_APP_IMPORT_MAX_TEXT_BYTES } from '../src/domain/mainAppImport';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
 import { NewPackFlow } from '../src/ui/NewPackFlow';
@@ -27,6 +28,9 @@ function nativeAdapter(): jest.Mocked<NativeAdapter> {
     handoffInbox: jest.fn(),
     acknowledgeInbox: jest.fn(),
     publishMainAppImport: jest.fn(),
+    stageMainAppPickerFiles: jest.fn(async fileUris => fileUris),
+    cleanupMainAppPickerTransients: jest.fn().mockResolvedValue(undefined),
+    recoverMainAppPickerCache: jest.fn().mockResolvedValue(undefined),
     discardMainAppPickerFiles: jest.fn().mockResolvedValue(undefined),
     publishArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
@@ -369,12 +373,13 @@ describe('NewPackFlow interactions', () => {
   });
 
   test('makes permission denial visible without leaking provider details', async () => {
+    const native = nativeAdapter();
     const systemPicker = picker();
     systemPicker.pickFiles.mockRejectedValue({
       code: 'PICKER_PERMISSION_DENIED',
     });
     const renderer = await render({
-      native: nativeAdapter(),
+      native,
       picker: systemPicker,
       onCancel: jest.fn(),
       onImported: jest.fn(),
@@ -383,6 +388,64 @@ describe('NewPackFlow interactions', () => {
 
     await press(byLabel(renderer, 'Add Files'));
     expect(text(renderer)).toContain('PICKER_PERMISSION_DENIED');
+    expect(native.cleanupMainAppPickerTransients).toHaveBeenCalledTimes(2);
+    act(() => renderer.unmount());
+  });
+
+  test('blocks after picker failure until transient cache cleanup succeeds', async () => {
+    const native = nativeAdapter();
+    const systemPicker = picker();
+    systemPicker.pickFiles.mockRejectedValue({ code: 'PICKER_FAILED' });
+    native.cleanupMainAppPickerTransients
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce({ code: 'MAIN_APP_IMPORT_CLEANUP_FAILED' })
+      .mockResolvedValueOnce(undefined);
+    const renderer = await render({
+      native,
+      picker: systemPicker,
+      onCancel: jest.fn(),
+      onImported: jest.fn(),
+      createDraft: () => draft(),
+    });
+
+    await press(byLabel(renderer, 'Add Files'));
+
+    expect(text(renderer)).toContain('MAIN_APP_IMPORT_CLEANUP_FAILED');
+    expect(byLabel(renderer, 'Retry Temporary Cleanup')).toBeDefined();
+    expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
+      disabled: true,
+    });
+
+    await press(byLabel(renderer, 'Retry Temporary Cleanup'));
+
+    expect(native.cleanupMainAppPickerTransients).toHaveBeenCalledTimes(3);
+    expect(text(renderer)).not.toContain('MAIN_APP_IMPORT_CLEANUP_FAILED');
+    expect(native.publishMainAppImport).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  test('rejects oversized inline text without retaining or publishing it', async () => {
+    const native = nativeAdapter();
+    const renderer = await render({
+      native,
+      picker: picker(),
+      onCancel: jest.fn(),
+      onImported: jest.fn(),
+      createDraft: () => draft(),
+    });
+
+    await change(
+      byLabel(renderer, 'Text to add'),
+      'x'.repeat(MAIN_APP_IMPORT_MAX_TEXT_BYTES + 1),
+    );
+    await press(byLabel(renderer, 'Add Text'));
+
+    expect(text(renderer)).toContain('IMPORT_SIZE_LIMIT_EXCEEDED');
+    expect(text(renderer).replace(/\s+/g, ' ')).toContain('0 selected');
+    expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
+      disabled: true,
+    });
+    expect(native.publishMainAppImport).not.toHaveBeenCalled();
     act(() => renderer.unmount());
   });
 
@@ -413,9 +476,10 @@ describe('NewPackFlow interactions', () => {
         },
       ],
     });
-    const onImported = jest.fn().mockRejectedValue({
-      code: 'STORAGE_WRITE_FAILED',
-    });
+    const onImported = jest
+      .fn()
+      .mockRejectedValueOnce({ code: 'STORAGE_WRITE_FAILED' })
+      .mockResolvedValueOnce(undefined);
     const renderer = await render({
       native,
       picker: picker(),
@@ -427,12 +491,87 @@ describe('NewPackFlow interactions', () => {
     await press(byLabel(renderer, 'Import Pack'));
 
     expect(text(renderer)).toContain('STORAGE_WRITE_FAILED');
+    expect(text(renderer)).toContain('Import recovery required');
     expect(text(renderer)).not.toContain('Import complete');
-    expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
+    expect(
+      byLabel(renderer, 'Retry Import Recovery').props.accessibilityState,
+    ).toEqual({
       disabled: false,
     });
-    await press(byLabel(renderer, 'Import Pack'));
+    expect(
+      renderer.root.findAll(
+        node => node.props.accessibilityLabel === 'Cancel New Pack',
+      ),
+    ).toHaveLength(0);
+
+    await press(byLabel(renderer, 'Retry Import Recovery'));
     expect(native.publishMainAppImport).toHaveBeenCalledTimes(2);
+    expect(onImported).toHaveBeenCalledTimes(2);
+    expect(text(renderer).replace(/[·\s]+/g, ' ')).toContain('Import complete');
+    act(() => renderer.unmount());
+  });
+
+  test('locks cancellation after native reports committed cache-cleanup recovery', async () => {
+    const native = nativeAdapter();
+    const onCancel = jest.fn();
+    const onImported = jest.fn().mockResolvedValue(undefined);
+    const input: MainAppImportInput = {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      kind: 'file',
+      declaredMediaType: 'image/png',
+      byteCount: 8,
+      fileUri: 'file:///cache/committed-cleanup.png',
+    };
+    const committed: ImportManifestV1 = {
+      schemaVersion: 1,
+      ingestionId,
+      createdAt: '2026-08-07T00:00:00Z',
+      source: 'main-app-picker',
+      status: 'complete',
+      items: [
+        {
+          id: input.id,
+          order: 0,
+          mediaType: input.declaredMediaType,
+          status: 'copied',
+          byteCount: input.byteCount,
+          relativePath: `${input.id}.bin`,
+        },
+      ],
+    };
+    native.publishMainAppImport
+      .mockRejectedValueOnce({
+        code: 'MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED',
+      })
+      .mockResolvedValueOnce(committed);
+    const renderer = await render({
+      native,
+      picker: picker(),
+      onCancel,
+      onImported,
+      createDraft: () => draft([input]),
+    });
+
+    await press(byLabel(renderer, 'Import Pack'));
+
+    expect(text(renderer)).toContain(
+      'MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED',
+    );
+    expect(text(renderer)).toContain('Import recovery required');
+    expect(
+      renderer.root.findAll(
+        node => node.props.accessibilityLabel === 'Cancel New Pack',
+      ),
+    ).toHaveLength(0);
+    expect(onCancel).not.toHaveBeenCalled();
+
+    await press(byLabel(renderer, 'Retry Import Recovery'));
+
+    expect(native.publishMainAppImport).toHaveBeenCalledTimes(2);
+    expect(onImported).toHaveBeenCalledWith(committed);
+    expect(text(renderer).replace(/[·\s]+/g, ' ')).toContain('Import complete');
+    expect(onCancel).not.toHaveBeenCalled();
     act(() => renderer.unmount());
   });
 });

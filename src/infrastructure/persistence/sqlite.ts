@@ -1,5 +1,6 @@
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
+import type { ImportManifestV1 } from '../../domain/contracts';
 import {
   DomainError,
   isDomainErrorCode,
@@ -20,6 +21,7 @@ import {
   type CommitImportInput,
   type DeletePackResult,
   type PersistedArtifactRecord,
+  type PersistedImportDetail,
   type PersistedImportSummary,
   type PersistedPackGraph,
   type PersistenceMigrationHook,
@@ -238,6 +240,105 @@ export class ExpoSqlitePersistenceRepository
           };
         })
       : null;
+  }
+
+  listImportDetails(): Promise<readonly PersistedImportDetail[]> {
+    return this.connection.exclusive(async transaction => {
+      const imports = await transaction.all<{
+        ingestion_id: string;
+        pack_id: string;
+        manifest_fingerprint: string;
+        status: string;
+        created_at: string;
+      }>(
+        `SELECT ingestion_id, pack_id, manifest_fingerprint, status, created_at
+         FROM imports ORDER BY created_at DESC, ingestion_id`,
+      );
+      const details: PersistedImportDetail[] = [];
+      for (const row of imports) {
+        const items = await transaction.all<{
+          id: string;
+          sort_index: number;
+          media_type: string;
+          status: string;
+          error_code: string | null;
+          artifact_count: number;
+        }>(
+          `SELECT item.id, item.sort_index, item.media_type, item.status, item.error_code,
+             (SELECT COUNT(*) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_count
+           FROM import_items item WHERE item.ingestion_id = ?
+           ORDER BY item.sort_index, item.id`,
+          [row.ingestion_id],
+        );
+        details.push(
+          decodePersisted(() => {
+            requireCanonicalId(row.ingestion_id);
+            requireCanonicalId(row.pack_id);
+            requireIsoDateTime(row.created_at);
+            if (
+              !/^[0-9a-f]{64}$/.test(row.manifest_fingerprint) ||
+              items.length === 0 ||
+              items.length > 20
+            )
+              throw new DomainError('SCHEMA_INVALID');
+            const decodedItems = items.map((item, index) => {
+              requireCanonicalId(item.id);
+              if (
+                item.sort_index !== index ||
+                !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(
+                  item.media_type,
+                ) ||
+                item.media_type.length > 127 ||
+                !Number.isSafeInteger(item.artifact_count) ||
+                item.artifact_count < 0
+              )
+                throw new DomainError('SCHEMA_INVALID');
+              const status = importItemStatus(item.status);
+              if (
+                (status === 'failed') !== (item.error_code !== null) ||
+                (status === 'copied' && item.artifact_count !== 1) ||
+                (status === 'failed' && item.artifact_count !== 0)
+              )
+                throw new DomainError('SCHEMA_INVALID');
+              return {
+                id: item.id,
+                order: item.sort_index,
+                mediaType: item.media_type,
+                status,
+                ...(item.error_code
+                  ? { errorCode: domainErrorCode(item.error_code) }
+                  : {}),
+              };
+            });
+            const status = importStatus(row.status);
+            const copied = decodedItems.filter(
+              item => item.status === 'copied',
+            ).length;
+            const expectedStatus =
+              copied === decodedItems.length
+                ? 'complete'
+                : copied === 0
+                ? 'failed'
+                : 'partial';
+            if (status !== expectedStatus)
+              throw new DomainError('SCHEMA_INVALID');
+            return {
+              ingestionId: row.ingestion_id,
+              packId: row.pack_id,
+              manifestFingerprint: row.manifest_fingerprint,
+              status,
+              itemCount: decodedItems.length,
+              artifactCount: decodedItems.filter(
+                item => item.status === 'copied',
+              ).length,
+              createdAt: row.created_at,
+              items: decodedItems,
+            };
+          }),
+        );
+      }
+      return details;
+    });
   }
 
   async commitImport(
@@ -1806,6 +1907,13 @@ function requireSchemaVersionOne(value: number): 1 {
 function importStatus(value: string): PersistedImportSummary['status'] {
   if (value === 'complete' || value === 'partial' || value === 'failed')
     return value;
+  throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+}
+
+function importItemStatus(
+  value: string,
+): ImportManifestV1['items'][number]['status'] {
+  if (value === 'copied' || value === 'failed') return value;
   throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
 }
 

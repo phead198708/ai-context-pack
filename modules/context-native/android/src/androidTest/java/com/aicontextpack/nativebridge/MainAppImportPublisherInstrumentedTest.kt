@@ -1,6 +1,7 @@
 package com.aicontextpack.nativebridge
 
 import android.net.Uri
+import android.system.Os
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
@@ -181,7 +182,7 @@ class MainAppImportPublisherInstrumentedTest {
         removeCacheFile = { false },
       )
     }
-    assertEquals("MAIN_APP_IMPORT_CLEANUP_FAILED", error.stableCode)
+    assertEquals("MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED", error.stableCode)
     assertTrue(image.exists())
     assertEquals(listOf(ingestionId), File(root, "Inbox").list()?.toList())
 
@@ -213,6 +214,16 @@ class MainAppImportPublisherInstrumentedTest {
           "text" to "中文",
         ),
       ),
+      listOf(
+        mapOf(
+          "id" to id(),
+          "order" to 0,
+          "kind" to "text",
+          "declaredMediaType" to "text/plain",
+          "byteCount" to ShareIngestionWriter.maximumTextBytes + 1L,
+          "text" to "x",
+        ),
+      ),
       listOf(file(id(), 0, "application/octet-stream", outside)),
       listOf(file(id(), 0, "application/octet-stream", directory)),
     )
@@ -236,6 +247,45 @@ class MainAppImportPublisherInstrumentedTest {
         listOf(Uri.fromFile(File(root, "outside.pdf")).toString()),
       )
     }
+  }
+
+  @Test fun pickerStagingIsAnonymousAndRecoverySweepsOrphans() {
+    val documentRoot = File(cache, "DocumentPicker").apply { assertTrue(mkdirs()) }
+    val imageRoot = File(cache, "ImagePicker").apply { assertTrue(mkdirs()) }
+    val document = File(documentRoot, "private-name.pdf").apply { writeText("pdf") }
+    val image = File(imageRoot, "private-name.png").apply { writeText("png") }
+
+    val staged = MainAppImportPublisher.stagePickerFiles(
+      cache,
+      listOf(Uri.fromFile(document).toString(), Uri.fromFile(image).toString()),
+    )
+
+    assertFalse(document.exists())
+    assertFalse(image.exists())
+    assertEquals(2, staged.size)
+    assertTrue(staged.all { it.contains("/AIContextPackMainAppPicker/") && it.endsWith(".bin") })
+    assertFalse(staged.joinToString().contains("private-name"))
+
+    val orphan = File(documentRoot, "orphan.pdf").apply { writeText("orphan") }
+    val partial = File(cache, "AIContextPackMainAppPicker/abandoned.partial").apply {
+      assertTrue(mkdirs())
+      File(this, "orphan.bin").writeText("partial")
+    }
+    assertTrue(MainAppImportPublisher.cleanupPickerTransients(cache))
+    assertFalse(orphan.exists())
+    assertFalse(partial.exists())
+    assertTrue(staged.all { File(requireNotNull(Uri.parse(it).path)).exists() })
+
+    assertTrue(MainAppImportPublisher.recoverPickerCache(cache))
+    assertTrue(staged.all { !File(requireNotNull(Uri.parse(it).path)).exists() })
+
+    val outside = File(root, "outside-stage").apply { assertTrue(mkdirs()) }
+    val sentinel = File(outside, "sentinel.bin").apply { writeText("sentinel") }
+    val invalidStageRoot = File(cache, "AIContextPackMainAppPicker")
+    Os.symlink(outside.path, invalidStageRoot.path)
+    assertTrue(MainAppImportPublisher.cleanupPickerTransients(cache))
+    assertFalse(invalidStageRoot.exists())
+    assertTrue(sentinel.exists())
   }
 
   private fun id(): String = UUID.randomUUID().toString()

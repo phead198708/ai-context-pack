@@ -14,6 +14,7 @@ import {
 import { StatusBar } from 'expo-status-bar';
 import {
   InboxEventWorkflow,
+  type InboxPersistedImportSummary,
   type InboxWorkflowState,
 } from './src/domain/inboxEventWorkflow';
 import type { ImportManifestV1 } from './src/domain/contracts';
@@ -24,6 +25,7 @@ import {
   persistenceInboxProcessor,
 } from './src/infrastructure/persistence/runtime';
 import { NewPackFlow, type NewPackFlowHandle } from './src/ui/NewPackFlow';
+import { t, type AppLocale } from './src/ui/i18n';
 import { colors, spacing, typography } from './src/ui/tokens';
 
 type Screen = 'inbox' | 'detail' | 'diagnostics' | 'new-pack';
@@ -31,9 +33,15 @@ type LoadState = InboxWorkflowState;
 
 function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>('inbox');
+  const [locale, setLocale] = useState<AppLocale>('en');
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const [emptyDraftError, setEmptyDraftError] = useState<string>();
   const [creatingEmptyDraft, setCreatingEmptyDraft] = useState(false);
+  const [bootstrapComplete, setBootstrapComplete] = useState(false);
+  const pickerCleanupBlocked =
+    state.kind === 'error' &&
+    (state.code === 'MAIN_APP_IMPORT_CLEANUP_FAILED' ||
+      state.code === 'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED');
   const scrollView = useRef<ScrollView | null>(null);
   const newPackFlow = useRef<NewPackFlowHandle | null>(null);
   const screenRef = useRef<Screen>('inbox');
@@ -56,7 +64,10 @@ function App(): React.JSX.Element {
       persistenceInboxProcessor,
     );
   useEffect(() => {
-    workflow.current?.bootstrap();
+    let mounted = true;
+    workflow.current?.bootstrap().finally(() => {
+      if (mounted) setBootstrapComplete(true);
+    });
     const subscription = AppState.addEventListener('change', next => {
       if (next === 'active') workflow.current?.appBecameActive();
     });
@@ -75,6 +86,7 @@ function App(): React.JSX.Element {
       },
     );
     return () => {
+      mounted = false;
       subscription.remove();
       inboxSubscription.remove();
       backSubscription.remove();
@@ -95,13 +107,35 @@ function App(): React.JSX.Element {
           <Text accessibilityRole="header" style={styles.title}>
             AI Context Pack
           </Text>
-          <Text style={styles.subtitle}>Local-first import foundation</Text>
+          <Text style={styles.subtitle}>{t(locale, 'appSubtitle')}</Text>
+          <View accessibilityRole="radiogroup" style={styles.headerActions}>
+            <Action
+              label={t(locale, 'languageEnglish')}
+              onPress={() => setLocale('en')}
+              role="radio"
+              selected={locale === 'en'}
+            />
+            <Action
+              label={t(locale, 'languageChinese')}
+              onPress={() => setLocale('zh-Hans')}
+              role="radio"
+              selected={locale === 'zh-Hans'}
+            />
+          </View>
           {screen !== 'new-pack' ? (
             <View style={styles.headerActions}>
-              <Action label="New Pack" onPress={() => setScreen('new-pack')} />
               <Action
-                disabled={creatingEmptyDraft}
-                label="Create Empty Draft"
+                disabled={!bootstrapComplete || pickerCleanupBlocked}
+                label={t(locale, 'newPack')}
+                onPress={() => setScreen('new-pack')}
+              />
+              <Action
+                disabled={
+                  creatingEmptyDraft ||
+                  !bootstrapComplete ||
+                  pickerCleanupBlocked
+                }
+                label={t(locale, 'createEmptyDraft')}
                 onPress={async () => {
                   setCreatingEmptyDraft(true);
                   setEmptyDraftError(undefined);
@@ -134,7 +168,7 @@ function App(): React.JSX.Element {
                 onPress={() => setScreen(value)}
                 style={[styles.tab, screen === value && styles.selectedTab]}
               >
-                <Text style={styles.tabText}>{value}</Text>
+                <Text style={styles.tabText}>{tabLabel(locale, value)}</Text>
               </Pressable>
             ))}
           </View>
@@ -142,20 +176,28 @@ function App(): React.JSX.Element {
         <View style={styles.screenContent}>
           {screen === 'inbox' && (
             <Inbox
+              locale={locale}
               state={state}
               onRetry={() => {
                 workflow.current?.retry();
               }}
             />
           )}
-          {screen === 'detail' && <ImportDetail state={state} />}
-          {screen === 'diagnostics' && <Diagnostics />}
+          {screen === 'detail' && (
+            <ImportDetail
+              locale={locale}
+              onRetryFailed={() => setScreen('new-pack')}
+              state={state}
+            />
+          )}
+          {screen === 'diagnostics' && <Diagnostics locale={locale} />}
           {screen === 'new-pack' && (
             <NewPackFlow
               native={nativeAdapter}
+              locale={locale}
               onCancel={() => setScreen('inbox')}
               onImported={async () => {
-                await workflow.current?.appBecameActive();
+                await workflow.current?.refreshForMainAppImport();
               }}
               picker={mainAppPicker}
               ref={newPackFlow}
@@ -170,27 +212,29 @@ function App(): React.JSX.Element {
 function Inbox({
   state,
   onRetry,
+  locale,
 }: {
   state: LoadState;
   onRetry: () => void;
+  locale: AppLocale;
 }): React.JSX.Element {
   if (state.kind === 'loading')
     return (
-      <StateCard title="Scanning Inbox">
+      <StateCard title={t(locale, 'scanningInbox')}>
         <ActivityIndicator color={colors.accent} />
       </StateCard>
     );
   if (state.kind === 'error')
     return (
-      <StateCard title="Inbox unavailable" detail={state.code}>
-        <Action label="Retry" onPress={onRetry} />
+      <StateCard title={t(locale, 'inboxUnavailable')} detail={state.code}>
+        <Action label={t(locale, 'retry')} onPress={onRetry} />
       </StateCard>
     );
   if (state.kind === 'empty')
     return (
       <StateCard
-        title="Inbox is empty"
-        detail="Share a synthetic image to this app, then open it again."
+        title={t(locale, 'inboxEmpty')}
+        detail={t(locale, 'inboxEmptyDetail')}
       />
     );
   if (state.packs)
@@ -200,7 +244,14 @@ function Inbox({
           <StateCard
             key={pack.id}
             title={pack.title}
-            detail={`${pack.itemCount} item · ${pack.state}`}
+            detail={`${t(locale, 'itemState', {
+              count: pack.itemCount,
+              state: localizedPackState(locale, pack.state),
+            })}${
+              pack.import
+                ? `\n${persistedImportSummary(locale, pack.import)}`
+                : ''
+            }`}
           />
         ))}
       </View>
@@ -210,34 +261,70 @@ function Inbox({
       {state.manifests.map(manifest => (
         <StateCard
           key={manifest.ingestionId}
-          title="Share import"
-          detail={manifestSummary(manifest)}
+          title={t(locale, 'shareImport')}
+          detail={manifestSummary(locale, manifest)}
         />
       ))}
     </View>
   );
 }
 
-function ImportDetail({ state }: { state: LoadState }): React.JSX.Element {
+function ImportDetail({
+  state,
+  onRetryFailed,
+  locale,
+}: {
+  state: LoadState;
+  onRetryFailed: () => void;
+  locale: AppLocale;
+}): React.JSX.Element {
   const pack = state.kind === 'ready' ? state.packs?.[0] : undefined;
   const manifest = state.kind === 'ready' ? state.manifests[0] : undefined;
+  const persistedImport = pack?.import;
+  const hasFailedItems =
+    persistedImport?.items.some(item => item.status === 'failed') ??
+    manifest?.items.some(item => item.status === 'failed') ??
+    false;
   return (
     <StateCard
-      title="Import detail"
+      title={t(locale, 'importDetail')}
       detail={
         pack
-          ? `ID ${pack.id}\nSchema ${pack.schemaVersion}\nItems ${pack.itemCount}`
+          ? `${t(locale, 'id')} ${pack.id}\n${t(locale, 'schema')} ${
+              pack.schemaVersion
+            }\n${t(locale, 'items')} ${pack.itemCount}${
+              persistedImport
+                ? `\n${persistedImportSummary(
+                    locale,
+                    persistedImport,
+                  )}\n${persistedImportItemSummary(locale, persistedImport)}`
+                : ''
+            }`
           : manifest
-          ? `ID ${manifest.ingestionId}\nSchema ${
-              manifest.schemaVersion
-            }\n${manifestSummary(manifest)}\n${manifestTypeSummary(manifest)}`
-          : 'No import selected.'
+          ? `${t(locale, 'id')} ${manifest.ingestionId}\n${t(
+              locale,
+              'schema',
+            )} ${manifest.schemaVersion}\n${manifestSummary(
+              locale,
+              manifest,
+            )}\n${manifestTypeSummary(
+              locale,
+              manifest,
+            )}\n${manifestFailedItemSummary(locale, manifest)}`
+          : t(locale, 'noImportSelected')
       }
-    />
+    >
+      {hasFailedItems ? (
+        <Action label={t(locale, 'retryFailedItems')} onPress={onRetryFailed} />
+      ) : null}
+    </StateCard>
   );
 }
 
-function manifestSummary(manifest: ImportManifestV1): string {
+function manifestSummary(
+  locale: AppLocale,
+  manifest: ImportManifestV1,
+): string {
   const copied = manifest.items.filter(item => item.status === 'copied').length;
   const rejected = manifest.items.filter(
     item =>
@@ -246,10 +333,19 @@ function manifestSummary(manifest: ImportManifestV1): string {
         item.errorCode === 'IMPORT_SIZE_LIMIT_EXCEEDED'),
   ).length;
   const failed = manifest.items.length - copied - rejected;
-  return `${copied} accepted · ${rejected} rejected · ${failed} failed · ${manifest.status}`;
+  return `${copied} ${t(locale, 'accepted')} · ${rejected} ${t(
+    locale,
+    'rejected',
+  )} · ${failed} ${t(locale, 'failed')} · ${localizedImportStatus(
+    locale,
+    manifest.status,
+  )}`;
 }
 
-function manifestTypeSummary(manifest: ImportManifestV1): string {
+function manifestTypeSummary(
+  locale: AppLocale,
+  manifest: ImportManifestV1,
+): string {
   const counts = new Map<string, number>();
   manifest.items.forEach(item =>
     counts.set(item.mediaType, (counts.get(item.mediaType) ?? 0) + 1),
@@ -257,16 +353,75 @@ function manifestTypeSummary(manifest: ImportManifestV1): string {
   const values = [...counts.entries()].map(
     ([mediaType, count]) => `${mediaType} × ${count}`,
   );
-  return values.length === 0 ? 'Types none' : `Types ${values.join(', ')}`;
+  return values.length === 0
+    ? t(locale, 'typesNone')
+    : t(locale, 'types', { types: values.join(', ') });
 }
 
-function Diagnostics(): React.JSX.Element {
+function persistedImportSummary(
+  locale: AppLocale,
+  value: InboxPersistedImportSummary,
+): string {
+  const copied = value.items.filter(item => item.status === 'copied').length;
+  const rejected = value.items.filter(
+    item =>
+      item.status === 'failed' &&
+      (item.errorCode === 'IMPORT_TYPE_UNSUPPORTED' ||
+        item.errorCode === 'IMPORT_SIZE_LIMIT_EXCEEDED'),
+  ).length;
+  return `${copied} ${t(locale, 'accepted')} · ${rejected} ${t(
+    locale,
+    'rejected',
+  )} · ${value.items.length - copied - rejected} ${t(
+    locale,
+    'failed',
+  )} · ${localizedImportStatus(locale, value.status)}`;
+}
+
+function persistedImportItemSummary(
+  locale: AppLocale,
+  value: InboxPersistedImportSummary,
+): string {
+  const failures = value.items.filter(item => item.status === 'failed');
+  return failures.length === 0
+    ? t(locale, 'importErrorsNone')
+    : failures
+        .map(
+          item =>
+            `${t(locale, 'item')} ${item.order + 1} · ${item.mediaType} · ${
+              item.errorCode ?? 'IMPORT_COPY_FAILED'
+            }`,
+        )
+        .join('\n');
+}
+
+function manifestFailedItemSummary(
+  locale: AppLocale,
+  manifest: ImportManifestV1,
+): string {
+  const failures = manifest.items.filter(item => item.status === 'failed');
+  return failures.length === 0
+    ? t(locale, 'importErrorsNone')
+    : failures
+        .map(
+          item =>
+            `${t(locale, 'item')} ${item.order + 1} · ${item.mediaType} · ${
+              item.errorCode
+            }`,
+        )
+        .join('\n');
+}
+
+function Diagnostics({ locale }: { locale: AppLocale }): React.JSX.Element {
   return (
     <StateCard
-      title="Diagnostics"
-      detail={`React Native: 0.86\nArchitecture: New\nHermes: enabled\nNative boundary: ${
-        nativeAdapter.available ? 'available' : 'preview fallback'
-      }\nPrivacy logging: metadata only`}
+      title={t(locale, 'diagnostics')}
+      detail={t(locale, 'diagnosticsDetail', {
+        boundary: t(
+          locale,
+          nativeAdapter.available ? 'nativeAvailable' : 'nativeFallback',
+        ),
+      })}
     />
   );
 }
@@ -292,16 +447,23 @@ function Action({
   label,
   onPress,
   disabled = false,
+  selected,
+  role = 'button',
 }: {
   label: string;
   onPress: () => void;
   disabled?: boolean;
+  selected?: boolean;
+  role?: 'button' | 'radio';
 }): React.JSX.Element {
   return (
     <Pressable
       accessibilityLabel={label}
-      accessibilityRole="button"
-      accessibilityState={{ disabled }}
+      accessibilityRole={role}
+      accessibilityState={{
+        disabled,
+        ...(selected === undefined ? {} : { selected }),
+      }}
       disabled={disabled}
       onPress={onPress}
       style={[styles.action, disabled && styles.disabledAction]}
@@ -309,6 +471,44 @@ function Action({
       <Text style={styles.actionText}>{label}</Text>
     </Pressable>
   );
+}
+
+function tabLabel(
+  locale: AppLocale,
+  screen: Exclude<Screen, 'new-pack'>,
+): string {
+  if (screen === 'inbox') return t(locale, 'tabInbox');
+  if (screen === 'detail') return t(locale, 'tabDetail');
+  return t(locale, 'tabDiagnostics');
+}
+
+function localizedImportStatus(
+  locale: AppLocale,
+  status: ImportManifestV1['status'],
+): string {
+  if (status === 'complete') return t(locale, 'statusComplete');
+  if (status === 'partial') return t(locale, 'statusPartial');
+  return t(locale, 'statusFailed');
+}
+
+function localizedPackState(
+  locale: AppLocale,
+  state: NonNullable<
+    Extract<LoadState, { kind: 'ready' }>['packs']
+  >[number]['state'],
+): string {
+  const keys = {
+    draft: 'stateDraft',
+    processing: 'stateProcessing',
+    'review-required': 'stateReviewRequired',
+    ready: 'stateReady',
+    exporting: 'stateExporting',
+    exported: 'stateExported',
+    recovering: 'stateRecovering',
+    failed: 'stateFailed',
+    cancelled: 'stateCancelled',
+  } as const;
+  return t(locale, keys[state]);
 }
 
 function appErrorCode(error: unknown): string {

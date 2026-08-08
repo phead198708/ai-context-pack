@@ -176,7 +176,11 @@ final class MainAppImportPublisherTests: XCTestCase {
       rawInputs: inputs,
       removeCacheFile: { _ in throw MainAppImportError.cleanupFailed }
     )) { error in
-      XCTAssertEqual(error as? MainAppImportError, .cleanupFailed)
+      XCTAssertEqual(error as? MainAppImportError, .committedCleanupRequired)
+      XCTAssertEqual(
+        (error as? MainAppImportError)?.stableCode,
+        "MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED"
+      )
     }
     XCTAssertTrue(FileManager.default.fileExists(atPath: image.path))
     XCTAssertEqual(
@@ -214,6 +218,14 @@ final class MainAppImportPublisherTests: XCTestCase {
         "byteCount": 1,
         "text": "中文",
       ]],
+      [[
+        "id": id(),
+        "order": 0,
+        "kind": "text",
+        "declaredMediaType": "text/plain",
+        "byteCount": ShareIngestionSession.maximumTextBytes + 1,
+        "text": "x",
+      ]],
       [file(id(), 0, "application/octet-stream", outside)],
       [file(id(), 0, "application/octet-stream", directory)],
     ]
@@ -248,6 +260,60 @@ final class MainAppImportPublisherTests: XCTestCase {
         fileUris: [root.appendingPathComponent("outside.pdf").absoluteString]
       )
     )
+  }
+
+  func testPickerStagingIsAnonymousAndRecoverySweepsOrphans() throws {
+    let documentRoot = cache.appendingPathComponent("DocumentPicker", isDirectory: true)
+    let imageRoot = cache.appendingPathComponent("ImagePicker", isDirectory: true)
+    try FileManager.default.createDirectory(at: documentRoot, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: imageRoot, withIntermediateDirectories: true)
+    let document = try cached("private-name.pdf", bytes: Data("pdf".utf8), directory: documentRoot)
+    let image = try cached("private-name.png", bytes: Data("png".utf8), directory: imageRoot)
+
+    let staged = try MainAppImportPublisher.stagePickerFiles(
+      cacheRoot: cache,
+      fileUris: [document.absoluteString, image.absoluteString]
+    )
+
+    XCTAssertFalse(FileManager.default.fileExists(atPath: document.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: image.path))
+    XCTAssertEqual(staged.count, 2)
+    XCTAssertTrue(staged.allSatisfy { value in
+      value.contains("/AIContextPackMainAppPicker/") && value.hasSuffix(".bin")
+    })
+    XCTAssertFalse(staged.joined().contains("private-name"))
+
+    let orphan = try cached("orphan.pdf", bytes: Data("orphan".utf8), directory: documentRoot)
+    let partial = cache.appendingPathComponent(
+      "AIContextPackMainAppPicker/abandoned.partial",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
+    try Data("partial".utf8).write(to: partial.appendingPathComponent("orphan.bin"))
+    XCTAssertTrue(try MainAppImportPublisher.cleanupPickerTransients(cacheRoot: cache))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+    XCTAssertTrue(staged.allSatisfy { value in
+      URL(string: value).map { FileManager.default.fileExists(atPath: $0.path) } == true
+    })
+
+    XCTAssertTrue(try MainAppImportPublisher.recoverPickerCache(cacheRoot: cache))
+    XCTAssertTrue(staged.allSatisfy { value in
+      URL(string: value).map { !FileManager.default.fileExists(atPath: $0.path) } == true
+    })
+
+    let outside = root.appendingPathComponent("outside-stage", isDirectory: true)
+    try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+    let sentinel = outside.appendingPathComponent("sentinel.bin")
+    try Data("sentinel".utf8).write(to: sentinel)
+    let invalidStageRoot = cache.appendingPathComponent(
+      "AIContextPackMainAppPicker",
+      isDirectory: true
+    )
+    try FileManager.default.createSymbolicLink(at: invalidStageRoot, withDestinationURL: outside)
+    XCTAssertTrue(try MainAppImportPublisher.cleanupPickerTransients(cacheRoot: cache))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: invalidStageRoot.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
   }
 
   private func id() -> String { UUID().uuidString.lowercased() }

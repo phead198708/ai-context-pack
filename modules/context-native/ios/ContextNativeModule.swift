@@ -155,6 +155,42 @@ public final class ContextNativeModule: Module {
       catch { throw NativeError("MAIN_APP_IMPORT_CLEANUP_FAILED") }
     }
 
+    AsyncFunction("stageMainAppPickerFiles") { (fileUris: [String]) throws -> [String] in
+      guard let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      do { return try MainAppImportPublisher.stagePickerFiles(cacheRoot: cacheRoot, fileUris: fileUris) }
+      catch let error as MainAppImportError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("MAIN_APP_PICKER_STAGING_FAILED") }
+    }
+
+    AsyncFunction("cleanupMainAppPickerTransients") { () throws -> Bool in
+      guard let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      do { return try MainAppImportPublisher.cleanupPickerTransients(cacheRoot: cacheRoot) }
+      catch let error as MainAppImportError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
+    AsyncFunction("recoverMainAppPickerCache") { () throws -> Bool in
+      guard let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      do { return try MainAppImportPublisher.recoverPickerCache(cacheRoot: cacheRoot) }
+      catch let error as MainAppImportError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
     AsyncFunction("publishArtifact") { (
       sourceFileUri: String,
       relativePath: String,

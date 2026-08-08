@@ -125,6 +125,27 @@ class ContextNativeModule : Module() {
       catch (_: Exception) { throw NativeException("MAIN_APP_IMPORT_CLEANUP_FAILED") }
     }
 
+    AsyncFunction("stageMainAppPickerFiles") { fileUris: List<String> ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.stagePickerFiles(context.cacheDir, fileUris) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_PICKER_STAGING_FAILED") }
+    }
+
+    AsyncFunction("cleanupMainAppPickerTransients") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.cleanupPickerTransients(context.cacheDir) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
+    AsyncFunction("recoverMainAppPickerCache") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.recoverPickerCache(context.cacheDir) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
     AsyncFunction("publishArtifact") {
       sourceFileUri: String,
       relativePath: String,

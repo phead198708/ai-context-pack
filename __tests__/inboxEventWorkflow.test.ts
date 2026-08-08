@@ -40,6 +40,9 @@ function harness(
     handoffInbox: jest.fn().mockResolvedValue([]),
     acknowledgeInbox: jest.fn().mockResolvedValue(undefined),
     publishMainAppImport: jest.fn(),
+    stageMainAppPickerFiles: jest.fn(),
+    cleanupMainAppPickerTransients: jest.fn(),
+    recoverMainAppPickerCache: jest.fn().mockResolvedValue(undefined),
     discardMainAppPickerFiles: jest.fn(),
     publishArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
@@ -98,6 +101,28 @@ describe('InboxEventWorkflow integration', () => {
     await h.workflow.bootstrap();
     await h.workflow.receive(duplicate);
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails closed on cold-start picker-cache recovery and Retry clears it', async () => {
+    const recover = jest
+      .fn()
+      .mockRejectedValueOnce({ code: 'MAIN_APP_IMPORT_CLEANUP_FAILED' })
+      .mockResolvedValueOnce(undefined);
+    const h = harness({ recoverMainAppPickerCache: recover });
+
+    await h.workflow.bootstrap();
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'MAIN_APP_IMPORT_CLEANUP_FAILED',
+    });
+    expect(h.native.scanInbox).not.toHaveBeenCalled();
+
+    await h.workflow.retry();
+
+    expect(recover).toHaveBeenCalledTimes(2);
+    expect(h.native.scanInbox).toHaveBeenCalledTimes(1);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
   });
 
   test('Retry commits partial failed ACK progress before a later ACK fails', async () => {
@@ -427,6 +452,26 @@ describe('InboxEventWorkflow integration', () => {
     });
 
     await h.workflow.retry();
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('main-app refresh rejects with the latched persistence code and retries it', async () => {
+    const process = jest
+      .fn()
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'))
+      .mockResolvedValueOnce(undefined);
+    const h = harness({}, { process });
+
+    await expect(h.workflow.refreshForMainAppImport()).rejects.toMatchObject({
+      code: 'STORAGE_WRITE_FAILED',
+    });
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'STORAGE_WRITE_FAILED',
+    });
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+    expect(process).toHaveBeenCalledTimes(2);
     expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
   });
 

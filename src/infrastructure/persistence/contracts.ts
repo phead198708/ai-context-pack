@@ -46,6 +46,19 @@ export interface PersistedImportSummary {
   readonly artifactCount: number;
 }
 
+export interface PersistedImportItemSummary {
+  readonly id: string;
+  readonly order: number;
+  readonly mediaType: string;
+  readonly status: ImportManifestV1['items'][number]['status'];
+  readonly errorCode?: DomainErrorCode;
+}
+
+export interface PersistedImportDetail extends PersistedImportSummary {
+  readonly createdAt: string;
+  readonly items: readonly PersistedImportItemSummary[];
+}
+
 export interface RecoveryJournalEntry {
   readonly ingestionId: string;
   readonly packId: string;
@@ -196,6 +209,7 @@ export interface DevelopmentResetRepository {
 export interface PersistenceRepository {
   initialize(): Promise<void>;
   findImport(ingestionId: string): Promise<PersistedImportSummary | null>;
+  listImportDetails(): Promise<readonly PersistedImportDetail[]>;
   commitImport(input: CommitImportInput): Promise<'created' | 'replayed'>;
   recordRecovery(entry: RecoveryJournalEntry): Promise<void>;
   findRecovery(ingestionId: string): Promise<RecoveryJournalEntry | null>;

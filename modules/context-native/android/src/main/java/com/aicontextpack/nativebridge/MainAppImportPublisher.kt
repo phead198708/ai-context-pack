@@ -18,6 +18,78 @@ class MainAppImportException(
  * writer used by Android system sharing. Provider paths and display filenames are never durable.
  */
 object MainAppImportPublisher {
+  private const val stagedDirectoryName = "AIContextPackMainAppPicker"
+  private val transientDirectoryNames = listOf("DocumentPicker", "ImagePicker")
+
+  @Synchronized
+  fun stagePickerFiles(cacheDir: File, fileUris: List<String>): List<String> {
+    if (fileUris.isEmpty() || fileUris.size > ShareIngestionWriter.maximumItemCount || fileUris.toSet().size != fileUris.size) {
+      invalid()
+    }
+    val cacheRoot = cacheDir.canonicalFile
+    val sources = fileUris.map { controlledTransientFile(it, cacheRoot) }
+    val stageRoot = File(cacheRoot, stagedDirectoryName)
+    if (hasEntry(stageRoot)) {
+      val mode = runCatching { Os.lstat(stageRoot.path).st_mode }.getOrNull()
+      if (mode == null || OsConstants.S_ISLNK(mode) || !OsConstants.S_ISDIR(mode)) {
+        throw MainAppImportException("MAIN_APP_IMPORT_CLEANUP_FAILED")
+      }
+    } else if (!stageRoot.mkdirs()) {
+      throw MainAppImportException("MAIN_APP_PICKER_STAGING_FAILED")
+    }
+    val transactionId = UUID.randomUUID().toString()
+    val partialRoot = File(stageRoot, "$transactionId.partial")
+    val committedRoot = File(stageRoot, transactionId)
+    if (!partialRoot.mkdir()) {
+      throw MainAppImportException("MAIN_APP_PICKER_STAGING_FAILED")
+    }
+    val staged = mutableListOf<File>()
+    try {
+      sources.forEach { source ->
+        val destination = File(partialRoot, "${UUID.randomUUID()}.bin")
+        if (!source.renameTo(destination)) {
+          throw MainAppImportException("MAIN_APP_PICKER_STAGING_FAILED")
+        }
+        staged += destination
+      }
+      if (!partialRoot.renameTo(committedRoot)) {
+        throw MainAppImportException("MAIN_APP_PICKER_STAGING_FAILED")
+      }
+      return staged.map { Uri.fromFile(File(committedRoot, it.name)).toString() }
+    } catch (error: Exception) {
+      var cleanupFailed = false
+      (listOf(partialRoot, committedRoot) + sources).distinctBy(File::getPath).forEach { file ->
+        if (hasEntry(file) && !removeTree(file)) cleanupFailed = true
+      }
+      if (!cleanupPickerTransientsUnlocked(cacheRoot)) cleanupFailed = true
+      if (cleanupFailed) throw MainAppImportException("MAIN_APP_IMPORT_CLEANUP_FAILED")
+      if (error is MainAppImportException) throw error
+      throw MainAppImportException("MAIN_APP_PICKER_STAGING_FAILED")
+    }
+  }
+
+  @Synchronized
+  fun cleanupPickerTransients(cacheDir: File): Boolean {
+    if (!cleanupPickerTransientsUnlocked(cacheDir.canonicalFile)) {
+      throw MainAppImportException("MAIN_APP_IMPORT_CLEANUP_FAILED")
+    }
+    return true
+  }
+
+  @Synchronized
+  fun recoverPickerCache(cacheDir: File): Boolean {
+    val cacheRoot = cacheDir.canonicalFile
+    val names = transientDirectoryNames + stagedDirectoryName
+    var cleanupFailed = false
+    names.forEach { name ->
+      val directory = File(cacheRoot, name)
+      if (hasEntry(directory) && !removeTree(directory)) cleanupFailed = true
+    }
+    if (cleanupFailed) throw MainAppImportException("MAIN_APP_IMPORT_CLEANUP_FAILED")
+    return true
+  }
+
+  @Synchronized
   fun publish(
     filesDir: File,
     cacheDir: File,
@@ -60,13 +132,16 @@ object MainAppImportPublisher {
           false
         }
         if (!removed) {
-          throw MainAppImportException("MAIN_APP_IMPORT_CLEANUP_FAILED")
+          // Publication is already durable. The UI must lock the draft and idempotently replay
+          // this ingestion instead of offering cancellation for a Pack that now exists.
+          throw MainAppImportException("MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED")
         }
       }
     }
     return manifest
   }
 
+  @Synchronized
   fun discard(cacheDir: File, fileUris: List<String>): Boolean {
     val cacheRoot = cacheDir.canonicalFile
     fileUris.forEach { value ->
@@ -124,8 +199,10 @@ object MainAppImportPublisher {
     if (text.isEmpty()) invalid()
     val expectedType = if (kind == "url") "text/uri-list" else "text/plain"
     if (declaredMediaType != expectedType) invalid()
+    val declaredByteCount = exactNonNegativeLong(raw["byteCount"])
+    if (declaredByteCount > ShareIngestionWriter.maximumTextBytes) invalid()
     val bytes = text.toByteArray(StandardCharsets.UTF_8)
-    if (exactNonNegativeLong(raw["byteCount"]) != bytes.size.toLong()) invalid()
+    if (declaredByteCount != bytes.size.toLong()) invalid()
     if (kind == "url") {
       val uri = runCatching { Uri.parse(text) }.getOrNull() ?: invalid()
       if (uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrEmpty()) invalid()
@@ -152,6 +229,47 @@ object MainAppImportPublisher {
     val file = unresolved.canonicalFile
     if (!file.path.startsWith(cacheRoot.path + File.separator)) invalid()
     return file
+  }
+
+  private fun controlledTransientFile(value: String, cacheRoot: File): File {
+    val file = controlledCacheFile(value, cacheRoot)
+    if (!file.isFile || transientDirectoryNames.none { name ->
+        file.path.startsWith(File(cacheRoot, name).canonicalPath + File.separator)
+      }) invalid()
+    return file
+  }
+
+  private fun cleanupPickerTransientsUnlocked(cacheRoot: File): Boolean {
+    var cleanupSucceeded = true
+    transientDirectoryNames.forEach { name ->
+      val directory = File(cacheRoot, name)
+      if (hasEntry(directory) && !removeTree(directory)) cleanupSucceeded = false
+    }
+    val stageRoot = File(cacheRoot, stagedDirectoryName)
+    if (hasEntry(stageRoot)) {
+      val mode = runCatching { Os.lstat(stageRoot.path).st_mode }.getOrNull()
+      if (mode == null || OsConstants.S_ISLNK(mode) || !OsConstants.S_ISDIR(mode)) {
+        if (!removeTree(stageRoot)) cleanupSucceeded = false
+      } else {
+        val children = stageRoot.listFiles()
+        if (children == null) cleanupSucceeded = false
+        else children.filter { it.name.endsWith(".partial") }.forEach { child ->
+          if (!removeTree(child)) cleanupSucceeded = false
+        }
+      }
+    }
+    return cleanupSucceeded
+  }
+
+  private fun hasEntry(file: File): Boolean =
+    runCatching { Os.lstat(file.path) }.isSuccess
+
+  private fun removeTree(file: File): Boolean {
+    val mode = runCatching { Os.lstat(file.path).st_mode }.getOrNull() ?: return true
+    if (OsConstants.S_ISLNK(mode) || !OsConstants.S_ISDIR(mode)) return file.delete()
+    val children = file.listFiles() ?: return false
+    if (children.any { !removeTree(it) }) return false
+    return file.delete()
   }
 
   private fun exactNonNegativeInt(value: Any?): Int {

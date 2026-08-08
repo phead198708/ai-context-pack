@@ -2,12 +2,17 @@ import Foundation
 
 enum MainAppImportError: Error, Equatable {
   case invalidInput
+  case stagingFailed
   case cleanupFailed
+  case committedCleanupRequired
 
   var stableCode: String {
     switch self {
     case .invalidInput: return "MAIN_APP_IMPORT_INPUT_INVALID"
+    case .stagingFailed: return "MAIN_APP_PICKER_STAGING_FAILED"
     case .cleanupFailed: return "MAIN_APP_IMPORT_CLEANUP_FAILED"
+    case .committedCleanupRequired:
+      return "MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED"
     }
   }
 }
@@ -17,6 +22,83 @@ enum MainAppImportError: Error, Equatable {
  session used by the iOS Share Extension. Provider paths and display filenames are never durable.
  */
 enum MainAppImportPublisher {
+  private static let stagedDirectoryName = "AIContextPackMainAppPicker"
+  private static let transientDirectoryNames = ["DocumentPicker", "ImagePicker"]
+  private static let cacheLock = NSLock()
+
+  static func stagePickerFiles(cacheRoot: URL, fileUris: [String]) throws -> [String] {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    guard !fileUris.isEmpty,
+          fileUris.count <= ShareIngestionSession.maximumItemCount,
+          Set(fileUris).count == fileUris.count else {
+      throw MainAppImportError.invalidInput
+    }
+    let sources = try fileUris.map { try controlledTransientFile($0, cacheRoot: cacheRoot) }
+    let stageRoot = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
+      .appendingPathComponent(stagedDirectoryName, isDirectory: true)
+    let transactionId = UUID().uuidString.lowercased()
+    let partialRoot = stageRoot.appendingPathComponent("\(transactionId).partial", isDirectory: true)
+    let committedRoot = stageRoot.appendingPathComponent(transactionId, isDirectory: true)
+    do {
+      if FileManager.default.fileExists(atPath: stageRoot.path) {
+        let values = try stageRoot.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+        guard values.isSymbolicLink != true, values.isDirectory == true else {
+          throw MainAppImportError.cleanupFailed
+        }
+      } else {
+        try FileManager.default.createDirectory(at: stageRoot, withIntermediateDirectories: true)
+      }
+      try FileManager.default.createDirectory(at: partialRoot, withIntermediateDirectories: false)
+    } catch let error as MainAppImportError {
+      throw error
+    } catch {
+      throw MainAppImportError.stagingFailed
+    }
+    var staged: [URL] = []
+    do {
+      for source in sources {
+        let destination = partialRoot.appendingPathComponent(
+          "\(UUID().uuidString.lowercased()).bin",
+          isDirectory: false
+        )
+        try FileManager.default.moveItem(at: source, to: destination)
+        staged.append(destination)
+      }
+      try FileManager.default.moveItem(at: partialRoot, to: committedRoot)
+      return staged.map {
+        committedRoot.appendingPathComponent($0.lastPathComponent, isDirectory: false).absoluteString
+      }
+    } catch {
+      var cleanupFailed = false
+      for file in [partialRoot, committedRoot] + sources
+        where FileManager.default.fileExists(atPath: file.path) {
+        do { try FileManager.default.removeItem(at: file) }
+        catch { cleanupFailed = true }
+      }
+      do { try cleanupPickerTransientsUnlocked(cacheRoot: cacheRoot) }
+      catch { cleanupFailed = true }
+      throw cleanupFailed ? MainAppImportError.cleanupFailed : MainAppImportError.stagingFailed
+    }
+  }
+
+  static func cleanupPickerTransients(cacheRoot: URL) throws -> Bool {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    try cleanupPickerTransientsUnlocked(cacheRoot: cacheRoot)
+    return true
+  }
+
+  static func recoverPickerCache(cacheRoot: URL) throws -> Bool {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    try removeCacheDirectories(
+      cacheRoot: cacheRoot,
+      names: transientDirectoryNames + [stagedDirectoryName]
+    )
+    return true
+  }
+
   static func publish(
     container: URL,
     cacheRoot: URL,
@@ -28,6 +110,8 @@ enum MainAppImportPublisher {
     },
     operationHook: @escaping (ShareIngestionSession.Point) throws -> Void = { _ in }
   ) throws -> [String: Any] {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
     guard ["main-app-picker", "main-app-text"].contains(source),
           !rawInputs.isEmpty,
           rawInputs.count <= ShareIngestionSession.maximumItemCount else {
@@ -81,12 +165,16 @@ enum MainAppImportPublisher {
     // cache files so the visible draft can retry or explicitly discard them.
     for file in Set(pickerFiles) where FileManager.default.fileExists(atPath: file.path) {
       do { try removeCacheFile(file) }
-      catch { throw MainAppImportError.cleanupFailed }
+      // The Inbox is already durable. This distinct state prevents the UI from exposing the
+      // normal draft cancellation path and requires an idempotent replay to retry cleanup.
+      catch { throw MainAppImportError.committedCleanupRequired }
     }
     return manifest
   }
 
   static func discard(cacheRoot: URL, fileUris: [String]) throws -> Bool {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
     for value in fileUris {
       let file = try controlledCacheFile(value, cacheRoot: cacheRoot)
       if FileManager.default.fileExists(atPath: file.path) {
@@ -142,6 +230,7 @@ enum MainAppImportPublisher {
     guard ["text", "url"].contains(kind),
           let text = raw["text"] as? String,
           !text.isEmpty,
+          exactByteCount <= Int64(ShareIngestionSession.maximumTextBytes),
           mediaType == (kind == "url" ? "text/uri-list" : "text/plain"),
           Int64(Data(text.utf8).count) == exactByteCount,
           kind != "url" || supportedWebURL(text) else {
@@ -166,6 +255,65 @@ enum MainAppImportPublisher {
       throw MainAppImportError.invalidInput
     }
     return file
+  }
+
+  private static func controlledTransientFile(_ value: String, cacheRoot: URL) throws -> URL {
+    let file = try controlledCacheFile(value, cacheRoot: cacheRoot)
+    let roots = transientDirectoryNames.map {
+      cacheRoot.appendingPathComponent($0, isDirectory: true)
+        .resolvingSymlinksInPath().standardizedFileURL.path + "/"
+    }
+    guard roots.contains(where: { file.path.hasPrefix($0) }),
+          FileManager.default.fileExists(atPath: file.path) else {
+      throw MainAppImportError.invalidInput
+    }
+    return file
+  }
+
+  private static func removeCacheDirectories(cacheRoot: URL, names: [String]) throws {
+    let root = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
+    var cleanupFailed = false
+    for name in names {
+      let directory = root.appendingPathComponent(name, isDirectory: true)
+      guard directory.standardizedFileURL.path.hasPrefix(root.path + "/") else {
+        throw MainAppImportError.invalidInput
+      }
+      if FileManager.default.fileExists(atPath: directory.path) {
+        do { try FileManager.default.removeItem(at: directory) }
+        catch { cleanupFailed = true }
+      }
+    }
+    if cleanupFailed { throw MainAppImportError.cleanupFailed }
+  }
+
+  private static func cleanupPickerTransientsUnlocked(cacheRoot: URL) throws {
+    var cleanupFailed = false
+    do { try removeCacheDirectories(cacheRoot: cacheRoot, names: transientDirectoryNames) }
+    catch { cleanupFailed = true }
+    let stageRoot = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
+      .appendingPathComponent(stagedDirectoryName, isDirectory: true)
+    if FileManager.default.fileExists(atPath: stageRoot.path) {
+      do {
+        let values = try stageRoot.resourceValues(
+          forKeys: [.isSymbolicLinkKey, .isDirectoryKey]
+        )
+        if values.isSymbolicLink == true || values.isDirectory != true {
+          try FileManager.default.removeItem(at: stageRoot)
+        } else {
+          for child in try FileManager.default.contentsOfDirectory(
+            at: stageRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+          ) where child.lastPathComponent.hasSuffix(".partial") {
+            do { try FileManager.default.removeItem(at: child) }
+            catch { cleanupFailed = true }
+          }
+        }
+      } catch {
+        cleanupFailed = true
+      }
+    }
+    if cleanupFailed { throw MainAppImportError.cleanupFailed }
   }
 
   private static func exactNonNegativeInteger(_ value: Any?) throws -> Int64 {

@@ -2,6 +2,7 @@ import {
   createNativeAdapter,
   NativeBoundaryError,
 } from '../src/infrastructure/createNativeAdapter';
+import { MAIN_APP_IMPORT_MAX_TEXT_BYTES } from '../src/domain/mainAppImport';
 
 describe('native adapter runtime boundary', () => {
   const mockNativeModule = {
@@ -356,6 +357,11 @@ describe('native adapter runtime boundary', () => {
     const native = {
       ...mockNativeModule,
       publishMainAppImport: jest.fn().mockResolvedValue(returned),
+      stageMainAppPickerFiles: jest
+        .fn()
+        .mockResolvedValue(['file:///cache/staged.bin']),
+      cleanupMainAppPickerTransients: jest.fn().mockResolvedValue(true),
+      recoverMainAppPickerCache: jest.fn().mockResolvedValue(true),
       discardMainAppPickerFiles: jest.fn().mockResolvedValue(true),
     };
     const guarded = createNativeAdapter(native);
@@ -369,6 +375,15 @@ describe('native adapter runtime boundary', () => {
       inputs,
     );
     await expect(
+      guarded.stageMainAppPickerFiles([
+        'file:///cache/DocumentPicker/input.pdf',
+      ]),
+    ).resolves.toEqual(['file:///cache/staged.bin']);
+    await expect(
+      guarded.cleanupMainAppPickerTransients(),
+    ).resolves.toBeUndefined();
+    await expect(guarded.recoverMainAppPickerCache()).resolves.toBeUndefined();
+    await expect(
       guarded.discardMainAppPickerFiles(['file:///cache/input.pdf']),
     ).resolves.toBeUndefined();
   });
@@ -379,6 +394,9 @@ describe('native adapter runtime boundary', () => {
     const native = {
       ...mockNativeModule,
       publishMainAppImport: jest.fn().mockResolvedValue({}),
+      stageMainAppPickerFiles: jest.fn().mockResolvedValue([]),
+      cleanupMainAppPickerTransients: jest.fn().mockResolvedValue(false),
+      recoverMainAppPickerCache: jest.fn().mockResolvedValue(false),
       discardMainAppPickerFiles: jest.fn().mockResolvedValue(false),
     };
     const guarded = createNativeAdapter(native);
@@ -421,12 +439,37 @@ describe('native adapter runtime boundary', () => {
         },
       ]),
     ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-text', [
+        {
+          ...textInput,
+          byteCount: MAIN_APP_IMPORT_MAX_TEXT_BYTES + 1,
+          text: 'x'.repeat(MAIN_APP_IMPORT_MAX_TEXT_BYTES + 1),
+        },
+      ]),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
     expect(native.publishMainAppImport).not.toHaveBeenCalled();
 
     await expect(
       guarded.publishMainAppImport(ingestionId, 'main-app-text', [textInput]),
     ).rejects.toMatchObject({
       code: 'NATIVE_MAIN_APP_IMPORT_RESULT_INVALID',
+    });
+    await expect(guarded.stageMainAppPickerFiles([])).rejects.toMatchObject({
+      code: 'NATIVE_MAIN_APP_IMPORT_INVALID',
+    });
+    await expect(
+      guarded.stageMainAppPickerFiles([
+        'file:///cache/DocumentPicker/input.pdf',
+      ]),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_PICKER_STAGE_INVALID' });
+    await expect(
+      guarded.cleanupMainAppPickerTransients(),
+    ).rejects.toMatchObject({
+      code: 'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
+    });
+    await expect(guarded.recoverMainAppPickerCache()).rejects.toMatchObject({
+      code: 'NATIVE_MAIN_APP_IMPORT_CLEANUP_FAILED',
     });
     await expect(
       guarded.discardMainAppPickerFiles(['content://provider/private']),

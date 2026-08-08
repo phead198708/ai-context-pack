@@ -21,6 +21,7 @@ import type {
   CleanupCandidate,
   CommitImportInput,
   PersistedArtifactRecord,
+  PersistedImportDetail,
   PersistedImportSummary,
   PersistedPackGraph,
   ProductionPersistenceRepository,
@@ -96,6 +97,7 @@ function packGraph(id: string, createdAt: string): PersistedPackGraph {
 
 class RuntimeRepository implements ProductionPersistenceRepository {
   readonly imports = new Map<string, PersistedImportSummary>();
+  readonly importDetails = new Map<string, PersistedImportDetail>();
   readonly recoveries = new Map<string, RecoveryJournalEntry>();
   readonly artifacts: PersistedArtifactRecord[] = [];
   readonly diagnostics: RecoveryDiagnosticInput[] = [];
@@ -112,6 +114,10 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     return this.imports.get(id) ?? null;
   }
 
+  async listImportDetails() {
+    return [...this.importDetails.values()];
+  }
+
   async commitImport(input: CommitImportInput) {
     this.commits.push(input.manifest.ingestionId);
     const existing = this.imports.get(input.manifest.ingestionId);
@@ -125,6 +131,17 @@ class RuntimeRepository implements ProductionPersistenceRepository {
       status: input.manifest.status,
       itemCount: input.manifest.items.length,
       artifactCount: input.artifacts.length,
+    });
+    this.importDetails.set(input.manifest.ingestionId, {
+      ...this.imports.get(input.manifest.ingestionId)!,
+      createdAt: input.manifest.createdAt,
+      items: input.manifest.items.map(item => ({
+        id: item.id,
+        order: item.order,
+        mediaType: item.mediaType,
+        status: item.status,
+        ...(item.status === 'failed' ? { errorCode: item.errorCode } : {}),
+      })),
     });
     for (const value of input.artifacts)
       this.artifacts.push({
@@ -326,6 +343,14 @@ class RuntimeNative implements NativeAdapter {
   async publishMainAppImport(): Promise<ImportManifestV1> {
     throw new Error('unused-main-app-import');
   }
+
+  async stageMainAppPickerFiles(fileUris: readonly string[]) {
+    return fileUris;
+  }
+
+  async cleanupMainAppPickerTransients() {}
+
+  async recoverMainAppPickerCache() {}
 
   async discardMainAppPickerFiles() {}
 

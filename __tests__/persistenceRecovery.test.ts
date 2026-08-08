@@ -121,6 +121,10 @@ class MemoryRepository implements PersistenceRepository {
     return this.imports.get(id) ?? null;
   }
 
+  async listImportDetails() {
+    return [];
+  }
+
   async commitImport(
     input: CommitImportInput,
   ): Promise<'created' | 'replayed'> {

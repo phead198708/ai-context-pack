@@ -37,7 +37,7 @@ describe('Issue #9 main-app entry-point boundaries', () => {
     expect(manifest).toContain(
       'android:name="android.hardware.camera" android:required="false"',
     );
-    expect(manifest).not.toContain('android:enableOnBackInvokedCallback');
+    expect(manifest).toContain('android:enableOnBackInvokedCallback="false"');
   });
 
   test('routes both native implementations through the existing atomic Inbox writer', () => {
@@ -66,5 +66,29 @@ describe('Issue #9 main-app entry-point boundaries', () => {
     expect(picker).toContain('selectionLimit: 20');
     expect(picker).toContain('copyToCacheDirectory: true');
     expect(picker).not.toMatch(/assetId:|fileName:|name:/);
+  });
+
+  test('ships one typed English/zh-Hans UI catalog and localized picker permission resources', () => {
+    const catalog = source('src/ui/i18n.ts');
+    const project = source('ios/AIContextPack.xcodeproj/project.pbxproj');
+    const englishPermission = source(
+      'ios/AIContextPack/en.lproj/InfoPlist.strings',
+    );
+    const chinesePermission = source(
+      'ios/AIContextPack/zh-Hans.lproj/InfoPlist.strings',
+    );
+    const androidChinese = source(
+      'android/app/src/main/res/values-zh-rCN/strings.xml',
+    );
+
+    expect(catalog).toContain("export type AppLocale = 'en' | 'zh-Hans'");
+    expect(catalog).toContain('Record<keyof typeof en, string>');
+    expect(project).toContain('PBXVariantGroup');
+    expect(project).toContain('InfoPlist.strings in Resources');
+    expect(project).toContain('zh-Hans');
+    expect(englishPermission).toContain('NSPhotoLibraryUsageDescription');
+    expect(chinesePermission).toContain('NSPhotoLibraryUsageDescription');
+    expect(chinesePermission).toContain('选择照片');
+    expect(androidChinese).toContain('AI 上下文包');
   });
 });

@@ -43,6 +43,7 @@ export interface MainAppImportDraft {
 export type MainAppImportEditError =
   | 'IMPORT_EMPTY_TEXT'
   | 'IMPORT_URL_INVALID'
+  | 'IMPORT_SIZE_LIMIT_EXCEEDED'
   | 'IMPORT_ITEM_LIMIT_EXCEEDED';
 
 export type MainAppImportPreflightCode =
@@ -110,6 +111,11 @@ export function appendTextEntry(
   if (draft.items.length >= MAIN_APP_IMPORT_MAX_ITEMS)
     return { draft, error: 'IMPORT_ITEM_LIMIT_EXCEEDED' };
   if (value.length === 0) return { draft, error: 'IMPORT_EMPTY_TEXT' };
+  const byteCount = utf8ByteCount(value);
+  // Inline content would otherwise be copied through the JS/native bridge in full. Reject it
+  // before it becomes part of the draft; file inputs cross the bridge only as cache URIs.
+  if (byteCount > MAIN_APP_IMPORT_MAX_TEXT_BYTES)
+    return { draft, error: 'IMPORT_SIZE_LIMIT_EXCEEDED' };
   if (kind === 'url' && !isSupportedWebUrl(value))
     return { draft, error: 'IMPORT_URL_INVALID' };
   const item: MainAppTextImportInput = {
@@ -117,7 +123,7 @@ export function appendTextEntry(
     order: draft.items.length,
     kind,
     declaredMediaType: kind === 'url' ? 'text/uri-list' : 'text/plain',
-    byteCount: utf8ByteCount(value),
+    byteCount,
     text: value,
   };
   return { draft: { ...draft, items: [...draft.items, item] } };

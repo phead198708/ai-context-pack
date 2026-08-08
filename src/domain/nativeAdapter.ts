@@ -69,6 +69,11 @@ export interface NativeAdapter {
     source: 'main-app-picker' | 'main-app-text',
     inputs: readonly MainAppImportInput[],
   ): Promise<ImportManifestV1>;
+  stageMainAppPickerFiles(
+    fileUris: readonly string[],
+  ): Promise<readonly string[]>;
+  cleanupMainAppPickerTransients(): Promise<void>;
+  recoverMainAppPickerCache(): Promise<void>;
   discardMainAppPickerFiles(fileUris: readonly string[]): Promise<void>;
   publishArtifact(
     sourceFileUri: string,
