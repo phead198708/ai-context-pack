@@ -998,6 +998,72 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('locks Detail retry Pack creation while an empty draft is pending', async () => {
+    const failedItem = partialManifest.items[2]!;
+    const retryPack = {
+      ...persistedPack,
+      itemCount: 1,
+      import: {
+        ingestionId,
+        status: 'failed' as const,
+        items: [
+          {
+            id: failedItem.id,
+            order: 0,
+            mediaType: failedItem.mediaType,
+            status: 'failed' as const,
+            errorCode: 'IMPORT_COPY_FAILED' as const,
+            retrySource: {
+              relativePath: `Packs/${persistedPack.id}/originals/${failedItem.id}.bin`,
+              byteCount: 4,
+              sha256: 'a'.repeat(64),
+            },
+          },
+        ],
+      },
+    };
+    const createdPack = { ...persistedPack, id: newerPackId };
+    let resolveCreate: ((pack: InboxPackSummary) => void) | undefined;
+    mockCreateEmptyDraftPack.mockReturnValue(
+      new Promise<InboxPackSummary>(resolve => {
+        resolveCreate = resolve;
+      }),
+    );
+    mockPersistenceInboxProcessor.listPersistedPacks
+      .mockResolvedValueOnce([retryPack])
+      .mockResolvedValue([retryPack, createdPack]);
+    const renderer = await renderApp();
+    await press(control(renderer, 'tab', 'detail'));
+    let pendingAction: Promise<void> | undefined;
+
+    act(() => {
+      pendingAction = control(
+        renderer,
+        'button',
+        'Create Empty Draft',
+      ).props.onPress();
+    });
+
+    expect(
+      control(renderer, 'button', 'Retry failed items in New Pack').props
+        .accessibilityState,
+    ).toEqual({ disabled: true });
+    await press(control(renderer, 'button', 'Retry failed items in New Pack'));
+    expect(renderedText(renderer)).not.toContain(
+      'Add photos, PDF or text files',
+    );
+    expect(mockMainAppPicker.pickFiles).not.toHaveBeenCalled();
+    expect(mockMainAppPicker.pickPhotos).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveCreate?.(createdPack);
+      await pendingAction;
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer)).toContain(`ID ${newerPackId}`);
+    act(() => renderer.unmount());
+  });
+
   test('creates and selects an empty Pack while preserving a historical share warning', async () => {
     const createdPack = {
       ...persistedPack,

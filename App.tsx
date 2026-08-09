@@ -74,6 +74,7 @@ function App(): React.JSX.Element {
       },
       persistenceInboxProcessor,
     );
+  const effectivePackCreationReady = packCreationReady && !creatingEmptyDraft;
   useEffect(() => {
     let mounted = true;
     workflow.current?.bootstrap().finally(() => {
@@ -137,10 +138,10 @@ function App(): React.JSX.Element {
           {screen !== 'new-pack' ? (
             <View style={styles.headerActions}>
               <Action
-                disabled={creatingEmptyDraft || !packCreationReady}
+                disabled={!effectivePackCreationReady}
                 label={t(locale, 'newPack')}
                 onPress={() => {
-                  if (creatingEmptyDraft || !packCreationReady) return;
+                  if (!effectivePackCreationReady) return;
                   setSelectedDetailPackId(undefined);
                   setRetryDraft(undefined);
                   setRetryDraftError(undefined);
@@ -148,10 +149,10 @@ function App(): React.JSX.Element {
                 }}
               />
               <Action
-                disabled={creatingEmptyDraft || !packCreationReady}
+                disabled={!effectivePackCreationReady}
                 label={t(locale, 'createEmptyDraft')}
                 onPress={async () => {
-                  if (creatingEmptyDraft || !packCreationReady) return;
+                  if (!effectivePackCreationReady) return;
                   setCreatingEmptyDraft(true);
                   setEmptyDraftError(undefined);
                   try {
@@ -212,8 +213,10 @@ function App(): React.JSX.Element {
           {screen === 'detail' && (
             <ImportDetail
               {...(retryDraftError ? { retryError: retryDraftError } : {})}
+              creationReady={effectivePackCreationReady}
               locale={locale}
               onRetryFailed={(packId, sources) => {
+                if (!effectivePackCreationReady) return;
                 try {
                   setSelectedDetailPackId(packId);
                   setRetryDraft(createRetryMainAppImportDraft(sources));
@@ -237,7 +240,7 @@ function App(): React.JSX.Element {
           {screen === 'new-pack' && (
             <NewPackFlow
               {...(retryDraft ? { createDraft: () => retryDraft } : {})}
-              creationReady={packCreationReady}
+              creationReady={effectivePackCreationReady}
               key={retryDraft?.ingestionId ?? 'new-pack'}
               native={nativeAdapter}
               locale={locale}
@@ -346,6 +349,7 @@ function Inbox({
 
 function ImportDetail({
   state,
+  creationReady,
   onRetryFailed,
   onSelectPack,
   selectedPackId,
@@ -353,6 +357,7 @@ function ImportDetail({
   locale,
 }: {
   state: LoadState;
+  creationReady: boolean;
   onRetryFailed: (
     packId: string,
     sources: readonly {
@@ -443,12 +448,13 @@ function ImportDetail({
       ) : null}
       {retryBatches.map(batch => (
         <Action
+          disabled={!creationReady}
           key={`${batch.start}-${batch.end}`}
           label={`${t(locale, 'retryFailedItems')}${
             retryBatches.length > 1 ? ` ${batch.start + 1}–${batch.end}` : ''
           }`}
           onPress={() => {
-            if (pack) onRetryFailed(pack.id, batch.sources);
+            if (creationReady && pack) onRetryFailed(pack.id, batch.sources);
           }}
         />
       ))}
