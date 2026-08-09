@@ -41,6 +41,8 @@ function App(): React.JSX.Element {
   const [locale, setLocale] = useState<AppLocale>('en');
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const [emptyDraftError, setEmptyDraftError] = useState<string>();
+  const [pendingEmptyDraftPackId, setPendingEmptyDraftPackId] =
+    useState<string>();
   const [creatingEmptyDraft, setCreatingEmptyDraft] = useState(false);
   const [packCreationReady, setPackCreationReady] = useState(false);
   const [selectedDetailPackId, setSelectedDetailPackId] = useState<string>();
@@ -155,8 +157,10 @@ function App(): React.JSX.Element {
                   if (!effectivePackCreationReady) return;
                   setCreatingEmptyDraft(true);
                   setEmptyDraftError(undefined);
+                  setPendingEmptyDraftPackId(undefined);
                   try {
                     const created = await createEmptyDraftPack();
+                    setPendingEmptyDraftPackId(created.id);
                     const activeWorkflow = workflow.current;
                     if (!activeWorkflow) {
                       setEmptyDraftError('INBOX_SCAN_FAILED');
@@ -165,6 +169,7 @@ function App(): React.JSX.Element {
                     const refreshed =
                       await activeWorkflow.refreshForCreatedPack(created.id);
                     setSelectedDetailPackId(refreshed.id);
+                    setPendingEmptyDraftPackId(undefined);
                     setScreen('detail');
                   } catch (error) {
                     setEmptyDraftError(appErrorCode(error));
@@ -202,9 +207,27 @@ function App(): React.JSX.Element {
               locale={locale}
               state={state}
               onRetry={() => {
-                workflow.current?.retry().finally(() => {
-                  const creationReady =
-                    workflow.current?.isPackCreationReady() === true;
+                const activeWorkflow = workflow.current;
+                if (!activeWorkflow) return;
+                if (pendingEmptyDraftPackId) {
+                  activeWorkflow
+                    .refreshForCreatedPack(pendingEmptyDraftPackId)
+                    .then(pack => {
+                      setSelectedDetailPackId(pack.id);
+                      setPendingEmptyDraftPackId(undefined);
+                      setEmptyDraftError(undefined);
+                      setScreen('detail');
+                    })
+                    .catch(error => setEmptyDraftError(appErrorCode(error)))
+                    .finally(() => {
+                      setPackCreationReady(
+                        activeWorkflow.isPackCreationReady(),
+                      );
+                    });
+                  return;
+                }
+                activeWorkflow.retry().finally(() => {
+                  const creationReady = activeWorkflow.isPackCreationReady();
                   setPackCreationReady(creationReady);
                   if (creationReady) setEmptyDraftError(undefined);
                 });

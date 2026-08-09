@@ -982,6 +982,41 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('keeps Empty Draft recovery locked until Retry finds and selects the exact Pack', async () => {
+    const createdPack = { ...persistedPack, id: newerPackId };
+    mockCreateEmptyDraftPack.mockResolvedValue(createdPack);
+    mockNative.scanInbox.mockResolvedValue([]);
+    mockPersistenceInboxProcessor.listPersistedPacks
+      .mockResolvedValueOnce([persistedPack])
+      .mockResolvedValueOnce([persistedPack])
+      .mockResolvedValueOnce([persistedPack])
+      .mockResolvedValue([persistedPack, createdPack]);
+    const renderer = await renderApp();
+    await press(control(renderer, 'tab', 'detail'));
+    expect(renderedText(renderer)).toContain(`ID ${ingestionId}`);
+
+    await press(control(renderer, 'button', 'Create Empty Draft'));
+
+    expect(renderedText(renderer)).toContain('INBOX_SCAN_FAILED');
+    await press(control(renderer, 'button', 'Retry'));
+    expect(renderedText(renderer)).toContain('INBOX_SCAN_FAILED');
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: true });
+
+    await press(control(renderer, 'button', 'Retry'));
+
+    expect(renderedText(renderer)).not.toContain('INBOX_SCAN_FAILED');
+    expect(renderedText(renderer)).toContain(`ID ${newerPackId}`);
+    expect(renderedText(renderer)).not.toContain(`ID ${ingestionId}`);
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: false });
+    act(() => renderer.unmount());
+  });
+
   test('keeps New Pack mutually exclusive while an empty draft is pending', async () => {
     let resolveCreate: ((pack: InboxPackSummary) => void) | undefined;
     const pendingCreate = new Promise<InboxPackSummary>(resolve => {
