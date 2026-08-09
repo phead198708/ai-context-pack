@@ -1,6 +1,6 @@
 import type { OCRResultV1 } from '../src/domain/contracts';
 import { OCRTaskError, type OCRTaskProgressV1 } from '../src/domain/ocr';
-import { OCRTaskRunner } from '../src/domain/ocrTask';
+import { OCRTaskRunner, type OCRTaskHandle } from '../src/domain/ocrTask';
 
 const ids = [
   '123e4567-e89b-42d3-a456-426614174000',
@@ -109,6 +109,37 @@ describe('OCRTaskRunner', () => {
       status: 'cancelled',
       errorCode: 'OCR_CANCELLED',
     });
+  });
+
+  test('does not start native OCR when recognize progress synchronously cancels', async () => {
+    const recognizeText = jest.fn().mockResolvedValue(result);
+    const cancelTextRecognition = jest.fn().mockResolvedValue(undefined);
+    const runner = new OCRTaskRunner({
+      recognizeText,
+      cancelTextRecognition,
+    });
+    const progress: OCRTaskProgressV1[] = [];
+    let handle!: OCRTaskHandle;
+
+    handle = runner.start(request(ids[0]), value => {
+      progress.push(value);
+      if (value.status === 'running' && value.phase === 'recognize') {
+        handle.cancel().catch(() => undefined);
+      }
+    });
+
+    await expect(handle.result).rejects.toEqual(
+      new OCRTaskError('OCR_CANCELLED'),
+    );
+    expect(recognizeText).not.toHaveBeenCalled();
+    expect(cancelTextRecognition).not.toHaveBeenCalled();
+    expect(progress.filter(value => value.status === 'cancelled')).toEqual([
+      expect.objectContaining({
+        taskId: ids[0],
+        errorCode: 'OCR_CANCELLED',
+      }),
+    ]);
+    expect(progress.some(value => value.status === 'succeeded')).toBe(false);
   });
 
   test('forwards in-flight cancellation and normalizes unknown failures', async () => {
