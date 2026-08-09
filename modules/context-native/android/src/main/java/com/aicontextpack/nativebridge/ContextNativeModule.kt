@@ -66,6 +66,7 @@ internal data class OcrLifecycleDestruction(
   val taskId: String,
   val close: () -> Unit,
   val reject: (() -> Unit)?,
+  val deferProcessorRelease: Boolean,
 )
 
 internal class OcrModuleLifecycle {
@@ -105,7 +106,8 @@ internal class OcrModuleLifecycle {
     val current = active ?: return null
     if (current.destructionIssued) return null
     current.destructionIssued = true
-    val reject = if (current.settled) {
+    val deferProcessorRelease = !current.settled
+    val reject = if (!deferProcessorRelease) {
       null
     } else {
       current.settled = true
@@ -115,6 +117,7 @@ internal class OcrModuleLifecycle {
       taskId = current.registration.taskId,
       close = current.registration.close,
       reject = reject,
+      deferProcessorRelease = deferProcessorRelease,
     )
   }
 }
@@ -160,7 +163,10 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         active.reject?.invoke()
       }
       val activePDF = pdfLifecycle.destroy()
-      pdfProcessor.destroy(activePDF?.taskId)
+      pdfProcessor.destroy(
+        activeTaskId = activePDF?.taskId,
+        deferRegistryRelease = activePDF?.deferProcessorRelease == true,
+      )
       activePDF?.let { active ->
         active.close()
         active.reject?.invoke()

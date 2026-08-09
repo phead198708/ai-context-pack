@@ -200,6 +200,72 @@ final class PDFExtractionTests: XCTestCase {
     replacement.finish(taskId: secondTaskId)
   }
 
+  func testConcurrentBeginFailureCannotStealActivePageDeliveryClaim() throws {
+    let registry = OCRCancellationRegistry()
+    let processor = ApplePDFProcessor(registry: registry)
+    let lifetime = OCRModuleLifetime()
+    try processor.reserve(taskId: firstTaskId)
+    let active = try beginPDFOperationLifetime(
+      lifetime: lifetime,
+      taskId: firstTaskId
+    )
+
+    XCTAssertThrowsError(
+      try beginPDFOperationLifetime(
+        lifetime: lifetime,
+        taskId: firstTaskId
+      )
+    ) {
+      XCTAssertEqual($0 as? OCRProcessingError, .resourceBusy)
+    }
+    XCTAssertThrowsError(
+      try beginPDFOperationLifetime(
+        lifetime: lifetime,
+        taskId: secondTaskId
+      )
+    ) {
+      XCTAssertEqual($0 as? OCRProcessingError, .resourceBusy)
+    }
+
+    XCTAssertTrue(active.claimDelivery(finishProcessor: processor.finish))
+    let replacement = ApplePDFProcessor(registry: registry)
+    XCTAssertThrowsError(try replacement.reserve(taskId: secondTaskId)) {
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
+    }
+    active.finish()
+    processor.finish(taskId: firstTaskId)
+  }
+
+  func testConcurrentBeginFailureCannotHideActivePageFromDestroy() throws {
+    let registry = OCRCancellationRegistry()
+    let processor = ApplePDFProcessor(registry: registry)
+    let replacement = ApplePDFProcessor(registry: registry)
+    let lifetime = OCRModuleLifetime()
+    try processor.reserve(taskId: firstTaskId)
+    let active = try beginPDFOperationLifetime(
+      lifetime: lifetime,
+      taskId: firstTaskId
+    )
+    XCTAssertThrowsError(
+      try beginPDFOperationLifetime(
+        lifetime: lifetime,
+        taskId: firstTaskId
+      )
+    ) {
+      XCTAssertEqual($0 as? OCRProcessingError, .resourceBusy)
+    }
+
+    let destroyedTaskId = try XCTUnwrap(lifetime.destroy())
+    processor.destroy(activeTaskId: destroyedTaskId)
+    XCTAssertThrowsError(try replacement.reserve(taskId: secondTaskId)) {
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
+    }
+    XCTAssertFalse(active.claimDelivery(finishProcessor: processor.finish))
+    XCTAssertNoThrow(try replacement.reserve(taskId: secondTaskId))
+    replacement.finish(taskId: secondTaskId)
+    active.finish()
+  }
+
   func testEncryptedBlankSparseOverLimitAndOversizedFixturesAreDeterministic() throws {
     let processor = ApplePDFProcessor()
     XCTAssertThrowsError(try processor.inspect(fileURL: fixtureURL("encrypted-one-page.pdf"))) {

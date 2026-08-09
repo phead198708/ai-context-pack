@@ -187,6 +187,35 @@ class AndroidOCRProcessorTest {
   }
 
   @Test
+  fun deliveredPdfCompletionDoesNotDeferProcessorReleaseDuringDestroy() {
+    val lifecycle = OcrModuleLifecycle()
+    val registry = OcrTaskRegistry()
+    val first = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    first.reserve(firstTaskId)
+    assertTrue(
+      lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = firstTaskId,
+          close = {},
+          rejectOnDestroy = {},
+        ),
+      ),
+    )
+    assertTrue(lifecycle.deliver(firstTaskId) {})
+
+    val destruction = lifecycle.destroy()!!
+    assertEquals(false, destruction.deferProcessorRelease)
+    first.destroy(
+      activeTaskId = destruction.taskId,
+      deferRegistryRelease = destruction.deferProcessorRelease,
+    )
+
+    replacement.reserve(secondTaskId)
+    replacement.finish(secondTaskId)
+  }
+
+  @Test
   fun resultTransformationExecutorIsSingleThreadedAndBounded() {
     assertEquals(1, AndroidOCRProcessScope.resultExecutor.corePoolSize)
     assertEquals(1, AndroidOCRProcessScope.resultExecutor.maximumPoolSize)

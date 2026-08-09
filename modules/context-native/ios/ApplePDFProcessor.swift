@@ -570,6 +570,36 @@ func claimPDFOperationDelivery(
   return claimed
 }
 
+final class PDFOperationLifetimeLease {
+  private let lifetime: OCRModuleLifetime
+  private let taskId: String
+
+  fileprivate init(lifetime: OCRModuleLifetime, taskId: String) {
+    self.lifetime = lifetime
+    self.taskId = taskId
+  }
+
+  func claimDelivery(finishProcessor: (String) -> Void) -> Bool {
+    claimPDFOperationDelivery(
+      lifetime: lifetime,
+      taskId: taskId,
+      finishProcessor: finishProcessor
+    )
+  }
+
+  func finish() {
+    lifetime.finish(taskId: taskId)
+  }
+}
+
+func beginPDFOperationLifetime(
+  lifetime: OCRModuleLifetime,
+  taskId: String
+) throws -> PDFOperationLifetimeLease {
+  try lifetime.begin(taskId: taskId)
+  return PDFOperationLifetimeLease(lifetime: lifetime, taskId: taskId)
+}
+
 private func normalizePDFText(_ input: String) -> String {
   let normalizedLines = input.replacingOccurrences(of: "\r\n", with: "\n")
     .replacingOccurrences(of: "\r", with: "\n")

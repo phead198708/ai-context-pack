@@ -186,7 +186,10 @@ internal class AndroidPDFProcessor(
     registry.finish(taskId)
   }
 
-  fun destroy(activeTaskId: String? = null) {
+  fun destroy(
+    activeTaskId: String? = null,
+    deferRegistryRelease: Boolean = activeTaskId != null,
+  ) {
     val current = synchronized(sourceLock) {
       sourceSession.also { sourceSession = null }
     }
@@ -196,7 +199,7 @@ internal class AndroidPDFProcessor(
       registry.cancel(taskId, "PDF_CANCELLED")
       // An active native operation owns the shared slot until it has actually
       // unwound. Its rejected-delivery path calls finish after the worker exits.
-      if (activeTaskId == null) registry.finish(taskId)
+      if (!deferRegistryRelease) registry.finish(taskId)
     }
   }
 

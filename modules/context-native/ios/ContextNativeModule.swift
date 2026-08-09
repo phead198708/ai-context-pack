@@ -420,9 +420,19 @@ public final class ContextNativeModule: Module {
       let url = try controlledArtifactSourceURL(fileUri)
       let processor = self.pdfProcessor
       let lifetime = self.pdfLifetime
+      let operation: PDFOperationLifetimeLease
       do {
-        try lifetime.begin(taskId: taskId)
-        defer { lifetime.finish(taskId: taskId) }
+        operation = try beginPDFOperationLifetime(
+          lifetime: lifetime,
+          taskId: taskId
+        )
+      } catch let error as OCRProcessingError {
+        throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
+      } catch {
+        throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
+      }
+      defer { operation.finish() }
+      do {
         let result = try await Task.detached(priority: .userInitiated) {
           try processor.extractPage(
             taskId: taskId,
@@ -433,45 +443,37 @@ public final class ContextNativeModule: Module {
             reserved: true
           )
         }.value
-        guard claimPDFOperationDelivery(
-          lifetime: lifetime,
-          taskId: taskId,
+        guard operation.claimDelivery(
           finishProcessor: processor.finish
         ) else {
           throw NativeError("PDF_CANCELLED")
         }
         return result
+      } catch let error as NativeError {
+        throw error
       } catch let error as PDFProcessingError {
-        guard claimPDFOperationDelivery(
-          lifetime: lifetime,
-          taskId: taskId,
+        guard operation.claimDelivery(
           finishProcessor: processor.finish
         ) else {
           throw NativeError("PDF_CANCELLED")
         }
         throw NativeError(error.stableCode)
       } catch let error as OCRProcessingError {
-        guard claimPDFOperationDelivery(
-          lifetime: lifetime,
-          taskId: taskId,
+        guard operation.claimDelivery(
           finishProcessor: processor.finish
         ) else {
           throw NativeError("PDF_CANCELLED")
         }
         throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
       } catch is CancellationError {
-        guard claimPDFOperationDelivery(
-          lifetime: lifetime,
-          taskId: taskId,
+        guard operation.claimDelivery(
           finishProcessor: processor.finish
         ) else {
           throw NativeError("PDF_CANCELLED")
         }
         throw NativeError("PDF_CANCELLED")
       } catch {
-        guard claimPDFOperationDelivery(
-          lifetime: lifetime,
-          taskId: taskId,
+        guard operation.claimDelivery(
           finishProcessor: processor.finish
         ) else {
           throw NativeError("PDF_CANCELLED")
