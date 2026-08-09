@@ -20,7 +20,7 @@
     },
     {
       "path": "contracts/ocr-result-v1.json",
-      "sha256": "ef1d166ce3a475c52a5c7f29088f367188f1fd2d290ca714355d2885c41b63b8",
+      "sha256": "a5e05e9a57edc7c60e02b91de1a3d7470b6d6a3b0c546ab50fc420f5e1e78770",
       "kind": "contract",
       "purpose": "canonical OCRResultV1 parity payload",
       "source": "project-authored synthetic OCR payload",
@@ -132,7 +132,7 @@
     },
     {
       "path": "media/mixed-two-page.pdf",
-      "sha256": "d07749471113839edb85c9f5f82a2d51fe110d8b2592cdefdfebf57e08d7452a",
+      "sha256": "15d74c794ac17bf1738a883056a8bd9866b97624ba02bcd1eb976d4bfa46c3dc",
       "kind": "pdf",
       "purpose": "mixed embedded-text and scanned-page extraction",
       "source": "scripts/generate_fixtures.swift",
@@ -140,23 +140,39 @@
     },
     {
       "path": "media/ocr-chinese.png",
-      "sha256": "38fad1e5ddd0dd48880fd95452ca1985e51195611db35904a2db9a78415f6297",
+      "sha256": "c0e3c881c0541892f1f581d0dc702b1d672b86e1d303f7b7d5350af5ca624f53",
       "kind": "ocr-image",
       "purpose": "Simplified Chinese OCR adapter check",
       "source": "scripts/generate_fixtures.swift",
       "license": "MIT"
     },
     {
-      "path": "media/ocr-english.png",
-      "sha256": "f7e5e4eba5c47f00b8e03dd4d5ec01a573ac0e2c25704fc675bb16dd801f7e98",
+      "path": "media/ocr-corrupt.png",
+      "sha256": "843ac23b1736b4487ec81cf7c07ddd9bb46ae5b7818c2c3843d99d62fa75f3c9",
       "kind": "ocr-image",
-      "purpose": "English OCR adapter check",
+      "purpose": "corrupt image OCR rejection",
+      "source": "scripts/generate_fixtures.swift literal bytes",
+      "license": "MIT"
+    },
+    {
+      "path": "media/ocr-english.png",
+      "sha256": "a6188e97bd650be60ecabd3bf156c7900e3432a19f9b26a83398ddc4dd3abfa7",
+      "kind": "ocr-image",
+      "purpose": "English programming-error OCR adapter check",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/ocr-rotated.jpg",
+      "sha256": "d45a98974dee4dc79163a593cb94d4e8674c38b03dc38f724dc0cdb8120addba",
+      "kind": "ocr-image",
+      "purpose": "EXIF-oriented OCR and preview-coordinate check",
       "source": "scripts/generate_fixtures.swift",
       "license": "MIT"
     },
     {
       "path": "media/scanned-one-page.pdf",
-      "sha256": "cedf50ab8c308fbade6dd8b807aa95a73b59fa82818ea1bbc5d2de2084499a11",
+      "sha256": "1b1882c4139f2f1e3fa7123634c25a825843e9902a34dcdeb3c3d2bcddf8d288",
       "kind": "pdf",
       "purpose": "scanned PDF fallback extraction",
       "source": "scripts/generate_fixtures.swift",
@@ -164,7 +180,7 @@
     },
     {
       "path": "media/text-one-page.pdf",
-      "sha256": "35c857cd8a27afc079d2cb16fa2aaae5c8ed18c734be680db6ce0316e1da3002",
+      "sha256": "7598bcb9320031e6bed5808ebffb25676ba414a75eea0a1cf3694dc8c2ebda30",
       "kind": "pdf",
       "purpose": "embedded-text PDF extraction",
       "source": "scripts/generate_fixtures.swift",

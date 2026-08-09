@@ -61,13 +61,39 @@ export interface OCRBlockV1 {
   readonly language?: string;
 }
 
+export type OCRScriptV1 = 'latin' | 'chinese';
+export type OCRRecognitionLevelV1 = 'accurate' | 'fast';
+export type OCRWarningV1 = 'OCR_LANGUAGE_FALLBACK' | 'OCR_LOW_CONFIDENCE';
+
+export type OCREngineV1 = 'apple-vision' | 'ml-kit-latin' | 'ml-kit-chinese';
+
 export interface OCRResultV1 {
   readonly schemaVersion: 1;
   readonly text: string;
   readonly blocks: readonly OCRBlockV1[];
   readonly durationMs: number;
-  readonly engine: 'apple-vision' | 'ml-kit-latin' | 'ml-kit-chinese';
+  readonly engine: OCREngineV1;
   readonly revision: string;
+  /** Added compatibly in Issue #10; production native adapters always populate it. */
+  readonly recognitionLevel?: OCRRecognitionLevelV1;
+  /** Added compatibly in Issue #10; production native adapters always populate it. */
+  readonly warnings?: readonly OCRWarningV1[];
+}
+
+export interface OCREngineCapabilityV1 {
+  readonly engine: OCREngineV1;
+  readonly revision: string;
+  readonly scripts: readonly OCRScriptV1[];
+  readonly recognitionLevels: readonly OCRRecognitionLevelV1[];
+  readonly ready: boolean;
+  readonly offline: true;
+}
+
+export interface OCRCapabilitiesV1 {
+  readonly schemaVersion: 1;
+  readonly engines: readonly OCREngineCapabilityV1[];
+  readonly maximumPixelCount: number;
+  readonly maximumDimension: number;
 }
 
 interface PDFPageExtractionBaseV1 {

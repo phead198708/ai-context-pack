@@ -1,5 +1,8 @@
 package com.aicontextpack.nativebridge
 
+import android.content.ComponentCallbacks2
+import android.content.Context
+import android.content.res.Configuration
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
@@ -8,11 +11,6 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.JsonReader
 import android.util.JsonToken
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
@@ -24,17 +22,28 @@ import java.io.StringReader
 import java.security.MessageDigest
 import java.util.UUID
 
-class ContextNativeModule : Module() {
+class ContextNativeModule : Module(), ComponentCallbacks2 {
+  private val ocrProcessor = AndroidOCRProcessor()
+  private var callbackContext: Context? = null
+
   override fun definition() = ModuleDefinition {
     Name("ContextNative")
 
     OnCreate {
       appContext.reactContext?.let { context ->
+        context.registerComponentCallbacks(this@ContextNativeModule)
+        callbackContext = context
         Thread(
           { InboxArtifactHandoff.runStartupMaintenance(context.filesDir) },
           "ai-context-pack-tombstone-sweep",
         ).start()
       }
+    }
+
+    OnDestroy {
+      callbackContext?.unregisterComponentCallbacks(this@ContextNativeModule)
+      callbackContext = null
+      ocrProcessor.setMemoryPressure(false)
     }
 
     AsyncFunction("scanInbox") {
@@ -250,16 +259,50 @@ class ContextNativeModule : Module() {
       catch (_: Exception) { throw NativeException("STORAGE_WRITE_FAILED") }
     }
 
-    AsyncFunction("recognizeText") { fileUri: String, script: String, promise: Promise ->
+    AsyncFunction("getOCRCapabilities") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      ocrProcessor.capabilities(context)
+    }
+
+    AsyncFunction("recognizeText") {
+      taskId: String,
+      fileUri: String,
+      script: String,
+      recognitionLevel: String,
+      promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
-      val uri = controlledFileUri(fileUri)
-      val started = System.nanoTime()
-      val image = try { InputImage.fromFilePath(context, uri) } catch (_: Exception) { return@AsyncFunction promise.reject(NativeException("OCR_IMAGE_DECODE_FAILED")) }
-      val recognizer = if (script == "chinese") TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()) else TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-      recognizer.process(image)
-        .addOnSuccessListener { result -> promise.resolve(ocrResult(result, image.width, image.height, script, started)) }
-        .addOnFailureListener { promise.reject(NativeException("OCR_RECOGNITION_FAILED")) }
-        .addOnCompleteListener { recognizer.close() }
+      val task = try {
+        ocrProcessor.prepare(context, taskId, fileUri, script, recognitionLevel)
+      } catch (error: NativeException) {
+        return@AsyncFunction promise.reject(error)
+      }
+      task.recognizer.process(task.image)
+        .addOnSuccessListener { result ->
+          try {
+            promise.resolve(ocrProcessor.result(task, result))
+          } catch (error: NativeException) {
+            promise.reject(error)
+          } catch (_: OutOfMemoryError) {
+            promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
+          } catch (_: Exception) {
+            promise.reject(NativeException("OCR_RESULT_INVALID"))
+          }
+        }
+        .addOnFailureListener {
+          promise.reject(
+            NativeException(
+              ocrProcessor.failureCode(taskId) ?: "OCR_RECOGNITION_FAILED",
+            ),
+          )
+        }
+        .addOnCompleteListener {
+          task.recognizer.close()
+          ocrProcessor.finish(taskId)
+        }
+    }
+
+    AsyncFunction("cancelTextRecognition") { taskId: String ->
+      ocrProcessor.cancel(taskId)
     }
 
     AsyncFunction("probePdf") { fileUri: String ->
@@ -283,16 +326,23 @@ class ContextNativeModule : Module() {
     return value.toLong()
   }
 
-  private fun ocrResult(result: Text, sourceWidth: Int, sourceHeight: Int, script: String, started: Long): Map<String, Any> {
-    val width = sourceWidth.coerceAtLeast(1)
-    val height = sourceHeight.coerceAtLeast(1)
-    val blocks = result.textBlocks.mapNotNull { block -> block.boundingBox?.let { box -> mapOf("text" to block.text, "bounds" to OcrBoundsNormalizer.normalize(box.left, box.top, box.width(), box.height(), width, height)) } }
-    return mapOf("schemaVersion" to 1, "text" to result.text, "blocks" to blocks,
-      "durationMs" to (System.nanoTime() - started) / 1_000_000.0,
-      "engine" to if (script == "chinese") "ml-kit-chinese" else "ml-kit-latin", "revision" to "16.0.1")
+  override fun onTrimMemory(level: Int) {
+    if (isMemoryPressureTrimLevel(level)) {
+      ocrProcessor.setMemoryPressure(true)
+    }
   }
 
+  override fun onLowMemory() {
+    ocrProcessor.setMemoryPressure(true)
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) = Unit
 }
+
+internal fun isMemoryPressureTrimLevel(level: Int): Boolean =
+  level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+    level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+    level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE
 
 internal object InboxManifestScanner {
   private const val maximumReceiptBytes = 262_144L

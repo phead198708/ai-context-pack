@@ -7,6 +7,7 @@ import type {
   ImportItemV1,
   ImportManifestV1,
   NormalizedBoundsV1,
+  OCRCapabilitiesV1,
   OCRBlockV1,
   OCRResultV1,
   PDFPageExtractionV1,
@@ -28,6 +29,9 @@ const safeRelativePathPattern =
 export const IMPORT_MANIFEST_MAX_ITEMS = 128;
 export const IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH = 127;
 export const IMPORT_MANIFEST_MAX_RETRY_BYTES = 52_428_800;
+export const OCR_RESULT_MAX_BLOCKS = 10_000;
+export const OCR_RESULT_MAX_TEXT_LENGTH = 1_000_000;
+export const OCR_RESULT_MAX_BLOCK_TEXT_LENGTH = 100_000;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -124,7 +128,8 @@ function isOCRBlockV1(value: unknown): value is OCRBlockV1 {
   return (
     record(value) &&
     hasOnlyKeys(value, ['text', 'bounds'], ['confidence', 'language']) &&
-    typeof value.text === 'string' &&
+    isNonEmptyString(value.text) &&
+    value.text.length <= OCR_RESULT_MAX_BLOCK_TEXT_LENGTH &&
     isNormalizedBoundsV1(value.bounds) &&
     (value.confidence === undefined ||
       (typeof value.confidence === 'number' &&
@@ -235,27 +240,98 @@ export function decodeImportManifestV1(
 }
 
 export function isOCRResultV1(value: unknown): value is OCRResultV1 {
-  return (
-    record(value) &&
-    hasOnlyKeys(value, [
+  if (
+    !record(value) ||
+    !hasOnlyKeys(
+      value,
+      ['schemaVersion', 'text', 'blocks', 'durationMs', 'engine', 'revision'],
+      ['recognitionLevel', 'warnings'],
+    ) ||
+    value.schemaVersion !== 1 ||
+    typeof value.text !== 'string' ||
+    value.text.length > OCR_RESULT_MAX_TEXT_LENGTH ||
+    !Array.isArray(value.blocks) ||
+    value.blocks.length > OCR_RESULT_MAX_BLOCKS ||
+    !value.blocks.every(isOCRBlockV1) ||
+    typeof value.durationMs !== 'number' ||
+    !Number.isFinite(value.durationMs) ||
+    value.durationMs < 0 ||
+    (value.engine !== 'apple-vision' &&
+      value.engine !== 'ml-kit-latin' &&
+      value.engine !== 'ml-kit-chinese') ||
+    !isNonEmptyString(value.revision) ||
+    (value.recognitionLevel !== undefined &&
+      value.recognitionLevel !== 'accurate' &&
+      value.recognitionLevel !== 'fast') ||
+    (value.warnings !== undefined &&
+      (!Array.isArray(value.warnings) ||
+        value.warnings.some(
+          warning =>
+            warning !== 'OCR_LANGUAGE_FALLBACK' &&
+            warning !== 'OCR_LOW_CONFIDENCE',
+        ) ||
+        new Set(value.warnings).size !== value.warnings.length))
+  )
+    return false;
+  return true;
+}
+
+export function isOCRCapabilitiesV1(
+  value: unknown,
+): value is OCRCapabilitiesV1 {
+  if (
+    !record(value) ||
+    !hasOnlyKeys(value, [
       'schemaVersion',
-      'text',
-      'blocks',
-      'durationMs',
-      'engine',
-      'revision',
-    ]) &&
-    value.schemaVersion === 1 &&
-    typeof value.text === 'string' &&
-    Array.isArray(value.blocks) &&
-    value.blocks.every(isOCRBlockV1) &&
-    typeof value.durationMs === 'number' &&
-    Number.isFinite(value.durationMs) &&
-    value.durationMs >= 0 &&
-    (value.engine === 'apple-vision' ||
-      value.engine === 'ml-kit-latin' ||
-      value.engine === 'ml-kit-chinese') &&
-    isNonEmptyString(value.revision)
+      'engines',
+      'maximumPixelCount',
+      'maximumDimension',
+    ]) ||
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.engines) ||
+    value.engines.length === 0 ||
+    value.engines.length > 3 ||
+    !isNonNegativeInteger(value.maximumPixelCount) ||
+    value.maximumPixelCount === 0 ||
+    !isNonNegativeInteger(value.maximumDimension) ||
+    value.maximumDimension === 0
+  )
+    return false;
+  const engines = value.engines;
+  if (
+    new Set(engines.map(engine => (record(engine) ? engine.engine : undefined)))
+      .size !== engines.length
+  )
+    return false;
+  return engines.every(
+    engine =>
+      record(engine) &&
+      hasOnlyKeys(engine, [
+        'engine',
+        'revision',
+        'scripts',
+        'recognitionLevels',
+        'ready',
+        'offline',
+      ]) &&
+      (engine.engine === 'apple-vision' ||
+        engine.engine === 'ml-kit-latin' ||
+        engine.engine === 'ml-kit-chinese') &&
+      isNonEmptyString(engine.revision) &&
+      Array.isArray(engine.scripts) &&
+      engine.scripts.every(
+        script => script === 'latin' || script === 'chinese',
+      ) &&
+      new Set(engine.scripts).size === engine.scripts.length &&
+      Array.isArray(engine.recognitionLevels) &&
+      engine.recognitionLevels.length > 0 &&
+      engine.recognitionLevels.every(
+        level => level === 'accurate' || level === 'fast',
+      ) &&
+      new Set(engine.recognitionLevels).size ===
+        engine.recognitionLevels.length &&
+      typeof engine.ready === 'boolean' &&
+      engine.offline === true,
   );
 }
 

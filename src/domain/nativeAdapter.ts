@@ -1,10 +1,12 @@
 import type {
   ImportManifestV1,
+  OCRCapabilitiesV1,
   OCRResultV1,
   PDFProbeResultV1,
 } from './contracts';
 import type { PendingShareEvent, RecoveryEvent } from './shareImportResult';
 import type { MainAppImportDraft, MainAppImportInput } from './mainAppImport';
+import type { OCRRequestV1 } from './ocr';
 export interface NativeHandoffArtifact {
   readonly id: string;
   readonly itemId: string;
@@ -95,9 +97,8 @@ export interface NativeAdapter {
     olderThanEpochMs: number,
   ): Promise<NativeQuarantinePurgeResult>;
   getArtifactStorageUsage(): Promise<NativeArtifactStorageUsage>;
-  recognizeText(
-    fileUri: string,
-    script: 'latin' | 'chinese',
-  ): Promise<OCRResultV1>;
+  getOCRCapabilities(): Promise<OCRCapabilitiesV1>;
+  recognizeText(request: OCRRequestV1): Promise<OCRResultV1>;
+  cancelTextRecognition(taskId: string): Promise<void>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }

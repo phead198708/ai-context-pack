@@ -1,7 +1,10 @@
 import { NativeModule, requireNativeModule } from 'expo';
 import type {
   ImportManifestV1,
+  OCRCapabilitiesV1,
+  OCRRecognitionLevelV1,
   OCRResultV1,
+  OCRScriptV1,
   PDFProbeResultV1,
 } from '../../../src/domain/contracts';
 import type { MainAppImportInput } from '../../../src/domain/mainAppImport';
@@ -61,10 +64,14 @@ declare class ContextNativeModule extends NativeModule {
     olderThanEpochMs: number,
   ): Promise<NativeQuarantinePurgeResult>;
   getArtifactStorageUsage(): Promise<NativeArtifactStorageUsage>;
+  getOCRCapabilities(): Promise<OCRCapabilitiesV1>;
   recognizeText(
+    taskId: string,
     fileUri: string,
-    script: 'latin' | 'chinese',
+    script: OCRScriptV1,
+    recognitionLevel: OCRRecognitionLevelV1,
   ): Promise<OCRResultV1>;
+  cancelTextRecognition(taskId: string): Promise<boolean>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }
 export default requireNativeModule<ContextNativeModule>('ContextNative');

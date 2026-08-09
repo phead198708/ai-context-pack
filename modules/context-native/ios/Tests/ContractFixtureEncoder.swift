@@ -39,7 +39,9 @@ enum ContractFixtureEncoder {
       ]],
       "durationMs": 4,
       "engine": "apple-vision",
-      "revision": "1",
+      "revision": "3",
+      "recognitionLevel": "accurate",
+      "warnings": [],
     ],
     "pdf-page-extraction-v1.json": [
       "schemaVersion": 1,
