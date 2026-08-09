@@ -79,6 +79,7 @@ declare class ContextNativeModule extends NativeModule {
   extractPdfPage(
     taskId: string,
     fileUri: string,
+    sourceSha256: string,
     pageIndex: number,
     script: OCRScriptV1,
   ): Promise<PDFPageExtractionV1>;

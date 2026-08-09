@@ -17,6 +17,13 @@ class AndroidPDFProcessorTest {
       normalizePDFText("中文\r\n\tcode\u0000\uD800"),
     )
     assertEquals("👩🏽‍💻", normalizePDFText("👩🏽‍💻"))
+    assertEquals(16, pdfEmbeddedTextNonWhitespaceUTF16Count("😀😀😀😀😀😀😀😀"))
+    assertEquals(
+      14,
+      pdfEmbeddedTextNonWhitespaceUTF16Count(" \n\u0085\u00A0\u3000😀😀😀😀😀😀😀"),
+    )
+    assertEquals("A\n4", reconcilePDFSparseEmbeddedText("A", "4"))
+    assertEquals("OCR A result", reconcilePDFSparseEmbeddedText("A", "OCR A result"))
   }
 
   @Test
@@ -65,18 +72,40 @@ class AndroidPDFProcessorTest {
     val encryptedXrefStream = xrefStreamPDF(
       xrefDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length 0 /Encrypt 1 0 R >>",
     )
+    val nestedClassic = classicXrefPDF(
+      trailerDictionary = "<< /Size 2 /Info << /Encrypt false >> >>",
+    )
+    val nestedXrefStream = xrefStreamPDF(
+      xrefDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length 0 " +
+        "/DecodeParms << /Columns 1 /Encrypt false >> >>",
+    )
+    val escapedEncrypted = classicXrefPDF(
+      trailerDictionary = "<< /Size 2 /En#63rypt 1 0 R >>",
+    )
+    val escapedEncryptedXrefStream = xrefStreamPDF(
+      xrefDictionary = "<< /Ty#70e /XR#65f /Size 2 /W [1 1 1] /Length 0 " +
+        "/En#63rypt 1 0 R >>",
+    )
     try {
       assertTrue(hasPDFEncryptionMarker(encrypted))
       assertEquals(false, hasPDFEncryptionMarker(metadataOnly))
       assertEquals(false, hasPDFEncryptionMarker(harmlessContent))
       assertEquals(false, hasPDFEncryptionMarker(harmlessXrefStream))
       assertTrue(hasPDFEncryptionMarker(encryptedXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(nestedClassic))
+      assertEquals(false, hasPDFEncryptionMarker(nestedXrefStream))
+      assertTrue(hasPDFEncryptionMarker(escapedEncrypted))
+      assertTrue(hasPDFEncryptionMarker(escapedEncryptedXrefStream))
     } finally {
       encrypted.delete()
       metadataOnly.delete()
       harmlessContent.delete()
       harmlessXrefStream.delete()
       encryptedXrefStream.delete()
+      nestedClassic.delete()
+      nestedXrefStream.delete()
+      escapedEncrypted.delete()
+      escapedEncryptedXrefStream.delete()
     }
   }
 

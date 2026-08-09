@@ -479,6 +479,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
     AsyncFunction("extractPdfPage") {
       taskId: String,
       fileUri: String,
+      sourceSha256: String,
       pageIndex: Int,
       script: String,
       promise: Promise ->
@@ -507,6 +508,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
               context = context,
               taskId = taskId,
               fileUri = fileUri,
+              expectedSourceSha256 = sourceSha256,
               pageIndex = pageIndex,
               script = script,
               reserved = true,

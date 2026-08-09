@@ -56,6 +56,32 @@ struct PDFResourcePolicy {
   static let maximumPageTextLength = 1_000_000
 }
 
+internal func pdfEmbeddedTextNonWhitespaceUTF16Count(_ input: String) -> Int {
+  input.unicodeScalars.reduce(into: 0) { count, scalar in
+    guard !isPDFDensityWhitespace(scalar.value) else { return }
+    count += scalar.value > 0xFFFF ? 2 : 1
+  }
+}
+
+private func isPDFDensityWhitespace(_ value: UInt32) -> Bool {
+  value == 0x0020 || value == 0x0085 || value == 0x00A0 || value == 0x1680 ||
+    (value >= 0x0009 && value <= 0x000D) ||
+    (value >= 0x2000 && value <= 0x200A) ||
+    value == 0x2028 || value == 0x2029 || value == 0x202F || value == 0x205F ||
+    value == 0x3000
+}
+
+internal func reconcilePDFSparseEmbeddedText(
+  embedded: String,
+  recognized: String
+) -> String {
+  guard !embedded.isEmpty else { return recognized }
+  guard !recognized.isEmpty else { return embedded }
+  if recognized.contains(embedded) { return recognized }
+  if embedded.contains(recognized) { return embedded }
+  return embedded + "\n" + recognized
+}
+
 final class ApplePDFProcessor: @unchecked Sendable {
   private let registry: OCRCancellationRegistry
 
@@ -91,6 +117,7 @@ final class ApplePDFProcessor: @unchecked Sendable {
   func extractPage(
     taskId: String,
     fileURL: URL,
+    expectedSourceSHA256: String,
     pageIndex: Int,
     script: String,
     reserved: Bool = false
@@ -111,6 +138,7 @@ final class ApplePDFProcessor: @unchecked Sendable {
     }
 
     _ = try validatedFileSize(fileURL)
+    try validateExpectedSource(fileURL, expectedSHA256: expectedSourceSHA256)
     let document = try openDocument(fileURL)
     try validateDocument(document)
     guard pageIndex < document.pageCount else { throw PDFProcessingError.pageOutOfRange }
@@ -122,27 +150,31 @@ final class ApplePDFProcessor: @unchecked Sendable {
     let started = ContinuousClock.now
     let embedded = normalizePDFText(page.string ?? "")
     guard embedded.utf16.count <= PDFResourcePolicy.maximumPageTextLength else {
-      return failedResult(
-        pageIndex: pageIndex,
-        warnings: ["PDF_PAGE_EXTRACTION_FAILED"],
-        started: started
+      return try sourceBoundResult(
+        failedResult(
+          pageIndex: pageIndex,
+          warnings: ["PDF_PAGE_EXTRACTION_FAILED"],
+          started: started
+        ),
+        fileURL: fileURL,
+        expectedSHA256: expectedSourceSHA256
       )
     }
-    let nonWhitespaceCount = embedded.unicodeScalars.reduce(into: 0) { count, scalar in
-      if !CharacterSet.whitespacesAndNewlines.contains(scalar) {
-        count += 1
-      }
-    }
+    let nonWhitespaceCount = pdfEmbeddedTextNonWhitespaceUTF16Count(embedded)
     if nonWhitespaceCount >= PDFResourcePolicy.minimumEmbeddedTextCharacters {
-      return completeResult(
-        pageIndex: pageIndex,
-        method: "embedded-text",
-        engine: "pdfkit",
-        revision: "PDFKit",
-        text: embedded,
-        blocks: [],
-        warnings: [],
-        started: started
+      return try sourceBoundResult(
+        completeResult(
+          pageIndex: pageIndex,
+          method: "embedded-text",
+          engine: "pdfkit",
+          revision: "PDFKit",
+          text: embedded,
+          blocks: [],
+          warnings: [],
+          started: started
+        ),
+        fileURL: fileURL,
+        expectedSHA256: expectedSourceSHA256
       )
     }
 
@@ -155,16 +187,24 @@ final class ApplePDFProcessor: @unchecked Sendable {
         page: page,
         script: script
       )
-      if recognized.text.isEmpty { warnings.append("PDF_PAGE_EMPTY") }
-      return completeResult(
-        pageIndex: pageIndex,
-        method: "rendered-ocr",
-        engine: "apple-vision",
-        revision: String(VNRecognizeTextRequestRevision3),
-        text: recognized.text,
-        blocks: recognized.blocks,
-        warnings: warnings,
-        started: started
+      let reconciledText = reconcilePDFSparseEmbeddedText(
+        embedded: embedded,
+        recognized: recognized.text
+      )
+      if reconciledText.isEmpty { warnings.append("PDF_PAGE_EMPTY") }
+      return try sourceBoundResult(
+        completeResult(
+          pageIndex: pageIndex,
+          method: "rendered-ocr",
+          engine: "apple-vision",
+          revision: String(VNRecognizeTextRequestRevision3),
+          text: reconciledText,
+          blocks: recognized.blocks,
+          warnings: warnings,
+          started: started
+        ),
+        fileURL: fileURL,
+        expectedSHA256: expectedSourceSHA256
       )
     } catch let error as PDFProcessingError {
       switch error {
@@ -172,15 +212,23 @@ final class ApplePDFProcessor: @unchecked Sendable {
         throw error
       default:
         warnings.append("PDF_PAGE_EXTRACTION_FAILED")
-        return failedResult(
-          pageIndex: pageIndex,
-          warnings: warnings,
-          started: started
+        return try sourceBoundResult(
+          failedResult(
+            pageIndex: pageIndex,
+            warnings: warnings,
+            started: started
+          ),
+          fileURL: fileURL,
+          expectedSHA256: expectedSourceSHA256
         )
       }
     } catch {
       warnings.append("PDF_PAGE_EXTRACTION_FAILED")
-      return failedResult(pageIndex: pageIndex, warnings: warnings, started: started)
+      return try sourceBoundResult(
+        failedResult(pageIndex: pageIndex, warnings: warnings, started: started),
+        fileURL: fileURL,
+        expectedSHA256: expectedSourceSHA256
+      )
     }
   }
 
@@ -228,6 +276,26 @@ final class ApplePDFProcessor: @unchecked Sendable {
       hasher.update(data: Data(buffer[0..<count]))
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+  }
+
+  private func validateExpectedSource(_ fileURL: URL, expectedSHA256: String) throws {
+    guard expectedSHA256.count == 64,
+          expectedSHA256.unicodeScalars.allSatisfy({
+            ($0.value >= 48 && $0.value <= 57) || ($0.value >= 97 && $0.value <= 102)
+          }),
+          (try? validatedFileSize(fileURL)) != nil,
+          (try? sha256(fileURL)) == expectedSHA256 else {
+      throw PDFProcessingError.resultInvalid
+    }
+  }
+
+  private func sourceBoundResult(
+    _ result: [String: Any],
+    fileURL: URL,
+    expectedSHA256: String
+  ) throws -> [String: Any] {
+    try validateExpectedSource(fileURL, expectedSHA256: expectedSHA256)
+    return result
   }
 
   private func openDocument(_ fileURL: URL) throws -> PDFDocument {

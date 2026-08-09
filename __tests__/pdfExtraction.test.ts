@@ -121,6 +121,9 @@ describe('PDFTaskRunner', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(extractPdfPage).toHaveBeenCalledTimes(1);
+    expect(extractPdfPage).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceSha256 }),
+    );
     checkpointGate.resolve();
 
     await expect(handle.result).resolves.toMatchObject({
@@ -221,6 +224,25 @@ describe('PDFTaskRunner', () => {
       new PDFTaskError('PDF_RESULT_INVALID'),
     );
     expect(extractPdfPage).not.toHaveBeenCalled();
+  });
+
+  test('binds every native page read to the inspected source hash', async () => {
+    const checkpoint = jest.fn().mockResolvedValue(undefined);
+    const extractPdfPage = jest.fn(requestValue => {
+      expect(requestValue.sourceSha256).toBe(sourceSha256);
+      return Promise.reject({ code: 'PDF_RESULT_INVALID' });
+    });
+    const runner = new PDFTaskRunner({
+      inspectPdf: jest.fn().mockResolvedValue({ ...document, pageCount: 1 }),
+      extractPdfPage,
+      cancelPdfExtraction: jest.fn(),
+    });
+
+    await expect(
+      runner.start(request(), checkpoint, jest.fn()).result,
+    ).rejects.toEqual(new PDFTaskError('PDF_RESULT_INVALID'));
+    expect(extractPdfPage).toHaveBeenCalledTimes(1);
+    expect(checkpoint).not.toHaveBeenCalled();
   });
 
   test('keeps failed page outcomes visible and continues later pages', async () => {

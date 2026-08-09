@@ -96,6 +96,7 @@ export interface NativeMethods {
   extractPdfPage?(
     taskId: string,
     uri: string,
+    sourceSha256: string,
     pageIndex: number,
     script: 'latin' | 'chinese',
   ): Promise<unknown>;
@@ -413,6 +414,7 @@ export const createNativeAdapter = (
             value = await nativeModule.extractPdfPage(
               request.taskId,
               request.fileUri,
+              request.sourceSha256,
               request.pageIndex,
               request.script,
             );
@@ -655,6 +657,8 @@ function nativePDFBoundaryError(error: unknown): NativeBoundaryError {
 function requirePDFPageRequest(request: PDFPageExtractionRequestV1): void {
   if (
     !isCanonicalUuid(request.taskId) ||
+    typeof request.sourceSha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(request.sourceSha256) ||
     !Number.isSafeInteger(request.pageIndex) ||
     request.pageIndex < 0 ||
     request.pageIndex >= 25 ||

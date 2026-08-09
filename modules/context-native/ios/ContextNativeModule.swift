@@ -382,6 +382,7 @@ public final class ContextNativeModule: Module {
     AsyncFunction("extractPdfPage") { [weak self] (
       taskId: String,
       fileUri: String,
+      sourceSha256: String,
       pageIndex: Int,
       script: String
     ) async throws -> [String: Any] in
@@ -402,6 +403,7 @@ public final class ContextNativeModule: Module {
           try processor.extractPage(
             taskId: taskId,
             fileURL: url,
+            expectedSourceSHA256: sourceSha256,
             pageIndex: pageIndex,
             script: script,
             reserved: true

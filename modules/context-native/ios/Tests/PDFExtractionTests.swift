@@ -23,6 +23,7 @@ final class PDFExtractionTests: XCTestCase {
     let embedded = try processor.extractPage(
       taskId: firstTaskId,
       fileURL: fixtureURL("text-one-page.pdf"),
+      expectedSourceSHA256: try pdfSHA256(fixtureURL("text-one-page.pdf")),
       pageIndex: 0,
       script: "latin"
     )
@@ -38,6 +39,7 @@ final class PDFExtractionTests: XCTestCase {
     let rendered = try processor.extractPage(
       taskId: secondTaskId,
       fileURL: fixtureURL("scanned-one-page.pdf"),
+      expectedSourceSHA256: try pdfSHA256(fixtureURL("scanned-one-page.pdf")),
       pageIndex: 0,
       script: "latin"
     )
@@ -50,12 +52,14 @@ final class PDFExtractionTests: XCTestCase {
     let first = try processor.extractPage(
       taskId: firstTaskId,
       fileURL: mixed,
+      expectedSourceSHA256: try pdfSHA256(mixed),
       pageIndex: 0,
       script: "latin"
     )
     let second = try processor.extractPage(
       taskId: secondTaskId,
       fileURL: mixed,
+      expectedSourceSHA256: try pdfSHA256(mixed),
       pageIndex: 1,
       script: "latin"
     )
@@ -72,6 +76,7 @@ final class PDFExtractionTests: XCTestCase {
       try processor.extractPage(
         taskId: firstTaskId,
         fileURL: fixtureURL("text-one-page.pdf"),
+        expectedSourceSHA256: try pdfSHA256(fixtureURL("text-one-page.pdf")),
         pageIndex: 1,
         script: "latin"
       )
@@ -104,6 +109,7 @@ final class PDFExtractionTests: XCTestCase {
     let blank = try processor.extractPage(
       taskId: firstTaskId,
       fileURL: fixtureURL("empty-one-page.pdf"),
+      expectedSourceSHA256: try pdfSHA256(fixtureURL("empty-one-page.pdf")),
       pageIndex: 0,
       script: "latin"
     )
@@ -114,6 +120,7 @@ final class PDFExtractionTests: XCTestCase {
     let sparse = try processor.extractPage(
       taskId: secondTaskId,
       fileURL: fixtureURL("sparse-one-page.pdf"),
+      expectedSourceSHA256: try pdfSHA256(fixtureURL("sparse-one-page.pdf")),
       pageIndex: 0,
       script: "latin"
     )
@@ -122,6 +129,8 @@ final class PDFExtractionTests: XCTestCase {
     XCTAssertTrue(
       (sparse["warnings"] as? [String])?.contains("PDF_EMBEDDED_TEXT_SPARSE") == true
     )
+    XCTAssertFalse((sparse["warnings"] as? [String])?.contains("PDF_PAGE_EMPTY") == true)
+    XCTAssertTrue((sparse["text"] as? String)?.contains("A") == true)
 
     let oversized = FileManager.default.temporaryDirectory
       .appendingPathComponent("\(UUID().uuidString).pdf")
@@ -175,6 +184,7 @@ final class PDFExtractionTests: XCTestCase {
       let result = try processor.extractPage(
         taskId: UUID().uuidString.lowercased(),
         fileURL: document,
+        expectedSourceSHA256: try pdfSHA256(document),
         pageIndex: pageIndex,
         script: "latin"
       )
@@ -201,6 +211,7 @@ final class PDFExtractionTests: XCTestCase {
       try processor.extractPage(
         taskId: cancellationId,
         fileURL: document,
+        expectedSourceSHA256: try pdfSHA256(document),
         pageIndex: 0,
         script: "latin",
         reserved: true
@@ -212,6 +223,50 @@ final class PDFExtractionTests: XCTestCase {
     print(
       "PDF_BENCHMARK_IOS pages=20 durationMs=\(Int(durationMs)) " +
         "observedPeakBytes=\(observedPeakBytes) cancellation=PDF_CANCELLED"
+    )
+  }
+
+  func testPageExtractionRejectsAReplacementAtTheInspectedPath() throws {
+    let file = FileManager.default.temporaryDirectory
+      .appendingPathComponent("\(UUID().uuidString).pdf")
+    defer { try? FileManager.default.removeItem(at: file) }
+    try Data(contentsOf: fixtureURL("text-one-page.pdf")).write(to: file)
+    let processor = ApplePDFProcessor()
+    let inspected = try processor.inspect(fileURL: file)
+    let sourceSHA256 = try XCTUnwrap(inspected["sha256"] as? String)
+
+    try Data(contentsOf: fixtureURL("scanned-one-page.pdf")).write(to: file, options: .atomic)
+    XCTAssertThrowsError(
+      try processor.extractPage(
+        taskId: firstTaskId,
+        fileURL: file,
+        expectedSourceSHA256: sourceSHA256,
+        pageIndex: 0,
+        script: "latin"
+      )
+    ) {
+      XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_RESULT_INVALID")
+    }
+  }
+
+  func testEmbeddedTextThresholdAndSparseReconciliationUseUTF16Units() {
+    XCTAssertEqual(
+      pdfEmbeddedTextNonWhitespaceUTF16Count(String(repeating: "😀", count: 8)),
+      16
+    )
+    XCTAssertEqual(
+      pdfEmbeddedTextNonWhitespaceUTF16Count(
+        " \n\u{0085}\u{00A0}\u{3000}" + String(repeating: "😀", count: 7)
+      ),
+      14
+    )
+    XCTAssertEqual(
+      reconcilePDFSparseEmbeddedText(embedded: "A", recognized: "4"),
+      "A\n4"
+    )
+    XCTAssertEqual(
+      reconcilePDFSparseEmbeddedText(embedded: "A", recognized: "OCR A result"),
+      "OCR A result"
     )
   }
 
@@ -252,5 +307,10 @@ final class PDFExtractionTests: XCTestCase {
     var repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     for _ in 0..<4 { repository.deleteLastPathComponent() }
     return repository.appendingPathComponent("fixtures/media/\(name)")
+  }
+
+  private func pdfSHA256(_ file: URL) throws -> String {
+    SHA256.hash(data: try Data(contentsOf: file))
+      .map { String(format: "%02x", $0) }.joined()
   }
 }

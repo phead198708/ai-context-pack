@@ -187,6 +187,7 @@ describe('native adapter runtime boundary', () => {
       guarded.extractPdfPage({
         taskId,
         fileUri,
+        sourceSha256: 'a'.repeat(64),
         pageIndex: 1,
         script: 'chinese',
       }),
@@ -194,6 +195,7 @@ describe('native adapter runtime boundary', () => {
     expect(native.extractPdfPage).toHaveBeenCalledWith(
       taskId,
       fileUri,
+      'a'.repeat(64),
       1,
       'chinese',
     );
@@ -227,6 +229,7 @@ describe('native adapter runtime boundary', () => {
       guarded.extractPdfPage({
         taskId,
         fileUri: 'file:///cache/synthetic.pdf',
+        sourceSha256: 'a'.repeat(64),
         pageIndex: 25,
         script: 'latin',
       }),
@@ -235,6 +238,16 @@ describe('native adapter runtime boundary', () => {
       guarded.extractPdfPage({
         taskId,
         fileUri: 'file:///cache/synthetic.pdf',
+        sourceSha256: 'a'.repeat(64),
+        pageIndex: 0,
+        script: 'latin',
+      }),
+    ).rejects.toMatchObject({ code: 'PDF_RESULT_INVALID' });
+    await expect(
+      guarded.extractPdfPage({
+        taskId,
+        fileUri: 'file:///cache/synthetic.pdf',
+        sourceSha256: 'A'.repeat(64),
         pageIndex: 0,
         script: 'latin',
       }),

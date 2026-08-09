@@ -31,6 +31,8 @@ internal object AndroidPDFResourcePolicy {
   const val maximumPageTextLength = 1_000_000
 }
 
+private val CANONICAL_PDF_SHA256 = Regex("^[0-9a-f]{64}$")
+
 private sealed class PreparedPDFPage {
   data class Complete(val result: Map<String, Any>) : PreparedPDFPage()
 
@@ -38,6 +40,7 @@ private sealed class PreparedPDFPage {
     val bitmap: Bitmap,
     val width: Int,
     val height: Int,
+    val embeddedText: String,
     val warnings: List<String>,
     val started: Long,
   ) : PreparedPDFPage()
@@ -81,6 +84,7 @@ internal class AndroidPDFProcessor(
     context: Context,
     taskId: String,
     fileUri: String,
+    expectedSourceSha256: String,
     pageIndex: Int,
     script: String,
     reserved: Boolean = false,
@@ -97,6 +101,7 @@ internal class AndroidPDFProcessor(
         registered = true
       }
       val file = validatedFile(context, fileUri)
+      validateExpectedSource(file, expectedSourceSha256)
       val started = System.nanoTime()
       val prepared = withRenderer(file) { renderer ->
         validatePageCount(renderer.pageCount)
@@ -106,7 +111,9 @@ internal class AndroidPDFProcessor(
           prepareOpenPage(context, taskId, pageIndex, page, started)
         }
       }
-      return finishPreparedPage(taskId, pageIndex, script, prepared)
+      val result = finishPreparedPage(taskId, pageIndex, script, prepared)
+      validateExpectedSource(file, expectedSourceSha256)
+      return result
     } finally {
       if (registered) registry.finish(taskId)
     }
@@ -146,7 +153,7 @@ internal class AndroidPDFProcessor(
     } else {
       ""
     }
-    val nonWhitespace = embedded.count { !it.isWhitespace() }
+    val nonWhitespace = pdfEmbeddedTextNonWhitespaceUTF16Count(embedded)
     if (nonWhitespace >= AndroidPDFResourcePolicy.minimumEmbeddedTextCharacters) {
       return PreparedPDFPage.Complete(
         completeResult(
@@ -166,7 +173,7 @@ internal class AndroidPDFProcessor(
     if (nonWhitespace > 0) warnings += "PDF_EMBEDDED_TEXT_SPARSE"
     warnings += "PDF_PAGE_OCR_FALLBACK"
     return try {
-      renderPage(context, taskId, page, warnings, started)
+      renderPage(context, taskId, page, embedded, warnings, started)
     } catch (error: NativeException) {
       if (
         error.code == "PDF_CANCELLED" ||
@@ -212,13 +219,17 @@ internal class AndroidPDFProcessor(
             prepared.height,
             script,
           )
-          if (recognized.first.isEmpty()) warnings += "PDF_PAGE_EMPTY"
+          val reconciledText = reconcilePDFSparseEmbeddedText(
+            embedded = prepared.embeddedText,
+            recognized = recognized.first,
+          )
+          if (reconciledText.isEmpty()) warnings += "PDF_PAGE_EMPTY"
           return completeResult(
             pageIndex = pageIndex,
             method = "rendered-ocr",
             engine = "ml-kit",
             revision = "16.0.1",
-            text = recognized.first,
+            text = reconciledText,
             blocks = recognized.second,
             warnings = warnings,
             started = prepared.started,
@@ -247,6 +258,7 @@ internal class AndroidPDFProcessor(
     context: Context,
     taskId: String,
     page: PdfRenderer.Page,
+    embeddedText: String,
     warnings: List<String>,
     started: Long,
   ): PreparedPDFPage.Rendered {
@@ -282,7 +294,14 @@ internal class AndroidPDFProcessor(
       page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
       checkCancellation(taskId)
       handedOff = true
-      return PreparedPDFPage.Rendered(bitmap, width, height, warnings.toList(), started)
+      return PreparedPDFPage.Rendered(
+        bitmap,
+        width,
+        height,
+        embeddedText,
+        warnings.toList(),
+        started,
+      )
     } finally {
       if (!handedOff) bitmap.recycle()
     }
@@ -358,6 +377,23 @@ internal class AndroidPDFProcessor(
     if (!preflight.first) throw NativeException("PDF_CORRUPT")
     if (preflight.second) throw NativeException("PDF_ENCRYPTED")
     return file
+  }
+
+  private fun validateExpectedSource(file: File, expectedSourceSha256: String) {
+    val actual = try {
+      if (
+        !CANONICAL_PDF_SHA256.matches(expectedSourceSha256) ||
+        !file.isFile ||
+        file.length() > AndroidPDFResourcePolicy.maximumFileBytes ||
+        file.canonicalPath != file.absolutePath
+      ) throw NativeException("PDF_RESULT_INVALID")
+      sha256(file)
+    } catch (error: NativeException) {
+      throw error
+    } catch (_: IOException) {
+      throw NativeException("PDF_RESULT_INVALID")
+    }
+    if (actual != expectedSourceSha256) throw NativeException("PDF_RESULT_INVALID")
   }
 
   private fun validatePageCount(pageCount: Int) {
@@ -454,6 +490,35 @@ internal fun normalizePDFText(input: String): String {
   return output.toString()
 }
 
+internal fun pdfEmbeddedTextNonWhitespaceUTF16Count(input: String): Int {
+  var count = 0
+  var index = 0
+  while (index < input.length) {
+    val codePoint = input.codePointAt(index)
+    val codeUnits = Character.charCount(codePoint)
+    if (!isPDFDensityWhitespace(codePoint)) count += codeUnits
+    index += codeUnits
+  }
+  return count
+}
+
+private fun isPDFDensityWhitespace(value: Int): Boolean =
+  value == 0x0020 || value == 0x0085 || value == 0x00A0 || value == 0x1680 ||
+    value in 0x0009..0x000D || value in 0x2000..0x200A ||
+    value == 0x2028 || value == 0x2029 || value == 0x202F || value == 0x205F ||
+    value == 0x3000
+
+internal fun reconcilePDFSparseEmbeddedText(
+  embedded: String,
+  recognized: String,
+): String {
+  if (embedded.isEmpty()) return recognized
+  if (recognized.isEmpty()) return embedded
+  if (recognized.contains(embedded)) return recognized
+  if (embedded.contains(recognized)) return embedded
+  return "$embedded\n$recognized"
+}
+
 private fun isUnsafePDFControl(value: Int): Boolean =
   value <= 0x0008 || value == 0x000B || value == 0x000C ||
     value in 0x000E..0x001F || value in 0x007F..0x009F ||
@@ -484,19 +549,20 @@ internal fun hasPDFEncryptionMarker(file: File): Boolean {
       }
       val trailer = lastPDFKeyword(tail, "trailer", startXref)
       if (trailer < xrefStartInTail) return false
-      return containsPDFName(
+      return parseTopLevelPDFDictionary(
         tail,
         trailer + "trailer".length,
         startXref,
-        "Encrypt",
-      )
+      )?.keys?.contains("Encrypt") == true
     }
 
-    val stream = firstPDFKeyword(dictionary, "stream", dictionary.size)
-    val end = if (stream >= 0) stream else dictionary.size
-    return containsPDFName(dictionary, 0, end, "Type") &&
-      containsPDFName(dictionary, 0, end, "XRef") &&
-      containsPDFName(dictionary, 0, end, "Encrypt")
+    val xrefDictionary = parseTopLevelPDFDictionary(
+      dictionary,
+      0,
+      dictionary.size,
+    ) ?: return false
+    return xrefDictionary.nameValues["Type"] == "XRef" &&
+      xrefDictionary.keys.contains("Encrypt")
   }
 }
 
@@ -548,18 +614,6 @@ private fun lastPDFKeyword(bytes: ByteArray, keyword: String, before: Int): Int 
   return -1
 }
 
-private fun firstPDFKeyword(bytes: ByteArray, keyword: String, before: Int): Int {
-  val token = keyword.toByteArray(Charsets.US_ASCII)
-  for (index in 0..before - token.size) {
-    if (
-      bytes.regionMatches(index, token) &&
-      isPDFTokenBoundary(bytes, index - 1) &&
-      isPDFTokenBoundary(bytes, index + token.size)
-    ) return index
-  }
-  return -1
-}
-
 private fun ByteArray.regionMatches(start: Int, token: ByteArray): Boolean {
   if (start < 0 || start > size - token.size) return false
   for (index in token.indices) if (this[start + index] != token[index]) return false
@@ -572,47 +626,185 @@ private fun isPDFTokenBoundary(bytes: ByteArray, index: Int): Boolean =
 private fun isPDFWhitespace(value: Int): Boolean =
   value == 0 || value == 9 || value == 10 || value == 12 || value == 13 || value == 32
 
-private fun containsPDFName(
+private data class TopLevelPDFDictionary(
+  val keys: Set<String>,
+  val nameValues: Map<String, String>,
+)
+
+private data class ParsedPDFName(val value: String, val end: Int)
+
+private data class ParsedPDFValue(val name: String?, val end: Int)
+
+private fun parseTopLevelPDFDictionary(
   bytes: ByteArray,
   start: Int,
   end: Int,
-  expected: String,
-): Boolean {
-  val token = expected.toByteArray(Charsets.US_ASCII)
-  var index = maxOf(0, start)
+): TopLevelPDFDictionary? {
   val limit = minOf(end, bytes.size)
+  var index = firstPDFDictionaryStart(bytes, maxOf(0, start), limit)
+  if (index < 0) return null
+  index += 2
+  val keys = linkedSetOf<String>()
+  val nameValues = linkedMapOf<String, String>()
   while (index < limit) {
+    index = skipPDFWhitespaceAndComments(bytes, index, limit)
+    if (index + 1 < limit && bytes[index] == '>'.code.toByte() &&
+      bytes[index + 1] == '>'.code.toByte()
+    ) return TopLevelPDFDictionary(keys, nameValues)
+    if (index >= limit) break
+    if (bytes[index] != '/'.code.toByte()) {
+      index = skipPDFValue(bytes, index, limit).end
+      continue
+    }
+    val key = parsePDFName(bytes, index, limit) ?: return null
+    keys += key.value
+    index = skipPDFWhitespaceAndComments(bytes, key.end, limit)
+    if (index + 1 < limit && bytes[index] == '>'.code.toByte() &&
+      bytes[index + 1] == '>'.code.toByte()
+    ) return TopLevelPDFDictionary(keys, nameValues)
+    if (index >= limit) return TopLevelPDFDictionary(keys, nameValues)
+    val value = skipPDFValue(bytes, index, limit)
+    value.name?.let { nameValues[key.value] = it }
+    index = value.end
+  }
+  return TopLevelPDFDictionary(keys, nameValues)
+}
+
+private fun firstPDFDictionaryStart(bytes: ByteArray, start: Int, end: Int): Int {
+  var index = start
+  while (index + 1 < end) {
     when (bytes[index].toInt() and 0xff) {
-      '%'.code -> {
-        index += 1
-        while (index < limit && bytes[index] != '\n'.code.toByte() && bytes[index] != '\r'.code.toByte()) index += 1
-      }
-      '('.code -> index = skipPDFLiteralString(bytes, index + 1, limit)
+      '%'.code -> index = skipPDFComment(bytes, index + 1, end)
+      '('.code -> index = skipPDFLiteralString(bytes, index + 1, end)
       '<'.code -> {
-        if (index + 1 < limit && bytes[index + 1] == '<'.code.toByte()) index += 2
-        else {
-          index += 1
-          while (index < limit && bytes[index] != '>'.code.toByte()) index += 1
-          index += 1
-        }
-      }
-      '/'.code -> {
-        val nameStart = index + 1
-        var nameEnd = nameStart
-        while (
-          nameEnd < limit &&
-          !isPDFDelimiter(bytes[nameEnd].toInt() and 0xff)
-        ) nameEnd += 1
-        if (
-          nameEnd - nameStart == token.size &&
-          bytes.regionMatches(nameStart, token)
-        ) return true
-        index = nameEnd
+        if (bytes[index + 1] == '<'.code.toByte()) return index
+        index = skipPDFHexString(bytes, index + 1, end)
       }
       else -> index += 1
     }
   }
-  return false
+  return -1
+}
+
+private fun skipPDFWhitespaceAndComments(bytes: ByteArray, start: Int, end: Int): Int {
+  var index = start
+  while (index < end) {
+    while (index < end && isPDFWhitespace(bytes[index].toInt() and 0xff)) index += 1
+    if (index >= end || bytes[index] != '%'.code.toByte()) return index
+    index = skipPDFComment(bytes, index + 1, end)
+  }
+  return index
+}
+
+private fun skipPDFComment(bytes: ByteArray, start: Int, end: Int): Int {
+  var index = start
+  while (index < end && bytes[index] != '\n'.code.toByte() && bytes[index] != '\r'.code.toByte()) {
+    index += 1
+  }
+  return index
+}
+
+private fun skipPDFHexString(bytes: ByteArray, start: Int, end: Int): Int {
+  var index = start
+  while (index < end && bytes[index] != '>'.code.toByte()) index += 1
+  return minOf(index + 1, end)
+}
+
+private fun parsePDFName(bytes: ByteArray, start: Int, end: Int): ParsedPDFName? {
+  if (start >= end || bytes[start] != '/'.code.toByte()) return null
+  val decoded = ArrayList<Byte>()
+  var index = start + 1
+  while (index < end && !isPDFDelimiter(bytes[index].toInt() and 0xff)) {
+    if (bytes[index] == '#'.code.toByte() && index + 2 < end) {
+      val high = pdfHexValue(bytes[index + 1].toInt() and 0xff)
+      val low = pdfHexValue(bytes[index + 2].toInt() and 0xff)
+      if (high >= 0 && low >= 0) {
+        decoded += ((high shl 4) or low).toByte()
+        index += 3
+        continue
+      }
+    }
+    decoded += bytes[index]
+    index += 1
+  }
+  return ParsedPDFName(decoded.toByteArray().toString(Charsets.ISO_8859_1), index)
+}
+
+private fun pdfHexValue(value: Int): Int = when (value) {
+  in '0'.code..'9'.code -> value - '0'.code
+  in 'A'.code..'F'.code -> value - 'A'.code + 10
+  in 'a'.code..'f'.code -> value - 'a'.code + 10
+  else -> -1
+}
+
+private fun skipPDFValue(bytes: ByteArray, start: Int, end: Int): ParsedPDFValue {
+  if (start >= end) return ParsedPDFValue(null, end)
+  return when (bytes[start].toInt() and 0xff) {
+    '/'.code -> {
+      val name = parsePDFName(bytes, start, end)
+      if (name == null) ParsedPDFValue(null, minOf(start + 1, end))
+      else ParsedPDFValue(name.value, name.end)
+    }
+    '('.code -> ParsedPDFValue(null, skipPDFLiteralString(bytes, start + 1, end))
+    '<'.code -> {
+      if (start + 1 < end && bytes[start + 1] == '<'.code.toByte()) {
+        ParsedPDFValue(null, skipPDFComposite(bytes, start, end))
+      } else {
+        ParsedPDFValue(null, skipPDFHexString(bytes, start + 1, end))
+      }
+    }
+    '['.code -> ParsedPDFValue(null, skipPDFComposite(bytes, start, end))
+    else -> {
+      var index = start
+      while (index < end && !isPDFDelimiter(bytes[index].toInt() and 0xff)) index += 1
+      ParsedPDFValue(null, if (index == start) minOf(index + 1, end) else index)
+    }
+  }
+}
+
+private fun skipPDFComposite(bytes: ByteArray, start: Int, end: Int): Int {
+  val stack = ArrayDeque<Int>()
+  var index = start
+  if (bytes[index] == '['.code.toByte()) {
+    stack.addLast(']'.code)
+    index += 1
+  } else {
+    stack.addLast('>'.code)
+    index += 2
+  }
+  while (index < end && stack.isNotEmpty()) {
+    when (bytes[index].toInt() and 0xff) {
+      '%'.code -> index = skipPDFComment(bytes, index + 1, end)
+      '('.code -> index = skipPDFLiteralString(bytes, index + 1, end)
+      '<'.code -> {
+        if (index + 1 < end && bytes[index + 1] == '<'.code.toByte()) {
+          stack.addLast('>'.code)
+          index += 2
+        } else {
+          index = skipPDFHexString(bytes, index + 1, end)
+        }
+      }
+      '['.code -> {
+        stack.addLast(']'.code)
+        index += 1
+      }
+      ']'.code -> {
+        if (stack.lastOrNull() == ']'.code) stack.removeLast()
+        index += 1
+      }
+      '>'.code -> {
+        if (
+          stack.lastOrNull() == '>'.code &&
+          index + 1 < end && bytes[index + 1] == '>'.code.toByte()
+        ) {
+          stack.removeLast()
+          index += 2
+        } else index += 1
+      }
+      else -> index += 1
+    }
+  }
+  return index
 }
 
 private fun skipPDFLiteralString(bytes: ByteArray, start: Int, end: Int): Int {

@@ -41,6 +41,8 @@ export interface PDFExtractionRequestV1 {
 export interface PDFPageExtractionRequestV1 {
   readonly taskId: string;
   readonly fileUri: string;
+  /** Hash of the exact inspected PDF that this page must be read from. */
+  readonly sourceSha256: string;
   readonly pageIndex: number;
   readonly script: OCRScriptV1;
 }
@@ -253,6 +255,7 @@ export class PDFTaskRunner {
           page = await this.native.extractPdfPage({
             taskId: request.taskId,
             fileUri: request.fileUri,
+            sourceSha256: request.sourceSha256,
             pageIndex,
             script: request.script,
           });
