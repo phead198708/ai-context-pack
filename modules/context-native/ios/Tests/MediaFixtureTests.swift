@@ -108,6 +108,50 @@ final class MediaFixtureTests: XCTestCase {
     }
   }
 
+  func testDenseReadingOrderIsDeterministicAcrossInputPermutations() {
+    let blocks = [
+      ocrBlock("A", x: 0.1, y: 0.018),
+      ocrBlock("B", x: 0.2, y: 0.009),
+      ocrBlock("C", x: 0.3, y: 0),
+    ]
+    let permutations = [
+      blocks,
+      blocks.reversed().map { $0 },
+      [blocks[1], blocks[2], blocks[0]],
+      [blocks[2], blocks[0], blocks[1]],
+    ]
+    for permutation in permutations {
+      XCTAssertEqual(
+        sortOCRBlocksInReadingOrder(permutation).compactMap { $0["text"] as? String },
+        ["B", "C", "A"]
+      )
+    }
+  }
+
+  func testDestroyedModuleCancelsAndSharedRegistryBlocksReplacementUntilFinish() throws {
+    let registry = OCRCancellationRegistry()
+    let firstProcessor = AppleVisionOCRProcessor(registry: registry)
+    let secondProcessor = AppleVisionOCRProcessor(registry: registry)
+    let lifetime = OCRModuleLifetime()
+    let secondRequest = VNRecognizeTextRequest()
+    try firstProcessor.reserve(taskId: firstTaskId)
+    try lifetime.begin(taskId: firstTaskId)
+
+    let destroyedTask = try XCTUnwrap(lifetime.destroy())
+    XCTAssertTrue(firstProcessor.cancel(taskId: destroyedTask))
+    XCTAssertEqual(registry.failure(taskId: firstTaskId), .cancelled)
+    XCTAssertFalse(lifetime.claimDelivery(taskId: firstTaskId))
+    XCTAssertThrowsError(try registry.begin(taskId: secondTaskId, request: secondRequest)) {
+      XCTAssertEqual($0 as? OCRProcessingError, .resourceBusy)
+    }
+
+    lifetime.finish(taskId: firstTaskId)
+    firstProcessor.finish(taskId: firstTaskId)
+    try registry.begin(taskId: secondTaskId, request: secondRequest)
+    XCTAssertTrue(secondProcessor.cancel(taskId: secondTaskId))
+    registry.finish(taskId: secondTaskId)
+  }
+
   func testTextScannedAndMixedPDFFixturesHaveExpectedPageSemantics() throws {
     let text = try openPDF("text-one-page.pdf")
     XCTAssertEqual(text.pageCount, 1)
@@ -183,5 +227,12 @@ final class MediaFixtureTests: XCTestCase {
   private func pageText(_ document: PDFDocument, index: Int) -> String {
     (document.page(at: index)?.string ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func ocrBlock(_ text: String, x: Double, y: Double) -> [String: Any] {
+    [
+      "text": text,
+      "bounds": ["x": x, "y": y, "width": 0.05, "height": 0.02],
+    ]
   }
 }

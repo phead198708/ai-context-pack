@@ -5,8 +5,15 @@ import UIKit
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
 
+private enum AppleVisionOCRProcessScope {
+  static let registry = OCRCancellationRegistry()
+}
+
 public final class ContextNativeModule: Module {
-  private let ocrProcessor = AppleVisionOCRProcessor()
+  private let ocrProcessor = AppleVisionOCRProcessor(
+    registry: AppleVisionOCRProcessScope.registry
+  )
+  private let ocrLifetime = OCRModuleLifetime()
   private var memoryWarningObserver: NSObjectProtocol?
 
   public func definition() -> ModuleDefinition {
@@ -33,6 +40,9 @@ public final class ContextNativeModule: Module {
         NotificationCenter.default.removeObserver(observer)
       }
       self?.memoryWarningObserver = nil
+      if let taskId = self?.ocrLifetime.destroy() {
+        _ = self?.ocrProcessor.cancel(taskId: taskId)
+      }
     }
 
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
@@ -308,15 +318,30 @@ public final class ContextNativeModule: Module {
     ) async throws -> [String: Any] in
       guard let self else { throw NativeError("OCR_ENGINE_UNAVAILABLE") }
       let url = try controlledArtifactSourceURL(fileUri)
+      let processor = self.ocrProcessor
+      let lifetime = self.ocrLifetime
       do {
-        return try await Task.detached(priority: .userInitiated) {
-          try self.ocrProcessor.recognize(
+        try processor.reserve(taskId: taskId)
+        do {
+          try lifetime.begin(taskId: taskId)
+        } catch {
+          processor.finish(taskId: taskId)
+          throw error
+        }
+        defer { lifetime.finish(taskId: taskId) }
+        let result = try await Task.detached(priority: .userInitiated) {
+          try processor.recognize(
             taskId: taskId,
             fileURL: url,
             script: script,
-            recognitionLevel: recognitionLevel
+            recognitionLevel: recognitionLevel,
+            reserved: true
           )
         }.value
+        guard lifetime.claimDelivery(taskId: taskId) else {
+          throw OCRProcessingError.cancelled
+        }
+        return result
       } catch let error as OCRProcessingError {
         throw NativeError(error.stableCode)
       } catch is CancellationError {

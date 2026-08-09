@@ -59,7 +59,7 @@ final class OCRCancellationRegistry: @unchecked Sendable {
   private var cancelCode: OCRProcessingError?
   private var memoryPressure = false
 
-  func begin(taskId: String, request: VNRequest) throws {
+  func reserve(taskId: String) throws {
     lock.lock()
     defer { lock.unlock() }
     guard activeTaskId == nil else { throw OCRProcessingError.resourceBusy }
@@ -68,8 +68,26 @@ final class OCRCancellationRegistry: @unchecked Sendable {
       throw OCRProcessingError.memoryPressure
     }
     activeTaskId = taskId
-    activeRequest = request
+    activeRequest = nil
     cancelCode = nil
+  }
+
+  func attach(taskId: String, request: VNRequest) throws {
+    lock.lock()
+    defer { lock.unlock() }
+    guard activeTaskId == taskId else { throw OCRProcessingError.resourceBusy }
+    if let cancelCode { throw cancelCode }
+    activeRequest = request
+  }
+
+  func begin(taskId: String, request: VNRequest) throws {
+    try reserve(taskId: taskId)
+    do {
+      try attach(taskId: taskId, request: request)
+    } catch {
+      finish(taskId: taskId)
+      throw error
+    }
   }
 
   func cancel(taskId: String) -> Bool {
@@ -107,6 +125,47 @@ final class OCRCancellationRegistry: @unchecked Sendable {
   }
 }
 
+final class OCRModuleLifetime: @unchecked Sendable {
+  private let lock = NSLock()
+  private var destroyed = false
+  private var activeTaskId: String?
+  private var settled = false
+
+  func begin(taskId: String) throws {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !destroyed else { throw OCRProcessingError.cancelled }
+    guard activeTaskId == nil else { throw OCRProcessingError.resourceBusy }
+    activeTaskId = taskId
+    settled = false
+  }
+
+  func claimDelivery(taskId: String) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !destroyed, activeTaskId == taskId, !settled else { return false }
+    settled = true
+    return true
+  }
+
+  func finish(taskId: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard activeTaskId == taskId else { return }
+    activeTaskId = nil
+    settled = false
+  }
+
+  func destroy() -> String? {
+    lock.lock()
+    defer { lock.unlock() }
+    destroyed = true
+    guard let activeTaskId, !settled else { return nil }
+    settled = true
+    return activeTaskId
+  }
+}
+
 final class AppleVisionOCRProcessor: @unchecked Sendable {
   private let registry: OCRCancellationRegistry
 
@@ -141,8 +200,13 @@ final class AppleVisionOCRProcessor: @unchecked Sendable {
     taskId: String,
     fileURL: URL,
     script: String,
-    recognitionLevel: String
+    recognitionLevel: String,
+    reserved: Bool = false
   ) throws -> [String: Any] {
+    var registered = reserved
+    defer {
+      if registered { registry.finish(taskId: taskId) }
+    }
     guard isCanonicalTaskId(taskId), script == "latin" || script == "chinese" else {
       throw OCRProcessingError.invalidRequest
     }
@@ -168,8 +232,12 @@ final class AppleVisionOCRProcessor: @unchecked Sendable {
     request.usesLanguageCorrection = true
     request.automaticallyDetectsLanguage = true
     request.recognitionLanguages = requested
-    try registry.begin(taskId: taskId, request: request)
-    defer { registry.finish(taskId: taskId) }
+    if reserved {
+      try registry.attach(taskId: taskId, request: request)
+    } else {
+      try registry.begin(taskId: taskId, request: request)
+      registered = true
+    }
 
     let started = ContinuousClock.now
     return try autoreleasepool {
@@ -207,19 +275,21 @@ final class AppleVisionOCRProcessor: @unchecked Sendable {
       guard observations.count <= OCRResourcePolicy.maximumBlocks else {
         throw OCRProcessingError.resultInvalid
       }
-      let blocks: [[String: Any]] = try observations.compactMap { observation in
-        guard let candidate = observation.topCandidates(1).first,
-              !candidate.string.isEmpty else { return nil }
-        guard candidate.string.utf16.count <= OCRResourcePolicy.maximumBlockTextLength else {
-          throw OCRProcessingError.resultInvalid
+      let blocks: [[String: Any]] = sortOCRBlocksInReadingOrder(
+        try observations.compactMap { observation in
+          guard let candidate = observation.topCandidates(1).first,
+                !candidate.string.isEmpty else { return nil }
+          guard candidate.string.utf16.count <= OCRResourcePolicy.maximumBlockTextLength else {
+            throw OCRProcessingError.resultInvalid
+          }
+          let bounds = normalizedTopLeftBounds(observation.boundingBox)
+          return [
+            "text": candidate.string,
+            "confidence": Double(candidate.confidence),
+            "bounds": bounds,
+          ]
         }
-        let bounds = normalizedTopLeftBounds(observation.boundingBox)
-        return [
-          "text": candidate.string,
-          "confidence": Double(candidate.confidence),
-          "bounds": bounds,
-        ]
-      }.sorted(by: readingOrder)
+      )
       let text = blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
       guard text.utf16.count <= OCRResourcePolicy.maximumTextLength else {
         throw OCRProcessingError.resultInvalid
@@ -243,6 +313,15 @@ final class AppleVisionOCRProcessor: @unchecked Sendable {
   func cancel(taskId: String) -> Bool {
     guard isCanonicalTaskId(taskId) else { return false }
     return registry.cancel(taskId: taskId)
+  }
+
+  func reserve(taskId: String) throws {
+    guard isCanonicalTaskId(taskId) else { throw OCRProcessingError.invalidRequest }
+    try registry.reserve(taskId: taskId)
+  }
+
+  func finish(taskId: String) {
+    registry.finish(taskId: taskId)
   }
 
   func setMemoryPressure(_ active: Bool) {
@@ -281,14 +360,47 @@ private func normalizedTopLeftBounds(_ value: CGRect) -> [String: Double] {
   return ["x": x, "y": y, "width": width, "height": height]
 }
 
-private func readingOrder(_ left: [String: Any], _ right: [String: Any]) -> Bool {
-  guard let leftBounds = left["bounds"] as? [String: Double],
-        let rightBounds = right["bounds"] as? [String: Double] else { return false }
-  let leftY = leftBounds["y"] ?? 0
-  let rightY = rightBounds["y"] ?? 0
-  if abs(leftY - rightY) > 0.01 { return leftY < rightY }
-  return (leftBounds["x"] ?? 0) < (rightBounds["x"] ?? 0)
+func sortOCRBlocksInReadingOrder(_ blocks: [[String: Any]]) -> [[String: Any]] {
+  let topLeftSorted = blocks.sorted { left, right in
+    compareOCRBlock(left, right, keys: ["y", "x", "width", "height"])
+  }
+  var rows: [[[String: Any]]] = []
+  for block in topLeftSorted {
+    let y = ocrBounds(block)["y"] ?? 0
+    if let anchorY = rows.last?.first.map({ ocrBounds($0)["y"] ?? 0 }),
+       y - anchorY < ocrRowTolerance {
+      rows[rows.count - 1].append(block)
+    } else {
+      rows.append([block])
+    }
+  }
+  return rows.flatMap { row in
+    row.sorted { left, right in
+      compareOCRBlock(left, right, keys: ["x", "y", "width", "height"])
+    }
+  }
 }
+
+private func compareOCRBlock(
+  _ left: [String: Any],
+  _ right: [String: Any],
+  keys: [String]
+) -> Bool {
+  let leftBounds = ocrBounds(left)
+  let rightBounds = ocrBounds(right)
+  for key in keys {
+    let leftValue = leftBounds[key] ?? 0
+    let rightValue = rightBounds[key] ?? 0
+    if leftValue != rightValue { return leftValue < rightValue }
+  }
+  return (left["text"] as? String ?? "") < (right["text"] as? String ?? "")
+}
+
+private func ocrBounds(_ block: [String: Any]) -> [String: Double] {
+  block["bounds"] as? [String: Double] ?? [:]
+}
+
+private let ocrRowTolerance = 0.01
 
 private extension Comparable {
   func clamped(to limits: ClosedRange<Self>) -> Self {

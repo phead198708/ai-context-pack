@@ -1,17 +1,26 @@
 import React from 'react';
 import { Text, View } from 'react-native';
 import type { OCRTaskProgressV1 } from '../domain/ocr';
+import { t, type AppLocale } from './i18n';
 
 export interface OCRProgressViewProps {
   readonly progress: OCRTaskProgressV1;
+  readonly locale?: AppLocale;
 }
 
 /** Content-free OCR status surface reused by the Issue #12 editor workflow. */
-export function OCRProgressView({ progress }: OCRProgressViewProps) {
-  const message = statusMessage(progress);
+export function OCRProgressView({
+  progress,
+  locale = 'en',
+}: OCRProgressViewProps) {
+  const message = statusMessage(progress, locale);
+  const completed = t(locale, 'ocrProgress', {
+    completed: progress.completedUnits,
+    total: progress.totalUnits,
+  });
   return (
     <View
-      accessibilityLabel="OCR status"
+      accessibilityLabel={`${message}, ${completed}`}
       accessibilityLiveRegion="polite"
       accessibilityRole="summary"
     >
@@ -21,19 +30,19 @@ export function OCRProgressView({ progress }: OCRProgressViewProps) {
   );
 }
 
-function statusMessage(progress: OCRTaskProgressV1): string {
+function statusMessage(progress: OCRTaskProgressV1, locale: AppLocale): string {
   switch (progress.status) {
     case 'queued':
-      return 'OCR queued';
+      return t(locale, 'ocrQueued');
     case 'running':
       return progress.phase === 'decode'
-        ? 'Preparing image'
-        : 'Recognizing text';
+        ? t(locale, 'ocrPreparingImage')
+        : t(locale, 'ocrRecognizingText');
     case 'succeeded':
-      return 'OCR complete';
+      return t(locale, 'ocrComplete');
     case 'cancelled':
-      return `OCR cancelled (${progress.errorCode})`;
+      return t(locale, 'ocrCancelled', { code: progress.errorCode });
     case 'failed':
-      return `OCR failed (${progress.errorCode})`;
+      return t(locale, 'ocrFailed', { code: progress.errorCode });
   }
 }

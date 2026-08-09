@@ -90,6 +90,20 @@ internal data class PreparedOCRTask(
   val startedNanos: Long,
 )
 
+internal data class OCRPixelBounds(
+  val left: Int,
+  val top: Int,
+  val width: Int,
+  val height: Int,
+)
+
+internal data class OCRRecognizedBlockInput(
+  val text: String,
+  val bounds: OCRPixelBounds?,
+  val confidences: List<Double>,
+  val language: String?,
+)
+
 internal class AndroidOCRProcessor(
   private val registry: OcrTaskRegistry = OcrTaskRegistry(),
 ) {
@@ -181,36 +195,20 @@ internal class AndroidOCRProcessor(
 
   fun result(task: PreparedOCRTask, value: Text): Map<String, Any> {
     registry.failureCode(task.taskId)?.let { throw NativeException(it) }
-    if (value.textBlocks.size > AndroidOCRResourcePolicy.maximumBlocks) {
-      throw NativeException("OCR_RESULT_INVALID")
-    }
-    val blocks = value.textBlocks.mapNotNull { block ->
-      val box = block.boundingBox ?: return@mapNotNull null
-      if (block.text.isEmpty()) return@mapNotNull null
-      if (block.text.length > AndroidOCRResourcePolicy.maximumBlockTextLength) {
-        throw NativeException("OCR_RESULT_INVALID")
-      }
-      val lines = block.lines.map { it.confidence }.filter { it.isFinite() && it >= 0 }
-      val confidence = lines.takeIf { it.isNotEmpty() }?.average()
-      buildMap<String, Any> {
-        put("text", block.text)
-        put(
-          "bounds",
-          OcrBoundsNormalizer.normalize(
-            box.left,
-            box.top,
-            box.width(),
-            box.height(),
-            task.outputWidth,
-            task.outputHeight,
-          ),
+    val blocks = buildOCRBlocks(
+      inputs = value.textBlocks.map { block ->
+        OCRRecognizedBlockInput(
+          text = block.text,
+          bounds = block.boundingBox?.let { box ->
+            OCRPixelBounds(box.left, box.top, box.width(), box.height())
+          },
+          confidences = block.lines.map { it.confidence.toDouble() },
+          language = block.recognizedLanguage,
         )
-        confidence?.let { put("confidence", it.coerceIn(0.0, 1.0)) }
-        block.recognizedLanguage
-          .takeIf { it.isNotBlank() && it != "und" }
-          ?.let { put("language", it) }
-      }
-    }.sortedWith(compareByReadingOrder())
+      },
+      outputWidth = task.outputWidth,
+      outputHeight = task.outputHeight,
+    )
     val text = blocks.joinToString("\n") { it.getValue("text") as String }
     if (text.length > AndroidOCRResourcePolicy.maximumTextLength) {
       throw NativeException("OCR_RESULT_INVALID")
@@ -267,18 +265,82 @@ internal class AndroidOCRProcessor(
   }
 }
 
-private fun compareByReadingOrder(): Comparator<Map<String, Any>> =
-  Comparator { left, right ->
-    @Suppress("UNCHECKED_CAST")
-    val leftBounds = left.getValue("bounds") as Map<String, Double>
-    @Suppress("UNCHECKED_CAST")
-    val rightBounds = right.getValue("bounds") as Map<String, Double>
-    val yDifference = leftBounds.getValue("y") - rightBounds.getValue("y")
-    if (kotlin.math.abs(yDifference) > 0.01) {
-      return@Comparator if (yDifference < 0) -1 else 1
-    }
-    leftBounds.getValue("x").compareTo(rightBounds.getValue("x"))
+internal fun buildOCRBlocks(
+  inputs: List<OCRRecognizedBlockInput>,
+  outputWidth: Int,
+  outputHeight: Int,
+): List<Map<String, Any>> {
+  if (inputs.size > AndroidOCRResourcePolicy.maximumBlocks) {
+    throw NativeException("OCR_RESULT_INVALID")
   }
+  val blocks = inputs.mapNotNull { input ->
+    if (input.text.isEmpty()) return@mapNotNull null
+    val box = input.bounds ?: throw NativeException("OCR_RESULT_INVALID")
+    if (input.text.length > AndroidOCRResourcePolicy.maximumBlockTextLength) {
+      throw NativeException("OCR_RESULT_INVALID")
+    }
+    val confidence = input.confidences
+      .filter { it.isFinite() && it >= 0 }
+      .takeIf { it.isNotEmpty() }
+      ?.average()
+    buildMap<String, Any> {
+      put("text", input.text)
+      put(
+        "bounds",
+        OcrBoundsNormalizer.normalize(
+          box.left,
+          box.top,
+          box.width,
+          box.height,
+          outputWidth,
+          outputHeight,
+        ),
+      )
+      confidence?.let { put("confidence", it.coerceIn(0.0, 1.0)) }
+      input.language
+        ?.takeIf { it.isNotBlank() && it != "und" }
+        ?.let { put("language", it) }
+    }
+  }
+  return sortOCRBlocksInReadingOrder(blocks)
+}
+
+internal fun sortOCRBlocksInReadingOrder(
+  blocks: List<Map<String, Any>>,
+): List<Map<String, Any>> {
+  val exactTopLeft = compareBy<Map<String, Any>>(
+    { bounds(it).getValue("y") },
+    { bounds(it).getValue("x") },
+    { bounds(it).getValue("width") },
+    { bounds(it).getValue("height") },
+    { it.getValue("text") as String },
+  )
+  val rows = mutableListOf<MutableList<Map<String, Any>>>()
+  for (block in blocks.sortedWith(exactTopLeft)) {
+    val y = bounds(block).getValue("y")
+    val current = rows.lastOrNull()
+    val anchorY = current?.firstOrNull()?.let { bounds(it).getValue("y") }
+    if (current == null || anchorY == null || y - anchorY >= OCR_ROW_TOLERANCE) {
+      rows.add(mutableListOf(block))
+    } else {
+      current.add(block)
+    }
+  }
+  val withinRow = compareBy<Map<String, Any>>(
+    { bounds(it).getValue("x") },
+    { bounds(it).getValue("y") },
+    { bounds(it).getValue("width") },
+    { bounds(it).getValue("height") },
+    { it.getValue("text") as String },
+  )
+  return rows.flatMap { row -> row.sortedWith(withinRow) }
+}
+
+@Suppress("UNCHECKED_CAST")
+private fun bounds(block: Map<String, Any>): Map<String, Double> =
+  block.getValue("bounds") as Map<String, Double>
+
+private const val OCR_ROW_TOLERANCE = 0.01
 
 private fun isCanonicalTaskId(value: String): Boolean {
   if (value != value.lowercase()) return false

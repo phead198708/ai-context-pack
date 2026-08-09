@@ -51,6 +51,92 @@ class AndroidOCRProcessorTest {
     assertEquals(false, isMemoryPressureTrimLevel(ComponentCallbacks2.TRIM_MEMORY_BACKGROUND))
   }
 
+  @Test
+  fun nonemptyBlockWithoutBoundsFailsClosed() {
+    assertCode("OCR_RESULT_INVALID") {
+      buildOCRBlocks(
+        inputs = listOf(
+          OCRRecognizedBlockInput(
+            text = "recognized-content",
+            bounds = null,
+            confidences = listOf(0.9),
+            language = "en",
+          ),
+        ),
+        outputWidth = 1_000,
+        outputHeight = 1_000,
+      )
+    }
+  }
+
+  @Test
+  fun denseReadingOrderIsDeterministicAcrossInputPermutations() {
+    val blocks = listOf(
+      block("A", left = 100, top = 18),
+      block("B", left = 200, top = 9),
+      block("C", left = 300, top = 0),
+    )
+    val orders = listOf(
+      blocks,
+      blocks.reversed(),
+      listOf(blocks[1], blocks[2], blocks[0]),
+      listOf(blocks[2], blocks[0], blocks[1]),
+    ).map { permutation ->
+      buildOCRBlocks(permutation, outputWidth = 1_000, outputHeight = 1_000)
+        .map { it.getValue("text") as String }
+    }
+    assertTrue(orders.all { it == listOf("B", "C", "A") })
+  }
+
+  @Test
+  fun destroySuppressesDeliveryAndSharedRegistryBlocksReplacementUntilCompletion() {
+    val registry = OcrTaskRegistry()
+    registry.begin(firstTaskId)
+    var closed = 0
+    var rejected = 0
+    var delivered = 0
+    val lifecycle = OcrModuleLifecycle()
+    assertTrue(
+      lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = firstTaskId,
+          close = { closed += 1 },
+          rejectOnDestroy = { rejected += 1 },
+        ),
+      ),
+    )
+
+    val destruction = lifecycle.destroy()!!
+    registry.cancel(destruction.taskId)
+    destruction.close()
+    destruction.reject?.invoke()
+    assertEquals(1, closed)
+    assertEquals(1, rejected)
+    assertEquals(false, lifecycle.deliver(firstTaskId) { delivered += 1 })
+    assertEquals(0, delivered)
+    assertCode("OCR_RESOURCE_BUSY") { registry.begin(secondTaskId) }
+
+    lifecycle.finish(firstTaskId)
+    registry.finish(firstTaskId)
+    registry.begin(secondTaskId)
+    registry.finish(secondTaskId)
+  }
+
+  @Test
+  fun resultTransformationExecutorIsSingleThreadedAndBounded() {
+    assertEquals(1, AndroidOCRProcessScope.resultExecutor.corePoolSize)
+    assertEquals(1, AndroidOCRProcessScope.resultExecutor.maximumPoolSize)
+    assertEquals(4, AndroidOCRProcessScope.resultExecutor.queue.remainingCapacity())
+  }
+
+  private fun block(text: String, left: Int, top: Int): OCRRecognizedBlockInput =
+    OCRRecognizedBlockInput(
+      text = text,
+      bounds = OCRPixelBounds(left = left, top = top, width = 50, height = 20),
+      confidences = emptyList(),
+      language = null,
+    )
+
   private fun assertCode(expected: String, action: () -> Unit) {
     try {
       action()

@@ -21,9 +21,92 @@ import java.io.IOException
 import java.io.StringReader
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+internal object AndroidOCRProcessScope {
+  val registry = OcrTaskRegistry()
+  val resultExecutor = ThreadPoolExecutor(
+    1,
+    1,
+    0L,
+    TimeUnit.MILLISECONDS,
+    ArrayBlockingQueue(4),
+    { action ->
+      Thread(action, "ai-context-pack-ocr-result").apply { isDaemon = true }
+    },
+    ThreadPoolExecutor.AbortPolicy(),
+  )
+}
+
+internal data class OcrLifecycleRegistration(
+  val taskId: String,
+  val close: () -> Unit,
+  val rejectOnDestroy: () -> Unit,
+)
+
+internal data class OcrLifecycleDestruction(
+  val taskId: String,
+  val close: () -> Unit,
+  val reject: (() -> Unit)?,
+)
+
+internal class OcrModuleLifecycle {
+  private data class Active(
+    val registration: OcrLifecycleRegistration,
+    var settled: Boolean = false,
+    var destructionIssued: Boolean = false,
+  )
+
+  private var destroyed = false
+  private var active: Active? = null
+
+  @Synchronized
+  fun register(registration: OcrLifecycleRegistration): Boolean {
+    if (destroyed || active != null) return false
+    active = Active(registration)
+    return true
+  }
+
+  @Synchronized
+  fun deliver(taskId: String, action: () -> Unit): Boolean {
+    val current = active
+    if (destroyed || current?.registration?.taskId != taskId || current.settled) return false
+    current.settled = true
+    action()
+    return true
+  }
+
+  @Synchronized
+  fun finish(taskId: String) {
+    if (active?.registration?.taskId == taskId) active = null
+  }
+
+  @Synchronized
+  fun destroy(): OcrLifecycleDestruction? {
+    destroyed = true
+    val current = active ?: return null
+    if (current.destructionIssued) return null
+    current.destructionIssued = true
+    val reject = if (current.settled) {
+      null
+    } else {
+      current.settled = true
+      current.registration.rejectOnDestroy
+    }
+    return OcrLifecycleDestruction(
+      taskId = current.registration.taskId,
+      close = current.registration.close,
+      reject = reject,
+    )
+  }
+}
 
 class ContextNativeModule : Module(), ComponentCallbacks2 {
-  private val ocrProcessor = AndroidOCRProcessor()
+  private val ocrProcessor = AndroidOCRProcessor(AndroidOCRProcessScope.registry)
+  private val ocrLifecycle = OcrModuleLifecycle()
   private var callbackContext: Context? = null
 
   override fun definition() = ModuleDefinition {
@@ -43,7 +126,11 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
     OnDestroy {
       callbackContext?.unregisterComponentCallbacks(this@ContextNativeModule)
       callbackContext = null
-      ocrProcessor.setMemoryPressure(false)
+      ocrLifecycle.destroy()?.let { active ->
+        ocrProcessor.cancel(active.taskId)
+        active.close()
+        active.reject?.invoke()
+      }
     }
 
     AsyncFunction("scanInbox") {
@@ -276,28 +363,65 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       } catch (error: NativeException) {
         return@AsyncFunction promise.reject(error)
       }
-      task.recognizer.process(task.image)
-        .addOnSuccessListener { result ->
-          try {
-            promise.resolve(ocrProcessor.result(task, result))
+      val processor = ocrProcessor
+      val lifecycle = ocrLifecycle
+      val closed = AtomicBoolean(false)
+      val closeRecognizer = {
+        if (closed.compareAndSet(false, true)) task.recognizer.close()
+      }
+      val registered = lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = taskId,
+          close = closeRecognizer,
+          rejectOnDestroy = { promise.reject(NativeException("OCR_CANCELLED")) },
+        ),
+      )
+      if (!registered) {
+        processor.cancel(taskId)
+        closeRecognizer()
+        processor.finish(taskId)
+        return@AsyncFunction promise.reject(NativeException("OCR_CANCELLED"))
+      }
+      val recognition = try {
+        task.recognizer.process(task.image)
+      } catch (_: Exception) {
+        closeRecognizer()
+        lifecycle.deliver(taskId) {
+          promise.reject(NativeException("OCR_RECOGNITION_FAILED"))
+        }
+        lifecycle.finish(taskId)
+        processor.finish(taskId)
+        return@AsyncFunction
+      }
+      recognition
+        .addOnSuccessListener(AndroidOCRProcessScope.resultExecutor) { result ->
+          val outcome = try {
+            processor.result(task, result) to null
           } catch (error: NativeException) {
-            promise.reject(error)
+            null to error
           } catch (_: OutOfMemoryError) {
-            promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
+            null to NativeException("RESOURCE_MEMORY_PRESSURE")
           } catch (_: Exception) {
-            promise.reject(NativeException("OCR_RESULT_INVALID"))
+            null to NativeException("OCR_RESULT_INVALID")
+          }
+          lifecycle.deliver(taskId) {
+            val error = outcome.second
+            if (error == null) promise.resolve(outcome.first) else promise.reject(error)
           }
         }
-        .addOnFailureListener {
-          promise.reject(
-            NativeException(
-              ocrProcessor.failureCode(taskId) ?: "OCR_RECOGNITION_FAILED",
-            ),
-          )
+        .addOnFailureListener(AndroidOCRProcessScope.resultExecutor) {
+          lifecycle.deliver(taskId) {
+            promise.reject(
+              NativeException(
+                processor.failureCode(taskId) ?: "OCR_RECOGNITION_FAILED",
+              ),
+            )
+          }
         }
-        .addOnCompleteListener {
-          task.recognizer.close()
-          ocrProcessor.finish(taskId)
+        .addOnCompleteListener(AndroidOCRProcessScope.resultExecutor) {
+          closeRecognizer()
+          lifecycle.finish(taskId)
+          processor.finish(taskId)
         }
     }
 
