@@ -88,7 +88,9 @@ private object ContractFixtureEncoder {
     )
     .put("durationMs", 4)
     .put("engine", "apple-vision")
-    .put("revision", "1")
+    .put("revision", "3")
+    .put("recognitionLevel", "accurate")
+    .put("warnings", JSONArray())
 
   private fun pdfPageExtraction() = JSONObject()
     .put("schemaVersion", 1)

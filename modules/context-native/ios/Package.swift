@@ -19,6 +19,7 @@ let package = Package(
         "InboxManifestValidator.swift",
         "InboxRecoverySupport.swift",
         "InboxWriterOwnership.swift",
+        "AppleVisionOCRProcessor.swift",
         "MainAppImportPublisher.swift",
         "OwnedArtifactStore.swift",
         "PrivacySafeLogger.swift",

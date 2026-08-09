@@ -42,7 +42,9 @@ function nativeAdapter(): jest.Mocked<NativeAdapter> {
     quarantineOwnedArtifact: jest.fn(),
     purgeArtifactQuarantine: jest.fn(),
     getArtifactStorageUsage: jest.fn(),
+    getOCRCapabilities: jest.fn(),
     recognizeText: jest.fn(),
+    cancelTextRecognition: jest.fn(),
     probePdf: jest.fn(),
   };
 }

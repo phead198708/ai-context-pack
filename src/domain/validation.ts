@@ -7,6 +7,7 @@ import type {
   ImportItemV1,
   ImportManifestV1,
   NormalizedBoundsV1,
+  OCRCapabilitiesV1,
   OCRBlockV1,
   OCRResultV1,
   PDFPageExtractionV1,
@@ -28,6 +29,9 @@ const safeRelativePathPattern =
 export const IMPORT_MANIFEST_MAX_ITEMS = 128;
 export const IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH = 127;
 export const IMPORT_MANIFEST_MAX_RETRY_BYTES = 52_428_800;
+export const OCR_RESULT_MAX_BLOCKS = 10_000;
+export const OCR_RESULT_MAX_TEXT_LENGTH = 1_000_000;
+export const OCR_RESULT_MAX_BLOCK_TEXT_LENGTH = 100_000;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -124,7 +128,8 @@ function isOCRBlockV1(value: unknown): value is OCRBlockV1 {
   return (
     record(value) &&
     hasOnlyKeys(value, ['text', 'bounds'], ['confidence', 'language']) &&
-    typeof value.text === 'string' &&
+    isNonEmptyString(value.text) &&
+    value.text.length <= OCR_RESULT_MAX_BLOCK_TEXT_LENGTH &&
     isNormalizedBoundsV1(value.bounds) &&
     (value.confidence === undefined ||
       (typeof value.confidence === 'number' &&
@@ -133,6 +138,99 @@ function isOCRBlockV1(value: unknown): value is OCRBlockV1 {
         value.confidence <= 1)) &&
     (value.language === undefined || isNonEmptyString(value.language))
   );
+}
+
+function hasBoundedOCRBlockText(blocks: readonly OCRBlockV1[]): boolean {
+  let aggregateLength = 0;
+  for (const [index, block] of blocks.entries()) {
+    const separatorLength = index === 0 ? 0 : 1;
+    const remaining =
+      OCR_RESULT_MAX_TEXT_LENGTH - aggregateLength - separatorLength;
+    if (block.text.length > remaining) return false;
+    aggregateLength += separatorLength + block.text.length;
+  }
+  return true;
+}
+
+/** Compares the cross-field OCR text invariant without allocating a joined copy. */
+export function ocrBlocksMatchText(
+  blocks: readonly OCRBlockV1[],
+  expectedText: string,
+): boolean {
+  let offset = 0;
+  for (const [index, block] of blocks.entries()) {
+    if (index > 0) {
+      if (
+        offset >= OCR_RESULT_MAX_TEXT_LENGTH ||
+        expectedText.charCodeAt(offset) !== 10
+      )
+        return false;
+      offset += 1;
+    }
+    const nextOffset = offset + block.text.length;
+    if (
+      nextOffset > OCR_RESULT_MAX_TEXT_LENGTH ||
+      nextOffset > expectedText.length ||
+      !expectedText.startsWith(block.text, offset)
+    )
+      return false;
+    offset = nextOffset;
+  }
+  return offset === expectedText.length;
+}
+
+/** Reconstructs the native row grouping and rejects non-canonical block order. */
+export function areOCRBlocksInReadingOrder(
+  blocks: readonly OCRBlockV1[],
+): boolean {
+  const exactTopLeft = [...blocks].sort((left, right) =>
+    compareOCRBlockKeys(left, right, ['y', 'x', 'width', 'height']),
+  );
+  const rows: OCRBlockV1[][] = [];
+  for (const block of exactTopLeft) {
+    const current = rows.at(-1);
+    if (
+      current === undefined ||
+      block.bounds.y - current[0]!.bounds.y >= 0.01
+    ) {
+      rows.push([block]);
+    } else {
+      current.push(block);
+    }
+  }
+  const expected = rows.flatMap(row =>
+    row.sort((left, right) =>
+      compareOCRBlockKeys(left, right, ['x', 'y', 'width', 'height']),
+    ),
+  );
+  return expected.every(
+    (block, index) => compareOCRBlockIdentity(block, blocks[index]!) === 0,
+  );
+}
+
+function compareOCRBlockKeys(
+  left: OCRBlockV1,
+  right: OCRBlockV1,
+  keys: readonly (keyof NormalizedBoundsV1)[],
+): number {
+  for (const key of keys) {
+    const difference = left.bounds[key] - right.bounds[key];
+    if (difference !== 0) return difference;
+  }
+  return compareUTF16CodeUnits(left.text, right.text);
+}
+
+function compareUTF16CodeUnits(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  for (let index = 0; index < limit; index += 1) {
+    const difference = left.charCodeAt(index) - right.charCodeAt(index);
+    if (difference !== 0) return difference;
+  }
+  return left.length - right.length;
+}
+
+function compareOCRBlockIdentity(left: OCRBlockV1, right: OCRBlockV1): number {
+  return compareOCRBlockKeys(left, right, ['x', 'y', 'width', 'height']);
 }
 
 function isCopiedImportItemV1(
@@ -235,27 +333,98 @@ export function decodeImportManifestV1(
 }
 
 export function isOCRResultV1(value: unknown): value is OCRResultV1 {
-  return (
-    record(value) &&
-    hasOnlyKeys(value, [
+  if (
+    !record(value) ||
+    !hasOnlyKeys(
+      value,
+      ['schemaVersion', 'text', 'blocks', 'durationMs', 'engine', 'revision'],
+      ['recognitionLevel', 'warnings'],
+    ) ||
+    value.schemaVersion !== 1 ||
+    typeof value.text !== 'string' ||
+    value.text.length > OCR_RESULT_MAX_TEXT_LENGTH ||
+    !Array.isArray(value.blocks) ||
+    value.blocks.length > OCR_RESULT_MAX_BLOCKS ||
+    !value.blocks.every(isOCRBlockV1) ||
+    typeof value.durationMs !== 'number' ||
+    !Number.isFinite(value.durationMs) ||
+    value.durationMs < 0 ||
+    (value.engine !== 'apple-vision' &&
+      value.engine !== 'ml-kit-latin' &&
+      value.engine !== 'ml-kit-chinese') ||
+    !isNonEmptyString(value.revision) ||
+    (value.recognitionLevel !== undefined &&
+      value.recognitionLevel !== 'accurate' &&
+      value.recognitionLevel !== 'fast') ||
+    (value.warnings !== undefined &&
+      (!Array.isArray(value.warnings) ||
+        value.warnings.some(
+          warning =>
+            warning !== 'OCR_LANGUAGE_FALLBACK' &&
+            warning !== 'OCR_LOW_CONFIDENCE',
+        ) ||
+        new Set(value.warnings).size !== value.warnings.length))
+  )
+    return false;
+  return hasBoundedOCRBlockText(value.blocks as readonly OCRBlockV1[]);
+}
+
+export function isOCRCapabilitiesV1(
+  value: unknown,
+): value is OCRCapabilitiesV1 {
+  if (
+    !record(value) ||
+    !hasOnlyKeys(value, [
       'schemaVersion',
-      'text',
-      'blocks',
-      'durationMs',
-      'engine',
-      'revision',
-    ]) &&
-    value.schemaVersion === 1 &&
-    typeof value.text === 'string' &&
-    Array.isArray(value.blocks) &&
-    value.blocks.every(isOCRBlockV1) &&
-    typeof value.durationMs === 'number' &&
-    Number.isFinite(value.durationMs) &&
-    value.durationMs >= 0 &&
-    (value.engine === 'apple-vision' ||
-      value.engine === 'ml-kit-latin' ||
-      value.engine === 'ml-kit-chinese') &&
-    isNonEmptyString(value.revision)
+      'engines',
+      'maximumPixelCount',
+      'maximumDimension',
+    ]) ||
+    value.schemaVersion !== 1 ||
+    !Array.isArray(value.engines) ||
+    value.engines.length === 0 ||
+    value.engines.length > 3 ||
+    !isNonNegativeInteger(value.maximumPixelCount) ||
+    value.maximumPixelCount === 0 ||
+    !isNonNegativeInteger(value.maximumDimension) ||
+    value.maximumDimension === 0
+  )
+    return false;
+  const engines = value.engines;
+  if (
+    new Set(engines.map(engine => (record(engine) ? engine.engine : undefined)))
+      .size !== engines.length
+  )
+    return false;
+  return engines.every(
+    engine =>
+      record(engine) &&
+      hasOnlyKeys(engine, [
+        'engine',
+        'revision',
+        'scripts',
+        'recognitionLevels',
+        'ready',
+        'offline',
+      ]) &&
+      (engine.engine === 'apple-vision' ||
+        engine.engine === 'ml-kit-latin' ||
+        engine.engine === 'ml-kit-chinese') &&
+      isNonEmptyString(engine.revision) &&
+      Array.isArray(engine.scripts) &&
+      engine.scripts.every(
+        script => script === 'latin' || script === 'chinese',
+      ) &&
+      new Set(engine.scripts).size === engine.scripts.length &&
+      Array.isArray(engine.recognitionLevels) &&
+      engine.recognitionLevels.length > 0 &&
+      engine.recognitionLevels.every(
+        level => level === 'accurate' || level === 'fast',
+      ) &&
+      new Set(engine.recognitionLevels).size ===
+        engine.recognitionLevels.length &&
+      typeof engine.ready === 'boolean' &&
+      engine.offline === true,
   );
 }
 

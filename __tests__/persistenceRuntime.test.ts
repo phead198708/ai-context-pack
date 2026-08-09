@@ -5,6 +5,7 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
 
 import type {
   ImportManifestV1,
+  OCRCapabilitiesV1,
   OCRResultV1,
   PDFProbeResultV1,
 } from '../src/domain/contracts';
@@ -407,6 +408,12 @@ class RuntimeNative implements NativeAdapter {
   async recognizeText(): Promise<OCRResultV1> {
     throw new Error('unused');
   }
+
+  async getOCRCapabilities(): Promise<OCRCapabilitiesV1> {
+    throw new Error('unused');
+  }
+
+  async cancelTextRecognition() {}
 
   async probePdf(): Promise<PDFProbeResultV1> {
     throw new Error('unused');

@@ -235,6 +235,22 @@ describe('versioned native contracts', () => {
       }),
     ).toBe(false);
   });
+  test('rejects aggregate OCR block text before any joined allocation', () => {
+    const blockText = 'x'.repeat(100_000);
+    expect(
+      isOCRResultV1({
+        schemaVersion: 1,
+        text: '',
+        blocks: Array.from({ length: 11 }, () => ({
+          text: blockText,
+          bounds: { x: 0, y: 0, width: 1, height: 1 },
+        })),
+        durationMs: 1,
+        engine: 'apple-vision',
+        revision: '1',
+      }),
+    ).toBe(false);
+  });
   test.each([
     { durationMs: -1 },
     { durationMs: Number.NaN },

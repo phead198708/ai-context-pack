@@ -16,10 +16,18 @@ import {
 } from '../domain/mainAppImport';
 import { newestManifestsFirst } from '../domain/importOrdering';
 import {
+  areOCRBlocksInReadingOrder,
   isImportManifestV1,
+  isOCRCapabilitiesV1,
   isOCRResultV1,
   isPDFProbeResultV1,
+  ocrBlocksMatchText,
 } from '../domain/validation';
+import {
+  isOCRErrorCode,
+  isOCRRequestV1,
+  type OCRErrorCode,
+} from '../domain/ocr';
 import {
   isPendingShareEvent,
   isRecoveryEvent,
@@ -68,7 +76,14 @@ export interface NativeMethods {
   quarantineOwnedArtifact?(relativePath: string): Promise<unknown>;
   purgeArtifactQuarantine?(olderThanEpochMs: number): Promise<unknown>;
   getArtifactStorageUsage?(): Promise<unknown>;
-  recognizeText(uri: string, script: 'latin' | 'chinese'): Promise<unknown>;
+  getOCRCapabilities?(): Promise<unknown>;
+  recognizeText(
+    taskId: string,
+    uri: string,
+    script: 'latin' | 'chinese',
+    recognitionLevel: 'accurate' | 'fast',
+  ): Promise<unknown>;
+  cancelTextRecognition?(taskId: string): Promise<unknown>;
   probePdf(uri: string): Promise<unknown>;
 }
 
@@ -310,11 +325,53 @@ export const createNativeAdapter = (
             throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
           return value;
         },
-        recognizeText: async (uri, script) => {
-          const value = await nativeModule.recognizeText(uri, script);
-          if (!isOCRResultV1(value))
-            throw new NativeBoundaryError('NATIVE_OCR_RESULT_INVALID');
+        getOCRCapabilities: async () => {
+          if (!nativeModule.getOCRCapabilities)
+            throw new NativeBoundaryError('OCR_ENGINE_UNAVAILABLE');
+          const value = await nativeModule.getOCRCapabilities();
+          if (!isOCRCapabilitiesV1(value))
+            throw new NativeBoundaryError('OCR_RESULT_INVALID');
           return value;
+        },
+        recognizeText: async request => {
+          if (!isOCRRequestV1(request))
+            throw new NativeBoundaryError('OCR_RESULT_INVALID');
+          let value: unknown;
+          try {
+            value = await nativeModule.recognizeText(
+              request.taskId,
+              request.fileUri,
+              request.script,
+              request.recognitionLevel,
+            );
+          } catch (error) {
+            throw nativeOCRBoundaryError(error);
+          }
+          if (
+            !isOCRResultV1(value) ||
+            value.recognitionLevel !== request.recognitionLevel ||
+            !Array.isArray(value.warnings) ||
+            !areOCRBlocksInReadingOrder(value.blocks) ||
+            !ocrBlocksMatchText(value.blocks, value.text) ||
+            (value.engine === 'ml-kit-latin' && request.script !== 'latin') ||
+            (value.engine === 'ml-kit-chinese' && request.script !== 'chinese')
+          )
+            throw new NativeBoundaryError('OCR_RESULT_INVALID');
+          return value;
+        },
+        cancelTextRecognition: async taskId => {
+          if (!isCanonicalUuid(taskId))
+            throw new NativeBoundaryError('OCR_RESULT_INVALID');
+          if (!nativeModule.cancelTextRecognition)
+            throw new NativeBoundaryError('OCR_ENGINE_UNAVAILABLE');
+          let acknowledged: unknown;
+          try {
+            acknowledged = await nativeModule.cancelTextRecognition(taskId);
+          } catch (error) {
+            throw nativeOCRBoundaryError(error);
+          }
+          if (acknowledged !== true)
+            throw new NativeBoundaryError('OCR_RESULT_INVALID');
         },
         probePdf: async uri => {
           const value = await nativeModule.probePdf(uri);
@@ -373,7 +430,13 @@ export const createNativeAdapter = (
         getArtifactStorageUsage: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
+        getOCRCapabilities: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
         recognizeText: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        cancelTextRecognition: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         probePdf: async () => {
@@ -467,6 +530,13 @@ function nativeErrorCode(error: unknown): string | undefined {
     value.message.includes('INBOX_RECOVERY_REQUIRED')
     ? 'INBOX_RECOVERY_REQUIRED'
     : undefined;
+}
+
+function nativeOCRBoundaryError(error: unknown): NativeBoundaryError {
+  const code = nativeErrorCode(error);
+  return new NativeBoundaryError(
+    isOCRErrorCode(code) ? (code as OCRErrorCode) : 'OCR_RECOGNITION_FAILED',
+  );
 }
 
 function requireFileUris(fileUris: readonly string[]): void {

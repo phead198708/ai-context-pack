@@ -56,11 +56,226 @@ describe('native adapter runtime boundary', () => {
     mockNativeModule.probePdf.mockResolvedValue({ pageCount: 1 });
 
     await expect(
-      adapter.recognizeText('file:///fixture.png', 'latin'),
-    ).rejects.toMatchObject({ code: 'NATIVE_OCR_RESULT_INVALID' });
+      adapter.recognizeText({
+        taskId: '123e4567-e89b-42d3-a456-426614174000',
+        fileUri: 'file:///fixture.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
     await expect(adapter.probePdf('file:///fixture.pdf')).rejects.toMatchObject(
       { code: 'NATIVE_PDF_RESULT_INVALID' },
     );
+  });
+
+  test('validates OCR capabilities and binds requests, results, and cancellation', async () => {
+    const taskId = '123e4567-e89b-42d3-a456-426614174000';
+    const capabilities = {
+      schemaVersion: 1,
+      engines: [
+        {
+          engine: 'apple-vision',
+          revision: '3',
+          scripts: ['latin', 'chinese'],
+          recognitionLevels: ['accurate', 'fast'],
+          ready: true,
+          offline: true,
+        },
+      ],
+      maximumPixelCount: 40_000_000,
+      maximumDimension: 12_000,
+    };
+    const result = {
+      schemaVersion: 1,
+      text: 'synthetic',
+      blocks: [
+        {
+          text: 'synthetic',
+          bounds: { x: 0, y: 0, width: 0.5, height: 0.1 },
+        },
+      ],
+      durationMs: 1,
+      engine: 'apple-vision',
+      revision: '3',
+      recognitionLevel: 'accurate',
+      warnings: [],
+    };
+    const native = {
+      ...mockNativeModule,
+      getOCRCapabilities: jest.fn().mockResolvedValue(capabilities),
+      recognizeText: jest.fn().mockResolvedValue(result),
+      cancelTextRecognition: jest.fn().mockResolvedValue(true),
+    };
+    const guarded = createNativeAdapter(native);
+
+    await expect(guarded.getOCRCapabilities()).resolves.toEqual(capabilities);
+    await expect(
+      guarded.recognizeText({
+        taskId,
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).resolves.toEqual(result);
+    expect(native.recognizeText).toHaveBeenCalledWith(
+      taskId,
+      'file:///cache/synthetic.png',
+      'latin',
+      'accurate',
+    );
+    await expect(
+      guarded.cancelTextRecognition(taskId),
+    ).resolves.toBeUndefined();
+
+    native.recognizeText.mockResolvedValue({
+      ...result,
+      recognitionLevel: 'fast',
+    });
+    await expect(
+      guarded.recognizeText({
+        taskId,
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
+  });
+
+  test('rejects mismatched OCR block text without allocating a joined copy', async () => {
+    const taskId = '123e4567-e89b-42d3-a456-426614174000';
+    const native = {
+      ...mockNativeModule,
+      recognizeText: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        text: 'first\nwrong',
+        blocks: [
+          {
+            text: 'first',
+            bounds: { x: 0, y: 0, width: 1, height: 0.5 },
+          },
+          {
+            text: 'second',
+            bounds: { x: 0, y: 0.5, width: 1, height: 0.5 },
+          },
+        ],
+        durationMs: 1,
+        engine: 'ml-kit-latin',
+        revision: '16.0.1',
+        recognitionLevel: 'accurate',
+        warnings: [],
+      }),
+    };
+    await expect(
+      createNativeAdapter(native).recognizeText({
+        taskId,
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
+  });
+
+  test('rejects OCR blocks returned outside canonical reading order', async () => {
+    const native = {
+      ...mockNativeModule,
+      recognizeText: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        text: 'second\nfirst',
+        blocks: [
+          {
+            text: 'second',
+            bounds: { x: 0, y: 0.5, width: 1, height: 0.25 },
+          },
+          {
+            text: 'first',
+            bounds: { x: 0, y: 0, width: 1, height: 0.25 },
+          },
+        ],
+        durationMs: 1,
+        engine: 'ml-kit-latin',
+        revision: '16.0.1',
+        recognitionLevel: 'accurate',
+        warnings: [],
+      }),
+    };
+
+    await expect(
+      createNativeAdapter(native).recognizeText({
+        taskId: '123e4567-e89b-42d3-a456-426614174000',
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
+  });
+
+  test('accepts iOS canonical Unicode blocks ordered by UTF-16 code units', async () => {
+    const result = {
+      schemaVersion: 1,
+      text: 'e\u0301\n\u00e9',
+      blocks: [
+        {
+          text: 'e\u0301',
+          bounds: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 },
+        },
+        {
+          text: '\u00e9',
+          bounds: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 },
+        },
+      ],
+      durationMs: 1,
+      engine: 'apple-vision',
+      revision: '3',
+      recognitionLevel: 'accurate',
+      warnings: [],
+    };
+    const native = {
+      ...mockNativeModule,
+      recognizeText: jest.fn().mockResolvedValue(result),
+    };
+
+    await expect(
+      createNativeAdapter(native).recognizeText({
+        taskId: '123e4567-e89b-42d3-a456-426614174000',
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).resolves.toEqual(result);
+  });
+
+  test('accepts a valid not-ready OCR capability and preserves stable OCR errors', async () => {
+    const native = {
+      ...mockNativeModule,
+      getOCRCapabilities: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        engines: [
+          {
+            engine: 'apple-vision',
+            revision: '3',
+            scripts: [],
+            recognitionLevels: ['accurate', 'fast'],
+            ready: false,
+            offline: true,
+          },
+        ],
+        maximumPixelCount: 40_000_000,
+        maximumDimension: 12_000,
+      }),
+      recognizeText: jest.fn().mockRejectedValue({ code: 'OCR_RESOURCE_BUSY' }),
+    };
+    const guarded = createNativeAdapter(native);
+    await expect(guarded.getOCRCapabilities()).resolves.toMatchObject({
+      engines: [expect.objectContaining({ ready: false, scripts: [] })],
+    });
+    await expect(
+      guarded.recognizeText({
+        taskId: '123e4567-e89b-42d3-a456-426614174000',
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).rejects.toMatchObject({ code: 'OCR_RESOURCE_BUSY' });
   });
 
   test('validates versioned share events before exposing them', async () => {

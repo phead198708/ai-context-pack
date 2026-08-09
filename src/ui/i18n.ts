@@ -81,6 +81,13 @@ const en = {
   cancelNewPack: 'Cancel New Pack',
   emptyImportHelp:
     'Import is disabled until at least one item is selected. Use the separate Empty Draft action if you want an intentionally empty Pack.',
+  ocrQueued: 'OCR queued',
+  ocrPreparingImage: 'Preparing image',
+  ocrRecognizingText: 'Recognizing text',
+  ocrComplete: 'OCR complete',
+  ocrCancelled: 'OCR cancelled ({code})',
+  ocrFailed: 'OCR failed ({code})',
+  ocrProgress: '{completed} of {total}',
 } as const;
 
 const zhHans: Record<keyof typeof en, string> = {
@@ -163,6 +170,13 @@ const zhHans: Record<keyof typeof en, string> = {
   cancelNewPack: '取消新建',
   emptyImportHelp:
     '至少选择一项后才能导入。如需创建空上下文包，请使用单独的“创建空白草稿”操作。',
+  ocrQueued: 'OCR 已排队',
+  ocrPreparingImage: '正在准备图片',
+  ocrRecognizingText: '正在识别文本',
+  ocrComplete: 'OCR 已完成',
+  ocrCancelled: 'OCR 已取消（{code}）',
+  ocrFailed: 'OCR 失败（{code}）',
+  ocrProgress: '已完成 {completed}/{total}',
 };
 
 const catalogs = { en, 'zh-Hans': zhHans } as const;

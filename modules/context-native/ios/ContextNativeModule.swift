@@ -1,21 +1,47 @@
 import ExpoModulesCore
 import Foundation
-import ImageIO
 import PDFKit
-import Vision
+import UIKit
 
 private let appGroupIdentifier = "group.com.example.aicontextpack"
 
+private enum AppleVisionOCRProcessScope {
+  static let registry = OCRCancellationRegistry()
+}
+
 public final class ContextNativeModule: Module {
+  private let ocrProcessor = AppleVisionOCRProcessor(
+    registry: AppleVisionOCRProcessScope.registry
+  )
+  private let ocrLifetime = OCRModuleLifetime()
+  private var memoryWarningObserver: NSObjectProtocol?
+
   public func definition() -> ModuleDefinition {
     Name("ContextNative")
 
     OnCreate {
+      memoryWarningObserver = NotificationCenter.default.addObserver(
+        forName: UIApplication.didReceiveMemoryWarningNotification,
+        object: nil,
+        queue: nil
+      ) { [weak self] _ in
+        self?.ocrProcessor.setMemoryPressure(true)
+      }
       guard let container = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: appGroupIdentifier
       ) else { return }
       DispatchQueue.global(qos: .utility).async {
         InboxArtifactHandoff.runStartupMaintenance(container: container)
+      }
+    }
+
+    OnDestroy { [weak self] in
+      if let observer = self?.memoryWarningObserver {
+        NotificationCenter.default.removeObserver(observer)
+      }
+      self?.memoryWarningObserver = nil
+      if let taskId = self?.ocrLifetime.destroy() {
+        _ = self?.ocrProcessor.cancel(taskId: taskId)
       }
     }
 
@@ -279,37 +305,58 @@ public final class ContextNativeModule: Module {
       catch { throw NativeError("STORAGE_WRITE_FAILED") }
     }
 
-    AsyncFunction("recognizeText") { (fileUri: String, script: String) async throws -> [String: Any] in
-      let started = ContinuousClock.now
-      let url = try controlledFileURL(fileUri)
-      guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-        throw NativeError("OCR_IMAGE_DECODE_FAILED")
-      }
-      let orientation = imageOrientation(source: source)
-      let request = VNRecognizeTextRequest()
-      request.recognitionLevel = .accurate
-      request.usesLanguageCorrection = true
-      request.recognitionLanguages = script == "chinese" ? ["zh-Hans", "en-US"] : ["en-US"]
+    AsyncFunction("getOCRCapabilities") { [weak self] () throws -> [String: Any] in
+      guard let self else { throw NativeError("OCR_ENGINE_UNAVAILABLE") }
+      return self.ocrProcessor.capabilities()
+    }
+
+    AsyncFunction("recognizeText") { [weak self] (
+      taskId: String,
+      fileUri: String,
+      script: String,
+      recognitionLevel: String
+    ) async throws -> [String: Any] in
+      guard let self else { throw NativeError("OCR_ENGINE_UNAVAILABLE") }
+      let url = try controlledArtifactSourceURL(fileUri)
+      let processor = self.ocrProcessor
+      let lifetime = self.ocrLifetime
       do {
-        try VNImageRequestHandler(cgImage: image, orientation: orientation).perform([request])
+        try processor.reserve(taskId: taskId)
+        do {
+          try lifetime.begin(taskId: taskId)
+        } catch {
+          processor.finish(taskId: taskId)
+          throw error
+        }
+        defer { lifetime.finish(taskId: taskId) }
+        let result = try await Task.detached(priority: .userInitiated) {
+          try processor.recognize(
+            taskId: taskId,
+            fileURL: url,
+            script: script,
+            recognitionLevel: recognitionLevel,
+            reserved: true
+          )
+        }.value
+        guard lifetime.claimDelivery(taskId: taskId) else {
+          throw OCRProcessingError.cancelled
+        }
+        return result
+      } catch let error as OCRProcessingError {
+        throw NativeError(error.stableCode)
+      } catch is CancellationError {
+        throw NativeError("OCR_CANCELLED")
       } catch {
         throw NativeError("OCR_RECOGNITION_FAILED")
       }
-      let observations = request.results ?? []
-      let blocks: [[String: Any]] = observations.compactMap { observation in
-        guard let candidate = observation.topCandidates(1).first else { return nil }
-        let bounds = observation.boundingBox
-        return ["text": candidate.string,
-                "confidence": Double(candidate.confidence),
-                "bounds": ["x": bounds.minX, "y": 1 - bounds.maxY, "width": bounds.width, "height": bounds.height]]
+    }
+
+    AsyncFunction("cancelTextRecognition") { [weak self] (taskId: String) throws -> Bool in
+      guard let self else { throw NativeError("OCR_ENGINE_UNAVAILABLE") }
+      guard self.ocrProcessor.cancel(taskId: taskId) else {
+        throw NativeError("OCR_RESULT_INVALID")
       }
-      return ["schemaVersion": 1,
-              "text": blocks.compactMap { $0["text"] as? String }.joined(separator: "\n"),
-              "blocks": blocks,
-              "durationMs": durationMilliseconds(since: started),
-              "engine": "apple-vision",
-              "revision": String(VNRecognizeTextRequestRevision3)]
+      return true
     }
 
     AsyncFunction("probePdf") { (fileUri: String) throws -> [String: Any] in
@@ -329,12 +376,6 @@ public final class ContextNativeModule: Module {
               "limit": ["pages": 25, "bytes": 52_428_800]]
     }
   }
-}
-
-private func imageOrientation(source: CGImageSource) -> CGImagePropertyOrientation {
-  guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-        let rawValue = properties[kCGImagePropertyOrientation] as? NSNumber else { return .up }
-  return CGImagePropertyOrientation(rawValue: rawValue.uint32Value) ?? .up
 }
 
 private func controlledFileURL(_ value: String) throws -> URL {
