@@ -297,6 +297,18 @@ final class ApplePDFProcessor: @unchecked Sendable {
     }
   }
 
+  func validatePageRequest(
+    taskId: String,
+    fileURL: URL,
+    expectedSourceSHA256: String
+  ) throws {
+    _ = try sourceDocument(
+      taskId: taskId,
+      fileURL: fileURL,
+      expectedSourceSHA256: expectedSourceSHA256
+    )
+  }
+
   func cancel(taskId: String) -> Bool {
     guard isCanonicalPDFTaskId(taskId) else { return false }
     return registry.cancel(taskId: taskId)
@@ -314,12 +326,15 @@ final class ApplePDFProcessor: @unchecked Sendable {
     let sessionTaskId = sourceSession?.taskId
     sourceSession = nil
     sourceLock.unlock()
-    let taskId = activeTaskId ?? sessionTaskId
-    if let taskId {
-      _ = registry.cancel(taskId: taskId)
+    let registryTaskId = sessionTaskId ?? activeTaskId
+    if let registryTaskId {
+      _ = registry.cancel(taskId: registryTaskId)
       // Keep process-wide single-flight ownership while an active Vision/PDF
-      // operation unwinds. The rejected-delivery/error path finishes it.
-      if activeTaskId == nil { registry.finish(taskId: taskId) }
+      // operation unwinds. A mismatched request cannot operate on the retained
+      // session, so it must not defer release of that session's actual owner.
+      if activeTaskId == nil || activeTaskId != registryTaskId {
+        registry.finish(taskId: registryTaskId)
+      }
     }
   }
 

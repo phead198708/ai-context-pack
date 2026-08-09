@@ -21,6 +21,7 @@ import java.util.UUID
 class PDFExtractionInstrumentedTest {
   private val firstTaskId = "123e4567-e89b-42d3-a456-426614174000"
   private val secondTaskId = "223e4567-e89b-42d3-a456-426614174000"
+  private val thirdTaskId = "323e4567-e89b-42d3-a456-426614174000"
 
   @Test
   fun extractsTextScannedAndMixedFixturesThroughProductionPaths() {
@@ -135,6 +136,62 @@ class PDFExtractionInstrumentedTest {
     val replacementHash = beginSession(processor, context, secondTaskId, text)
     assertEquals(sha256(text), replacementHash)
     processor.finish(secondTaskId)
+  }
+
+  @Test
+  fun destroyReleasesTheRetainedOwnerWhenTheActivePageTaskDiffers() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val registry = OcrTaskRegistry()
+    val processor = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    val lifecycle = OcrModuleLifecycle()
+    val text = copyFixture("text-one-page.pdf")
+    val sourceSha256 = beginSession(processor, context, firstTaskId, text)
+    processor.validatePageRequest(firstTaskId, text.toURI().toString(), sourceSha256)
+    val earlyBindingError = assertThrows(NativeException::class.java) {
+      processor.validatePageRequest(secondTaskId, text.toURI().toString(), sourceSha256)
+    }
+    assertEquals("PDF_RESULT_INVALID", earlyBindingError.code)
+    assertTrue(
+      lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = secondTaskId,
+          close = {},
+          rejectOnDestroy = {},
+        ),
+      ),
+    )
+
+    val bindingError = assertThrows(NativeException::class.java) {
+      processor.extractPage(
+        context,
+        secondTaskId,
+        text.toURI().toString(),
+        sourceSha256,
+        0,
+        "latin",
+        reserved = true,
+      )
+    }
+    assertEquals("PDF_RESULT_INVALID", bindingError.code)
+
+    val destruction = lifecycle.destroy()!!
+    processor.destroy(
+      activeTaskId = destruction.taskId,
+      deferRegistryRelease = destruction.deferProcessorRelease,
+    )
+    assertEquals(
+      false,
+      deliverPDFOperationCompletion(
+        lifecycle = lifecycle,
+        taskId = secondTaskId,
+        finishProcessor = processor::finish,
+      ) {},
+    )
+    lifecycle.finish(secondTaskId)
+
+    replacement.reserve(thirdTaskId)
+    replacement.finish(thirdTaskId)
   }
 
   @Test

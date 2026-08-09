@@ -560,6 +560,11 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
       val processor = pdfProcessor
       val lifecycle = pdfLifecycle
+      try {
+        processor.validatePageRequest(taskId, fileUri, sourceSha256)
+      } catch (error: NativeException) {
+        return@AsyncFunction promise.reject(error)
+      }
       if (!lifecycle.register(OcrLifecycleRegistration(
           taskId = taskId,
           close = {},

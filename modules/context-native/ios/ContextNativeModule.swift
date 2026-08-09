@@ -420,6 +420,17 @@ public final class ContextNativeModule: Module {
       let url = try controlledArtifactSourceURL(fileUri)
       let processor = self.pdfProcessor
       let lifetime = self.pdfLifetime
+      do {
+        try processor.validatePageRequest(
+          taskId: taskId,
+          fileURL: url,
+          expectedSourceSHA256: sourceSha256
+        )
+      } catch let error as PDFProcessingError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
+      }
       let operation: PDFOperationLifetimeLease
       do {
         operation = try beginPDFOperationLifetime(

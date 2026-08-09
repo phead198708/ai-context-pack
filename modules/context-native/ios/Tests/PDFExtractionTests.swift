@@ -9,6 +9,7 @@ import XCTest
 final class PDFExtractionTests: XCTestCase {
   private let firstTaskId = "123e4567-e89b-42d3-a456-426614174000"
   private let secondTaskId = "223e4567-e89b-42d3-a456-426614174000"
+  private let thirdTaskId = "323e4567-e89b-42d3-a456-426614174000"
 
   func testInspectAndExtractTextScannedAndMixedFixtures() throws {
     let processor = ApplePDFProcessor()
@@ -264,6 +265,60 @@ final class PDFExtractionTests: XCTestCase {
     XCTAssertNoThrow(try replacement.reserve(taskId: secondTaskId))
     replacement.finish(taskId: secondTaskId)
     active.finish()
+  }
+
+  func testDestroyReleasesRetainedOwnerWhenActivePageTaskDiffers() throws {
+    let registry = OCRCancellationRegistry()
+    let processor = ApplePDFProcessor(registry: registry)
+    let replacement = ApplePDFProcessor(registry: registry)
+    let lifetime = OCRModuleLifetime()
+    let document = fixtureURL("text-one-page.pdf")
+    let sourceSHA256 = try beginSession(
+      processor,
+      taskId: firstTaskId,
+      file: document
+    )
+    XCTAssertNoThrow(
+      try processor.validatePageRequest(
+        taskId: firstTaskId,
+        fileURL: document,
+        expectedSourceSHA256: sourceSHA256
+      )
+    )
+    XCTAssertThrowsError(
+      try processor.validatePageRequest(
+        taskId: secondTaskId,
+        fileURL: document,
+        expectedSourceSHA256: sourceSHA256
+      )
+    ) {
+      XCTAssertEqual($0 as? PDFProcessingError, .resultInvalid)
+    }
+    let stalePage = try beginPDFOperationLifetime(
+      lifetime: lifetime,
+      taskId: secondTaskId
+    )
+
+    XCTAssertThrowsError(
+      try processor.extractPage(
+        taskId: secondTaskId,
+        fileURL: document,
+        expectedSourceSHA256: sourceSHA256,
+        pageIndex: 0,
+        script: "latin",
+        reserved: true
+      )
+    ) {
+      XCTAssertEqual($0 as? PDFProcessingError, .resultInvalid)
+    }
+
+    let destroyedTaskId = try XCTUnwrap(lifetime.destroy())
+    processor.destroy(activeTaskId: destroyedTaskId)
+    XCTAssertFalse(stalePage.claimDelivery(finishProcessor: processor.finish))
+    stalePage.finish()
+
+    XCTAssertNoThrow(try replacement.reserve(taskId: thirdTaskId))
+    replacement.finish(taskId: thirdTaskId)
   }
 
   func testEncryptedBlankSparseOverLimitAndOversizedFixturesAreDeterministic() throws {

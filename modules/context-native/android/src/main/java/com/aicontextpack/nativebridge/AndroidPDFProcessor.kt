@@ -171,6 +171,14 @@ internal class AndroidPDFProcessor(
     return result
   }
 
+  fun validatePageRequest(
+    taskId: String,
+    fileUri: String,
+    expectedSourceSha256: String,
+  ) {
+    sourceForTask(taskId, fileUri, expectedSourceSha256)
+  }
+
   fun cancel(taskId: String): Boolean {
     if (!isCanonicalPDFTaskId(taskId)) throw NativeException("PDF_RESULT_INVALID")
     return registry.cancel(taskId, "PDF_CANCELLED")
@@ -194,12 +202,16 @@ internal class AndroidPDFProcessor(
       sourceSession.also { sourceSession = null }
     }
     current?.descriptor?.close()
-    val taskId = activeTaskId ?: current?.taskId
-    if (taskId != null) {
-      registry.cancel(taskId, "PDF_CANCELLED")
+    val registryTaskId = current?.taskId ?: activeTaskId
+    if (registryTaskId != null) {
+      registry.cancel(registryTaskId, "PDF_CANCELLED")
       // An active native operation owns the shared slot until it has actually
-      // unwound. Its rejected-delivery path calls finish after the worker exits.
-      if (!deferRegistryRelease) registry.finish(taskId)
+      // unwound. A mismatched request cannot operate on the retained session,
+      // so it must never defer release of that session's actual registry owner.
+      val activeOwnsRegistry = activeTaskId == registryTaskId
+      if (!deferRegistryRelease || !activeOwnsRegistry) {
+        registry.finish(registryTaskId)
+      }
     }
   }
 
