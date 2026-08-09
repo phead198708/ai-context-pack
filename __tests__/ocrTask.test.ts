@@ -144,4 +144,32 @@ describe('OCRTaskRunner', () => {
       errorCode: 'OCR_RECOGNITION_FAILED',
     });
   });
+
+  test('publishes one cancellation when native OCR succeeds after cancel', async () => {
+    const active = deferred<OCRResultV1>();
+    const cancelTextRecognition = jest.fn().mockResolvedValue(undefined);
+    const runner = new OCRTaskRunner({
+      recognizeText: jest.fn(() => active.promise),
+      cancelTextRecognition,
+    });
+    const progress: OCRTaskProgressV1[] = [];
+    const handle = runner.start(request(ids[0]), value => progress.push(value));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await handle.cancel();
+    active.resolve(result);
+
+    await expect(handle.result).rejects.toEqual(
+      new OCRTaskError('OCR_CANCELLED'),
+    );
+    expect(cancelTextRecognition).toHaveBeenCalledWith(ids[0]);
+    expect(progress.filter(value => value.status === 'cancelled')).toEqual([
+      expect.objectContaining({
+        taskId: ids[0],
+        errorCode: 'OCR_CANCELLED',
+      }),
+    ]);
+    expect(progress.some(value => value.status === 'succeeded')).toBe(false);
+  });
 });

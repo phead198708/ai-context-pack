@@ -75,18 +75,9 @@ export class OCRTaskRunner {
         totalUnits: 2,
       });
       nativeStarted = true;
+      let value: OCRResultV1;
       try {
-        const value = await this.native.recognizeText(request);
-        if (cancelRequested) return cancelled();
-        terminal = true;
-        publish({
-          schemaVersion: 1,
-          taskId: request.taskId,
-          status: 'succeeded',
-          completedUnits: 2,
-          totalUnits: 2,
-        });
-        return value;
+        value = await this.native.recognizeText(request);
       } catch (error) {
         const code = ocrErrorCode(error);
         if (cancelRequested || code === 'OCR_CANCELLED') return cancelled();
@@ -101,6 +92,16 @@ export class OCRTaskRunner {
         });
         throw new OCRTaskError(code);
       }
+      if (cancelRequested) return cancelled();
+      terminal = true;
+      publish({
+        schemaVersion: 1,
+        taskId: request.taskId,
+        status: 'succeeded',
+        completedUnits: 2,
+        totalUnits: 2,
+      });
+      return value;
     };
 
     publish({
