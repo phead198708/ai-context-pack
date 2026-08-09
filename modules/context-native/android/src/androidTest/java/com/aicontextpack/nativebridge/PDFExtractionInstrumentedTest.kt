@@ -161,6 +161,21 @@ class PDFExtractionInstrumentedTest {
   }
 
   @Test
+  fun validXrefStreamPdfWithTrailerEncryptContentIsNotMisclassified() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val file = File(context.cacheDir, "unencrypted-xref-stream-content.pdf")
+    file.writeBytes(unencryptedXrefStreamEncryptTextPDF())
+    try {
+      assertEquals(false, hasPDFEncryptionMarker(file))
+      val info = AndroidPDFProcessor().inspect(context, file.toURI().toString())
+      assertEquals(1, info["pageCount"])
+      assertEquals(sha256(file), info["sha256"])
+    } finally {
+      file.delete()
+    }
+  }
+
+  @Test
   fun overLimitFixtureHasStableError() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val processor = AndroidPDFProcessor()
@@ -303,6 +318,46 @@ class PDFExtractionInstrumentedTest {
       append(String.format(Locale.US, "%010d 00000 n \n", offset))
     }
     append("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n$xref\n%%EOF\n")
+    return output.toByteArray()
+  }
+
+  private fun unencryptedXrefStreamEncryptTextPDF(): ByteArray {
+    val output = ByteArrayOutputStream()
+    val offsets = mutableListOf<Int>()
+    fun append(value: String) = output.write(value.toByteArray(Charsets.US_ASCII))
+    append("%PDF-1.5\n")
+    val content = "BT /F1 18 Tf 72 720 Td (trailer /Encrypt) Tj ET"
+    val objects = listOf(
+      "<< /Type /Catalog /Pages 2 0 R >>",
+      "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+        "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+      "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+      "<< /Length ${content.toByteArray(Charsets.US_ASCII).size} >>\n" +
+        "stream\n$content\nendstream",
+    )
+    objects.forEachIndexed { index, body ->
+      offsets += output.size()
+      append("${index + 1} 0 obj\n$body\nendobj\n")
+    }
+
+    val xrefOffset = output.size()
+    val xrefOffsets = listOf(0) + offsets + xrefOffset
+    append(
+      "6 0 obj\n<< /Type /XRef /Size 7 /Root 1 0 R " +
+        "/W [1 4 2] /Index [0 7] /Length 49 >>\nstream\n",
+    )
+    xrefOffsets.forEachIndexed { index, offset ->
+      output.write(if (index == 0) 0 else 1)
+      output.write(offset ushr 24 and 0xff)
+      output.write(offset ushr 16 and 0xff)
+      output.write(offset ushr 8 and 0xff)
+      output.write(offset and 0xff)
+      val generation = if (index == 0) 65_535 else 0
+      output.write(generation ushr 8 and 0xff)
+      output.write(generation and 0xff)
+    }
+    append("\nendstream\nendobj\nstartxref\n$xrefOffset\n%%EOF\n")
     return output.toByteArray()
   }
 

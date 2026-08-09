@@ -468,18 +468,30 @@ internal fun hasPDFEncryptionMarker(file: File): Boolean {
     input.readFully(tail)
     val startXref = lastPDFKeyword(tail, "startxref", tail.size)
     if (startXref < 0) return false
-    val trailer = lastPDFKeyword(tail, "trailer", startXref)
-    if (
-      trailer >= 0 &&
-      containsPDFName(tail, trailer + "trailer".length, startXref, "Encrypt")
-    ) return true
-
     val xrefOffset = parseStartXrefOffset(tail, startXref) ?: return false
     if (xrefOffset < 0 || xrefOffset >= input.length()) return false
     val dictionaryLength = minOf(65_536L, input.length() - xrefOffset).toInt()
     val dictionary = ByteArray(dictionaryLength)
     input.seek(xrefOffset)
     input.readFully(dictionary)
+    val dictionaryStart = skipPDFWhitespace(dictionary, 0, dictionary.size)
+    if (isPDFKeywordAt(dictionary, dictionaryStart, "xref")) {
+      val tailStartOffset = input.length() - tailLength
+      val xrefStartInTail = if (xrefOffset <= tailStartOffset) {
+        0
+      } else {
+        (xrefOffset - tailStartOffset).toInt()
+      }
+      val trailer = lastPDFKeyword(tail, "trailer", startXref)
+      if (trailer < xrefStartInTail) return false
+      return containsPDFName(
+        tail,
+        trailer + "trailer".length,
+        startXref,
+        "Encrypt",
+      )
+    }
+
     val stream = firstPDFKeyword(dictionary, "stream", dictionary.size)
     val end = if (stream >= 0) stream else dictionary.size
     return containsPDFName(dictionary, 0, end, "Type") &&
@@ -508,6 +520,20 @@ private fun parseStartXrefOffset(bytes: ByteArray, keyword: Int): Long? {
   while (index < bytes.size && bytes[index].toInt().toChar() in '0'..'9') index += 1
   if (index == start) return null
   return bytes.copyOfRange(start, index).toString(Charsets.US_ASCII).toLongOrNull()
+}
+
+private fun skipPDFWhitespace(bytes: ByteArray, start: Int, end: Int): Int {
+  var index = start
+  val limit = minOf(end, bytes.size)
+  while (index < limit && isPDFWhitespace(bytes[index].toInt() and 0xff)) index += 1
+  return index
+}
+
+private fun isPDFKeywordAt(bytes: ByteArray, index: Int, keyword: String): Boolean {
+  val token = keyword.toByteArray(Charsets.US_ASCII)
+  return bytes.regionMatches(index, token) &&
+    isPDFTokenBoundary(bytes, index - 1) &&
+    isPDFTokenBoundary(bytes, index + token.size)
 }
 
 private fun lastPDFKeyword(bytes: ByteArray, keyword: String, before: Int): Int {

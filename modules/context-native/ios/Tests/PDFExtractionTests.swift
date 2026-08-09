@@ -1,6 +1,8 @@
 import Darwin
+import CoreGraphics
 import CryptoKit
 import Foundation
+import PDFKit
 import XCTest
 @testable import ContextNativeRecovery
 
@@ -130,6 +132,31 @@ final class PDFExtractionTests: XCTestCase {
     try handle.close()
     XCTAssertThrowsError(try processor.inspect(fileURL: oversized)) {
       XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_TOO_LARGE")
+    }
+  }
+
+  func testPermissionsEncryptedPDFWithEmptyUserPasswordIsRejectedWhileUnlocked() throws {
+    let encrypted = FileManager.default.temporaryDirectory
+      .appendingPathComponent("\(UUID().uuidString).pdf")
+    defer { try? FileManager.default.removeItem(at: encrypted) }
+    var mediaBox = CGRect(x: 0, y: 0, width: 200, height: 200)
+    let options = [
+      kCGPDFContextOwnerPassword: "synthetic-owner",
+      kCGPDFContextUserPassword: "",
+    ] as CFDictionary
+    guard let context = CGContext(encrypted as CFURL, mediaBox: &mediaBox, options) else {
+      return XCTFail("Failed to create synthetic encrypted PDF")
+    }
+    context.beginPDFPage(nil)
+    context.fill(CGRect(x: 20, y: 20, width: 40, height: 40))
+    context.endPDFPage()
+    context.closePDF()
+
+    let document = try XCTUnwrap(PDFDocument(url: encrypted))
+    XCTAssertTrue(document.isEncrypted)
+    XCTAssertFalse(document.isLocked)
+    XCTAssertThrowsError(try ApplePDFProcessor().inspect(fileURL: encrypted)) {
+      XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_ENCRYPTED")
     }
   }
 

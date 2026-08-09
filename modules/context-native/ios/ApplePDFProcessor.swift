@@ -234,7 +234,9 @@ final class ApplePDFProcessor: @unchecked Sendable {
     guard let document = PDFDocument(url: fileURL) else {
       throw PDFProcessingError.corrupt
     }
-    if document.isLocked { throw PDFProcessingError.encrypted }
+    if document.isEncrypted || document.isLocked {
+      throw PDFProcessingError.encrypted
+    }
     return document
   }
 
