@@ -130,6 +130,19 @@ describe('URL extraction', () => {
     expect(result.displayUrl).not.toContain(longSecret);
   });
 
+  test('redacts query components without a value separator wholesale', () => {
+    const opaqueToken = 'eyJhbGciOiJIUzI1NiJ9';
+    const result = extractURL(
+      `https://example.test/reset?${opaqueToken}&named=secret`,
+    );
+
+    expect(result.displayUrl).toBe(
+      'https://example.test/reset?[REDACTED]&named=[REDACTED]',
+    );
+    expect(result.displayUrl).not.toContain(opaqueToken);
+    expect(result.warnings).toContain('URL_QUERY_VALUES_REDACTED');
+  });
+
   test('rejects unsafe schemes, whitespace/control injection, and over-limit URLs', () => {
     for (const invalid of [
       'file:///private/document.pdf',

@@ -157,11 +157,19 @@ export function extractURL(
           return `[REDACTED]@${parsed.host}`;
         })()
       : parsed.host;
-  const query = [...parsed.searchParams.keys()];
-  const queryDisplay = query.length
-    ? `?${query.map(key => `${encodeURIComponent(key)}=[REDACTED]`).join('&')}`
+  const queryComponents = parsed.search.length
+    ? parsed.search.slice(1).split('&')
+    : [];
+  const queryDisplay = queryComponents.length
+    ? `?${queryComponents
+        .map(component => {
+          if (!component.includes('=')) return '[REDACTED]';
+          const key = new URLSearchParams(component).keys().next().value ?? '';
+          return `${encodeURIComponent(key)}=[REDACTED]`;
+        })
+        .join('&')}`
     : '';
-  if (query.length > 0) warnings.push('URL_QUERY_VALUES_REDACTED');
+  if (queryComponents.length > 0) warnings.push('URL_QUERY_VALUES_REDACTED');
   const fragment = parsed.hash.length > 0 ? '#[REDACTED]' : '';
   if (fragment.length > 0) warnings.push('URL_FRAGMENT_REDACTED');
   const displayUrl = `${parsed.protocol}//${authority}${parsed.pathname}${queryDisplay}${fragment}`;
