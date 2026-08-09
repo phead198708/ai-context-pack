@@ -137,9 +137,10 @@ function App(): React.JSX.Element {
           {screen !== 'new-pack' ? (
             <View style={styles.headerActions}>
               <Action
-                disabled={!packCreationReady}
+                disabled={creatingEmptyDraft || !packCreationReady}
                 label={t(locale, 'newPack')}
                 onPress={() => {
+                  if (creatingEmptyDraft || !packCreationReady) return;
                   setSelectedDetailPackId(undefined);
                   setRetryDraft(undefined);
                   setRetryDraftError(undefined);
@@ -150,6 +151,7 @@ function App(): React.JSX.Element {
                 disabled={creatingEmptyDraft || !packCreationReady}
                 label={t(locale, 'createEmptyDraft')}
                 onPress={async () => {
+                  if (creatingEmptyDraft || !packCreationReady) return;
                   setCreatingEmptyDraft(true);
                   setEmptyDraftError(undefined);
                   try {

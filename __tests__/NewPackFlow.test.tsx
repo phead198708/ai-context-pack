@@ -260,6 +260,28 @@ describe('NewPackFlow interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('rejects isolated surrogates before pasted text reaches native publication', async () => {
+    const native = nativeAdapter();
+    const renderer = await render({
+      native,
+      picker: picker(),
+      onCancel: jest.fn(),
+      onImported: jest.fn(),
+      createDraft: () => draft(),
+    });
+
+    await change(byLabel(renderer, 'Text to add'), '\ud800');
+    await press(byLabel(renderer, 'Add Text'));
+
+    expect(text(renderer)).toContain('MAIN_APP_IMPORT_INPUT_INVALID');
+    expect(text(renderer).replace(/\s+/g, ' ')).toContain('0 selected');
+    expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
+      disabled: true,
+    });
+    expect(native.publishMainAppImport).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
   test('removes and cancels only after controlled picker files are discarded', async () => {
     const native = nativeAdapter();
     const onCancel = jest.fn();

@@ -420,6 +420,11 @@ describe('native adapter runtime boundary', () => {
     ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
     await expect(
       guarded.publishMainAppImport(ingestionId, 'main-app-text', [
+        { ...textInput, byteCount: 3, text: '\ud800' },
+      ]),
+    ).rejects.toMatchObject({ code: 'NATIVE_MAIN_APP_IMPORT_INVALID' });
+    await expect(
+      guarded.publishMainAppImport(ingestionId, 'main-app-text', [
         {
           ...textInput,
           kind: 'url',

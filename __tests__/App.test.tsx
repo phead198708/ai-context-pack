@@ -955,6 +955,49 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('keeps New Pack mutually exclusive while an empty draft is pending', async () => {
+    let resolveCreate: ((pack: InboxPackSummary) => void) | undefined;
+    const pendingCreate = new Promise<InboxPackSummary>(resolve => {
+      resolveCreate = resolve;
+    });
+    mockCreateEmptyDraftPack.mockReturnValue(pendingCreate);
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
+      persistedPack,
+    ]);
+    const renderer = await renderApp();
+    let pendingAction: Promise<void> | undefined;
+
+    act(() => {
+      pendingAction = control(
+        renderer,
+        'button',
+        'Create Empty Draft',
+      ).props.onPress();
+    });
+
+    expect(
+      control(renderer, 'button', 'New Pack').props.accessibilityState,
+    ).toEqual({ disabled: true });
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: true });
+    await press(control(renderer, 'button', 'New Pack'));
+    expect(renderedText(renderer)).not.toContain(
+      'Add photos, PDF or text files',
+    );
+    expect(mockMainAppPicker.pickFiles).not.toHaveBeenCalled();
+    expect(mockMainAppPicker.pickPhotos).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveCreate?.(persistedPack);
+      await pendingAction;
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer)).toContain('Import detail');
+    act(() => renderer.unmount());
+  });
+
   test('creates and selects an empty Pack while preserving a historical share warning', async () => {
     const createdPack = {
       ...persistedPack,

@@ -60,7 +60,8 @@ export type MainAppImportEditError =
   | 'IMPORT_EMPTY_TEXT'
   | 'IMPORT_URL_INVALID'
   | 'IMPORT_SIZE_LIMIT_EXCEEDED'
-  | 'IMPORT_ITEM_LIMIT_EXCEEDED';
+  | 'IMPORT_ITEM_LIMIT_EXCEEDED'
+  | 'MAIN_APP_IMPORT_INPUT_INVALID';
 
 export type MainAppImportPreflightCode =
   | 'IMPORT_TYPE_UNSUPPORTED'
@@ -147,6 +148,8 @@ export function appendTextEntry(
   if (draft.items.length >= MAIN_APP_IMPORT_MAX_ITEMS)
     return { draft, error: 'IMPORT_ITEM_LIMIT_EXCEEDED' };
   if (value.length === 0) return { draft, error: 'IMPORT_EMPTY_TEXT' };
+  if (!isValidUnicodeScalarString(value))
+    return { draft, error: 'MAIN_APP_IMPORT_INPUT_INVALID' };
   const byteCount = utf8ByteCount(value);
   // Inline content would otherwise be copied through the JS/native bridge in full. Reject it
   // before it becomes part of the draft; file inputs cross the bridge only as cache URIs.
@@ -301,6 +304,7 @@ function isSupportedWebUrl(value: string): boolean {
 }
 
 export function utf8ByteCount(value: string): number {
+  if (!isValidUnicodeScalarString(value)) throw new MainAppImportInputError();
   let count = 0;
   for (const character of value) {
     const codePoint = character.codePointAt(0)!;
@@ -314,4 +318,26 @@ export function utf8ByteCount(value: string): number {
         : 4;
   }
   return count;
+}
+
+/** Ensures native UTF-8 encoders receive only Unicode scalar values with identical bytes. */
+export function isValidUnicodeScalarString(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+class MainAppImportInputError extends Error {
+  readonly code = 'MAIN_APP_IMPORT_INPUT_INVALID';
+
+  constructor() {
+    super('MAIN_APP_IMPORT_INPUT_INVALID');
+    this.name = 'MainAppImportInputError';
+  }
 }

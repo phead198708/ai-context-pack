@@ -10,6 +10,7 @@ import type {
 } from '../domain/nativeAdapter';
 import type { MainAppImportInput } from '../domain/mainAppImport';
 import {
+  isValidUnicodeScalarString,
   MAIN_APP_IMPORT_MAX_TEXT_BYTES,
   utf8ByteCount,
 } from '../domain/mainAppImport';
@@ -431,6 +432,7 @@ function isValidMainAppImportInput(
       Object.keys(input).length !== 6 ||
       typeof input.text !== 'string' ||
       input.text.length === 0 ||
+      !isValidUnicodeScalarString(input.text) ||
       input.byteCount > MAIN_APP_IMPORT_MAX_TEXT_BYTES ||
       input.byteCount !== utf8ByteCount(input.text) ||
       input.declaredMediaType !==

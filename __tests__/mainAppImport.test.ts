@@ -151,6 +151,24 @@ describe('main-app import draft', () => {
     expect(utf8ByteCount('A中🧪')).toBe(8);
   });
 
+  test('rejects isolated UTF-16 surrogates before they enter a cross-platform draft', () => {
+    const empty = createMainAppImportDraft(() => ingestionId);
+
+    for (const invalid of ['\ud800', '\udfff', 'before\ud800after']) {
+      expect(appendTextEntry(empty, 'text', invalid)).toEqual({
+        draft: empty,
+        error: 'MAIN_APP_IMPORT_INPUT_INVALID',
+      });
+      expect(() => utf8ByteCount(invalid)).toThrow(
+        'MAIN_APP_IMPORT_INPUT_INVALID',
+      );
+    }
+    expect(
+      appendTextEntry(empty, 'text', '\ud83e\uddea').error,
+    ).toBeUndefined();
+    expect(utf8ByteCount('\ud83e\uddea')).toBe(4);
+  });
+
   test('rejects empty text, non-http URLs, and the twenty-first item without mutation', () => {
     const empty = createMainAppImportDraft(() => ingestionId);
     expect(appendTextEntry(empty, 'text', '').error).toBe('IMPORT_EMPTY_TEXT');
