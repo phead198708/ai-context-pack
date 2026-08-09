@@ -74,6 +74,7 @@ final class MediaFixtureTests: XCTestCase {
     )
     let text = try XCTUnwrap(result["text"] as? String)
     XCTAssertTrue(text.localizedCaseInsensitiveContains("TypeError"))
+    XCTAssertTrue(text.localizedCaseInsensitiveContains("E42"))
     XCTAssertTrue(text.localizedCaseInsensitiveContains("retry import"))
     try assertValidOrderedTopLeftBlocks(result)
     try assertFixtureTextRegionMapsToPreview(result)
@@ -125,6 +126,26 @@ final class MediaFixtureTests: XCTestCase {
         sortOCRBlocksInReadingOrder(permutation).compactMap { $0["text"] as? String },
         ["B", "C", "A"]
       )
+    }
+  }
+
+  func testAggregateTextLimitFailsBeforeJoiningBlocks() throws {
+    XCTAssertEqual(
+      try advanceOCRAggregateTextLength(
+        currentLength: OCRResourcePolicy.maximumTextLength - 1,
+        nextTextLength: 1,
+        hasPreviousBlock: false
+      ),
+      OCRResourcePolicy.maximumTextLength
+    )
+    XCTAssertThrowsError(
+      try advanceOCRAggregateTextLength(
+        currentLength: OCRResourcePolicy.maximumTextLength,
+        nextTextLength: 1,
+        hasPreviousBlock: true
+      )
+    ) { error in
+      XCTAssertEqual(error as? OCRProcessingError, .resultInvalid)
     }
   }
 

@@ -1,9 +1,18 @@
 import React from 'react';
+import { AccessibilityInfo, Platform } from 'react-native';
 import TestRenderer, { act } from 'react-test-renderer';
 import { OCRProgressView } from '../src/ui/OCRProgressView';
 
 describe('OCRProgressView', () => {
+  const announceForVoiceOver = jest
+    .spyOn(AccessibilityInfo, 'announceForAccessibilityWithOptions')
+    .mockImplementation(() => undefined);
+
+  beforeEach(() => announceForVoiceOver.mockClear());
+  afterAll(() => announceForVoiceOver.mockRestore());
+
   test('renders accessible structured progress without source content', async () => {
+    expect(Platform.OS).toBe('ios');
     let renderer: TestRenderer.ReactTestRenderer | undefined;
     await act(async () => {
       renderer = TestRenderer.create(
@@ -24,6 +33,10 @@ describe('OCRProgressView', () => {
       node => node.props.accessibilityLabel === 'Recognizing text, 1 of 2',
     );
     expect(status.props.accessibilityLiveRegion).toBe('polite');
+    expect(announceForVoiceOver).toHaveBeenLastCalledWith(
+      'Recognizing text, 1 of 2',
+      { queue: true },
+    );
     expect(renderer!.toJSON()).toEqual(
       expect.objectContaining({ type: 'View' }),
     );
@@ -53,6 +66,10 @@ describe('OCRProgressView', () => {
           'OCR failed (OCR_IMAGE_DECODE_FAILED), 1 of 2',
       ),
     ).toBeDefined();
+    expect(announceForVoiceOver).toHaveBeenLastCalledWith(
+      'OCR failed (OCR_IMAGE_DECODE_FAILED), 1 of 2',
+      { queue: true },
+    );
   });
 
   test('announces localized Simplified Chinese status and progress', async () => {
@@ -79,5 +96,9 @@ describe('OCRProgressView', () => {
     ).toBeDefined();
     expect(JSON.stringify(renderer!.toJSON())).toContain('正在准备图片');
     expect(JSON.stringify(renderer!.toJSON())).toContain('已完成 0/2');
+    expect(announceForVoiceOver).toHaveBeenLastCalledWith(
+      '正在准备图片, 已完成 0/2',
+      { queue: true },
+    );
   });
 });

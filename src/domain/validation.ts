@@ -140,6 +140,45 @@ function isOCRBlockV1(value: unknown): value is OCRBlockV1 {
   );
 }
 
+function hasBoundedOCRBlockText(blocks: readonly OCRBlockV1[]): boolean {
+  let aggregateLength = 0;
+  for (const [index, block] of blocks.entries()) {
+    const separatorLength = index === 0 ? 0 : 1;
+    const remaining =
+      OCR_RESULT_MAX_TEXT_LENGTH - aggregateLength - separatorLength;
+    if (block.text.length > remaining) return false;
+    aggregateLength += separatorLength + block.text.length;
+  }
+  return true;
+}
+
+/** Compares the cross-field OCR text invariant without allocating a joined copy. */
+export function ocrBlocksMatchText(
+  blocks: readonly OCRBlockV1[],
+  expectedText: string,
+): boolean {
+  let offset = 0;
+  for (const [index, block] of blocks.entries()) {
+    if (index > 0) {
+      if (
+        offset >= OCR_RESULT_MAX_TEXT_LENGTH ||
+        expectedText.charCodeAt(offset) !== 10
+      )
+        return false;
+      offset += 1;
+    }
+    const nextOffset = offset + block.text.length;
+    if (
+      nextOffset > OCR_RESULT_MAX_TEXT_LENGTH ||
+      nextOffset > expectedText.length ||
+      !expectedText.startsWith(block.text, offset)
+    )
+      return false;
+    offset = nextOffset;
+  }
+  return offset === expectedText.length;
+}
+
 function isCopiedImportItemV1(
   value: Record<string, unknown>,
 ): value is Record<string, unknown> & ImportItemV1 {
@@ -273,7 +312,7 @@ export function isOCRResultV1(value: unknown): value is OCRResultV1 {
         new Set(value.warnings).size !== value.warnings.length))
   )
     return false;
-  return true;
+  return hasBoundedOCRBlockText(value.blocks as readonly OCRBlockV1[]);
 }
 
 export function isOCRCapabilitiesV1(

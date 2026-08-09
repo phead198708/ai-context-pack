@@ -89,6 +89,25 @@ class AndroidOCRProcessorTest {
   }
 
   @Test
+  fun aggregateTextLimitFailsBeforeJoiningBlocks() {
+    assertEquals(
+      AndroidOCRResourcePolicy.maximumTextLength,
+      advanceOCRAggregateTextLength(
+        currentLength = AndroidOCRResourcePolicy.maximumTextLength - 1,
+        nextTextLength = 1,
+        hasPreviousBlock = false,
+      ),
+    )
+    assertCode("OCR_RESULT_INVALID") {
+      advanceOCRAggregateTextLength(
+        currentLength = AndroidOCRResourcePolicy.maximumTextLength,
+        nextTextLength = 1,
+        hasPreviousBlock = true,
+      )
+    }
+  }
+
+  @Test
   fun destroySuppressesDeliveryAndSharedRegistryBlocksReplacementUntilCompletion() {
     val registry = OcrTaskRegistry()
     registry.begin(firstTaskId)

@@ -195,6 +195,9 @@ internal class AndroidOCRProcessor(
 
   fun result(task: PreparedOCRTask, value: Text): Map<String, Any> {
     registry.failureCode(task.taskId)?.let { throw NativeException(it) }
+    if (value.textBlocks.size > AndroidOCRResourcePolicy.maximumBlocks) {
+      throw NativeException("OCR_RESULT_INVALID")
+    }
     val blocks = buildOCRBlocks(
       inputs = value.textBlocks.map { block ->
         OCRRecognizedBlockInput(
@@ -273,12 +276,20 @@ internal fun buildOCRBlocks(
   if (inputs.size > AndroidOCRResourcePolicy.maximumBlocks) {
     throw NativeException("OCR_RESULT_INVALID")
   }
+  var aggregateTextLength = 0
+  var includedBlocks = 0
   val blocks = inputs.mapNotNull { input ->
     if (input.text.isEmpty()) return@mapNotNull null
     val box = input.bounds ?: throw NativeException("OCR_RESULT_INVALID")
     if (input.text.length > AndroidOCRResourcePolicy.maximumBlockTextLength) {
       throw NativeException("OCR_RESULT_INVALID")
     }
+    aggregateTextLength = advanceOCRAggregateTextLength(
+      currentLength = aggregateTextLength,
+      nextTextLength = input.text.length,
+      hasPreviousBlock = includedBlocks > 0,
+    )
+    includedBlocks += 1
     val confidence = input.confidences
       .filter { it.isFinite() && it >= 0 }
       .takeIf { it.isNotEmpty() }
@@ -303,6 +314,26 @@ internal fun buildOCRBlocks(
     }
   }
   return sortOCRBlocksInReadingOrder(blocks)
+}
+
+internal fun advanceOCRAggregateTextLength(
+  currentLength: Int,
+  nextTextLength: Int,
+  hasPreviousBlock: Boolean,
+): Int {
+  if (
+    currentLength < 0 ||
+    currentLength > AndroidOCRResourcePolicy.maximumTextLength ||
+    nextTextLength < 0
+  ) {
+    throw NativeException("OCR_RESULT_INVALID")
+  }
+  val separatorLength = if (hasPreviousBlock) 1 else 0
+  val remaining = AndroidOCRResourcePolicy.maximumTextLength - currentLength - separatorLength
+  if (nextTextLength > remaining) {
+    throw NativeException("OCR_RESULT_INVALID")
+  }
+  return currentLength + separatorLength + nextTextLength
 }
 
 internal fun sortOCRBlocksInReadingOrder(

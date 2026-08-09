@@ -141,6 +141,40 @@ describe('native adapter runtime boundary', () => {
     ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
   });
 
+  test('rejects mismatched OCR block text without allocating a joined copy', async () => {
+    const taskId = '123e4567-e89b-42d3-a456-426614174000';
+    const native = {
+      ...mockNativeModule,
+      recognizeText: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        text: 'first\nwrong',
+        blocks: [
+          {
+            text: 'first',
+            bounds: { x: 0, y: 0, width: 1, height: 0.5 },
+          },
+          {
+            text: 'second',
+            bounds: { x: 0, y: 0.5, width: 1, height: 0.5 },
+          },
+        ],
+        durationMs: 1,
+        engine: 'ml-kit-latin',
+        revision: '16.0.1',
+        recognitionLevel: 'accurate',
+        warnings: [],
+      }),
+    };
+    await expect(
+      createNativeAdapter(native).recognizeText({
+        taskId,
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
+  });
+
   test('accepts a valid not-ready OCR capability and preserves stable OCR errors', async () => {
     const native = {
       ...mockNativeModule,

@@ -50,6 +50,8 @@ class AndroidOCRProcessorInstrumentedTest {
     assertTrue(
       text(rotated).filterNot(Char::isWhitespace).contains("TypeError", ignoreCase = true),
     )
+    assertTrue(text(rotated).contains("E42", ignoreCase = true))
+    assertTrue(text(rotated).contains("retry import", ignoreCase = true))
     assertValidBounds(rotated)
     assertFixtureTextRegionMapsToPreview(rotated)
 

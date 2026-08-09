@@ -1,5 +1,5 @@
-import React from 'react';
-import { Text, View } from 'react-native';
+import React, { useEffect } from 'react';
+import { AccessibilityInfo, Platform, Text, View } from 'react-native';
 import type { OCRTaskProgressV1 } from '../domain/ocr';
 import { t, type AppLocale } from './i18n';
 
@@ -18,9 +18,17 @@ export function OCRProgressView({
     completed: progress.completedUnits,
     total: progress.totalUnits,
   });
+  const announcement = `${message}, ${completed}`;
+  useEffect(() => {
+    if (Platform.OS === 'ios') {
+      AccessibilityInfo.announceForAccessibilityWithOptions(announcement, {
+        queue: true,
+      });
+    }
+  }, [announcement]);
   return (
     <View
-      accessibilityLabel={`${message}, ${completed}`}
+      accessibilityLabel={announcement}
       accessibilityLiveRegion="polite"
       accessibilityRole="summary"
     >

@@ -20,6 +20,7 @@ import {
   isOCRCapabilitiesV1,
   isOCRResultV1,
   isPDFProbeResultV1,
+  ocrBlocksMatchText,
 } from '../domain/validation';
 import {
   isOCRErrorCode,
@@ -349,7 +350,7 @@ export const createNativeAdapter = (
             !isOCRResultV1(value) ||
             value.recognitionLevel !== request.recognitionLevel ||
             !Array.isArray(value.warnings) ||
-            value.text !== value.blocks.map(block => block.text).join('\n') ||
+            !ocrBlocksMatchText(value.blocks, value.text) ||
             (value.engine === 'ml-kit-latin' && request.script !== 'latin') ||
             (value.engine === 'ml-kit-chinese' && request.script !== 'chinese')
           )

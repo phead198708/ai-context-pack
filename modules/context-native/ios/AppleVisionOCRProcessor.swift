@@ -275,25 +275,28 @@ final class AppleVisionOCRProcessor: @unchecked Sendable {
       guard observations.count <= OCRResourcePolicy.maximumBlocks else {
         throw OCRProcessingError.resultInvalid
       }
-      let blocks: [[String: Any]] = sortOCRBlocksInReadingOrder(
-        try observations.compactMap { observation in
-          guard let candidate = observation.topCandidates(1).first,
-                !candidate.string.isEmpty else { return nil }
-          guard candidate.string.utf16.count <= OCRResourcePolicy.maximumBlockTextLength else {
-            throw OCRProcessingError.resultInvalid
-          }
-          let bounds = normalizedTopLeftBounds(observation.boundingBox)
-          return [
-            "text": candidate.string,
-            "confidence": Double(candidate.confidence),
-            "bounds": bounds,
-          ]
+      var recognizedBlocks: [[String: Any]] = []
+      var aggregateTextLength = 0
+      for observation in observations {
+        guard let candidate = observation.topCandidates(1).first,
+              !candidate.string.isEmpty else { continue }
+        let blockTextLength = candidate.string.utf16.count
+        guard blockTextLength <= OCRResourcePolicy.maximumBlockTextLength else {
+          throw OCRProcessingError.resultInvalid
         }
-      )
-      let text = blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
-      guard text.utf16.count <= OCRResourcePolicy.maximumTextLength else {
-        throw OCRProcessingError.resultInvalid
+        aggregateTextLength = try advanceOCRAggregateTextLength(
+          currentLength: aggregateTextLength,
+          nextTextLength: blockTextLength,
+          hasPreviousBlock: !recognizedBlocks.isEmpty
+        )
+        recognizedBlocks.append([
+          "text": candidate.string,
+          "confidence": Double(candidate.confidence),
+          "bounds": normalizedTopLeftBounds(observation.boundingBox),
+        ])
       }
+      let blocks = sortOCRBlocksInReadingOrder(recognizedBlocks)
+      let text = blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
       let lowConfidence = blocks.contains { block in
         (block["confidence"] as? Double).map { $0 < 0.5 } == true
       }
@@ -379,6 +382,22 @@ func sortOCRBlocksInReadingOrder(_ blocks: [[String: Any]]) -> [[String: Any]] {
       compareOCRBlock(left, right, keys: ["x", "y", "width", "height"])
     }
   }
+}
+
+func advanceOCRAggregateTextLength(
+  currentLength: Int,
+  nextTextLength: Int,
+  hasPreviousBlock: Bool
+) throws -> Int {
+  guard currentLength >= 0,
+        currentLength <= OCRResourcePolicy.maximumTextLength,
+        nextTextLength >= 0 else {
+    throw OCRProcessingError.resultInvalid
+  }
+  let separatorLength = hasPreviousBlock ? 1 : 0
+  let remaining = OCRResourcePolicy.maximumTextLength - currentLength - separatorLength
+  guard nextTextLength <= remaining else { throw OCRProcessingError.resultInvalid }
+  return currentLength + separatorLength + nextTextLength
 }
 
 private func compareOCRBlock(
