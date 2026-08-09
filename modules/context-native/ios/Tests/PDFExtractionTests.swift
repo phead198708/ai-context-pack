@@ -20,12 +20,18 @@ final class PDFExtractionTests: XCTestCase {
       .map { String(format: "%02x", $0) }.joined()
     XCTAssertEqual(info["sha256"] as? String, expectedHash)
 
+    let embeddedHash = try beginSession(
+      processor,
+      taskId: firstTaskId,
+      file: fixtureURL("text-one-page.pdf")
+    )
     let embedded = try processor.extractPage(
       taskId: firstTaskId,
       fileURL: fixtureURL("text-one-page.pdf"),
-      expectedSourceSHA256: try pdfSHA256(fixtureURL("text-one-page.pdf")),
+      expectedSourceSHA256: embeddedHash,
       pageIndex: 0,
-      script: "latin"
+      script: "latin",
+      reserved: true
     )
     XCTAssertEqual(embedded["status"] as? String, "complete")
     XCTAssertEqual(embedded["method"] as? String, "embedded-text")
@@ -35,36 +41,48 @@ final class PDFExtractionTests: XCTestCase {
       embedded["characterCount"] as? Int,
       (embedded["text"] as? String)?.utf16.count
     )
+    processor.finish(taskId: firstTaskId)
 
+    let renderedHash = try beginSession(
+      processor,
+      taskId: secondTaskId,
+      file: fixtureURL("scanned-one-page.pdf")
+    )
     let rendered = try processor.extractPage(
       taskId: secondTaskId,
       fileURL: fixtureURL("scanned-one-page.pdf"),
-      expectedSourceSHA256: try pdfSHA256(fixtureURL("scanned-one-page.pdf")),
+      expectedSourceSHA256: renderedHash,
       pageIndex: 0,
-      script: "latin"
+      script: "latin",
+      reserved: true
     )
     XCTAssertEqual(rendered["status"] as? String, "complete")
     XCTAssertEqual(rendered["method"] as? String, "rendered-ocr")
     XCTAssertEqual(rendered["engine"] as? String, "apple-vision")
     XCTAssertTrue((rendered["warnings"] as? [String])?.contains("PDF_PAGE_OCR_FALLBACK") == true)
+    processor.finish(taskId: secondTaskId)
 
     let mixed = fixtureURL("mixed-two-page.pdf")
+    let mixedHash = try beginSession(processor, taskId: firstTaskId, file: mixed)
     let first = try processor.extractPage(
       taskId: firstTaskId,
       fileURL: mixed,
-      expectedSourceSHA256: try pdfSHA256(mixed),
+      expectedSourceSHA256: mixedHash,
       pageIndex: 0,
-      script: "latin"
+      script: "latin",
+      reserved: true
     )
     let second = try processor.extractPage(
-      taskId: secondTaskId,
+      taskId: firstTaskId,
       fileURL: mixed,
-      expectedSourceSHA256: try pdfSHA256(mixed),
+      expectedSourceSHA256: mixedHash,
       pageIndex: 1,
-      script: "latin"
+      script: "latin",
+      reserved: true
     )
     XCTAssertEqual(first["method"] as? String, "embedded-text")
     XCTAssertEqual(second["method"] as? String, "rendered-ocr")
+    processor.finish(taskId: firstTaskId)
   }
 
   func testCorruptOutOfRangeAndSharedCancellationHaveStableCodes() throws {
@@ -72,17 +90,24 @@ final class PDFExtractionTests: XCTestCase {
     XCTAssertThrowsError(try processor.inspect(fileURL: fixtureURL("corrupt-truncated.pdf"))) {
       XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_CORRUPT")
     }
+    let sourceHash = try beginSession(
+      processor,
+      taskId: firstTaskId,
+      file: fixtureURL("text-one-page.pdf")
+    )
     XCTAssertThrowsError(
       try processor.extractPage(
         taskId: firstTaskId,
         fileURL: fixtureURL("text-one-page.pdf"),
-        expectedSourceSHA256: try pdfSHA256(fixtureURL("text-one-page.pdf")),
+        expectedSourceSHA256: sourceHash,
         pageIndex: 1,
-        script: "latin"
+        script: "latin",
+        reserved: true
       )
     ) {
       XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_PAGE_OUT_OF_RANGE")
     }
+    processor.finish(taskId: firstTaskId)
 
     let registry = OCRCancellationRegistry()
     let first = ApplePDFProcessor(registry: registry)
@@ -97,6 +122,32 @@ final class PDFExtractionTests: XCTestCase {
     replacement.finish(taskId: secondTaskId)
   }
 
+  func testCancelledInspectionStopsBeforeHashingAndReleasesTheSourceSnapshot() throws {
+    let processor = ApplePDFProcessor()
+    let document = fixtureURL("text-one-page.pdf")
+    try processor.reserve(taskId: firstTaskId)
+    XCTAssertTrue(processor.cancel(taskId: firstTaskId))
+
+    XCTAssertThrowsError(
+      try processor.inspect(
+        taskId: firstTaskId,
+        fileURL: document,
+        expectedSourceSHA256: try pdfSHA256(document),
+        reserved: true
+      )
+    ) {
+      XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_CANCELLED")
+    }
+
+    let replacementHash = try beginSession(
+      processor,
+      taskId: secondTaskId,
+      file: document
+    )
+    XCTAssertEqual(replacementHash, try pdfSHA256(document))
+    processor.finish(taskId: secondTaskId)
+  }
+
   func testEncryptedBlankSparseOverLimitAndOversizedFixturesAreDeterministic() throws {
     let processor = ApplePDFProcessor()
     XCTAssertThrowsError(try processor.inspect(fileURL: fixtureURL("encrypted-one-page.pdf"))) {
@@ -106,23 +157,36 @@ final class PDFExtractionTests: XCTestCase {
       XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_TOO_MANY_PAGES")
     }
 
+    let blankHash = try beginSession(
+      processor,
+      taskId: firstTaskId,
+      file: fixtureURL("empty-one-page.pdf")
+    )
     let blank = try processor.extractPage(
       taskId: firstTaskId,
       fileURL: fixtureURL("empty-one-page.pdf"),
-      expectedSourceSHA256: try pdfSHA256(fixtureURL("empty-one-page.pdf")),
+      expectedSourceSHA256: blankHash,
       pageIndex: 0,
-      script: "latin"
+      script: "latin",
+      reserved: true
     )
     XCTAssertEqual(blank["status"] as? String, "complete")
     XCTAssertEqual(blank["method"] as? String, "rendered-ocr")
     XCTAssertTrue((blank["warnings"] as? [String])?.contains("PDF_PAGE_EMPTY") == true)
+    processor.finish(taskId: firstTaskId)
 
+    let sparseHash = try beginSession(
+      processor,
+      taskId: secondTaskId,
+      file: fixtureURL("sparse-one-page.pdf")
+    )
     let sparse = try processor.extractPage(
       taskId: secondTaskId,
       fileURL: fixtureURL("sparse-one-page.pdf"),
-      expectedSourceSHA256: try pdfSHA256(fixtureURL("sparse-one-page.pdf")),
+      expectedSourceSHA256: sparseHash,
       pageIndex: 0,
-      script: "latin"
+      script: "latin",
+      reserved: true
     )
     XCTAssertEqual(sparse["status"] as? String, "complete")
     XCTAssertEqual(sparse["method"] as? String, "rendered-ocr")
@@ -131,6 +195,8 @@ final class PDFExtractionTests: XCTestCase {
     )
     XCTAssertFalse((sparse["warnings"] as? [String])?.contains("PDF_PAGE_EMPTY") == true)
     XCTAssertTrue((sparse["text"] as? String)?.contains("A") == true)
+    XCTAssertEqual(sparse["embeddedText"] as? String, "A")
+    processor.finish(taskId: secondTaskId)
 
     let oversized = FileManager.default.temporaryDirectory
       .appendingPathComponent("\(UUID().uuidString).pdf")
@@ -174,6 +240,8 @@ final class PDFExtractionTests: XCTestCase {
     let document = fixtureURL("mixed-twenty-page.pdf")
     let info = try processor.inspect(fileURL: document)
     XCTAssertEqual(info["pageCount"] as? Int, 20)
+    let taskId = UUID().uuidString.lowercased()
+    let sourceSHA256 = try beginSession(processor, taskId: taskId, file: document)
 
     var usageBefore = rusage()
     XCTAssertEqual(getrusage(RUSAGE_SELF, &usageBefore), 0)
@@ -182,11 +250,12 @@ final class PDFExtractionTests: XCTestCase {
     var renderedPages = 0
     for pageIndex in 0..<20 {
       let result = try processor.extractPage(
-        taskId: UUID().uuidString.lowercased(),
+        taskId: taskId,
         fileURL: document,
-        expectedSourceSHA256: try pdfSHA256(document),
+        expectedSourceSHA256: sourceSHA256,
         pageIndex: pageIndex,
-        script: "latin"
+        script: "latin",
+        reserved: true
       )
       XCTAssertEqual(result["status"] as? String, "complete")
       if result["method"] as? String == "embedded-text" { embeddedPages += 1 }
@@ -203,15 +272,20 @@ final class PDFExtractionTests: XCTestCase {
     XCTAssertEqual(renderedPages, 10)
     XCTAssertGreaterThan(durationMs, 0)
     XCTAssertGreaterThan(observedPeakBytes, 0)
+    processor.finish(taskId: taskId)
 
     let cancellationId = UUID().uuidString.lowercased()
-    try processor.reserve(taskId: cancellationId)
+    let cancellationHash = try beginSession(
+      processor,
+      taskId: cancellationId,
+      file: document
+    )
     XCTAssertTrue(processor.cancel(taskId: cancellationId))
     XCTAssertThrowsError(
       try processor.extractPage(
         taskId: cancellationId,
         fileURL: document,
-        expectedSourceSHA256: try pdfSHA256(document),
+        expectedSourceSHA256: cancellationHash,
         pageIndex: 0,
         script: "latin",
         reserved: true
@@ -219,6 +293,7 @@ final class PDFExtractionTests: XCTestCase {
     ) {
       XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_CANCELLED")
     }
+    processor.finish(taskId: cancellationId)
 
     print(
       "PDF_BENCHMARK_IOS pages=20 durationMs=\(Int(durationMs)) " +
@@ -226,27 +301,26 @@ final class PDFExtractionTests: XCTestCase {
     )
   }
 
-  func testPageExtractionRejectsAReplacementAtTheInspectedPath() throws {
+  func testPageExtractionUsesTheImmutableInspectedSnapshotAfterPathReplacement() throws {
     let file = FileManager.default.temporaryDirectory
       .appendingPathComponent("\(UUID().uuidString).pdf")
     defer { try? FileManager.default.removeItem(at: file) }
     try Data(contentsOf: fixtureURL("text-one-page.pdf")).write(to: file)
     let processor = ApplePDFProcessor()
-    let inspected = try processor.inspect(fileURL: file)
-    let sourceSHA256 = try XCTUnwrap(inspected["sha256"] as? String)
+    let sourceSHA256 = try beginSession(processor, taskId: firstTaskId, file: file)
 
     try Data(contentsOf: fixtureURL("scanned-one-page.pdf")).write(to: file, options: .atomic)
-    XCTAssertThrowsError(
-      try processor.extractPage(
-        taskId: firstTaskId,
-        fileURL: file,
-        expectedSourceSHA256: sourceSHA256,
-        pageIndex: 0,
-        script: "latin"
-      )
-    ) {
-      XCTAssertEqual(($0 as? PDFProcessingError)?.stableCode, "PDF_RESULT_INVALID")
-    }
+    let result = try processor.extractPage(
+      taskId: firstTaskId,
+      fileURL: file,
+      expectedSourceSHA256: sourceSHA256,
+      pageIndex: 0,
+      script: "latin",
+      reserved: true
+    )
+    XCTAssertEqual(result["method"] as? String, "embedded-text")
+    XCTAssertTrue((result["text"] as? String)?.contains("Synthetic PDF fixture") == true)
+    processor.finish(taskId: firstTaskId)
   }
 
   func testEmbeddedTextThresholdAndSparseReconciliationUseUTF16Units() {
@@ -267,6 +341,10 @@ final class PDFExtractionTests: XCTestCase {
     XCTAssertEqual(
       reconcilePDFSparseEmbeddedText(embedded: "A", recognized: "OCR A result"),
       "OCR A result"
+    )
+    XCTAssertEqual(
+      reconcilePDFSparseEmbeddedText(embedded: "é", recognized: "e\u{301}"),
+      "é\ne\u{301}"
     )
   }
 
@@ -312,5 +390,20 @@ final class PDFExtractionTests: XCTestCase {
   private func pdfSHA256(_ file: URL) throws -> String {
     SHA256.hash(data: try Data(contentsOf: file))
       .map { String(format: "%02x", $0) }.joined()
+  }
+
+  @discardableResult
+  private func beginSession(
+    _ processor: ApplePDFProcessor,
+    taskId: String,
+    file: URL
+  ) throws -> String {
+    let sourceSHA256 = try pdfSHA256(file)
+    _ = try processor.inspect(
+      taskId: taskId,
+      fileURL: file,
+      expectedSourceSHA256: sourceSHA256
+    )
+    return sourceSHA256
   }
 }

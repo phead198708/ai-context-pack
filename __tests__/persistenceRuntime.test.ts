@@ -428,6 +428,8 @@ class RuntimeNative implements NativeAdapter {
 
   async cancelPdfExtraction() {}
 
+  async finishPdfExtraction() {}
+
   async readPlainTextFile(): Promise<NativePlainTextFileV1> {
     throw new Error('unused');
   }

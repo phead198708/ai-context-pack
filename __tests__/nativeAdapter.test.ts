@@ -172,6 +172,7 @@ describe('native adapter runtime boundary', () => {
       inspectPdf: jest.fn().mockResolvedValue(document),
       extractPdfPage: jest.fn().mockResolvedValue(page),
       cancelPdfExtraction: jest.fn().mockResolvedValue(true),
+      finishPdfExtraction: jest.fn().mockResolvedValue(true),
       readPlainTextFile: jest.fn().mockResolvedValue({
         schemaVersion: 1,
         text,
@@ -182,7 +183,18 @@ describe('native adapter runtime boundary', () => {
     };
     const guarded = createNativeAdapter(native);
 
-    await expect(guarded.inspectPdf(fileUri)).resolves.toEqual(document);
+    await expect(
+      guarded.inspectPdf({
+        taskId,
+        fileUri,
+        sourceSha256: 'a'.repeat(64),
+      }),
+    ).resolves.toEqual(document);
+    expect(native.inspectPdf).toHaveBeenCalledWith(
+      taskId,
+      fileUri,
+      'a'.repeat(64),
+    );
     await expect(
       guarded.extractPdfPage({
         taskId,
@@ -200,9 +212,56 @@ describe('native adapter runtime boundary', () => {
       'chinese',
     );
     await expect(guarded.cancelPdfExtraction(taskId)).resolves.toBeUndefined();
+    await expect(guarded.finishPdfExtraction(taskId)).resolves.toBeUndefined();
     await expect(
       guarded.readPlainTextFile('file:///cache/synthetic.txt'),
     ).resolves.toMatchObject({ text, byteCount: 22 });
+  });
+
+  test('accepts only source-proven sparse embedded text reconciled with OCR blocks', async () => {
+    const taskId = '123e4567-e89b-42d3-a456-426614174000';
+    const sparsePage = {
+      schemaVersion: 1,
+      pageIndex: 0,
+      method: 'rendered-ocr',
+      engine: 'apple-vision',
+      revision: '3',
+      durationMs: 1,
+      characterCount: 3,
+      warnings: ['PDF_EMBEDDED_TEXT_SPARSE', 'PDF_PAGE_OCR_FALLBACK'],
+      status: 'complete',
+      text: 'A\n4',
+      embeddedText: 'A',
+      blocks: [{ text: '4', bounds: { x: 0, y: 0, width: 0.1, height: 0.1 } }],
+    };
+    const extractPdfPage = jest.fn().mockResolvedValue(sparsePage);
+    const guarded = createNativeAdapter({
+      ...mockNativeModule,
+      extractPdfPage,
+    });
+    const request = {
+      taskId,
+      fileUri: 'file:///cache/synthetic.pdf',
+      sourceSha256: 'a'.repeat(64),
+      pageIndex: 0,
+      script: 'latin' as const,
+    };
+
+    await expect(guarded.extractPdfPage(request)).resolves.toEqual(sparsePage);
+    extractPdfPage.mockResolvedValueOnce({
+      ...sparsePage,
+      embeddedText: 'B',
+    });
+    await expect(guarded.extractPdfPage(request)).rejects.toMatchObject({
+      code: 'PDF_RESULT_INVALID',
+    });
+    const unprovenSparsePage = Object.fromEntries(
+      Object.entries(sparsePage).filter(([key]) => key !== 'embeddedText'),
+    );
+    extractPdfPage.mockResolvedValueOnce(unprovenSparsePage);
+    await expect(guarded.extractPdfPage(request)).rejects.toMatchObject({
+      code: 'PDF_RESULT_INVALID',
+    });
   });
 
   test('fails closed on invalid PDF/text requests, DTOs, and unknown native errors', async () => {
@@ -212,6 +271,7 @@ describe('native adapter runtime boundary', () => {
       inspectPdf: jest.fn().mockResolvedValue({ pageCount: 1 }),
       extractPdfPage: jest.fn().mockResolvedValue({ schemaVersion: 1 }),
       cancelPdfExtraction: jest.fn().mockResolvedValue(false),
+      finishPdfExtraction: jest.fn().mockResolvedValue(false),
       readPlainTextFile: jest.fn().mockResolvedValue({
         schemaVersion: 1,
         text: 'abc',
@@ -223,7 +283,11 @@ describe('native adapter runtime boundary', () => {
     const guarded = createNativeAdapter(native);
 
     await expect(
-      guarded.inspectPdf('content://provider/file'),
+      guarded.inspectPdf({
+        taskId,
+        fileUri: 'content://provider/file',
+        sourceSha256: 'a'.repeat(64),
+      }),
     ).rejects.toMatchObject({ code: 'PDF_RESULT_INVALID' });
     await expect(
       guarded.extractPdfPage({
@@ -255,6 +319,9 @@ describe('native adapter runtime boundary', () => {
     await expect(guarded.cancelPdfExtraction(taskId)).rejects.toMatchObject({
       code: 'PDF_RESULT_INVALID',
     });
+    await expect(guarded.finishPdfExtraction(taskId)).rejects.toMatchObject({
+      code: 'PDF_RESULT_INVALID',
+    });
     await expect(
       guarded.readPlainTextFile('file:///cache/synthetic.txt'),
     ).rejects.toMatchObject({ code: 'TEXT_RESULT_INVALID' });
@@ -278,11 +345,19 @@ describe('native adapter runtime boundary', () => {
 
     native.inspectPdf.mockRejectedValue({ code: 'PDF_ENCRYPTED' });
     await expect(
-      guarded.inspectPdf('file:///cache/synthetic.pdf'),
+      guarded.inspectPdf({
+        taskId,
+        fileUri: 'file:///cache/synthetic.pdf',
+        sourceSha256: 'a'.repeat(64),
+      }),
     ).rejects.toMatchObject({ code: 'PDF_ENCRYPTED' });
     native.inspectPdf.mockRejectedValue({ code: 'PRIVATE_NATIVE_FAILURE' });
     await expect(
-      guarded.inspectPdf('file:///cache/synthetic.pdf'),
+      guarded.inspectPdf({
+        taskId,
+        fileUri: 'file:///cache/synthetic.pdf',
+        sourceSha256: 'a'.repeat(64),
+      }),
     ).rejects.toMatchObject({ code: 'PDF_PAGE_EXTRACTION_FAILED' });
   });
 

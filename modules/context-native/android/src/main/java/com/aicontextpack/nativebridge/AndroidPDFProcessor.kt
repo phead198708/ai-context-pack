@@ -7,15 +7,20 @@ import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import androidx.annotation.RequiresApi
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.ceil
@@ -29,6 +34,7 @@ internal object AndroidPDFResourcePolicy {
   const val lowRamMaximumRenderedPixels = 4_000_000
   const val minimumEmbeddedTextCharacters = 16
   const val maximumPageTextLength = 1_000_000
+  const val maximumXrefDictionaryBytes = 1_048_576
 }
 
 private val CANONICAL_PDF_SHA256 = Regex("^[0-9a-f]{64}$")
@@ -48,32 +54,86 @@ private sealed class PreparedPDFPage {
   data class Failed(val result: Map<String, Any>) : PreparedPDFPage()
 }
 
+private data class AndroidPDFSourceSession(
+  val taskId: String,
+  val fileUri: String,
+  val sourceSha256: String,
+  val byteCount: Long,
+  val device: Long,
+  val inode: Long,
+  val modifiedSeconds: Long,
+  val pageCount: Int,
+  val descriptor: ParcelFileDescriptor,
+)
+
 internal class AndroidPDFProcessor(
   private val registry: OcrTaskRegistry = OcrTaskRegistry(),
 ) {
+  private val sourceLock = Any()
+  private var sourceSession: AndroidPDFSourceSession? = null
+
   fun inspect(context: Context, fileUri: String): Map<String, Any> {
-    val file = validatedFile(context, fileUri)
-    val sourceSha256 = try {
-      sha256(file)
-    } catch (_: IOException) {
-      throw NativeException("PDF_CORRUPT")
-    }
-    return withRenderer(file) { renderer ->
-      validatePageCount(renderer.pageCount)
-      mapOf(
-        "schemaVersion" to 1,
-        "pageCount" to renderer.pageCount,
-        "byteCount" to file.length(),
-        "sha256" to sourceSha256,
-        "engine" to "pdf-renderer",
-        "revision" to Build.VERSION.SDK_INT.toString(),
-        "limit" to mapOf(
-          "pages" to AndroidPDFResourcePolicy.maximumPages,
-          "bytes" to AndroidPDFResourcePolicy.maximumFileBytes,
-        ),
+    val source = openValidatedSource(context, fileUri, taskId = null)
+    source.descriptor.use {
+      return documentInfo(
+        pageCount = source.pageCount,
+        byteCount = source.byteCount,
+        sourceSha256 = source.sourceSha256,
       )
     }
   }
+
+  fun inspect(
+    context: Context,
+    taskId: String,
+    fileUri: String,
+    expectedSourceSha256: String,
+    reserved: Boolean = false,
+  ): Map<String, Any> {
+    var registered = reserved
+    var source: AndroidPDFSourceSession? = null
+    try {
+      if (!isCanonicalPDFTaskId(taskId) || !CANONICAL_PDF_SHA256.matches(expectedSourceSha256)) {
+        throw NativeException("PDF_RESULT_INVALID")
+      }
+      if (!reserved) {
+        reserve(taskId)
+        registered = true
+      }
+      source = openValidatedSource(context, fileUri, taskId)
+      if (source.sourceSha256 != expectedSourceSha256) {
+        throw NativeException("PDF_RESULT_INVALID")
+      }
+      val retained = source
+      synchronized(sourceLock) {
+        if (sourceSession != null) throw NativeException("PDF_RESOURCE_BUSY")
+        sourceSession = retained
+      }
+      source = null
+      return documentInfo(retained.pageCount, retained.byteCount, retained.sourceSha256)
+    } catch (error: Throwable) {
+      source?.descriptor?.close()
+      if (registered) registry.finish(taskId)
+      throw error
+    }
+  }
+
+  private fun documentInfo(
+    pageCount: Int,
+    byteCount: Long,
+    sourceSha256: String,
+  ): Map<String, Any> = mapOf(
+    "schemaVersion" to 1,
+    "pageCount" to pageCount,
+    "byteCount" to byteCount,
+    "sha256" to sourceSha256,
+    "engine" to "pdf-renderer",
+    "revision" to Build.VERSION.SDK_INT.toString(),
+    "limit" to mapOf(
+      "pages" to AndroidPDFResourcePolicy.maximumPages,
+      "bytes" to AndroidPDFResourcePolicy.maximumFileBytes,
+    ),
+  )
 
   fun reserve(taskId: String) {
     if (!isCanonicalPDFTaskId(taskId)) throw NativeException("PDF_RESULT_INVALID")
@@ -89,34 +149,26 @@ internal class AndroidPDFProcessor(
     script: String,
     reserved: Boolean = false,
   ): Map<String, Any> {
-    var registered = reserved
-    try {
-      if (
-        !isCanonicalPDFTaskId(taskId) ||
-        pageIndex !in 0 until AndroidPDFResourcePolicy.maximumPages ||
-        (script != "latin" && script != "chinese")
-      ) throw NativeException("PDF_RESULT_INVALID")
-      if (!reserved) {
-        reserve(taskId)
-        registered = true
+    if (
+      !isCanonicalPDFTaskId(taskId) ||
+      pageIndex !in 0 until AndroidPDFResourcePolicy.maximumPages ||
+      (script != "latin" && script != "chinese")
+    ) throw NativeException("PDF_RESULT_INVALID")
+    if (!reserved) throw NativeException("PDF_RESULT_INVALID")
+    val source = sourceForTask(taskId, fileUri, expectedSourceSha256)
+    validateSourceDescriptor(source)
+    val started = System.nanoTime()
+    val prepared = withRenderer(source.descriptor) { renderer ->
+      if (renderer.pageCount != source.pageCount) throw NativeException("PDF_RESULT_INVALID")
+      if (pageIndex >= source.pageCount) throw NativeException("PDF_PAGE_OUT_OF_RANGE")
+      renderer.openPage(pageIndex).use { page ->
+        checkCancellation(taskId)
+        prepareOpenPage(context, taskId, pageIndex, page, started)
       }
-      val file = validatedFile(context, fileUri)
-      validateExpectedSource(file, expectedSourceSha256)
-      val started = System.nanoTime()
-      val prepared = withRenderer(file) { renderer ->
-        validatePageCount(renderer.pageCount)
-        if (pageIndex >= renderer.pageCount) throw NativeException("PDF_PAGE_OUT_OF_RANGE")
-        renderer.openPage(pageIndex).use { page ->
-          checkCancellation(taskId)
-          prepareOpenPage(context, taskId, pageIndex, page, started)
-        }
-      }
-      val result = finishPreparedPage(taskId, pageIndex, script, prepared)
-      validateExpectedSource(file, expectedSourceSha256)
-      return result
-    } finally {
-      if (registered) registry.finish(taskId)
     }
+    val result = finishPreparedPage(taskId, pageIndex, script, prepared)
+    validateSourceDescriptor(source)
+    return result
   }
 
   fun cancel(taskId: String): Boolean {
@@ -124,7 +176,26 @@ internal class AndroidPDFProcessor(
     return registry.cancel(taskId, "PDF_CANCELLED")
   }
 
-  fun finish(taskId: String) = registry.finish(taskId)
+  fun finish(taskId: String) {
+    val descriptor = synchronized(sourceLock) {
+      val current = sourceSession
+      if (current?.taskId == taskId) sourceSession = null
+      current?.takeIf { it.taskId == taskId }?.descriptor
+    }
+    descriptor?.close()
+    registry.finish(taskId)
+  }
+
+  fun destroy() {
+    val current = synchronized(sourceLock) {
+      sourceSession.also { sourceSession = null }
+    }
+    current?.let {
+      registry.cancel(it.taskId, "PDF_CANCELLED")
+      it.descriptor.close()
+      registry.finish(it.taskId)
+    }
+  }
 
   private fun prepareOpenPage(
     context: Context,
@@ -231,6 +302,9 @@ internal class AndroidPDFProcessor(
             revision = "16.0.1",
             text = reconciledText,
             blocks = recognized.second,
+            embeddedText = prepared.embeddedText.takeIf {
+              warnings.contains("PDF_EMBEDDED_TEXT_SPARSE")
+            },
             warnings = warnings,
             started = prepared.started,
           )
@@ -364,36 +438,91 @@ internal class AndroidPDFProcessor(
     registry.failureCode(taskId)?.let { throw NativeException(it) }
   }
 
-  private fun validatedFile(context: Context, fileUri: String): File {
+  private fun openValidatedSource(
+    context: Context,
+    fileUri: String,
+    taskId: String?,
+  ): AndroidPDFSourceSession {
     val file = controlledSandboxFile(context, fileUri)
-    if (file.length() > AndroidPDFResourcePolicy.maximumFileBytes) {
-      throw NativeException("PDF_TOO_LARGE")
-    }
-    val preflight = try {
-      hasValidPDFEnvelope(file) to hasPDFEncryptionMarker(file)
-    } catch (_: IOException) {
+    val descriptor = try {
+      ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+    } catch (_: Exception) {
       throw NativeException("PDF_CORRUPT")
     }
-    if (!preflight.first) throw NativeException("PDF_CORRUPT")
-    if (preflight.second) throw NativeException("PDF_ENCRYPTED")
-    return file
+    try {
+      val initial = try { Os.fstat(descriptor.fileDescriptor) }
+      catch (_: Exception) { throw NativeException("PDF_CORRUPT") }
+      if (!OsConstants.S_ISREG(initial.st_mode) || initial.st_size < 0) {
+        throw NativeException("PDF_CORRUPT")
+      }
+      val reader = DescriptorPDFReader(descriptor)
+      reader.use {
+        if (reader.length != initial.st_size) throw NativeException("PDF_RESULT_INVALID")
+        if (reader.length > AndroidPDFResourcePolicy.maximumFileBytes) {
+          throw NativeException("PDF_TOO_LARGE")
+        }
+        val sourceSha256 = try {
+          sha256(reader) { taskId?.let(::checkCancellation) }
+        } catch (error: NativeException) {
+          throw error
+        } catch (_: IOException) {
+          throw NativeException("PDF_CORRUPT")
+        }
+        val preflight = try {
+          hasValidPDFEnvelope(reader) to hasPDFEncryptionMarker(reader)
+        } catch (_: IOException) {
+          throw NativeException("PDF_CORRUPT")
+        }
+        if (!preflight.first) throw NativeException("PDF_CORRUPT")
+        if (preflight.second) throw NativeException("PDF_ENCRYPTED")
+        taskId?.let(::checkCancellation)
+        val pageCount = withRenderer(descriptor) { renderer ->
+          validatePageCount(renderer.pageCount)
+          renderer.pageCount
+        }
+        val source = AndroidPDFSourceSession(
+          taskId = taskId.orEmpty(),
+          fileUri = fileUri,
+          sourceSha256 = sourceSha256,
+          byteCount = reader.length,
+          device = initial.st_dev,
+          inode = initial.st_ino,
+          modifiedSeconds = initial.st_mtime,
+          pageCount = pageCount,
+          descriptor = descriptor,
+        )
+        validateSourceDescriptor(source)
+        return source
+      }
+    } catch (error: Throwable) {
+      descriptor.close()
+      throw error
+    }
   }
 
-  private fun validateExpectedSource(file: File, expectedSourceSha256: String) {
-    val actual = try {
-      if (
-        !CANONICAL_PDF_SHA256.matches(expectedSourceSha256) ||
-        !file.isFile ||
-        file.length() > AndroidPDFResourcePolicy.maximumFileBytes ||
-        file.canonicalPath != file.absolutePath
-      ) throw NativeException("PDF_RESULT_INVALID")
-      sha256(file)
-    } catch (error: NativeException) {
-      throw error
-    } catch (_: IOException) {
-      throw NativeException("PDF_RESULT_INVALID")
-    }
-    if (actual != expectedSourceSha256) throw NativeException("PDF_RESULT_INVALID")
+  private fun sourceForTask(
+    taskId: String,
+    fileUri: String,
+    expectedSourceSha256: String,
+  ): AndroidPDFSourceSession = synchronized(sourceLock) {
+    sourceSession?.takeIf {
+      it.taskId == taskId &&
+        it.fileUri == fileUri &&
+        it.sourceSha256 == expectedSourceSha256
+    } ?: throw NativeException("PDF_RESULT_INVALID")
+  }
+
+  private fun validateSourceDescriptor(source: AndroidPDFSourceSession) {
+    val current = try { Os.fstat(source.descriptor.fileDescriptor) }
+    catch (_: Exception) { throw NativeException("PDF_RESULT_INVALID") }
+    if (
+      !OsConstants.S_ISREG(current.st_mode) ||
+      current.st_size != source.byteCount ||
+      current.st_size > AndroidPDFResourcePolicy.maximumFileBytes ||
+      current.st_dev != source.device ||
+      current.st_ino != source.inode ||
+      current.st_mtime != source.modifiedSeconds
+    ) throw NativeException("PDF_RESULT_INVALID")
   }
 
   private fun validatePageCount(pageCount: Int) {
@@ -403,9 +532,12 @@ internal class AndroidPDFProcessor(
     }
   }
 
-  private inline fun <T> withRenderer(file: File, action: (PdfRenderer) -> T): T {
+  private inline fun <T> withRenderer(
+    source: ParcelFileDescriptor,
+    action: (PdfRenderer) -> T,
+  ): T {
     val descriptor = try {
-      ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+      ParcelFileDescriptor.dup(source.fileDescriptor)
     } catch (_: Exception) {
       throw NativeException("PDF_CORRUPT")
     }
@@ -430,21 +562,23 @@ internal class AndroidPDFProcessor(
     revision: String,
     text: String,
     blocks: List<Map<String, Any>>,
+    embeddedText: String? = null,
     warnings: List<String>,
     started: Long,
-  ): Map<String, Any> = mapOf(
-    "schemaVersion" to 1,
-    "pageIndex" to pageIndex,
-    "method" to method,
-    "engine" to engine,
-    "revision" to revision,
-    "durationMs" to (System.nanoTime() - started) / 1_000_000.0,
-    "characterCount" to text.length,
-    "warnings" to warnings,
-    "status" to "complete",
-    "text" to text,
-    "blocks" to blocks,
-  )
+  ): Map<String, Any> = buildMap {
+    put("schemaVersion", 1)
+    put("pageIndex", pageIndex)
+    put("method", method)
+    put("engine", engine)
+    put("revision", revision)
+    put("durationMs", (System.nanoTime() - started) / 1_000_000.0)
+    put("characterCount", text.length)
+    put("warnings", warnings)
+    put("status", "complete")
+    put("text", text)
+    put("blocks", blocks)
+    if (embeddedText != null) put("embeddedText", embeddedText)
+  }
 
   private fun failedResult(
     pageIndex: Int,
@@ -519,63 +653,140 @@ internal fun reconcilePDFSparseEmbeddedText(
   return "$embedded\n$recognized"
 }
 
+private interface PDFRandomAccessReader : Closeable {
+  val length: Long
+  @Throws(IOException::class)
+  fun read(offset: Long, byteCount: Int): ByteArray
+}
+
+private class FilePDFReader(file: File) : PDFRandomAccessReader {
+  private val input = RandomAccessFile(file, "r")
+  override val length: Long get() = input.length()
+
+  override fun read(offset: Long, byteCount: Int): ByteArray {
+    if (offset < 0 || byteCount < 0 || offset > length) throw IOException("Invalid PDF range")
+    val requested = minOf(byteCount.toLong(), length - offset).toInt()
+    val output = ByteArray(requested)
+    input.seek(offset)
+    input.readFully(output)
+    return output
+  }
+
+  override fun close() = input.close()
+}
+
+private class DescriptorPDFReader(
+  descriptor: ParcelFileDescriptor,
+) : PDFRandomAccessReader {
+  private val input = ParcelFileDescriptor.AutoCloseInputStream(
+    ParcelFileDescriptor.dup(descriptor.fileDescriptor),
+  )
+  private val channel = input.channel
+  override val length: Long = channel.size()
+
+  override fun read(offset: Long, byteCount: Int): ByteArray {
+    if (offset < 0 || byteCount < 0 || offset > length) throw IOException("Invalid PDF range")
+    val requested = minOf(byteCount.toLong(), length - offset).toInt()
+    val buffer = ByteBuffer.allocate(requested)
+    var consumed = 0
+    while (consumed < requested) {
+      val count = channel.read(buffer, offset + consumed)
+      if (count < 0) throw IOException("Unexpected PDF EOF")
+      if (count == 0) throw IOException("PDF read made no progress")
+      consumed += count
+    }
+    return buffer.array()
+  }
+
+  override fun close() = input.close()
+}
+
 private fun isUnsafePDFControl(value: Int): Boolean =
   value <= 0x0008 || value == 0x000B || value == 0x000C ||
     value in 0x000E..0x001F || value in 0x007F..0x009F ||
     value in 0x202A..0x202E || value in 0x2066..0x2069
 
-internal fun hasPDFEncryptionMarker(file: File): Boolean {
-  RandomAccessFile(file, "r").use { input ->
-    val tailLength = minOf(1_048_576L, input.length()).toInt()
-    if (tailLength == 0) return false
-    val tail = ByteArray(tailLength)
-    input.seek(input.length() - tailLength)
-    input.readFully(tail)
-    val startXref = lastPDFKeyword(tail, "startxref", tail.size)
-    if (startXref < 0) return false
-    val xrefOffset = parseStartXrefOffset(tail, startXref) ?: return false
-    if (xrefOffset < 0 || xrefOffset >= input.length()) return false
-    val dictionaryLength = minOf(65_536L, input.length() - xrefOffset).toInt()
-    val dictionary = ByteArray(dictionaryLength)
-    input.seek(xrefOffset)
-    input.readFully(dictionary)
-    val dictionaryStart = skipPDFWhitespace(dictionary, 0, dictionary.size)
-    if (isPDFKeywordAt(dictionary, dictionaryStart, "xref")) {
-      val tailStartOffset = input.length() - tailLength
-      val xrefStartInTail = if (xrefOffset <= tailStartOffset) {
-        0
-      } else {
-        (xrefOffset - tailStartOffset).toInt()
-      }
-      val trailer = lastPDFKeyword(tail, "trailer", startXref)
-      if (trailer < xrefStartInTail) return false
-      return parseTopLevelPDFDictionary(
-        tail,
-        trailer + "trailer".length,
-        startXref,
-      )?.keys?.contains("Encrypt") == true
-    }
+internal fun hasPDFEncryptionMarker(file: File): Boolean =
+  FilePDFReader(file).use(::hasPDFEncryptionMarker)
 
-    val xrefDictionary = parseTopLevelPDFDictionary(
-      dictionary,
-      0,
-      dictionary.size,
-    ) ?: return false
-    return xrefDictionary.nameValues["Type"] == "XRef" &&
-      xrefDictionary.keys.contains("Encrypt")
+private fun hasPDFEncryptionMarker(input: PDFRandomAccessReader): Boolean {
+  val trailerWindow = AndroidPDFResourcePolicy.maximumXrefDictionaryBytes + 65_536L
+  val tailLength = minOf(trailerWindow, input.length).toInt()
+  if (tailLength == 0) throw IOException("Missing PDF trailer")
+  val tail = input.read(input.length - tailLength, tailLength)
+  val startXref = lastPDFKeyword(tail, "startxref", tail.size)
+  if (startXref < 0) throw IOException("Missing PDF startxref")
+  val xrefOffset = parseStartXrefOffset(tail, startXref)
+    ?: throw IOException("Invalid PDF startxref")
+  if (xrefOffset < 0 || xrefOffset >= input.length) {
+    throw IOException("PDF startxref is outside the source")
   }
+  val prefixLength = minOf(256L, input.length - xrefOffset).toInt()
+  val prefix = input.read(xrefOffset, prefixLength)
+  val dictionaryStart = skipPDFWhitespace(prefix, 0, prefix.size)
+  if (isPDFKeywordAt(prefix, dictionaryStart, "xref")) {
+    val tailStartOffset = input.length - tailLength
+    val xrefStartInTail = if (xrefOffset <= tailStartOffset) {
+      0
+    } else {
+      (xrefOffset - tailStartOffset).toInt()
+    }
+    val trailer = lastPDFKeyword(tail, "trailer", startXref)
+    if (trailer < xrefStartInTail) throw IOException("Missing active PDF trailer")
+    val trailerDictionary = parseTopLevelPDFDictionary(
+      tail,
+      trailer + "trailer".length,
+      startXref,
+    ) ?: throw IOException("Missing PDF trailer dictionary")
+    if (!trailerDictionary.complete) throw IOException("Incomplete PDF trailer dictionary")
+    return trailerDictionary.keys.contains("Encrypt")
+  }
+
+  val xrefDictionary = readCompleteXrefStreamDictionary(input, xrefOffset)
+  if (xrefDictionary.nameValues["Type"] != "XRef") {
+    throw IOException("Active PDF object is not an xref stream")
+  }
+  return xrefDictionary.keys.contains("Encrypt")
 }
 
-private fun sha256(file: File): String {
-  val digest = MessageDigest.getInstance("SHA-256")
-  file.inputStream().buffered().use { input ->
-    val buffer = ByteArray(64 * 1_024)
-    while (true) {
-      val count = input.read(buffer)
-      if (count < 0) break
-      digest.update(buffer, 0, count)
-    }
+private fun readCompleteXrefStreamDictionary(
+  input: PDFRandomAccessReader,
+  xrefOffset: Long,
+): TopLevelPDFDictionary {
+  val available = input.length - xrefOffset
+  val limit = minOf(
+    available,
+    AndroidPDFResourcePolicy.maximumXrefDictionaryBytes.toLong(),
+  )
+  val output = ByteArrayOutputStream(minOf(limit, 65_536L).toInt())
+  var consumed = 0L
+  while (consumed < limit) {
+    val requested = minOf(65_536L, limit - consumed).toInt()
+    val chunk = input.read(xrefOffset + consumed, requested)
+    if (chunk.isEmpty()) break
+    output.write(chunk)
+    consumed += chunk.size
+    val bytes = output.toByteArray()
+    val parsed = parseTopLevelPDFDictionary(bytes, 0, bytes.size)
+    if (parsed?.complete == true) return parsed
   }
+  throw IOException("PDF xref-stream dictionary exceeds its bounded parser policy")
+}
+
+private fun sha256(
+  input: PDFRandomAccessReader,
+  onChunk: () -> Unit = {},
+): String {
+  val digest = MessageDigest.getInstance("SHA-256")
+  var offset = 0L
+  while (offset < input.length) {
+    onChunk()
+    val chunk = input.read(offset, minOf(64 * 1_024L, input.length - offset).toInt())
+    if (chunk.isEmpty()) throw IOException("Unexpected PDF EOF")
+    digest.update(chunk)
+    offset += chunk.size
+  }
+  onChunk()
   return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
@@ -629,6 +840,7 @@ private fun isPDFWhitespace(value: Int): Boolean =
 private data class TopLevelPDFDictionary(
   val keys: Set<String>,
   val nameValues: Map<String, String>,
+  val complete: Boolean,
 )
 
 private data class ParsedPDFName(val value: String, val end: Int)
@@ -650,7 +862,7 @@ private fun parseTopLevelPDFDictionary(
     index = skipPDFWhitespaceAndComments(bytes, index, limit)
     if (index + 1 < limit && bytes[index] == '>'.code.toByte() &&
       bytes[index + 1] == '>'.code.toByte()
-    ) return TopLevelPDFDictionary(keys, nameValues)
+    ) return TopLevelPDFDictionary(keys, nameValues, complete = true)
     if (index >= limit) break
     if (bytes[index] != '/'.code.toByte()) {
       index = skipPDFValue(bytes, index, limit).end
@@ -661,13 +873,13 @@ private fun parseTopLevelPDFDictionary(
     index = skipPDFWhitespaceAndComments(bytes, key.end, limit)
     if (index + 1 < limit && bytes[index] == '>'.code.toByte() &&
       bytes[index + 1] == '>'.code.toByte()
-    ) return TopLevelPDFDictionary(keys, nameValues)
-    if (index >= limit) return TopLevelPDFDictionary(keys, nameValues)
+    ) return TopLevelPDFDictionary(keys, nameValues, complete = true)
+    if (index >= limit) return TopLevelPDFDictionary(keys, nameValues, complete = false)
     val value = skipPDFValue(bytes, index, limit)
     value.name?.let { nameValues[key.value] = it }
     index = value.end
   }
-  return TopLevelPDFDictionary(keys, nameValues)
+  return TopLevelPDFDictionary(keys, nameValues, complete = false)
 }
 
 private fun firstPDFDictionaryStart(bytes: ByteArray, start: Int, end: Int): Int {
@@ -827,23 +1039,21 @@ private fun skipPDFLiteralString(bytes: ByteArray, start: Int, end: Int): Int {
   return index
 }
 
-internal fun hasValidPDFEnvelope(file: File): Boolean {
-  if (file.length() < 8) return false
-  RandomAccessFile(file, "r").use { input ->
-    val headerLength = minOf(1_024L, input.length()).toInt()
-    val header = ByteArray(headerLength)
-    input.readFully(header)
+internal fun hasValidPDFEnvelope(file: File): Boolean =
+  FilePDFReader(file).use(::hasValidPDFEnvelope)
+
+private fun hasValidPDFEnvelope(input: PDFRandomAccessReader): Boolean {
+    if (input.length < 8) return false
+    val headerLength = minOf(1_024L, input.length).toInt()
+    val header = input.read(0, headerLength)
     if (!header.toString(Charsets.ISO_8859_1).contains("%PDF-")) return false
 
-    val tailLength = minOf(4_096L, input.length()).toInt()
-    val tail = ByteArray(tailLength)
-    input.seek(input.length() - tailLength)
-    input.readFully(tail)
+    val tailLength = minOf(4_096L, input.length).toInt()
+    val tail = input.read(input.length - tailLength, tailLength)
     val trailer = tail.toString(Charsets.ISO_8859_1)
     val startXref = trailer.lastIndexOf("startxref")
     val endOfFile = trailer.lastIndexOf("%%EOF")
     return startXref >= 0 && endOfFile > startXref
-  }
 }
 
 private fun isPDFDelimiter(value: Int): Boolean =

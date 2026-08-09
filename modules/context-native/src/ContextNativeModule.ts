@@ -75,7 +75,11 @@ declare class ContextNativeModule extends NativeModule {
     recognitionLevel: OCRRecognitionLevelV1,
   ): Promise<OCRResultV1>;
   cancelTextRecognition(taskId: string): Promise<boolean>;
-  inspectPdf(fileUri: string): Promise<PDFDocumentInfoV1>;
+  inspectPdf(
+    taskId: string,
+    fileUri: string,
+    sourceSha256: string,
+  ): Promise<PDFDocumentInfoV1>;
   extractPdfPage(
     taskId: string,
     fileUri: string,
@@ -84,6 +88,7 @@ declare class ContextNativeModule extends NativeModule {
     script: OCRScriptV1,
   ): Promise<PDFPageExtractionV1>;
   cancelPdfExtraction(taskId: string): Promise<boolean>;
+  finishPdfExtraction(taskId: string): Promise<boolean>;
   readPlainTextFile(fileUri: string): Promise<NativePlainTextFileV1>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }

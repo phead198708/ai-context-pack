@@ -5,6 +5,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.io.IOException
 
 class AndroidPDFProcessorTest {
   private val firstTaskId = "123e4567-e89b-42d3-a456-426614174000"
@@ -24,6 +25,7 @@ class AndroidPDFProcessorTest {
     )
     assertEquals("A\n4", reconcilePDFSparseEmbeddedText("A", "4"))
     assertEquals("OCR A result", reconcilePDFSparseEmbeddedText("A", "OCR A result"))
+    assertEquals("é\ne\u0301", reconcilePDFSparseEmbeddedText("é", "e\u0301"))
   }
 
   @Test
@@ -86,6 +88,21 @@ class AndroidPDFProcessorTest {
       xrefDictionary = "<< /Ty#70e /XR#65f /Size 2 /W [1 1 1] /Length 0 " +
         "/En#63rypt 1 0 R >>",
     )
+    val lateEncryptedXrefStream = xrefStreamPDF(
+      xrefDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length 0 /Custom (" +
+        "a".repeat(70_000) + ") /Encrypt 1 0 R >>",
+    )
+    val oversizedIncompleteXrefStream = xrefStreamPDF(
+      xrefDictionary = "<< /Type /XRef /Custom (" +
+        "a".repeat(AndroidPDFResourcePolicy.maximumXrefDictionaryBytes + 1),
+    )
+    val malformedStartXref = temporaryPDF(
+      "%PDF-1.7\nstartxref\n999999\n%%EOF",
+    )
+    val incompleteClassicTrailer = classicXrefPDF(
+      trailerDictionary = "<< /Size 2 /Custom (" +
+        "a".repeat(AndroidPDFResourcePolicy.maximumXrefDictionaryBytes + 1),
+    )
     try {
       assertTrue(hasPDFEncryptionMarker(encrypted))
       assertEquals(false, hasPDFEncryptionMarker(metadataOnly))
@@ -96,6 +113,16 @@ class AndroidPDFProcessorTest {
       assertEquals(false, hasPDFEncryptionMarker(nestedXrefStream))
       assertTrue(hasPDFEncryptionMarker(escapedEncrypted))
       assertTrue(hasPDFEncryptionMarker(escapedEncryptedXrefStream))
+      assertTrue(hasPDFEncryptionMarker(lateEncryptedXrefStream))
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(oversizedIncompleteXrefStream)
+      }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(malformedStartXref)
+      }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(incompleteClassicTrailer)
+      }
     } finally {
       encrypted.delete()
       metadataOnly.delete()
@@ -106,6 +133,10 @@ class AndroidPDFProcessorTest {
       nestedXrefStream.delete()
       escapedEncrypted.delete()
       escapedEncryptedXrefStream.delete()
+      lateEncryptedXrefStream.delete()
+      oversizedIncompleteXrefStream.delete()
+      malformedStartXref.delete()
+      incompleteClassicTrailer.delete()
     }
   }
 

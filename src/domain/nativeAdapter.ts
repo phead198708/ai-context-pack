@@ -10,7 +10,10 @@ import type {
 import type { PendingShareEvent, RecoveryEvent } from './shareImportResult';
 import type { MainAppImportDraft, MainAppImportInput } from './mainAppImport';
 import type { OCRRequestV1 } from './ocr';
-import type { PDFPageExtractionRequestV1 } from './pdfExtraction';
+import type {
+  PDFInspectionRequestV1,
+  PDFPageExtractionRequestV1,
+} from './pdfExtraction';
 export interface NativeHandoffArtifact {
   readonly id: string;
   readonly itemId: string;
@@ -104,11 +107,12 @@ export interface NativeAdapter {
   getOCRCapabilities(): Promise<OCRCapabilitiesV1>;
   recognizeText(request: OCRRequestV1): Promise<OCRResultV1>;
   cancelTextRecognition(taskId: string): Promise<void>;
-  inspectPdf(fileUri: string): Promise<PDFDocumentInfoV1>;
+  inspectPdf(request: PDFInspectionRequestV1): Promise<PDFDocumentInfoV1>;
   extractPdfPage(
     request: PDFPageExtractionRequestV1,
   ): Promise<PDFPageExtractionV1>;
   cancelPdfExtraction(taskId: string): Promise<void>;
+  finishPdfExtraction(taskId: string): Promise<void>;
   readPlainTextFile(fileUri: string): Promise<NativePlainTextFileV1>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }

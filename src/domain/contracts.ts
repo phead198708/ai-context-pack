@@ -136,6 +136,12 @@ export interface CompletePDFPageExtractionV1 extends PDFPageExtractionBaseV1 {
   readonly status: 'complete';
   readonly text: string;
   readonly blocks: readonly OCRBlockV1[];
+  /**
+   * Exact embedded text retained when sparse text is reconciled with OCR.
+   * Optional for backward-compatible V1 decoding; required on new sparse
+   * rendered-OCR results so the boundary can validate the reconciliation.
+   */
+  readonly embeddedText?: string;
 }
 
 export interface FailedPDFPageExtractionV1 extends PDFPageExtractionBaseV1 {

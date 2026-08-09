@@ -50,6 +50,7 @@ public final class ContextNativeModule: Module {
       if let taskId = self?.pdfLifetime.destroy() {
         _ = self?.pdfProcessor.cancel(taskId: taskId)
       }
+      self?.pdfProcessor.destroy()
     }
 
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
@@ -366,15 +367,46 @@ public final class ContextNativeModule: Module {
       return true
     }
 
-    AsyncFunction("inspectPdf") { (fileUri: String) async throws -> [String: Any] in
+    AsyncFunction("inspectPdf") { [weak self] (
+      taskId: String,
+      fileUri: String,
+      sourceSha256: String
+    ) async throws -> [String: Any] in
+      guard let self else { throw NativeError("PDF_PAGE_EXTRACTION_FAILED") }
       let url = try controlledArtifactSourceURL(fileUri)
+      let processor = self.pdfProcessor
+      let lifetime = self.pdfLifetime
       do {
-        return try await Task.detached(priority: .userInitiated) {
-          try ApplePDFProcessor().inspect(fileURL: url)
+        try processor.reserve(taskId: taskId)
+        do {
+          try lifetime.begin(taskId: taskId)
+        } catch {
+          processor.finish(taskId: taskId)
+          throw error
+        }
+        defer { lifetime.finish(taskId: taskId) }
+        let result = try await Task.detached(priority: .userInitiated) {
+          try processor.inspect(
+            taskId: taskId,
+            fileURL: url,
+            expectedSourceSHA256: sourceSha256,
+            reserved: true
+          )
         }.value
+        guard lifetime.claimDelivery(taskId: taskId) else {
+          processor.finish(taskId: taskId)
+          throw PDFProcessingError.cancelled
+        }
+        return result
       } catch let error as PDFProcessingError {
         throw NativeError(error.stableCode)
+      } catch let error as OCRProcessingError {
+        throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
+      } catch is CancellationError {
+        processor.finish(taskId: taskId)
+        throw NativeError("PDF_CANCELLED")
       } catch {
+        processor.finish(taskId: taskId)
         throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
       }
     }
@@ -391,13 +423,7 @@ public final class ContextNativeModule: Module {
       let processor = self.pdfProcessor
       let lifetime = self.pdfLifetime
       do {
-        try processor.reserve(taskId: taskId)
-        do {
-          try lifetime.begin(taskId: taskId)
-        } catch {
-          processor.finish(taskId: taskId)
-          throw error
-        }
+        try lifetime.begin(taskId: taskId)
         defer { lifetime.finish(taskId: taskId) }
         let result = try await Task.detached(priority: .userInitiated) {
           try processor.extractPage(
@@ -429,6 +455,12 @@ public final class ContextNativeModule: Module {
       guard self.pdfProcessor.cancel(taskId: taskId) else {
         throw NativeError("PDF_RESULT_INVALID")
       }
+      return true
+    }
+
+    AsyncFunction("finishPdfExtraction") { [weak self] (taskId: String) throws -> Bool in
+      guard let self else { throw NativeError("PDF_PAGE_EXTRACTION_FAILED") }
+      self.pdfProcessor.finish(taskId: taskId)
       return true
     }
 

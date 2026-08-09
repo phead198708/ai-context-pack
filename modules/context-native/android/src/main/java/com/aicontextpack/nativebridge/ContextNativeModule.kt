@@ -153,6 +153,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         active.close()
         active.reject?.invoke()
       }
+      pdfProcessor.destroy()
     }
 
     AsyncFunction("scanInbox") {
@@ -461,27 +462,10 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       ocrProcessor.cancel(taskId)
     }
 
-    AsyncFunction("inspectPdf") { fileUri: String, promise: Promise ->
-      val context = appContext.reactContext
-        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
-      try {
-        AndroidPDFProcessScope.executor.execute {
-          try { promise.resolve(pdfProcessor.inspect(context, fileUri)) }
-          catch (error: NativeException) { promise.reject(error) }
-          catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
-          catch (_: Throwable) { promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED")) }
-        }
-      } catch (_: RejectedExecutionException) {
-        promise.reject(NativeException("PDF_RESOURCE_BUSY"))
-      }
-    }
-
-    AsyncFunction("extractPdfPage") {
+    AsyncFunction("inspectPdf") {
       taskId: String,
       fileUri: String,
       sourceSha256: String,
-      pageIndex: Int,
-      script: String,
       promise: Promise ->
       val context = appContext.reactContext
         ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
@@ -497,9 +481,58 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
           close = {},
           rejectOnDestroy = { promise.reject(NativeException("PDF_CANCELLED")) },
         ))) {
-        processor.cancel(taskId)
         processor.finish(taskId)
         return@AsyncFunction promise.reject(NativeException("PDF_CANCELLED"))
+      }
+      try {
+        AndroidPDFProcessScope.executor.execute {
+          try {
+            val result = processor.inspect(
+              context = context,
+              taskId = taskId,
+              fileUri = fileUri,
+              expectedSourceSha256 = sourceSha256,
+              reserved = true,
+            )
+            lifecycle.deliver(taskId) { promise.resolve(result) }
+          } catch (error: NativeException) {
+            lifecycle.deliver(taskId) { promise.reject(error) }
+          } catch (_: OutOfMemoryError) {
+            lifecycle.deliver(taskId) {
+              promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
+            }
+          } catch (_: Throwable) {
+            lifecycle.deliver(taskId) {
+              promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
+            }
+          } finally {
+            lifecycle.finish(taskId)
+          }
+        }
+      } catch (_: RejectedExecutionException) {
+        lifecycle.deliver(taskId) { promise.reject(NativeException("PDF_RESOURCE_BUSY")) }
+        lifecycle.finish(taskId)
+        processor.finish(taskId)
+      }
+    }
+
+    AsyncFunction("extractPdfPage") {
+      taskId: String,
+      fileUri: String,
+      sourceSha256: String,
+      pageIndex: Int,
+      script: String,
+      promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      val processor = pdfProcessor
+      val lifecycle = pdfLifecycle
+      if (!lifecycle.register(OcrLifecycleRegistration(
+          taskId = taskId,
+          close = {},
+          rejectOnDestroy = { promise.reject(NativeException("PDF_CANCELLED")) },
+        ))) {
+        return@AsyncFunction promise.reject(NativeException("PDF_RESOURCE_BUSY"))
       }
       try {
         AndroidPDFProcessScope.executor.execute {
@@ -526,18 +559,21 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
             }
           } finally {
             lifecycle.finish(taskId)
-            processor.finish(taskId)
           }
         }
       } catch (_: RejectedExecutionException) {
         lifecycle.deliver(taskId) { promise.reject(NativeException("PDF_RESOURCE_BUSY")) }
         lifecycle.finish(taskId)
-        processor.finish(taskId)
       }
     }
 
     AsyncFunction("cancelPdfExtraction") { taskId: String ->
       pdfProcessor.cancel(taskId)
+    }
+
+    AsyncFunction("finishPdfExtraction") { taskId: String ->
+      pdfProcessor.finish(taskId)
+      true
     }
 
     AsyncFunction("readPlainTextFile") { fileUri: String, promise: Promise ->

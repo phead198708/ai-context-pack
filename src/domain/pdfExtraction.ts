@@ -47,6 +47,13 @@ export interface PDFPageExtractionRequestV1 {
   readonly script: OCRScriptV1;
 }
 
+export interface PDFInspectionRequestV1 {
+  readonly taskId: string;
+  readonly fileUri: string;
+  /** Hash of the owned immutable PDF used to create the native source session. */
+  readonly sourceSha256: string;
+}
+
 export type PDFCheckpointReasonV1 = 'periodic' | 'cancelled';
 
 export interface PDFExtractionCheckpointV1 {
@@ -122,7 +129,10 @@ export interface PDFTaskHandle {
 
 type PDFNativeAdapter = Pick<
   NativeAdapter,
-  'inspectPdf' | 'extractPdfPage' | 'cancelPdfExtraction'
+  | 'inspectPdf'
+  | 'extractPdfPage'
+  | 'cancelPdfExtraction'
+  | 'finishPdfExtraction'
 >;
 
 export class PDFTaskError extends Error {
@@ -151,6 +161,8 @@ export class PDFTaskRunner {
     let cancelled = false;
     let nativeActive = false;
     let terminal = false;
+    let nativeSessionRequested = false;
+    let nativeSessionClosed = false;
     let cancellation: Promise<void> | undefined;
     let completedPages = 0;
     let totalPages: number | undefined;
@@ -209,7 +221,12 @@ export class PDFTaskRunner {
       await checkpoint(pages, 'cancelled');
       return fail('PDF_CANCELLED');
     };
-    const execute = async (): Promise<PDFExtractionResultV1> => {
+    const closeNativeSession = async (): Promise<void> => {
+      if (!nativeSessionRequested || nativeSessionClosed) return;
+      await this.native.finishPdfExtraction(request.taskId);
+      nativeSessionClosed = true;
+    };
+    const executeCore = async (): Promise<PDFExtractionResultV1> => {
       if (cancelled) return cancelNow([]);
       publish({
         schemaVersion: 1,
@@ -219,11 +236,19 @@ export class PDFTaskRunner {
       });
       if (cancelled) return cancelNow([]);
       let document: PDFDocumentInfoV1;
+      nativeActive = true;
+      nativeSessionRequested = true;
       try {
-        document = await this.native.inspectPdf(request.fileUri);
+        document = await this.native.inspectPdf({
+          taskId: request.taskId,
+          fileUri: request.fileUri,
+          sourceSha256: request.sourceSha256,
+        });
       } catch (error) {
+        nativeActive = false;
         return fail(pdfErrorCode(error));
       }
+      nativeActive = false;
       if (!isPDFDocumentInfoV1(document)) return fail('PDF_RESULT_INVALID');
       if (document.sha256 !== request.sourceSha256)
         return fail('PDF_RESULT_INVALID');
@@ -285,6 +310,11 @@ export class PDFTaskRunner {
       const failedPageIndexes = ordered
         .filter(page => page.status === 'failed')
         .map(page => page.pageIndex);
+      try {
+        await closeNativeSession();
+      } catch {
+        return fail('PDF_RESULT_INVALID');
+      }
       terminal = true;
       publish({
         schemaVersion: 1,
@@ -302,6 +332,19 @@ export class PDFTaskRunner {
         pages: ordered,
         failedPageIndexes,
       };
+    };
+    const execute = async (): Promise<PDFExtractionResultV1> => {
+      try {
+        return await executeCore();
+      } finally {
+        nativeActive = false;
+        try {
+          await closeNativeSession();
+        } catch {
+          // The primary stable failure remains authoritative. Successful runs
+          // close before publishing their terminal event above.
+        }
+      }
     };
 
     publish({
@@ -483,7 +526,10 @@ function isProductionPDFPage(value: unknown): value is PDFPageExtractionV1 {
   return (
     isPDFPageExtractionV1(value) &&
     typeof value.characterCount === 'number' &&
-    Array.isArray(value.warnings)
+    Array.isArray(value.warnings) &&
+    (value.status !== 'complete' ||
+      !value.warnings.includes('PDF_EMBEDDED_TEXT_SPARSE') ||
+      typeof value.embeddedText === 'string')
   );
 }
 

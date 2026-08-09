@@ -480,7 +480,7 @@ export function isPDFPageExtractionV1(
           'text',
           'blocks',
         ],
-        ['characterCount', 'warnings'],
+        ['characterCount', 'warnings', 'embeddedText'],
       ) ||
       typeof value.text !== 'string' ||
       !isValidUnicodeScalarString(value.text) ||
@@ -490,15 +490,15 @@ export function isPDFPageExtractionV1(
       !Array.isArray(value.blocks) ||
       value.blocks.length > PDF_PAGE_MAX_BLOCKS ||
       !value.blocks.every(isOCRBlockV1) ||
-      !hasBoundedOCRBlockText(value.blocks as readonly OCRBlockV1[])
+      !hasBoundedOCRBlockText(value.blocks as readonly OCRBlockV1[]) ||
+      !isValidSparsePDFEmbeddedText(value)
     )
       return false;
     const blocks = value.blocks as readonly OCRBlockV1[];
-    return (
-      blocks.length === 0 ||
-      (areOCRBlocksInReadingOrder(blocks) &&
-        ocrBlocksMatchText(blocks, value.text))
-    );
+    if (blocks.length > 0 && !areOCRBlocksInReadingOrder(blocks)) return false;
+    return typeof value.embeddedText === 'string'
+      ? sparsePDFBlocksReconcileToText(value.embeddedText, blocks, value.text)
+      : blocks.length === 0 || ocrBlocksMatchText(blocks, value.text);
   }
   return (
     value.status === 'failed' &&
@@ -518,6 +518,67 @@ export function isPDFPageExtractionV1(
     ) &&
     (value.characterCount === undefined || value.characterCount === 0) &&
     isDomainErrorCode(value.errorCode)
+  );
+}
+
+function isValidSparsePDFEmbeddedText(value: Record<string, unknown>): boolean {
+  if (value.embeddedText === undefined) return true;
+  if (
+    value.method !== 'rendered-ocr' ||
+    typeof value.embeddedText !== 'string' ||
+    !isValidUnicodeScalarString(value.embeddedText) ||
+    value.embeddedText.length > PDF_PAGE_MAX_TEXT_LENGTH ||
+    !Array.isArray(value.warnings) ||
+    !value.warnings.includes('PDF_EMBEDDED_TEXT_SPARSE')
+  )
+    return false;
+  const density = pdfNonWhitespaceUTF16Count(value.embeddedText);
+  return density > 0 && density < 16;
+}
+
+function sparsePDFBlocksReconcileToText(
+  embeddedText: string,
+  blocks: readonly OCRBlockV1[],
+  expectedText: string,
+): boolean {
+  const recognizedText = blocks.map(block => block.text).join('\n');
+  const reconciled =
+    embeddedText.length === 0
+      ? recognizedText
+      : recognizedText.length === 0
+      ? embeddedText
+      : recognizedText.includes(embeddedText)
+      ? recognizedText
+      : embeddedText.includes(recognizedText)
+      ? embeddedText
+      : `${embeddedText}\n${recognizedText}`;
+  return reconciled === expectedText;
+}
+
+function pdfNonWhitespaceUTF16Count(input: string): number {
+  let count = 0;
+  for (let index = 0; index < input.length; ) {
+    const codePoint = input.codePointAt(index)!;
+    const codeUnits = codePoint > 0xffff ? 2 : 1;
+    if (!isPDFDensityWhitespace(codePoint)) count += codeUnits;
+    index += codeUnits;
+  }
+  return count;
+}
+
+function isPDFDensityWhitespace(value: number): boolean {
+  return (
+    value === 0x0020 ||
+    value === 0x0085 ||
+    value === 0x00a0 ||
+    value === 0x1680 ||
+    (value >= 0x0009 && value <= 0x000d) ||
+    (value >= 0x2000 && value <= 0x200a) ||
+    value === 0x2028 ||
+    value === 0x2029 ||
+    value === 0x202f ||
+    value === 0x205f ||
+    value === 0x3000
   );
 }
 

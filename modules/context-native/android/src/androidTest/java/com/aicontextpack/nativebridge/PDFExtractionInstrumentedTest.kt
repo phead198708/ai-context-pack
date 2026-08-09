@@ -33,13 +33,15 @@ class PDFExtractionInstrumentedTest {
     assertEquals("pdf-renderer", info["engine"])
     assertEquals(sha256(text), info["sha256"])
 
+    val textHash = beginSession(processor, context, firstTaskId, text)
     val textPage = processor.extractPage(
       context,
       firstTaskId,
       text.toURI().toString(),
-      sha256(text),
+      textHash,
       0,
       "latin",
+      reserved = true,
     )
     assertEquals("complete", textPage["status"])
     assertEquals(
@@ -50,31 +52,40 @@ class PDFExtractionInstrumentedTest {
       },
       textPage["method"],
     )
+    processor.finish(firstTaskId)
 
     val scanned = copyFixture("scanned-one-page.pdf")
+    val scannedHash = beginSession(processor, context, secondTaskId, scanned)
     val scannedPage = processor.extractPage(
       context,
       secondTaskId,
       scanned.toURI().toString(),
-      sha256(scanned),
+      scannedHash,
       0,
       "latin",
+      reserved = true,
     )
     assertEquals("complete", scannedPage["status"])
     assertEquals("rendered-ocr", scannedPage["method"])
     assertTrue((scannedPage["warnings"] as List<*>).contains("PDF_PAGE_OCR_FALLBACK"))
+    processor.finish(secondTaskId)
 
     val mixedFile = copyFixture("mixed-two-page.pdf")
     val mixed = mixedFile.toURI().toString()
-    val mixedSha256 = sha256(mixedFile)
-    val first = processor.extractPage(context, firstTaskId, mixed, mixedSha256, 0, "latin")
-    val second = processor.extractPage(context, secondTaskId, mixed, mixedSha256, 1, "latin")
+    val mixedSha256 = beginSession(processor, context, firstTaskId, mixedFile)
+    val first = processor.extractPage(
+      context, firstTaskId, mixed, mixedSha256, 0, "latin", reserved = true,
+    )
+    val second = processor.extractPage(
+      context, firstTaskId, mixed, mixedSha256, 1, "latin", reserved = true,
+    )
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
       assertEquals("embedded-text", first["method"])
     } else {
       assertEquals("rendered-ocr", first["method"])
     }
     assertEquals("rendered-ocr", second["method"])
+    processor.finish(firstTaskId)
   }
 
   @Test
@@ -86,17 +97,44 @@ class PDFExtractionInstrumentedTest {
     }
     assertEquals("PDF_CORRUPT", corrupt.code)
     val text = copyFixture("text-one-page.pdf")
+    val sourceSha256 = beginSession(processor, context, firstTaskId, text)
     val outOfRange = assertThrows(NativeException::class.java) {
       processor.extractPage(
         context,
         firstTaskId,
         text.toURI().toString(),
-        sha256(text),
+        sourceSha256,
         1,
         "latin",
+        reserved = true,
       )
     }
     assertEquals("PDF_PAGE_OUT_OF_RANGE", outOfRange.code)
+    processor.finish(firstTaskId)
+  }
+
+  @Test
+  fun cancelledInspectionStopsBeforeHashingAndReleasesTheSourceSession() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val processor = AndroidPDFProcessor()
+    val text = copyFixture("text-one-page.pdf")
+    processor.reserve(firstTaskId)
+    assertTrue(processor.cancel(firstTaskId))
+
+    val cancelled = assertThrows(NativeException::class.java) {
+      processor.inspect(
+        context = context,
+        taskId = firstTaskId,
+        fileUri = text.toURI().toString(),
+        expectedSourceSha256 = sha256(text),
+        reserved = true,
+      )
+    }
+    assertEquals("PDF_CANCELLED", cancelled.code)
+
+    val replacementHash = beginSession(processor, context, secondTaskId, text)
+    assertEquals(sha256(text), replacementHash)
+    processor.finish(secondTaskId)
   }
 
   @Test
@@ -104,26 +142,32 @@ class PDFExtractionInstrumentedTest {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val processor = AndroidPDFProcessor()
     val text = copyFixture("text-one-page.pdf")
+    val textHash = beginSession(processor, context, firstTaskId, text)
     assertThrows(NativeException::class.java) {
       processor.extractPage(
         context,
         firstTaskId,
         text.toURI().toString(),
-        sha256(text),
+        textHash,
         1,
         "latin",
+        reserved = true,
       )
     }
+    processor.finish(firstTaskId)
     val blankFile = copyFixture("empty-one-page.pdf")
+    val blankHash = beginSession(processor, context, secondTaskId, blankFile)
     val blank = processor.extractPage(
       context,
       secondTaskId,
       blankFile.toURI().toString(),
-      sha256(blankFile),
+      blankHash,
       0,
       "latin",
+      reserved = true,
     )
     assertEquals("complete", blank["status"])
+    processor.finish(secondTaskId)
   }
 
   @Test
@@ -134,15 +178,18 @@ class PDFExtractionInstrumentedTest {
       processor.inspect(context, copyFixture("corrupt-truncated.pdf").toURI().toString())
     }
     val blankFile = copyFixture("empty-one-page.pdf")
+    val blankHash = beginSession(processor, context, firstTaskId, blankFile)
     val blank = processor.extractPage(
       context,
       firstTaskId,
       blankFile.toURI().toString(),
-      sha256(blankFile),
+      blankHash,
       0,
       "latin",
+      reserved = true,
     )
     assertEquals("complete", blank["status"])
+    processor.finish(firstTaskId)
   }
 
   @Test
@@ -189,26 +236,33 @@ class PDFExtractionInstrumentedTest {
   }
 
   @Test
-  fun pageExtractionRejectsAReplacementAtTheInspectedPath() {
+  fun pageExtractionUsesTheImmutableInspectedDescriptorAfterPathReplacement() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val file = copyFixture("text-one-page.pdf")
     val processor = AndroidPDFProcessor()
-    val inspected = processor.inspect(context, file.toURI().toString())
-    val sourceSha256 = inspected["sha256"] as String
+    val sourceSha256 = beginSession(processor, context, firstTaskId, file)
     val replacement = copyFixture("scanned-one-page.pdf")
-    file.writeBytes(replacement.readBytes())
+    val displaced = File(file.parentFile, "${UUID.randomUUID()}.pdf")
+    assertTrue(file.renameTo(displaced))
+    assertTrue(replacement.renameTo(file))
 
-    val mismatch = assertThrows(NativeException::class.java) {
-      processor.extractPage(
-        context,
-        firstTaskId,
-        file.toURI().toString(),
-        sourceSha256,
-        0,
-        "latin",
-      )
+    val result = processor.extractPage(
+      context,
+      firstTaskId,
+      file.toURI().toString(),
+      sourceSha256,
+      0,
+      "latin",
+      reserved = true,
+    )
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+      assertEquals("embedded-text", result["method"])
+      assertTrue((result["text"] as String).contains("Synthetic PDF fixture"))
+    } else {
+      assertEquals("rendered-ocr", result["method"])
     }
-    assertEquals("PDF_RESULT_INVALID", mismatch.code)
+    processor.finish(firstTaskId)
+    displaced.delete()
   }
 
   @Test
@@ -229,26 +283,31 @@ class PDFExtractionInstrumentedTest {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val processor = AndroidPDFProcessor()
     val blankFile = copyFixture("empty-one-page.pdf")
+    val blankHash = beginSession(processor, context, firstTaskId, blankFile)
     val blank = processor.extractPage(
       context,
       firstTaskId,
       blankFile.toURI().toString(),
-      sha256(blankFile),
+      blankHash,
       0,
       "latin",
+      reserved = true,
     )
     assertEquals("complete", blank["status"])
     assertEquals("rendered-ocr", blank["method"])
     assertTrue((blank["warnings"] as List<*>).contains("PDF_PAGE_EMPTY"))
+    processor.finish(firstTaskId)
 
     val sparseFile = copyFixture("sparse-one-page.pdf")
+    val sparseHash = beginSession(processor, context, secondTaskId, sparseFile)
     val sparse = processor.extractPage(
       context,
       secondTaskId,
       sparseFile.toURI().toString(),
-      sha256(sparseFile),
+      sparseHash,
       0,
       "latin",
+      reserved = true,
     )
     assertEquals("complete", sparse["status"])
     assertEquals("rendered-ocr", sparse["method"])
@@ -257,7 +316,9 @@ class PDFExtractionInstrumentedTest {
       assertTrue((sparse["warnings"] as List<*>).contains("PDF_EMBEDDED_TEXT_SPARSE"))
       assertEquals(false, (sparse["warnings"] as List<*>).contains("PDF_PAGE_EMPTY"))
       assertTrue((sparse["text"] as String).contains("A"))
+      assertEquals("A", sparse["embeddedText"])
     }
+    processor.finish(secondTaskId)
   }
 
   @Test
@@ -284,7 +345,8 @@ class PDFExtractionInstrumentedTest {
     val processor = AndroidPDFProcessor()
     val mixedFile = copyFixture("mixed-twenty-page.pdf")
     val mixed = mixedFile.toURI().toString()
-    val mixedSha256 = sha256(mixedFile)
+    val taskId = UUID.randomUUID().toString()
+    val mixedSha256 = beginSession(processor, context, taskId, mixedFile)
     assertEquals(20, processor.inspect(context, mixed)["pageCount"])
 
     val started = SystemClock.elapsedRealtimeNanos()
@@ -294,11 +356,12 @@ class PDFExtractionInstrumentedTest {
     repeat(20) { pageIndex ->
       val result = processor.extractPage(
         context,
-        UUID.randomUUID().toString(),
+        taskId,
         mixed,
         mixedSha256,
         pageIndex,
         "latin",
+        reserved = true,
       )
       assertEquals("complete", result["status"])
       when (result["method"]) {
@@ -317,22 +380,24 @@ class PDFExtractionInstrumentedTest {
     }
     assertTrue(durationMs > 0)
     assertTrue(sampledPeakPssKb > 0)
+    processor.finish(taskId)
 
     val cancellationId = UUID.randomUUID().toString()
-    processor.reserve(cancellationId)
+    val cancellationHash = beginSession(processor, context, cancellationId, mixedFile)
     assertTrue(processor.cancel(cancellationId))
     val cancelled = assertThrows(NativeException::class.java) {
       processor.extractPage(
         context,
         cancellationId,
         mixed,
-        mixedSha256,
+        cancellationHash,
         0,
         "latin",
         reserved = true,
       )
     }
     assertEquals("PDF_CANCELLED", cancelled.code)
+    processor.finish(cancellationId)
 
     println(
       "PDF_BENCHMARK_ANDROID api=${Build.VERSION.SDK_INT} pages=20 " +
@@ -419,6 +484,22 @@ class PDFExtractionInstrumentedTest {
       }
     }
     return digest.digest().joinToString("") { "%02x".format(it) }
+  }
+
+  private fun beginSession(
+    processor: AndroidPDFProcessor,
+    context: android.content.Context,
+    taskId: String,
+    file: File,
+  ): String {
+    val sourceSha256 = sha256(file)
+    processor.inspect(
+      context = context,
+      taskId = taskId,
+      fileUri = file.toURI().toString(),
+      expectedSourceSha256 = sourceSha256,
+    )
+    return sourceSha256
   }
 
   @Test

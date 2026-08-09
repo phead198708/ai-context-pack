@@ -103,10 +103,13 @@ describe('PDFTaskRunner', () => {
     );
     const checkpoints: PDFExtractionCheckpointV1[] = [];
     const progress: PDFTaskProgressV1[] = [];
+    const inspectPdf = jest.fn().mockResolvedValue(document);
+    const finishPdfExtraction = jest.fn().mockResolvedValue(undefined);
     const runner = new PDFTaskRunner({
-      inspectPdf: jest.fn().mockResolvedValue(document),
+      inspectPdf,
       extractPdfPage,
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction,
     });
 
     const handle = runner.start(
@@ -131,6 +134,13 @@ describe('PDFTaskRunner', () => {
       failedPageIndexes: [],
       pages: [{ pageIndex: 0 }, { pageIndex: 1 }, { pageIndex: 2 }],
     });
+    expect(inspectPdf).toHaveBeenCalledWith({
+      taskId: ids[0],
+      fileUri: request().fileUri,
+      sourceSha256,
+    });
+    expect(finishPdfExtraction).toHaveBeenCalledTimes(1);
+    expect(finishPdfExtraction).toHaveBeenCalledWith(ids[0]);
     expect(checkpoints.map(value => value.pages.length)).toEqual([1, 2, 3]);
     expect(progress.map(value => value.status)).toEqual([
       'queued',
@@ -153,6 +163,7 @@ describe('PDFTaskRunner', () => {
       inspectPdf: jest.fn().mockResolvedValue(document),
       extractPdfPage,
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
 
     const handle = runner.start(
@@ -183,6 +194,7 @@ describe('PDFTaskRunner', () => {
       }),
       extractPdfPage,
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
 
     const handle = runner.start(
@@ -212,6 +224,7 @@ describe('PDFTaskRunner', () => {
       }),
       extractPdfPage,
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
 
     const handle = runner.start(
@@ -236,6 +249,7 @@ describe('PDFTaskRunner', () => {
       inspectPdf: jest.fn().mockResolvedValue({ ...document, pageCount: 1 }),
       extractPdfPage,
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
 
     await expect(
@@ -254,6 +268,7 @@ describe('PDFTaskRunner', () => {
         ),
       ),
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
 
     const result = await runner.start(
@@ -359,6 +374,7 @@ describe('PDFTaskRunner', () => {
       inspectPdf: jest.fn().mockResolvedValue(document),
       extractPdfPage: jest.fn(() => firstPage.promise),
       cancelPdfExtraction,
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
     const handle = runner.start(
       request(),
@@ -384,6 +400,35 @@ describe('PDFTaskRunner', () => {
     });
   });
 
+  test('cancels task-scoped inspection and always releases its native source', async () => {
+    const inspection = deferred<PDFDocumentInfoV1>();
+    const cancelPdfExtraction = jest.fn().mockResolvedValue(undefined);
+    const finishPdfExtraction = jest.fn().mockResolvedValue(undefined);
+    const runner = new PDFTaskRunner({
+      inspectPdf: jest.fn(() => inspection.promise),
+      extractPdfPage: jest.fn(),
+      cancelPdfExtraction,
+      finishPdfExtraction,
+    });
+    const handle = runner.start(
+      request(),
+      jest.fn().mockResolvedValue(undefined),
+      jest.fn(),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const cancellation = handle.cancel();
+    inspection.reject({ code: 'PDF_CANCELLED' });
+    await cancellation;
+    await expect(handle.result).rejects.toEqual(
+      new PDFTaskError('PDF_CANCELLED'),
+    );
+    expect(cancelPdfExtraction).toHaveBeenCalledWith(ids[0]);
+    expect(finishPdfExtraction).toHaveBeenCalledTimes(1);
+    expect(finishPdfExtraction).toHaveBeenCalledWith(ids[0]);
+  });
+
   test('does not start native work after synchronous cancellation from extracting progress', async () => {
     const extractPdfPage = jest.fn();
     const checkpoints: PDFExtractionCheckpointV1[] = [];
@@ -392,6 +437,7 @@ describe('PDFTaskRunner', () => {
       inspectPdf: jest.fn().mockResolvedValue({ ...document, pageCount: 1 }),
       extractPdfPage,
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
     let handle!: PDFTaskHandle;
     let cancellation: Promise<void> | undefined;
@@ -433,6 +479,7 @@ describe('PDFTaskRunner', () => {
       inspectPdf: jest.fn().mockResolvedValue({ ...document, pageCount: 1 }),
       extractPdfPage: jest.fn().mockResolvedValue(completePage(0)),
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
     let handle!: PDFTaskHandle;
     handle = runner.start(
@@ -466,6 +513,7 @@ describe('PDFTaskRunner', () => {
         Promise.resolve(completePage(pageIndex)),
       ),
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
 
     const handle = runner.start(
@@ -488,6 +536,7 @@ describe('PDFTaskRunner', () => {
       inspectPdf: jest.fn().mockResolvedValue(document),
       extractPdfPage: jest.fn(),
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
     const invalidRequests = [
       {
@@ -540,6 +589,7 @@ describe('PDFTaskRunner', () => {
       inspectPdf,
       extractPdfPage,
       cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
     });
 
     const first = runner.start(
