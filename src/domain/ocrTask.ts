@@ -74,6 +74,7 @@ export class OCRTaskRunner {
         completedUnits,
         totalUnits: 2,
       });
+      if (cancelRequested) return cancelled();
       nativeStarted = true;
       let value: OCRResultV1;
       try {
