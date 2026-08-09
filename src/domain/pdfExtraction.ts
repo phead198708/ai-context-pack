@@ -315,6 +315,7 @@ export class PDFTaskRunner {
       } catch {
         return fail('PDF_RESULT_INVALID');
       }
+      if (cancelled) return cancelNow(ordered);
       terminal = true;
       publish({
         schemaVersion: 1,

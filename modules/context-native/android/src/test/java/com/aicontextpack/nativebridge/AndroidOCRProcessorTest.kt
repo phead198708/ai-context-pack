@@ -216,6 +216,44 @@ class AndroidOCRProcessorTest {
   }
 
   @Test
+  fun explicitPdfFinishWaitsForMatchingNativeOperationToUnwind() {
+    val lifecycle = OcrModuleLifecycle()
+    val registry = OcrTaskRegistry()
+    val first = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    first.reserve(firstTaskId)
+    assertTrue(
+      lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = firstTaskId,
+          close = {},
+          rejectOnDestroy = {},
+        ),
+      ),
+    )
+
+    assertEquals(
+      false,
+      requestPDFProcessorFinish(
+        lifecycle = lifecycle,
+        taskId = firstTaskId,
+        finishProcessor = first::finish,
+      ),
+    )
+    assertCode("PDF_RESOURCE_BUSY") { replacement.reserve(secondTaskId) }
+
+    assertTrue(
+      finishPDFOperationLifecycle(
+        lifecycle = lifecycle,
+        taskId = firstTaskId,
+        finishProcessor = first::finish,
+      ),
+    )
+    replacement.reserve(secondTaskId)
+    replacement.finish(secondTaskId)
+  }
+
+  @Test
   fun resultTransformationExecutorIsSingleThreadedAndBounded() {
     assertEquals(1, AndroidOCRProcessScope.resultExecutor.corePoolSize)
     assertEquals(1, AndroidOCRProcessScope.resultExecutor.maximumPoolSize)

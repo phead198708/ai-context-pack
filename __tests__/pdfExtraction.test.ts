@@ -505,6 +505,51 @@ describe('PDFTaskRunner', () => {
     });
   });
 
+  test('cancels while the final native session cleanup is pending', async () => {
+    const cleanup = deferred<void>();
+    const cleanupStarted = deferred<void>();
+    const checkpoints: PDFExtractionCheckpointV1[] = [];
+    const progress: PDFTaskProgressV1[] = [];
+    const runner = new PDFTaskRunner({
+      inspectPdf: jest.fn().mockResolvedValue({ ...document, pageCount: 1 }),
+      extractPdfPage: jest.fn().mockResolvedValue(completePage(0)),
+      cancelPdfExtraction: jest.fn(),
+      finishPdfExtraction: jest.fn(() => {
+        cleanupStarted.resolve();
+        return cleanup.promise;
+      }),
+    });
+    const handle = runner.start(
+      request(),
+      async value => {
+        checkpoints.push(value);
+      },
+      value => progress.push(value),
+    );
+
+    await cleanupStarted.promise;
+    await handle.cancel();
+    cleanup.resolve();
+
+    await expect(handle.result).rejects.toEqual(
+      new PDFTaskError('PDF_CANCELLED'),
+    );
+    expect(checkpoints.map(value => value.reason)).toEqual([
+      'periodic',
+      'cancelled',
+    ]);
+    expect(
+      progress.filter(value =>
+        ['succeeded', 'failed', 'cancelled'].includes(value.status),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        status: 'cancelled',
+        errorCode: 'PDF_CANCELLED',
+      }),
+    ]);
+  });
+
   test('fails closed when a checkpoint cannot be committed', async () => {
     const progress: PDFTaskProgressV1[] = [];
     const runner = new PDFTaskRunner({

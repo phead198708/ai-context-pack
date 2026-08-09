@@ -201,6 +201,33 @@ final class PDFExtractionTests: XCTestCase {
     replacement.finish(taskId: secondTaskId)
   }
 
+  func testExplicitFinishWaitsForMatchingNativeOperationToUnwind() throws {
+    let registry = OCRCancellationRegistry()
+    let first = ApplePDFProcessor(registry: registry)
+    let replacement = ApplePDFProcessor(registry: registry)
+    let lifetime = OCRModuleLifetime()
+    try first.reserve(taskId: firstTaskId)
+    let active = try beginPDFOperationLifetime(
+      lifetime: lifetime,
+      taskId: firstTaskId
+    )
+
+    XCTAssertFalse(
+      requestPDFProcessorFinish(
+        lifetime: lifetime,
+        taskId: firstTaskId,
+        finishProcessor: first.finish
+      )
+    )
+    XCTAssertThrowsError(try replacement.reserve(taskId: secondTaskId)) {
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
+    }
+
+    XCTAssertTrue(active.finish(finishProcessor: first.finish))
+    XCTAssertNoThrow(try replacement.reserve(taskId: secondTaskId))
+    replacement.finish(taskId: secondTaskId)
+  }
+
   func testConcurrentBeginFailureCannotStealActivePageDeliveryClaim() throws {
     let registry = OCRCancellationRegistry()
     let processor = ApplePDFProcessor(registry: registry)

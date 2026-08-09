@@ -74,6 +74,7 @@ internal class OcrModuleLifecycle {
     val registration: OcrLifecycleRegistration,
     var settled: Boolean = false,
     var destructionIssued: Boolean = false,
+    var processorFinishRequested: Boolean = false,
   )
 
   private var destroyed = false
@@ -96,8 +97,19 @@ internal class OcrModuleLifecycle {
   }
 
   @Synchronized
-  fun finish(taskId: String) {
-    if (active?.registration?.taskId == taskId) active = null
+  fun requestProcessorFinish(taskId: String): Boolean {
+    val current = active
+    if (current?.registration?.taskId != taskId) return true
+    current.processorFinishRequested = true
+    return false
+  }
+
+  @Synchronized
+  fun finish(taskId: String): Boolean {
+    val current = active
+    if (current?.registration?.taskId != taskId) return false
+    active = null
+    return current.processorFinishRequested
   }
 
   @Synchronized
@@ -131,6 +143,26 @@ internal fun deliverPDFOperationCompletion(
   val delivered = lifecycle.deliver(taskId, action)
   if (!delivered) finishProcessor(taskId)
   return delivered
+}
+
+internal fun requestPDFProcessorFinish(
+  lifecycle: OcrModuleLifecycle,
+  taskId: String,
+  finishProcessor: (String) -> Unit,
+): Boolean {
+  val finishImmediately = lifecycle.requestProcessorFinish(taskId)
+  if (finishImmediately) finishProcessor(taskId)
+  return finishImmediately
+}
+
+internal fun finishPDFOperationLifecycle(
+  lifecycle: OcrModuleLifecycle,
+  taskId: String,
+  finishProcessor: (String) -> Unit,
+): Boolean {
+  val finishRequested = lifecycle.finish(taskId)
+  if (finishRequested) finishProcessor(taskId)
+  return finishRequested
 }
 
 class ContextNativeModule : Module(), ComponentCallbacks2 {
@@ -539,7 +571,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
               promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
             }
           } finally {
-            lifecycle.finish(taskId)
+            finishPDFOperationLifecycle(lifecycle, taskId, processor::finish)
           }
         }
       } catch (_: RejectedExecutionException) {
@@ -612,7 +644,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
               promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
             }
           } finally {
-            lifecycle.finish(taskId)
+            finishPDFOperationLifecycle(lifecycle, taskId, processor::finish)
           }
         }
       } catch (_: RejectedExecutionException) {
@@ -630,7 +662,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
     }
 
     AsyncFunction("finishPdfExtraction") { taskId: String ->
-      pdfProcessor.finish(taskId)
+      requestPDFProcessorFinish(pdfLifecycle, taskId, pdfProcessor::finish)
       true
     }
 

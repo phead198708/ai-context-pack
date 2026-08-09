@@ -382,7 +382,11 @@ public final class ContextNativeModule: Module {
           processor.finish(taskId: taskId)
           throw error
         }
-        defer { lifetime.finish(taskId: taskId) }
+        defer {
+          if lifetime.finish(taskId: taskId) {
+            processor.finish(taskId: taskId)
+          }
+        }
         let result = try await Task.detached(priority: .userInitiated) {
           try processor.inspect(
             taskId: taskId,
@@ -442,7 +446,7 @@ public final class ContextNativeModule: Module {
       } catch {
         throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
       }
-      defer { operation.finish() }
+      defer { operation.finish(finishProcessor: processor.finish) }
       do {
         let result = try await Task.detached(priority: .userInitiated) {
           try processor.extractPage(
@@ -503,7 +507,11 @@ public final class ContextNativeModule: Module {
 
     AsyncFunction("finishPdfExtraction") { [weak self] (taskId: String) throws -> Bool in
       guard let self else { throw NativeError("PDF_PAGE_EXTRACTION_FAILED") }
-      self.pdfProcessor.finish(taskId: taskId)
+      requestPDFProcessorFinish(
+        lifetime: self.pdfLifetime,
+        taskId: taskId,
+        finishProcessor: self.pdfProcessor.finish
+      )
       return true
     }
 

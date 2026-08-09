@@ -585,6 +585,17 @@ func claimPDFOperationDelivery(
   return claimed
 }
 
+@discardableResult
+func requestPDFProcessorFinish(
+  lifetime: OCRModuleLifetime,
+  taskId: String,
+  finishProcessor: (String) -> Void
+) -> Bool {
+  let finishImmediately = lifetime.requestProcessorFinish(taskId: taskId)
+  if finishImmediately { finishProcessor(taskId) }
+  return finishImmediately
+}
+
 final class PDFOperationLifetimeLease {
   private let lifetime: OCRModuleLifetime
   private let taskId: String
@@ -603,7 +614,14 @@ final class PDFOperationLifetimeLease {
   }
 
   func finish() {
-    lifetime.finish(taskId: taskId)
+    _ = lifetime.finish(taskId: taskId)
+  }
+
+  @discardableResult
+  func finish(finishProcessor: (String) -> Void) -> Bool {
+    let finishRequested = lifetime.finish(taskId: taskId)
+    if finishRequested { finishProcessor(taskId) }
+    return finishRequested
   }
 }
 
