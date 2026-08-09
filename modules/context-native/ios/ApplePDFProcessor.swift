@@ -309,14 +309,17 @@ final class ApplePDFProcessor: @unchecked Sendable {
     registry.finish(taskId: taskId)
   }
 
-  func destroy() {
+  func destroy(activeTaskId: String? = nil) {
     sourceLock.lock()
-    let taskId = sourceSession?.taskId
+    let sessionTaskId = sourceSession?.taskId
     sourceSession = nil
     sourceLock.unlock()
+    let taskId = activeTaskId ?? sessionTaskId
     if let taskId {
       _ = registry.cancel(taskId: taskId)
-      registry.finish(taskId: taskId)
+      // Keep process-wide single-flight ownership while an active Vision/PDF
+      // operation unwinds. The rejected-delivery/error path finishes it.
+      if activeTaskId == nil { registry.finish(taskId: taskId) }
     }
   }
 
@@ -555,6 +558,16 @@ final class ApplePDFProcessor: @unchecked Sendable {
       "errorCode": "PDF_PAGE_EXTRACTION_FAILED",
     ]
   }
+}
+
+func claimPDFOperationDelivery(
+  lifetime: OCRModuleLifetime,
+  taskId: String,
+  finishProcessor: (String) -> Void
+) -> Bool {
+  let claimed = lifetime.claimDelivery(taskId: taskId)
+  if !claimed { finishProcessor(taskId) }
+  return claimed
 }
 
 private func normalizePDFText(_ input: String) -> String {

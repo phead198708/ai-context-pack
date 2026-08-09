@@ -47,10 +47,8 @@ public final class ContextNativeModule: Module {
       if let taskId = self?.ocrLifetime.destroy() {
         _ = self?.ocrProcessor.cancel(taskId: taskId)
       }
-      if let taskId = self?.pdfLifetime.destroy() {
-        _ = self?.pdfProcessor.cancel(taskId: taskId)
-      }
-      self?.pdfProcessor.destroy()
+      let activePDFTaskId = self?.pdfLifetime.destroy()
+      self?.pdfProcessor.destroy(activeTaskId: activePDFTaskId)
     }
 
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
@@ -435,17 +433,49 @@ public final class ContextNativeModule: Module {
             reserved: true
           )
         }.value
-        guard lifetime.claimDelivery(taskId: taskId) else {
-          throw PDFProcessingError.cancelled
+        guard claimPDFOperationDelivery(
+          lifetime: lifetime,
+          taskId: taskId,
+          finishProcessor: processor.finish
+        ) else {
+          throw NativeError("PDF_CANCELLED")
         }
         return result
       } catch let error as PDFProcessingError {
+        guard claimPDFOperationDelivery(
+          lifetime: lifetime,
+          taskId: taskId,
+          finishProcessor: processor.finish
+        ) else {
+          throw NativeError("PDF_CANCELLED")
+        }
         throw NativeError(error.stableCode)
       } catch let error as OCRProcessingError {
+        guard claimPDFOperationDelivery(
+          lifetime: lifetime,
+          taskId: taskId,
+          finishProcessor: processor.finish
+        ) else {
+          throw NativeError("PDF_CANCELLED")
+        }
         throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
       } catch is CancellationError {
+        guard claimPDFOperationDelivery(
+          lifetime: lifetime,
+          taskId: taskId,
+          finishProcessor: processor.finish
+        ) else {
+          throw NativeError("PDF_CANCELLED")
+        }
         throw NativeError("PDF_CANCELLED")
       } catch {
+        guard claimPDFOperationDelivery(
+          lifetime: lifetime,
+          taskId: taskId,
+          finishProcessor: processor.finish
+        ) else {
+          throw NativeError("PDF_CANCELLED")
+        }
         throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
       }
     }

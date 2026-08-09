@@ -186,14 +186,17 @@ internal class AndroidPDFProcessor(
     registry.finish(taskId)
   }
 
-  fun destroy() {
+  fun destroy(activeTaskId: String? = null) {
     val current = synchronized(sourceLock) {
       sourceSession.also { sourceSession = null }
     }
-    current?.let {
-      registry.cancel(it.taskId, "PDF_CANCELLED")
-      it.descriptor.close()
-      registry.finish(it.taskId)
+    current?.descriptor?.close()
+    val taskId = activeTaskId ?: current?.taskId
+    if (taskId != null) {
+      registry.cancel(taskId, "PDF_CANCELLED")
+      // An active native operation owns the shared slot until it has actually
+      // unwound. Its rejected-delivery path calls finish after the worker exits.
+      if (activeTaskId == null) registry.finish(taskId)
     }
   }
 
@@ -731,8 +734,13 @@ private fun hasPDFEncryptionMarker(input: PDFRandomAccessReader): Boolean {
     } else {
       (xrefOffset - tailStartOffset).toInt()
     }
-    val trailer = lastPDFKeyword(tail, "trailer", startXref)
-    if (trailer < xrefStartInTail) throw IOException("Missing active PDF trailer")
+    val trailer = lastLexicalPDFKeyword(
+      tail,
+      "trailer",
+      xrefStartInTail,
+      startXref,
+    )
+    if (trailer < 0) throw IOException("Missing active PDF trailer")
     val trailerDictionary = parseTopLevelPDFDictionary(
       tail,
       trailer + "trailer".length,
@@ -823,6 +831,55 @@ private fun lastPDFKeyword(bytes: ByteArray, keyword: String, before: Int): Int 
     ) return index
   }
   return -1
+}
+
+private fun lastLexicalPDFKeyword(
+  bytes: ByteArray,
+  keyword: String,
+  start: Int,
+  end: Int,
+): Int {
+  val limit = minOf(end, bytes.size)
+  var index = maxOf(0, start)
+  var dictionaryDepth = 0
+  var arrayDepth = 0
+  var found = -1
+  while (index < limit) {
+    val value = bytes[index].toInt() and 0xff
+    when {
+      value == '%'.code -> index = skipPDFComment(bytes, index, limit)
+      value == '('.code -> index = skipPDFLiteralString(bytes, index, limit)
+      value == '<'.code && index + 1 < limit &&
+        bytes[index + 1] == '<'.code.toByte() -> {
+        dictionaryDepth += 1
+        index += 2
+      }
+      value == '>'.code && index + 1 < limit &&
+        bytes[index + 1] == '>'.code.toByte() -> {
+        dictionaryDepth = maxOf(0, dictionaryDepth - 1)
+        index += 2
+      }
+      value == '<'.code -> index = skipPDFHexString(bytes, index, limit)
+      value == '['.code -> {
+        arrayDepth += 1
+        index += 1
+      }
+      value == ']'.code -> {
+        arrayDepth = maxOf(0, arrayDepth - 1)
+        index += 1
+      }
+      value == '/'.code -> {
+        index = parsePDFName(bytes, index, limit)?.end ?: (index + 1)
+      }
+      dictionaryDepth == 0 && arrayDepth == 0 &&
+        isPDFKeywordAt(bytes, index, keyword) -> {
+        found = index
+        index += keyword.length
+      }
+      else -> index += 1
+    }
+  }
+  return found
 }
 
 private fun ByteArray.regionMatches(start: Int, token: ByteArray): Boolean {

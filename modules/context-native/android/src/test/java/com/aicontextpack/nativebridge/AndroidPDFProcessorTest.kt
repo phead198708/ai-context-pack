@@ -46,6 +46,25 @@ class AndroidPDFProcessorTest {
   }
 
   @Test
+  fun destroyDefersSharedRegistryReleaseUntilActivePageWorkUnwinds() {
+    val registry = OcrTaskRegistry()
+    val first = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    first.reserve(firstTaskId)
+
+    first.destroy(activeTaskId = firstTaskId)
+    assertEquals("PDF_CANCELLED", registry.failureCode(firstTaskId))
+    val busy = assertThrows(NativeException::class.java) {
+      replacement.reserve(secondTaskId)
+    }
+    assertEquals("PDF_RESOURCE_BUSY", busy.code)
+
+    first.finish(firstTaskId)
+    replacement.reserve(secondTaskId)
+    replacement.finish(secondTaskId)
+  }
+
+  @Test
   fun rejectsNonCanonicalTaskIdsBeforeAnyResourceWork() {
     val error = assertThrows(NativeException::class.java) {
       AndroidPDFProcessor().reserve("123E4567-E89B-42D3-A456-426614174000")
@@ -103,6 +122,12 @@ class AndroidPDFProcessorTest {
       trailerDictionary = "<< /Size 2 /Custom (" +
         "a".repeat(AndroidPDFResourcePolicy.maximumXrefDictionaryBytes + 1),
     )
+    val harmlessTrailerString = classicXrefPDF(
+      trailerDictionary = "<< /Size 2 /ID [(trailer) (second-id)] >>",
+    )
+    val harmlessTrailerComment = classicXrefPDF(
+      trailerDictionary = "<< /Size 2 % trailer\n/Root 1 0 R >>",
+    )
     try {
       assertTrue(hasPDFEncryptionMarker(encrypted))
       assertEquals(false, hasPDFEncryptionMarker(metadataOnly))
@@ -114,6 +139,8 @@ class AndroidPDFProcessorTest {
       assertTrue(hasPDFEncryptionMarker(escapedEncrypted))
       assertTrue(hasPDFEncryptionMarker(escapedEncryptedXrefStream))
       assertTrue(hasPDFEncryptionMarker(lateEncryptedXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessTrailerString))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessTrailerComment))
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(oversizedIncompleteXrefStream)
       }
@@ -137,6 +164,8 @@ class AndroidPDFProcessorTest {
       oversizedIncompleteXrefStream.delete()
       malformedStartXref.delete()
       incompleteClassicTrailer.delete()
+      harmlessTrailerString.delete()
+      harmlessTrailerComment.delete()
     }
   }
 

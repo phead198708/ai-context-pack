@@ -119,6 +119,17 @@ internal class OcrModuleLifecycle {
   }
 }
 
+internal fun deliverPDFOperationCompletion(
+  lifecycle: OcrModuleLifecycle,
+  taskId: String,
+  finishProcessor: (String) -> Unit,
+  action: () -> Unit,
+): Boolean {
+  val delivered = lifecycle.deliver(taskId, action)
+  if (!delivered) finishProcessor(taskId)
+  return delivered
+}
+
 class ContextNativeModule : Module(), ComponentCallbacks2 {
   private val ocrProcessor = AndroidOCRProcessor(AndroidOCRProcessScope.registry)
   private val pdfProcessor = AndroidPDFProcessor(AndroidOCRProcessScope.registry)
@@ -148,12 +159,12 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         active.close()
         active.reject?.invoke()
       }
-      pdfLifecycle.destroy()?.let { active ->
-        pdfProcessor.cancel(active.taskId)
+      val activePDF = pdfLifecycle.destroy()
+      pdfProcessor.destroy(activePDF?.taskId)
+      activePDF?.let { active ->
         active.close()
         active.reject?.invoke()
       }
-      pdfProcessor.destroy()
     }
 
     AsyncFunction("scanInbox") {
@@ -494,15 +505,31 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
               expectedSourceSha256 = sourceSha256,
               reserved = true,
             )
-            lifecycle.deliver(taskId) { promise.resolve(result) }
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) { promise.resolve(result) }
           } catch (error: NativeException) {
-            lifecycle.deliver(taskId) { promise.reject(error) }
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) { promise.reject(error) }
           } catch (_: OutOfMemoryError) {
-            lifecycle.deliver(taskId) {
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) {
               promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
             }
           } catch (_: Throwable) {
-            lifecycle.deliver(taskId) {
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) {
               promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
             }
           } finally {
@@ -546,15 +573,31 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
               script = script,
               reserved = true,
             )
-            lifecycle.deliver(taskId) { promise.resolve(result) }
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) { promise.resolve(result) }
           } catch (error: NativeException) {
-            lifecycle.deliver(taskId) { promise.reject(error) }
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) { promise.reject(error) }
           } catch (_: OutOfMemoryError) {
-            lifecycle.deliver(taskId) {
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) {
               promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
             }
           } catch (_: Throwable) {
-            lifecycle.deliver(taskId) {
+            deliverPDFOperationCompletion(
+              lifecycle,
+              taskId,
+              processor::finish,
+            ) {
               promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
             }
           } finally {
@@ -562,7 +605,11 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
           }
         }
       } catch (_: RejectedExecutionException) {
-        lifecycle.deliver(taskId) { promise.reject(NativeException("PDF_RESOURCE_BUSY")) }
+        deliverPDFOperationCompletion(
+          lifecycle,
+          taskId,
+          processor::finish,
+        ) { promise.reject(NativeException("PDF_RESOURCE_BUSY")) }
         lifecycle.finish(taskId)
       }
     }
