@@ -9,7 +9,10 @@ import type {
   MainAppImportDraft,
   MainAppImportInput,
 } from '../src/domain/mainAppImport';
-import { MAIN_APP_IMPORT_MAX_TEXT_BYTES } from '../src/domain/mainAppImport';
+import {
+  MAIN_APP_IMPORT_MAX_ITEMS,
+  MAIN_APP_IMPORT_MAX_TEXT_BYTES,
+} from '../src/domain/mainAppImport';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
 import { NewPackFlow } from '../src/ui/NewPackFlow';
@@ -291,11 +294,47 @@ describe('NewPackFlow interactions', () => {
     act(() => renderer.unmount());
   });
 
-  test('retains an over-limit cache cleanup for retry before import can proceed', async () => {
+  test('preflights the combined document item limit before staging', async () => {
+    const native = nativeAdapter();
+    const systemPicker = picker();
+    const existing: MainAppImportInput = {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      kind: 'text',
+      declaredMediaType: 'text/plain',
+      byteCount: 1,
+      text: 'x',
+    };
+    systemPicker.pickFiles.mockResolvedValue({
+      canceled: false,
+      assets: Array.from({ length: MAIN_APP_IMPORT_MAX_ITEMS }, (_, index) => ({
+        uri: `file:///provider/document-${index}.pdf`,
+        mediaType: 'application/pdf',
+        byteCount: 4,
+      })),
+    });
+    const renderer = await render({
+      native,
+      picker: systemPicker,
+      onCancel: jest.fn(),
+      onImported: jest.fn(),
+      createDraft: () => draft([existing]),
+    });
+
+    await press(byLabel(renderer, 'Add Files'));
+
+    expect(text(renderer)).toContain('IMPORT_ITEM_LIMIT_EXCEEDED');
+    expect(native.stageMainAppPickerFiles).not.toHaveBeenCalled();
+    expect(native.discardMainAppPickerFiles).not.toHaveBeenCalled();
+    expect(native.cleanupMainAppPickerTransients).toHaveBeenCalledTimes(2);
+    expect(text(renderer).replace(/\s+/g, ' ')).toContain('1 selected');
+    act(() => renderer.unmount());
+  });
+
+  test('retains failed over-limit transient cleanup for retry before import can proceed', async () => {
     const native = nativeAdapter();
     const systemPicker = picker();
     const onCancel = jest.fn();
-    const overflowUri = 'file:///cache/overflow.pdf';
     const fullDraft = draft(
       Array.from({ length: 20 }, (_, order) => ({
         id: `${String(order + 1).padStart(8, '0')}-e89b-42d3-a456-426614174000`,
@@ -310,13 +349,14 @@ describe('NewPackFlow interactions', () => {
       canceled: false,
       assets: [
         {
-          uri: overflowUri,
+          uri: 'file:///cache/overflow.pdf',
           mediaType: 'application/pdf',
           byteCount: 4,
         },
       ],
     });
-    native.discardMainAppPickerFiles
+    native.cleanupMainAppPickerTransients
+      .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce({ code: 'MAIN_APP_IMPORT_CLEANUP_FAILED' })
       .mockResolvedValueOnce(undefined);
     const renderer = await render({
@@ -329,9 +369,8 @@ describe('NewPackFlow interactions', () => {
 
     await press(byLabel(renderer, 'Add Files'));
     expect(text(renderer)).toContain('MAIN_APP_IMPORT_CLEANUP_FAILED');
-    expect(native.discardMainAppPickerFiles).toHaveBeenCalledWith([
-      overflowUri,
-    ]);
+    expect(native.stageMainAppPickerFiles).not.toHaveBeenCalled();
+    expect(native.discardMainAppPickerFiles).not.toHaveBeenCalled();
     expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
       disabled: true,
     });
@@ -339,10 +378,7 @@ describe('NewPackFlow interactions', () => {
     expect(onCancel).not.toHaveBeenCalled();
 
     await press(byLabel(renderer, 'Retry Temporary Cleanup'));
-    expect(native.discardMainAppPickerFiles).toHaveBeenLastCalledWith([
-      overflowUri,
-    ]);
-    expect(native.discardMainAppPickerFiles).toHaveBeenCalledTimes(2);
+    expect(native.cleanupMainAppPickerTransients).toHaveBeenCalledTimes(3);
     expect(text(renderer)).not.toContain('MAIN_APP_IMPORT_CLEANUP_FAILED');
     expect(byLabel(renderer, 'Import Pack').props.accessibilityState).toEqual({
       disabled: false,
@@ -719,6 +755,68 @@ describe('NewPackFlow interactions', () => {
     expect(text(renderer)).toContain(
       'MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED',
     );
+    expect(text(renderer)).toContain('Import recovery required');
+    expect(
+      renderer.root.findAll(
+        node => node.props.accessibilityLabel === 'Cancel New Pack',
+      ),
+    ).toHaveLength(0);
+    expect(onCancel).not.toHaveBeenCalled();
+
+    await press(byLabel(renderer, 'Retry Import Recovery'));
+
+    expect(native.publishMainAppImport).toHaveBeenCalledTimes(2);
+    expect(onImported).toHaveBeenCalledWith(committed);
+    expect(text(renderer).replace(/[·\s]+/g, ' ')).toContain('Import complete');
+    expect(onCancel).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  test('locks cancellation when native publication returns an invalid committed result', async () => {
+    const native = nativeAdapter();
+    const onCancel = jest.fn();
+    const onImported = jest.fn().mockResolvedValue(undefined);
+    const input: MainAppImportInput = {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      kind: 'text',
+      declaredMediaType: 'text/plain',
+      byteCount: 7,
+      text: 'fixture',
+    };
+    const committed: ImportManifestV1 = {
+      schemaVersion: 1,
+      ingestionId,
+      createdAt: '2026-08-07T00:00:00Z',
+      source: 'main-app-text',
+      status: 'complete',
+      items: [
+        {
+          id: input.id,
+          order: 0,
+          mediaType: input.declaredMediaType,
+          status: 'copied',
+          byteCount: input.byteCount,
+          relativePath: `${input.id}.bin`,
+        },
+      ],
+    };
+    native.publishMainAppImport
+      .mockRejectedValueOnce({
+        code: 'NATIVE_MAIN_APP_IMPORT_RESULT_INVALID',
+      })
+      .mockResolvedValueOnce(committed);
+    const renderer = await render({
+      native,
+      picker: picker(),
+      onCancel,
+      onImported,
+      createDraft: () => draft([input]),
+    });
+
+    await press(byLabel(renderer, 'Import Pack'));
+
+    expect(text(renderer)).toContain('NATIVE_MAIN_APP_IMPORT_RESULT_INVALID');
     expect(text(renderer)).toContain('Import recovery required');
     expect(
       renderer.root.findAll(

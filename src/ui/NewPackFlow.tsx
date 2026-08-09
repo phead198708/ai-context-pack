@@ -12,6 +12,7 @@ import {
   appendPickerAssets,
   appendTextEntry,
   createMainAppImportDraft,
+  MAIN_APP_IMPORT_MAX_ITEMS,
   moveImportItem,
   pickerFileUris,
   removeImportItem,
@@ -169,6 +170,22 @@ export const NewPackFlow = React.forwardRef<
         setMessage(t(locale, 'selectionCanceled'));
         return;
       }
+      if (
+        draft.items.length + picked.assets.length >
+        MAIN_APP_IMPORT_MAX_ITEMS
+      ) {
+        try {
+          await native.cleanupMainAppPickerTransients();
+          setTransientCleanupRequired(false);
+          setMessage('IMPORT_ITEM_LIMIT_EXCEEDED');
+        } catch (cleanupError) {
+          setTransientCleanupRequired(true);
+          setMessage(
+            stableErrorCode(cleanupError, 'MAIN_APP_IMPORT_CLEANUP_FAILED'),
+          );
+        }
+        return;
+      }
       const stagedUris = await native.stageMainAppPickerFiles(
         picked.assets.map(asset => asset.uri),
       );
@@ -309,7 +326,8 @@ export const NewPackFlow = React.forwardRef<
       const code = stableErrorCode(error, 'MAIN_APP_IMPORT_FAILED');
       if (
         nativePublicationReturned ||
-        code === 'MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED'
+        code === 'MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED' ||
+        code === 'NATIVE_MAIN_APP_IMPORT_RESULT_INVALID'
       )
         setPublicationCommitted(true);
       setMessage(code);
