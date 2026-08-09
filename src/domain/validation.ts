@@ -217,7 +217,16 @@ function compareOCRBlockKeys(
     const difference = left.bounds[key] - right.bounds[key];
     if (difference !== 0) return difference;
   }
-  return left.text < right.text ? -1 : left.text > right.text ? 1 : 0;
+  return compareUTF16CodeUnits(left.text, right.text);
+}
+
+function compareUTF16CodeUnits(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  for (let index = 0; index < limit; index += 1) {
+    const difference = left.charCodeAt(index) - right.charCodeAt(index);
+    if (difference !== 0) return difference;
+  }
+  return left.length - right.length;
 }
 
 function compareOCRBlockIdentity(left: OCRBlockV1, right: OCRBlockV1): number {

@@ -129,6 +129,17 @@ final class MediaFixtureTests: XCTestCase {
     }
   }
 
+  func testReadingOrderUsesUTF16CodeUnitsForCanonicalUnicodeParity() {
+    let composed = ocrBlock("\u{00E9}", x: 0.1, y: 0.1)
+    let decomposed = ocrBlock("e\u{0301}", x: 0.1, y: 0.1)
+    for permutation in [[composed, decomposed], [decomposed, composed]] {
+      XCTAssertEqual(
+        sortOCRBlocksInReadingOrder(permutation).compactMap { $0["text"] as? String },
+        ["e\u{0301}", "\u{00E9}"]
+      )
+    }
+  }
+
   func testAggregateTextLimitFailsBeforeJoiningBlocks() throws {
     XCTAssertEqual(
       try advanceOCRAggregateTextLength(

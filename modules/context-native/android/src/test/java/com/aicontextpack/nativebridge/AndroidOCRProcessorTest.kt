@@ -89,6 +89,20 @@ class AndroidOCRProcessorTest {
   }
 
   @Test
+  fun readingOrderUsesUtf16CodeUnitsForCanonicalUnicodeParity() {
+    val composed = block("\u00e9", left = 100, top = 100)
+    val decomposed = block("e\u0301", left = 100, top = 100)
+    val orders = listOf(
+      listOf(composed, decomposed),
+      listOf(decomposed, composed),
+    ).map { permutation ->
+      buildOCRBlocks(permutation, outputWidth = 1_000, outputHeight = 1_000)
+        .map { it.getValue("text") as String }
+    }
+    assertTrue(orders.all { it == listOf("e\u0301", "\u00e9") })
+  }
+
+  @Test
   fun aggregateTextLimitFailsBeforeJoiningBlocks() {
     assertEquals(
       AndroidOCRResourcePolicy.maximumTextLength,

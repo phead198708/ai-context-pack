@@ -209,6 +209,41 @@ describe('native adapter runtime boundary', () => {
     ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
   });
 
+  test('accepts iOS canonical Unicode blocks ordered by UTF-16 code units', async () => {
+    const result = {
+      schemaVersion: 1,
+      text: 'e\u0301\n\u00e9',
+      blocks: [
+        {
+          text: 'e\u0301',
+          bounds: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 },
+        },
+        {
+          text: '\u00e9',
+          bounds: { x: 0.1, y: 0.1, width: 0.2, height: 0.1 },
+        },
+      ],
+      durationMs: 1,
+      engine: 'apple-vision',
+      revision: '3',
+      recognitionLevel: 'accurate',
+      warnings: [],
+    };
+    const native = {
+      ...mockNativeModule,
+      recognizeText: jest.fn().mockResolvedValue(result),
+    };
+
+    await expect(
+      createNativeAdapter(native).recognizeText({
+        taskId: '123e4567-e89b-42d3-a456-426614174000',
+        fileUri: 'file:///cache/synthetic.png',
+        script: 'latin',
+        recognitionLevel: 'accurate',
+      }),
+    ).resolves.toEqual(result);
+  });
+
   test('accepts a valid not-ready OCR capability and preserves stable OCR errors', async () => {
     const native = {
       ...mockNativeModule,

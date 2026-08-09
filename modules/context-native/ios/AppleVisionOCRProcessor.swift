@@ -412,7 +412,25 @@ private func compareOCRBlock(
     let rightValue = rightBounds[key] ?? 0
     if leftValue != rightValue { return leftValue < rightValue }
   }
-  return (left["text"] as? String ?? "") < (right["text"] as? String ?? "")
+  return utf16CodeUnitsPrecede(
+    left["text"] as? String ?? "",
+    right["text"] as? String ?? ""
+  )
+}
+
+private func utf16CodeUnitsPrecede(_ left: String, _ right: String) -> Bool {
+  let leftUnits = left.utf16
+  let rightUnits = right.utf16
+  var leftIndex = leftUnits.startIndex
+  var rightIndex = rightUnits.startIndex
+  while leftIndex != leftUnits.endIndex && rightIndex != rightUnits.endIndex {
+    let leftUnit = leftUnits[leftIndex]
+    let rightUnit = rightUnits[rightIndex]
+    if leftUnit != rightUnit { return leftUnit < rightUnit }
+    leftUnits.formIndex(after: &leftIndex)
+    rightUnits.formIndex(after: &rightIndex)
+  }
+  return leftIndex == leftUnits.endIndex && rightIndex != rightUnits.endIndex
 }
 
 private func ocrBounds(_ block: [String: Any]) -> [String: Double] {

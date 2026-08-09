@@ -339,13 +339,7 @@ internal fun advanceOCRAggregateTextLength(
 internal fun sortOCRBlocksInReadingOrder(
   blocks: List<Map<String, Any>>,
 ): List<Map<String, Any>> {
-  val exactTopLeft = compareBy<Map<String, Any>>(
-    { bounds(it).getValue("y") },
-    { bounds(it).getValue("x") },
-    { bounds(it).getValue("width") },
-    { bounds(it).getValue("height") },
-    { it.getValue("text") as String },
-  )
+  val exactTopLeft = ocrBlockComparator(listOf("y", "x", "width", "height"))
   val rows = mutableListOf<MutableList<Map<String, Any>>>()
   for (block in blocks.sortedWith(exactTopLeft)) {
     val y = bounds(block).getValue("y")
@@ -357,14 +351,29 @@ internal fun sortOCRBlocksInReadingOrder(
       current.add(block)
     }
   }
-  val withinRow = compareBy<Map<String, Any>>(
-    { bounds(it).getValue("x") },
-    { bounds(it).getValue("y") },
-    { bounds(it).getValue("width") },
-    { bounds(it).getValue("height") },
-    { it.getValue("text") as String },
-  )
+  val withinRow = ocrBlockComparator(listOf("x", "y", "width", "height"))
   return rows.flatMap { row -> row.sortedWith(withinRow) }
+}
+
+private fun ocrBlockComparator(keys: List<String>): Comparator<Map<String, Any>> =
+  Comparator { left, right ->
+    for (key in keys) {
+      val comparison = bounds(left).getValue(key).compareTo(bounds(right).getValue(key))
+      if (comparison != 0) return@Comparator comparison
+    }
+    compareUTF16CodeUnits(
+      left.getValue("text") as String,
+      right.getValue("text") as String,
+    )
+  }
+
+private fun compareUTF16CodeUnits(left: String, right: String): Int {
+  val limit = minOf(left.length, right.length)
+  for (index in 0 until limit) {
+    val comparison = left[index].code.compareTo(right[index].code)
+    if (comparison != 0) return comparison
+  }
+  return left.length.compareTo(right.length)
 }
 
 @Suppress("UNCHECKED_CAST")
