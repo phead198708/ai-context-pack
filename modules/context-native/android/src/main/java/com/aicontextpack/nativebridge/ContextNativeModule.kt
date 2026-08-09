@@ -384,13 +384,23 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       }
       val recognition = try {
         task.recognizer.process(task.image)
-      } catch (_: Exception) {
-        closeRecognizer()
-        lifecycle.deliver(taskId) {
-          promise.reject(NativeException("OCR_RECOGNITION_FAILED"))
-        }
-        lifecycle.finish(taskId)
-        processor.finish(taskId)
+      } catch (error: OutOfMemoryError) {
+        settleOCRRecognitionStartFailure(
+          error,
+          taskId,
+          closeRecognizer,
+          lifecycle,
+          processor::finish,
+        ) { promise.reject(it) }
+        return@AsyncFunction
+      } catch (error: Exception) {
+        settleOCRRecognitionStartFailure(
+          error,
+          taskId,
+          closeRecognizer,
+          lifecycle,
+          processor::finish,
+        ) { promise.reject(it) }
         return@AsyncFunction
       }
       recognition
@@ -461,6 +471,33 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) = Unit
+}
+
+internal fun settleOCRRecognitionStartFailure(
+  error: Throwable,
+  taskId: String,
+  closeRecognizer: () -> Unit,
+  lifecycle: OcrModuleLifecycle,
+  finishProcessor: (String) -> Unit,
+  reject: (NativeException) -> Unit,
+) {
+  try {
+    closeRecognizer()
+    lifecycle.deliver(taskId) {
+      reject(
+        NativeException(
+          if (error is OutOfMemoryError) "RESOURCE_MEMORY_PRESSURE"
+          else "OCR_RECOGNITION_FAILED",
+        ),
+      )
+    }
+  } finally {
+    try {
+      lifecycle.finish(taskId)
+    } finally {
+      finishProcessor(taskId)
+    }
+  }
 }
 
 internal fun isMemoryPressureTrimLevel(level: Int): Boolean =

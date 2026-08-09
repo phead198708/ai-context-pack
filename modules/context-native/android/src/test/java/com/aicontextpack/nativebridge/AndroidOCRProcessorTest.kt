@@ -148,6 +148,47 @@ class AndroidOCRProcessorTest {
     assertEquals(4, AndroidOCRProcessScope.resultExecutor.queue.remainingCapacity())
   }
 
+  @Test
+  fun recognitionStartOomClosesAndReleasesTheTaskForRetry() {
+    val registry = OcrTaskRegistry()
+    val lifecycle = OcrModuleLifecycle()
+    var closed = 0
+    var rejection: String? = null
+    registry.begin(firstTaskId)
+    assertTrue(
+      lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = firstTaskId,
+          close = { closed += 1 },
+          rejectOnDestroy = { rejection = "OCR_CANCELLED" },
+        ),
+      ),
+    )
+
+    settleOCRRecognitionStartFailure(
+      OutOfMemoryError("synthetic"),
+      firstTaskId,
+      closeRecognizer = { closed += 1 },
+      lifecycle = lifecycle,
+      finishProcessor = registry::finish,
+      reject = { rejection = it.code },
+    )
+
+    assertEquals(1, closed)
+    assertEquals("RESOURCE_MEMORY_PRESSURE", rejection)
+    assertTrue(
+      lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = secondTaskId,
+          close = {},
+          rejectOnDestroy = {},
+        ),
+      ),
+    )
+    registry.begin(secondTaskId)
+    registry.finish(secondTaskId)
+  }
+
   private fun block(text: String, left: Int, top: Int): OCRRecognizedBlockInput =
     OCRRecognizedBlockInput(
       text = text,

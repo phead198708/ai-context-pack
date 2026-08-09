@@ -179,6 +179,51 @@ export function ocrBlocksMatchText(
   return offset === expectedText.length;
 }
 
+/** Reconstructs the native row grouping and rejects non-canonical block order. */
+export function areOCRBlocksInReadingOrder(
+  blocks: readonly OCRBlockV1[],
+): boolean {
+  const exactTopLeft = [...blocks].sort((left, right) =>
+    compareOCRBlockKeys(left, right, ['y', 'x', 'width', 'height']),
+  );
+  const rows: OCRBlockV1[][] = [];
+  for (const block of exactTopLeft) {
+    const current = rows.at(-1);
+    if (
+      current === undefined ||
+      block.bounds.y - current[0]!.bounds.y >= 0.01
+    ) {
+      rows.push([block]);
+    } else {
+      current.push(block);
+    }
+  }
+  const expected = rows.flatMap(row =>
+    row.sort((left, right) =>
+      compareOCRBlockKeys(left, right, ['x', 'y', 'width', 'height']),
+    ),
+  );
+  return expected.every(
+    (block, index) => compareOCRBlockIdentity(block, blocks[index]!) === 0,
+  );
+}
+
+function compareOCRBlockKeys(
+  left: OCRBlockV1,
+  right: OCRBlockV1,
+  keys: readonly (keyof NormalizedBoundsV1)[],
+): number {
+  for (const key of keys) {
+    const difference = left.bounds[key] - right.bounds[key];
+    if (difference !== 0) return difference;
+  }
+  return left.text < right.text ? -1 : left.text > right.text ? 1 : 0;
+}
+
+function compareOCRBlockIdentity(left: OCRBlockV1, right: OCRBlockV1): number {
+  return compareOCRBlockKeys(left, right, ['x', 'y', 'width', 'height']);
+}
+
 function isCopiedImportItemV1(
   value: Record<string, unknown>,
 ): value is Record<string, unknown> & ImportItemV1 {

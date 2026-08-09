@@ -16,6 +16,7 @@ import {
 } from '../domain/mainAppImport';
 import { newestManifestsFirst } from '../domain/importOrdering';
 import {
+  areOCRBlocksInReadingOrder,
   isImportManifestV1,
   isOCRCapabilitiesV1,
   isOCRResultV1,
@@ -350,6 +351,7 @@ export const createNativeAdapter = (
             !isOCRResultV1(value) ||
             value.recognitionLevel !== request.recognitionLevel ||
             !Array.isArray(value.warnings) ||
+            !areOCRBlocksInReadingOrder(value.blocks) ||
             !ocrBlocksMatchText(value.blocks, value.text) ||
             (value.engine === 'ml-kit-latin' && request.script !== 'latin') ||
             (value.engine === 'ml-kit-chinese' && request.script !== 'chinese')
