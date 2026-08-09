@@ -203,9 +203,10 @@ function App(): React.JSX.Element {
               state={state}
               onRetry={() => {
                 workflow.current?.retry().finally(() => {
-                  setPackCreationReady(
-                    workflow.current?.isPackCreationReady() === true,
-                  );
+                  const creationReady =
+                    workflow.current?.isPackCreationReady() === true;
+                  setPackCreationReady(creationReady);
+                  if (creationReady) setEmptyDraftError(undefined);
                 });
               }}
             />
