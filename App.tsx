@@ -43,6 +43,7 @@ function App(): React.JSX.Element {
   const [emptyDraftError, setEmptyDraftError] = useState<string>();
   const [creatingEmptyDraft, setCreatingEmptyDraft] = useState(false);
   const [packCreationReady, setPackCreationReady] = useState(false);
+  const [selectedDetailPackId, setSelectedDetailPackId] = useState<string>();
   const [retryDraft, setRetryDraft] = useState<MainAppImportDraft>();
   const [retryDraftError, setRetryDraftError] = useState<string>();
   const scrollView = useRef<ScrollView | null>(null);
@@ -65,7 +66,10 @@ function App(): React.JSX.Element {
       {
         setState: setWorkflowState,
         showNewestImport: () => {
-          if (screenRef.current !== 'new-pack') setScreen('detail');
+          if (screenRef.current !== 'new-pack') {
+            setSelectedDetailPackId(undefined);
+            setScreen('detail');
+          }
         },
       },
       persistenceInboxProcessor,
@@ -136,6 +140,7 @@ function App(): React.JSX.Element {
                 disabled={!packCreationReady}
                 label={t(locale, 'newPack')}
                 onPress={() => {
+                  setSelectedDetailPackId(undefined);
                   setRetryDraft(undefined);
                   setRetryDraftError(undefined);
                   setScreen('new-pack');
@@ -150,6 +155,7 @@ function App(): React.JSX.Element {
                   try {
                     await createEmptyDraftPack();
                     await workflow.current?.appBecameActive();
+                    setSelectedDetailPackId(undefined);
                     setScreen('detail');
                   } catch (error) {
                     setEmptyDraftError(appErrorCode(error));
@@ -199,8 +205,9 @@ function App(): React.JSX.Element {
             <ImportDetail
               {...(retryDraftError ? { retryError: retryDraftError } : {})}
               locale={locale}
-              onRetryFailed={sources => {
+              onRetryFailed={(packId, sources) => {
                 try {
+                  setSelectedDetailPackId(packId);
                   setRetryDraft(createRetryMainAppImportDraft(sources));
                   setRetryDraftError(undefined);
                   setScreen('new-pack');
@@ -208,6 +215,13 @@ function App(): React.JSX.Element {
                   setRetryDraftError(appErrorCode(error));
                 }
               }}
+              onSelectPack={packId => {
+                setSelectedDetailPackId(packId);
+                setRetryDraftError(undefined);
+              }}
+              {...(selectedDetailPackId
+                ? { selectedPackId: selectedDetailPackId }
+                : {})}
               state={state}
             />
           )}
@@ -325,11 +339,14 @@ function Inbox({
 function ImportDetail({
   state,
   onRetryFailed,
+  onSelectPack,
+  selectedPackId,
   retryError,
   locale,
 }: {
   state: LoadState;
   onRetryFailed: (
+    packId: string,
     sources: readonly {
       readonly mediaType: string;
       readonly byteCount: number;
@@ -337,10 +354,13 @@ function ImportDetail({
       readonly sha256: string;
     }[],
   ) => void;
+  onSelectPack: (packId: string) => void;
+  selectedPackId?: string;
   retryError?: string;
   locale: AppLocale;
 }): React.JSX.Element {
-  const pack = state.kind === 'ready' ? state.packs?.[0] : undefined;
+  const packs = state.kind === 'ready' ? state.packs ?? [] : [];
+  const pack = packs.find(value => value.id === selectedPackId) ?? packs[0];
   const manifest = state.kind === 'ready' ? state.manifests[0] : undefined;
   const persistedImport = pack?.import;
   const retrySources =
@@ -400,13 +420,28 @@ function ImportDetail({
           : t(locale, 'noImportSelected')
       }
     >
+      {packs.length > 1 ? (
+        <View accessibilityRole="radiogroup" style={styles.detailPackChoices}>
+          {packs.map((candidate, index) => (
+            <Action
+              key={candidate.id}
+              label={t(locale, 'selectPack', { position: index + 1 })}
+              onPress={() => onSelectPack(candidate.id)}
+              role="radio"
+              selected={candidate.id === pack?.id}
+            />
+          ))}
+        </View>
+      ) : null}
       {retryBatches.map(batch => (
         <Action
           key={`${batch.start}-${batch.end}`}
           label={`${t(locale, 'retryFailedItems')}${
             retryBatches.length > 1 ? ` ${batch.start + 1}–${batch.end}` : ''
           }`}
-          onPress={() => onRetryFailed(batch.sources)}
+          onPress={() => {
+            if (pack) onRetryFailed(pack.id, batch.sources);
+          }}
         />
       ))}
       {retryError ? (
@@ -646,6 +681,11 @@ const styles = StyleSheet.create({
   },
   content: { flexGrow: 1, paddingBottom: spacing.lg },
   screenContent: { padding: spacing.lg },
+  detailPackChoices: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
   card: {
     backgroundColor: colors.surface,
     borderRadius: 16,

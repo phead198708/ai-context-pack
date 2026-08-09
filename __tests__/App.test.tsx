@@ -493,6 +493,73 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
+  test('keeps untouched retry batches reachable after a retry creates the newest Pack', async () => {
+    const failedItems = Array.from({ length: 128 }, (_, index) => {
+      const itemId = `${String(index + 10).padStart(
+        8,
+        '0',
+      )}-e89b-42d3-a456-426614174000`;
+      return {
+        id: itemId,
+        order: index,
+        mediaType: 'image/png',
+        status: 'failed' as const,
+        errorCode: 'IMPORT_COPY_FAILED',
+        retrySource: {
+          relativePath: `Packs/${persistedPack.id}/originals/${itemId}.bin`,
+          byteCount: 4,
+          sha256: 'a'.repeat(64),
+        },
+      };
+    });
+    const original = {
+      ...persistedPack,
+      itemCount: failedItems.length,
+      import: {
+        ingestionId,
+        status: 'failed' as const,
+        items: failedItems,
+      },
+    };
+    const retryPack = {
+      ...persistedPack,
+      id: newerPackId,
+      updatedAt: '2026-01-02T00:00:00Z',
+      itemCount: 20,
+    };
+    mockNative.scanInbox.mockResolvedValue([]);
+    mockNative.publishMainAppImport.mockResolvedValue({
+      ...manifest,
+      ingestionId: newerPackId,
+      source: 'main-app-picker',
+    });
+    mockPersistenceInboxProcessor.listPersistedPacks
+      .mockResolvedValueOnce([original])
+      .mockResolvedValue([retryPack, original]);
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'tab', 'detail'));
+    await press(
+      control(renderer, 'button', 'Retry failed items in New Pack 1–20'),
+    );
+    await press(control(renderer, 'button', 'Import Pack'));
+    await press(control(renderer, 'button', 'Done'));
+    await press(control(renderer, 'tab', 'detail'));
+
+    expect(renderedText(renderer)).toContain(`ID ${ingestionId}`);
+    expect(renderedText(renderer)).not.toContain(`ID ${newerPackId}`);
+    expect(
+      control(renderer, 'radio', 'Select Pack 2').props.accessibilityState,
+    ).toEqual({ disabled: false, selected: true });
+    expect(
+      control(renderer, 'button', 'Retry failed items in New Pack 121–128'),
+    ).toBeDefined();
+
+    await press(control(renderer, 'radio', 'Select Pack 1'));
+    expect(renderedText(renderer)).toContain(`ID ${newerPackId}`);
+    act(() => renderer.unmount());
+  });
+
   test('keeps an ACKed import visible from persisted Packs across refresh and restart', async () => {
     mockNative.scanInbox
       .mockResolvedValueOnce([manifest])
