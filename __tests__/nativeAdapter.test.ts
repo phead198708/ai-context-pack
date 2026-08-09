@@ -148,6 +148,7 @@ describe('native adapter runtime boundary', () => {
       schemaVersion: 1,
       pageCount: 2,
       byteCount: 1024,
+      sha256: 'a'.repeat(64),
       engine: 'pdfkit',
       revision: 'PDFKit',
       limit: { pages: 25, bytes: 52_428_800 },

@@ -11,7 +11,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.io.RandomAccessFile
+import java.security.MessageDigest
+import java.util.Locale
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
@@ -28,6 +31,7 @@ class PDFExtractionInstrumentedTest {
     assertEquals(1, info["schemaVersion"])
     assertEquals(1, info["pageCount"])
     assertEquals("pdf-renderer", info["engine"])
+    assertEquals(sha256(text), info["sha256"])
 
     val textPage = processor.extractPage(
       context,
@@ -139,6 +143,21 @@ class PDFExtractionInstrumentedTest {
       )
     }
     assertEquals("PDF_ENCRYPTED", encrypted.code)
+  }
+
+  @Test
+  fun validUnencryptedPdfWithEncryptContentIsNotMisclassified() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val file = File(context.cacheDir, "unencrypted-encrypt-content.pdf")
+    file.writeBytes(unencryptedEncryptTextPDF())
+    try {
+      assertEquals(false, hasPDFEncryptionMarker(file))
+      val info = AndroidPDFProcessor().inspect(context, file.toURI().toString())
+      assertEquals(1, info["pageCount"])
+      assertEquals(sha256(file), info["sha256"])
+    } finally {
+      file.delete()
+    }
   }
 
   @Test
@@ -259,6 +278,45 @@ class PDFExtractionInstrumentedTest {
         "durationMs=$durationMs sampledPeakPssKb=$sampledPeakPssKb " +
         "cancellation=PDF_CANCELLED",
     )
+  }
+
+  private fun unencryptedEncryptTextPDF(): ByteArray {
+    val output = ByteArrayOutputStream()
+    val offsets = mutableListOf<Int>()
+    fun append(value: String) = output.write(value.toByteArray(Charsets.US_ASCII))
+    append("%PDF-1.4\n")
+    val objects = listOf(
+      "<< /Type /Catalog /Pages 2 0 R >>",
+      "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+        "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+      "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+      "<< /Length 40 >>\nstream\nBT /F1 18 Tf 72 720 Td (/Encrypt) Tj ET\nendstream",
+    )
+    objects.forEachIndexed { index, body ->
+      offsets += output.size()
+      append("${index + 1} 0 obj\n$body\nendobj\n")
+    }
+    val xref = output.size()
+    append("xref\n0 6\n0000000000 65535 f \n")
+    offsets.forEach { offset ->
+      append(String.format(Locale.US, "%010d 00000 n \n", offset))
+    }
+    append("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n$xref\n%%EOF\n")
+    return output.toByteArray()
+  }
+
+  private fun sha256(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().buffered().use { input ->
+      val buffer = ByteArray(8_192)
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        digest.update(buffer, 0, count)
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
   }
 
   @Test

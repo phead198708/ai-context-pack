@@ -52,12 +52,18 @@ class AndroidPDFProcessorTest {
     val metadataOnly = temporaryPDF(
       "%PDF-1.7\n1 0 obj << /EncryptMetadata true >> endobj\nstartxref\n8\n%%EOF",
     )
+    val harmlessContent = temporaryPDF(
+      "%PDF-1.7\n1 0 obj << /Length 20 >> stream\nBT (/Encrypt) Tj ET\n" +
+        "endstream\nendobj\ntrailer\n<< /Size 2 >>\nstartxref\n8\n%%EOF",
+    )
     try {
       assertTrue(hasPDFEncryptionMarker(encrypted))
       assertEquals(false, hasPDFEncryptionMarker(metadataOnly))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessContent))
     } finally {
       encrypted.delete()
       metadataOnly.delete()
+      harmlessContent.delete()
     }
   }
 

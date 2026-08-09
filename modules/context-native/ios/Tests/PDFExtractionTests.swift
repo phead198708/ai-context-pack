@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import XCTest
 @testable import ContextNativeRecovery
@@ -13,6 +14,9 @@ final class PDFExtractionTests: XCTestCase {
     XCTAssertEqual(info["schemaVersion"] as? Int, 1)
     XCTAssertEqual(info["pageCount"] as? Int, 1)
     XCTAssertEqual(info["engine"] as? String, "pdfkit")
+    let expectedHash = SHA256.hash(data: try Data(contentsOf: fixtureURL("text-one-page.pdf")))
+      .map { String(format: "%02x", $0) }.joined()
+    XCTAssertEqual(info["sha256"] as? String, expectedHash)
 
     let embedded = try processor.extractPage(
       taskId: firstTaskId,

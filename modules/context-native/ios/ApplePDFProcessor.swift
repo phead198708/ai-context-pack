@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
 import PDFKit
 import Vision
@@ -64,12 +65,14 @@ final class ApplePDFProcessor: @unchecked Sendable {
 
   func inspect(fileURL: URL) throws -> [String: Any] {
     let fileSize = try validatedFileSize(fileURL)
+    let sourceSHA256 = try sha256(fileURL)
     let document = try openDocument(fileURL)
     try validateDocument(document)
     return [
       "schemaVersion": 1,
       "pageCount": document.pageCount,
       "byteCount": fileSize,
+      "sha256": sourceSHA256,
       "engine": "pdfkit",
       "revision": "PDFKit",
       "limit": [
@@ -208,6 +211,23 @@ final class ApplePDFProcessor: @unchecked Sendable {
       throw PDFProcessingError.tooLarge
     }
     return fileSize
+  }
+
+  private func sha256(_ fileURL: URL) throws -> String {
+    guard let input = InputStream(url: fileURL) else {
+      throw PDFProcessingError.invalidLocalFile
+    }
+    input.open()
+    defer { input.close() }
+    var hasher = SHA256()
+    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+    while true {
+      let count = input.read(&buffer, maxLength: buffer.count)
+      if count < 0 { throw PDFProcessingError.corrupt }
+      if count == 0 { break }
+      hasher.update(data: Data(buffer[0..<count]))
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   private func openDocument(_ fileURL: URL) throws -> PDFDocument {

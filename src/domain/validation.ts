@@ -551,6 +551,7 @@ export function isPDFDocumentInfoV1(
       'schemaVersion',
       'pageCount',
       'byteCount',
+      'sha256',
       'engine',
       'revision',
       'limit',
@@ -561,6 +562,7 @@ export function isPDFDocumentInfoV1(
     (value.pageCount as number) <= PDF_MAXIMUM_PAGES &&
     isNonNegativeInteger(value.byteCount) &&
     (value.byteCount as number) <= PDF_MAXIMUM_BYTES &&
+    isSha256(value.sha256) &&
     (value.engine === 'pdfkit' || value.engine === 'pdf-renderer') &&
     isNonEmptyString(value.revision) &&
     record(value.limit) &&

@@ -15,11 +15,14 @@ const ids = [
   '123e4567-e89b-42d3-a456-426614174000',
   '223e4567-e89b-42d3-a456-426614174000',
 ] as const;
+const sourceSha256 = 'a'.repeat(64);
+const otherSourceSha256 = 'b'.repeat(64);
 
 const document: PDFDocumentInfoV1 = {
   schemaVersion: 1,
   pageCount: 3,
   byteCount: 1024,
+  sha256: sourceSha256,
   engine: 'pdfkit',
   revision: 'PDFKit',
   limit: { pages: 25, bytes: 52_428_800 },
@@ -62,6 +65,23 @@ function request(taskId: string = ids[0]) {
     taskId,
     fileUri: 'file:///private/synthetic.pdf',
     script: 'latin' as const,
+    sourceSha256,
+  };
+}
+
+function recoveryCheckpoint(
+  pages: readonly PDFPageExtractionV1[],
+  overrides: Partial<PDFExtractionCheckpointV1> = {},
+): PDFExtractionCheckpointV1 {
+  return {
+    schemaVersion: 1,
+    taskId: ids[0],
+    sourceSha256,
+    script: 'latin',
+    pageCount: document.pageCount,
+    pages,
+    reason: 'periodic',
+    ...overrides,
   };
 }
 
@@ -135,7 +155,10 @@ describe('PDFTaskRunner', () => {
     const handle = runner.start(
       {
         ...request(),
-        completedPages: [completePage(0), failedPage(1)],
+        recoveryCheckpoint: recoveryCheckpoint([
+          completePage(0),
+          failedPage(1),
+        ]),
         retryFailedPageIndexes: [1],
       },
       jest.fn().mockResolvedValue(undefined),
@@ -145,6 +168,59 @@ describe('PDFTaskRunner', () => {
     expect(extractPdfPage.mock.calls.map(call => call[0].pageIndex)).toEqual([
       1, 2,
     ]);
+  });
+
+  test('fails closed when recovered pages belong to another PDF', async () => {
+    const extractPdfPage = jest.fn();
+    const runner = new PDFTaskRunner({
+      inspectPdf: jest.fn().mockResolvedValue({
+        ...document,
+        pageCount: 1,
+        sha256: otherSourceSha256,
+      }),
+      extractPdfPage,
+      cancelPdfExtraction: jest.fn(),
+    });
+
+    const handle = runner.start(
+      {
+        ...request(),
+        sourceSha256: otherSourceSha256,
+        recoveryCheckpoint: recoveryCheckpoint([completePage(0)], {
+          pageCount: 1,
+        }),
+      },
+      jest.fn().mockResolvedValue(undefined),
+      jest.fn(),
+    );
+
+    await expect(handle.result).rejects.toEqual(
+      new PDFTaskError('PDF_RESULT_INVALID'),
+    );
+    expect(extractPdfPage).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when the selected artifact hash changed before inspection', async () => {
+    const extractPdfPage = jest.fn();
+    const runner = new PDFTaskRunner({
+      inspectPdf: jest.fn().mockResolvedValue({
+        ...document,
+        sha256: otherSourceSha256,
+      }),
+      extractPdfPage,
+      cancelPdfExtraction: jest.fn(),
+    });
+
+    const handle = runner.start(
+      request(),
+      jest.fn().mockResolvedValue(undefined),
+      jest.fn(),
+    );
+
+    await expect(handle.result).rejects.toEqual(
+      new PDFTaskError('PDF_RESULT_INVALID'),
+    );
+    expect(extractPdfPage).not.toHaveBeenCalled();
   });
 
   test('keeps failed page outcomes visible and continues later pages', async () => {
@@ -394,22 +470,25 @@ describe('PDFTaskRunner', () => {
     const invalidRequests = [
       {
         ...request(),
-        completedPages: [completePage(0), completePage(0)],
+        recoveryCheckpoint: recoveryCheckpoint([
+          completePage(0),
+          completePage(0),
+        ]),
       },
-      { ...request(), completedPages: [completePage(3)] },
       {
         ...request(),
-        completedPages: [completePage(0)],
+        recoveryCheckpoint: recoveryCheckpoint([completePage(3)]),
+      },
+      {
+        ...request(),
+        recoveryCheckpoint: recoveryCheckpoint([completePage(0)]),
         retryFailedPageIndexes: [0],
       },
       {
         ...request(),
-        completedPages: [
-          {
-            ...completePage(0),
-            engine: 'pdf-renderer' as const,
-          },
-        ],
+        recoveryCheckpoint: recoveryCheckpoint([
+          { ...completePage(0), engine: 'pdf-renderer' as const },
+        ]),
       },
     ];
 

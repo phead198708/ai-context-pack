@@ -109,6 +109,8 @@ export interface PDFDocumentInfoV1 {
   readonly schemaVersion: 1;
   readonly pageCount: number;
   readonly byteCount: number;
+  /** SHA-256 of the exact bounded local PDF inspected by the native adapter. */
+  readonly sha256: string;
   readonly engine: 'pdfkit' | 'pdf-renderer';
   readonly revision: string;
   readonly limit: {

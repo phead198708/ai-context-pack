@@ -16,6 +16,7 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.security.MessageDigest
 import java.util.UUID
 import kotlin.math.ceil
 import kotlin.math.sqrt
@@ -49,12 +50,18 @@ internal class AndroidPDFProcessor(
 ) {
   fun inspect(context: Context, fileUri: String): Map<String, Any> {
     val file = validatedFile(context, fileUri)
+    val sourceSha256 = try {
+      sha256(file)
+    } catch (_: IOException) {
+      throw NativeException("PDF_CORRUPT")
+    }
     return withRenderer(file) { renderer ->
       validatePageCount(renderer.pageCount)
       mapOf(
         "schemaVersion" to 1,
         "pageCount" to renderer.pageCount,
         "byteCount" to file.length(),
+        "sha256" to sourceSha256,
         "engine" to "pdf-renderer",
         "revision" to Build.VERSION.SDK_INT.toString(),
         "limit" to mapOf(
@@ -453,24 +460,153 @@ private fun isUnsafePDFControl(value: Int): Boolean =
     value in 0x202A..0x202E || value in 0x2066..0x2069
 
 internal fun hasPDFEncryptionMarker(file: File): Boolean {
-  val marker = "/Encrypt".toByteArray(Charsets.US_ASCII)
+  RandomAccessFile(file, "r").use { input ->
+    val tailLength = minOf(1_048_576L, input.length()).toInt()
+    if (tailLength == 0) return false
+    val tail = ByteArray(tailLength)
+    input.seek(input.length() - tailLength)
+    input.readFully(tail)
+    val startXref = lastPDFKeyword(tail, "startxref", tail.size)
+    if (startXref < 0) return false
+    val trailer = lastPDFKeyword(tail, "trailer", startXref)
+    if (
+      trailer >= 0 &&
+      containsPDFName(tail, trailer + "trailer".length, startXref, "Encrypt")
+    ) return true
+
+    val xrefOffset = parseStartXrefOffset(tail, startXref) ?: return false
+    if (xrefOffset < 0 || xrefOffset >= input.length()) return false
+    val dictionaryLength = minOf(65_536L, input.length() - xrefOffset).toInt()
+    val dictionary = ByteArray(dictionaryLength)
+    input.seek(xrefOffset)
+    input.readFully(dictionary)
+    val stream = firstPDFKeyword(dictionary, "stream", dictionary.size)
+    val end = if (stream >= 0) stream else dictionary.size
+    return containsPDFName(dictionary, 0, end, "Type") &&
+      containsPDFName(dictionary, 0, end, "XRef") &&
+      containsPDFName(dictionary, 0, end, "Encrypt")
+  }
+}
+
+private fun sha256(file: File): String {
+  val digest = MessageDigest.getInstance("SHA-256")
   file.inputStream().buffered().use { input ->
-    var matched = 0
+    val buffer = ByteArray(64 * 1_024)
     while (true) {
-      val value = input.read()
-      if (value < 0) return matched == marker.size
-      if (matched == marker.size) {
-        if (isPDFDelimiter(value)) return true
-        matched = if (value == marker[0].toInt()) 1 else 0
-        continue
-      }
-      if (value == marker[matched].toInt()) {
-        matched += 1
-      } else {
-        matched = if (value == marker[0].toInt()) 1 else 0
-      }
+      val count = input.read(buffer)
+      if (count < 0) break
+      digest.update(buffer, 0, count)
     }
   }
+  return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+private fun parseStartXrefOffset(bytes: ByteArray, keyword: Int): Long? {
+  var index = keyword + "startxref".length
+  while (index < bytes.size && isPDFWhitespace(bytes[index].toInt() and 0xff)) index += 1
+  val start = index
+  while (index < bytes.size && bytes[index].toInt().toChar() in '0'..'9') index += 1
+  if (index == start) return null
+  return bytes.copyOfRange(start, index).toString(Charsets.US_ASCII).toLongOrNull()
+}
+
+private fun lastPDFKeyword(bytes: ByteArray, keyword: String, before: Int): Int {
+  val token = keyword.toByteArray(Charsets.US_ASCII)
+  for (index in before - token.size downTo 0) {
+    if (
+      bytes.regionMatches(index, token) &&
+      isPDFTokenBoundary(bytes, index - 1) &&
+      isPDFTokenBoundary(bytes, index + token.size)
+    ) return index
+  }
+  return -1
+}
+
+private fun firstPDFKeyword(bytes: ByteArray, keyword: String, before: Int): Int {
+  val token = keyword.toByteArray(Charsets.US_ASCII)
+  for (index in 0..before - token.size) {
+    if (
+      bytes.regionMatches(index, token) &&
+      isPDFTokenBoundary(bytes, index - 1) &&
+      isPDFTokenBoundary(bytes, index + token.size)
+    ) return index
+  }
+  return -1
+}
+
+private fun ByteArray.regionMatches(start: Int, token: ByteArray): Boolean {
+  if (start < 0 || start > size - token.size) return false
+  for (index in token.indices) if (this[start + index] != token[index]) return false
+  return true
+}
+
+private fun isPDFTokenBoundary(bytes: ByteArray, index: Int): Boolean =
+  index !in bytes.indices || isPDFDelimiter(bytes[index].toInt() and 0xff)
+
+private fun isPDFWhitespace(value: Int): Boolean =
+  value == 0 || value == 9 || value == 10 || value == 12 || value == 13 || value == 32
+
+private fun containsPDFName(
+  bytes: ByteArray,
+  start: Int,
+  end: Int,
+  expected: String,
+): Boolean {
+  val token = expected.toByteArray(Charsets.US_ASCII)
+  var index = maxOf(0, start)
+  val limit = minOf(end, bytes.size)
+  while (index < limit) {
+    when (bytes[index].toInt() and 0xff) {
+      '%'.code -> {
+        index += 1
+        while (index < limit && bytes[index] != '\n'.code.toByte() && bytes[index] != '\r'.code.toByte()) index += 1
+      }
+      '('.code -> index = skipPDFLiteralString(bytes, index + 1, limit)
+      '<'.code -> {
+        if (index + 1 < limit && bytes[index + 1] == '<'.code.toByte()) index += 2
+        else {
+          index += 1
+          while (index < limit && bytes[index] != '>'.code.toByte()) index += 1
+          index += 1
+        }
+      }
+      '/'.code -> {
+        val nameStart = index + 1
+        var nameEnd = nameStart
+        while (
+          nameEnd < limit &&
+          !isPDFDelimiter(bytes[nameEnd].toInt() and 0xff)
+        ) nameEnd += 1
+        if (
+          nameEnd - nameStart == token.size &&
+          bytes.regionMatches(nameStart, token)
+        ) return true
+        index = nameEnd
+      }
+      else -> index += 1
+    }
+  }
+  return false
+}
+
+private fun skipPDFLiteralString(bytes: ByteArray, start: Int, end: Int): Int {
+  var index = start
+  var depth = 1
+  while (index < end && depth > 0) {
+    when (bytes[index].toInt() and 0xff) {
+      '\\'.code -> index += 2
+      '('.code -> {
+        depth += 1
+        index += 1
+      }
+      ')'.code -> {
+        depth -= 1
+        index += 1
+      }
+      else -> index += 1
+    }
+  }
+  return index
 }
 
 internal fun hasValidPDFEnvelope(file: File): Boolean {

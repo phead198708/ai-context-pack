@@ -30,8 +30,10 @@ export interface PDFExtractionRequestV1 {
   readonly taskId: string;
   readonly fileUri: string;
   readonly script: OCRScriptV1;
-  /** Previously committed page outcomes loaded from an immutable checkpoint. */
-  readonly completedPages?: readonly PDFPageExtractionV1[];
+  /** Hash recorded for the immutable owned artifact selected for this run. */
+  readonly sourceSha256: string;
+  /** Previously committed outcomes, bound to the same task, script, and PDF hash. */
+  readonly recoveryCheckpoint?: PDFExtractionCheckpointV1;
   /** Only failed pages may be selected; successful pages are never recomputed. */
   readonly retryFailedPageIndexes?: readonly number[];
 }
@@ -48,6 +50,8 @@ export type PDFCheckpointReasonV1 = 'periodic' | 'cancelled';
 export interface PDFExtractionCheckpointV1 {
   readonly schemaVersion: 1;
   readonly taskId: string;
+  readonly sourceSha256: string;
+  readonly script: OCRScriptV1;
   readonly pageCount: number;
   readonly pages: readonly PDFPageExtractionV1[];
   readonly reason: PDFCheckpointReasonV1;
@@ -187,6 +191,8 @@ export class PDFTaskRunner {
         await onCheckpoint({
           schemaVersion: 1,
           taskId: request.taskId,
+          sourceSha256: request.sourceSha256,
+          script: request.script,
           pageCount: totalPages,
           pages,
           reason,
@@ -217,6 +223,8 @@ export class PDFTaskRunner {
         return fail(pdfErrorCode(error));
       }
       if (!isPDFDocumentInfoV1(document)) return fail('PDF_RESULT_INVALID');
+      if (document.sha256 !== request.sourceSha256)
+        return fail('PDF_RESULT_INVALID');
       totalPages = document.pageCount;
       let pages: Map<number, PDFPageExtractionV1>;
       try {
@@ -332,7 +340,8 @@ export function isPDFExtractionRequestV1(
     'taskId',
     'fileUri',
     'script',
-    'completedPages',
+    'sourceSha256',
+    'recoveryCheckpoint',
     'retryFailedPageIndexes',
   ]);
   return (
@@ -341,10 +350,9 @@ export function isPDFExtractionRequestV1(
     typeof request.fileUri === 'string' &&
     request.fileUri.startsWith('file://') &&
     (request.script === 'latin' || request.script === 'chinese') &&
-    (request.completedPages === undefined ||
-      (Array.isArray(request.completedPages) &&
-        request.completedPages.length <= PDF_MAXIMUM_PAGES &&
-        request.completedPages.every(isProductionPDFPage))) &&
+    isSha256(request.sourceSha256) &&
+    (request.recoveryCheckpoint === undefined ||
+      isPDFExtractionCheckpointV1(request.recoveryCheckpoint)) &&
     (request.retryFailedPageIndexes === undefined ||
       (Array.isArray(request.retryFailedPageIndexes) &&
         request.retryFailedPageIndexes.every(
@@ -352,6 +360,37 @@ export function isPDFExtractionRequestV1(
         ) &&
         new Set(request.retryFailedPageIndexes).size ===
           request.retryFailedPageIndexes.length))
+  );
+}
+
+export function isPDFExtractionCheckpointV1(
+  value: unknown,
+): value is PDFExtractionCheckpointV1 {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return false;
+  const checkpoint = value as Record<string, unknown>;
+  const allowed = new Set([
+    'schemaVersion',
+    'taskId',
+    'sourceSha256',
+    'script',
+    'pageCount',
+    'pages',
+    'reason',
+  ]);
+  return (
+    Object.keys(checkpoint).every(key => allowed.has(key)) &&
+    checkpoint.schemaVersion === 1 &&
+    isCanonicalUuid(checkpoint.taskId) &&
+    isSha256(checkpoint.sourceSha256) &&
+    (checkpoint.script === 'latin' || checkpoint.script === 'chinese') &&
+    Number.isSafeInteger(checkpoint.pageCount) &&
+    (checkpoint.pageCount as number) > 0 &&
+    (checkpoint.pageCount as number) <= PDF_MAXIMUM_PAGES &&
+    Array.isArray(checkpoint.pages) &&
+    checkpoint.pages.length <= (checkpoint.pageCount as number) &&
+    checkpoint.pages.every(isProductionPDFPage) &&
+    (checkpoint.reason === 'periodic' || checkpoint.reason === 'cancelled')
   );
 }
 
@@ -400,7 +439,17 @@ function recoverPages(
   document: PDFDocumentInfoV1,
 ): Map<number, PDFPageExtractionV1> {
   const pages = new Map<number, PDFPageExtractionV1>();
-  for (const page of request.completedPages ?? []) {
+  const checkpoint = request.recoveryCheckpoint;
+  if (
+    checkpoint !== undefined &&
+    (checkpoint.taskId !== request.taskId ||
+      checkpoint.sourceSha256 !== request.sourceSha256 ||
+      checkpoint.sourceSha256 !== document.sha256 ||
+      checkpoint.script !== request.script ||
+      checkpoint.pageCount !== document.pageCount)
+  )
+    throw new PDFTaskError('PDF_RESULT_INVALID');
+  for (const page of checkpoint?.pages ?? []) {
     if (
       page.pageIndex >= document.pageCount ||
       pages.has(page.pageIndex) ||
@@ -415,6 +464,10 @@ function recoverPages(
     pages.delete(pageIndex);
   }
   return pages;
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 }
 
 /**
