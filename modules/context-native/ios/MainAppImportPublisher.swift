@@ -233,7 +233,11 @@ enum MainAppImportPublisher {
           (try exactNonNegativeInteger(raw["byteCount"])) <= 9_007_199_254_740_991,
           let mediaType = raw["declaredMediaType"] as? String,
           mediaType.utf8.count <= 127,
-          mediaType.range(of: mediaTypePattern, options: .regularExpression) != nil else {
+          let mediaTypeMatch = mediaType.range(
+            of: mediaTypePattern,
+            options: .regularExpression
+          ),
+          mediaTypeMatch == mediaType.startIndex..<mediaType.endIndex else {
       throw MainAppImportError.invalidInput
     }
 

@@ -349,6 +349,25 @@ final class MainAppImportPublisherTests: XCTestCase {
     }
   }
 
+  func testMixedCaseMediaTypeRejectsTrailingLineTerminators() throws {
+    let image = try cached("line-terminated-media-type.bin", bytes: Data([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]))
+
+    for mediaType in ["Image/PNG\n", "Image/PNG\r\n"] {
+      XCTAssertThrowsError(try MainAppImportPublisher.publish(
+        container: root,
+        cacheRoot: cache,
+        ingestionId: id(),
+        source: "main-app-picker",
+        rawInputs: [file(id(), 0, mediaType, image)]
+      )) { error in
+        XCTAssertEqual(error as? MainAppImportError, .invalidInput)
+      }
+      XCTAssertTrue(FileManager.default.fileExists(atPath: image.path))
+    }
+  }
+
   func testDiscardRemovesOnlyControlledCacheFiles() throws {
     let selected = try cached("cancelled.pdf", bytes: Data("fixture".utf8))
     XCTAssertTrue(

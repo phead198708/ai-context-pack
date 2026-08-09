@@ -339,6 +339,27 @@ class MainAppImportPublisherInstrumentedTest {
     }
   }
 
+  @Test fun mixedCaseMediaTypeRejectsTrailingLineTerminators() {
+    val image = cached(
+      "line-terminated-media-type.bin",
+      byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
+    )
+
+    listOf("Image/PNG\n", "Image/PNG\r\n").forEach { mediaType ->
+      val error = assertThrows(MainAppImportException::class.java) {
+        MainAppImportPublisher.publish(
+          root,
+          cache,
+          id(),
+          "main-app-picker",
+          listOf(file(id(), 0, mediaType, image)),
+        )
+      }
+      assertEquals("MAIN_APP_IMPORT_INPUT_INVALID", error.stableCode)
+      assertTrue(image.exists())
+    }
+  }
+
   @Test fun discardRemovesOnlyControlledCacheFiles() {
     val selected = cached("cancelled.pdf", "fixture".toByteArray())
     assertTrue(MainAppImportPublisher.discard(cache, listOf(Uri.fromFile(selected).toString())))
