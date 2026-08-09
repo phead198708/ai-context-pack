@@ -198,7 +198,7 @@ class MainAppImportPublisherInstrumentedTest {
     assertEquals(listOf(ingestionId), File(root, "Inbox").list()?.toList())
   }
 
-  @Test fun failedItemRetainsOwnedBytesAndRetriesAfterInboxAcknowledgement() {
+  @Test fun failedItemRetainsOwnedBytesAndRetriesMixedCaseMediaTypeAfterInboxAcknowledgement() {
     val firstIngestionId = id()
     val failedItemId = id()
     val bytes = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
@@ -290,7 +290,7 @@ class MainAppImportPublisherInstrumentedTest {
           "id" to id(),
           "order" to 0,
           "kind" to "owned-file",
-          "declaredMediaType" to "image/png",
+          "declaredMediaType" to "Image/PNG",
           "byteCount" to byteCount,
           "ownedRelativePath" to relativePath,
           "sha256" to sha256,

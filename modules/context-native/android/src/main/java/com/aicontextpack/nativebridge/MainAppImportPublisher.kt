@@ -335,7 +335,7 @@ object MainAppImportPublisher {
   private fun invalid(): Nothing = throw MainAppImportException("MAIN_APP_IMPORT_INPUT_INVALID")
 
   private val mediaType = Regex(
-    "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$",
+    "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$",
   )
   private val fileKeys = setOf(
     "id",

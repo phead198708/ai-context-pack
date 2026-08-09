@@ -401,7 +401,7 @@ enum MainAppImportPublisher {
   }
 
   private static let mediaTypePattern =
-    "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$"
+    "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
   private static let fileKeys: Set<String> = [
     "id", "order", "kind", "declaredMediaType", "byteCount", "fileUri",
   ]

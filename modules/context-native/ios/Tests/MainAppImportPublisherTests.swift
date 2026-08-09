@@ -203,7 +203,7 @@ final class MainAppImportPublisherTests: XCTestCase {
     )
   }
 
-  func testFailedItemRetainsOwnedBytesAndRetriesAfterInboxAcknowledgement() throws {
+  func testFailedItemRetainsOwnedBytesAndRetriesMixedCaseMediaTypeAfterInboxAcknowledgement() throws {
     let firstIngestionId = id()
     let failedItemId = id()
     let bytes = Data([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -298,7 +298,7 @@ final class MainAppImportPublisherTests: XCTestCase {
         "id": id(),
         "order": 0,
         "kind": "owned-file",
-        "declaredMediaType": "image/png",
+        "declaredMediaType": "Image/PNG",
         "byteCount": byteCount,
         "ownedRelativePath": relativePath,
         "sha256": sha256,
