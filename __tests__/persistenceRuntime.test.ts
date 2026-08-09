@@ -5,8 +5,11 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
 
 import type {
   ImportManifestV1,
+  NativePlainTextFileV1,
   OCRCapabilitiesV1,
   OCRResultV1,
+  PDFDocumentInfoV1,
+  PDFPageExtractionV1,
   PDFProbeResultV1,
 } from '../src/domain/contracts';
 import type {
@@ -414,6 +417,20 @@ class RuntimeNative implements NativeAdapter {
   }
 
   async cancelTextRecognition() {}
+
+  async inspectPdf(): Promise<PDFDocumentInfoV1> {
+    throw new Error('unused');
+  }
+
+  async extractPdfPage(): Promise<PDFPageExtractionV1> {
+    throw new Error('unused');
+  }
+
+  async cancelPdfExtraction() {}
+
+  async readPlainTextFile(): Promise<NativePlainTextFileV1> {
+    throw new Error('unused');
+  }
 
   async probePdf(): Promise<PDFProbeResultV1> {
     throw new Error('unused');

@@ -45,6 +45,10 @@ function nativeAdapter(): jest.Mocked<NativeAdapter> {
     getOCRCapabilities: jest.fn(),
     recognizeText: jest.fn(),
     cancelTextRecognition: jest.fn(),
+    inspectPdf: jest.fn(),
+    extractPdfPage: jest.fn(),
+    cancelPdfExtraction: jest.fn(),
+    readPlainTextFile: jest.fn(),
     probePdf: jest.fn(),
   };
 }

@@ -45,8 +45,8 @@ internal class OcrTaskRegistry {
   private var memoryPressure = false
 
   @Synchronized
-  fun begin(taskId: String) {
-    if (activeTaskId != null) throw NativeException("OCR_RESOURCE_BUSY")
+  fun begin(taskId: String, busyCode: String = "OCR_RESOURCE_BUSY") {
+    if (activeTaskId != null) throw NativeException(busyCode)
     if (memoryPressure) {
       memoryPressure = false
       throw NativeException("RESOURCE_MEMORY_PRESSURE")
@@ -56,8 +56,8 @@ internal class OcrTaskRegistry {
   }
 
   @Synchronized
-  fun cancel(taskId: String): Boolean {
-    if (activeTaskId == taskId) cancelCode = "OCR_CANCELLED"
+  fun cancel(taskId: String, requestedCancelCode: String = "OCR_CANCELLED"): Boolean {
+    if (activeTaskId == taskId) cancelCode = requestedCancelCode
     return true
   }
 
@@ -149,7 +149,7 @@ internal class AndroidOCRProcessor(
     }
     registry.begin(taskId)
     try {
-      val file = controlledFile(context, fileUri)
+      val file = controlledSandboxFile(context, fileUri)
       val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
       BitmapFactory.decodeFile(file.path, options)
       AndroidOCRResourcePolicy.validate(
@@ -242,22 +242,6 @@ internal class AndroidOCRProcessor(
 
   fun setMemoryPressure(active: Boolean) = registry.setMemoryPressure(active)
 
-  private fun controlledFile(context: Context, value: String): File {
-    val uri = Uri.parse(value)
-    if (uri.scheme != "file") throw NativeException("INVALID_LOCAL_FILE_URI")
-    val unresolved = File(uri.path ?: throw NativeException("INVALID_LOCAL_FILE_URI"))
-    val mode = try { Os.lstat(unresolved.path).st_mode }
-    catch (_: Exception) { throw NativeException("INVALID_LOCAL_FILE_URI") }
-    if (OsConstants.S_ISLNK(mode)) throw NativeException("INVALID_LOCAL_FILE_URI")
-    val candidate = try { unresolved.canonicalFile }
-    catch (_: Exception) { throw NativeException("INVALID_LOCAL_FILE_URI") }
-    val roots = listOf(context.filesDir, context.cacheDir).map(File::getCanonicalFile)
-    if (!candidate.isFile || roots.none { candidate.path.startsWith(it.path + File.separator) }) {
-      throw NativeException("INVALID_LOCAL_FILE_URI")
-    }
-    return candidate
-  }
-
   private fun pixelLimit(context: Context): Int {
     val manager = context.getSystemService(ActivityManager::class.java)
     return if (manager?.isLowRamDevice == true) {
@@ -266,6 +250,22 @@ internal class AndroidOCRProcessor(
       AndroidOCRResourcePolicy.maximumPixelCount
     }
   }
+}
+
+internal fun controlledSandboxFile(context: Context, value: String): File {
+  val uri = Uri.parse(value)
+  if (uri.scheme != "file") throw NativeException("INVALID_LOCAL_FILE_URI")
+  val unresolved = File(uri.path ?: throw NativeException("INVALID_LOCAL_FILE_URI"))
+  val mode = try { Os.lstat(unresolved.path).st_mode }
+  catch (_: Exception) { throw NativeException("INVALID_LOCAL_FILE_URI") }
+  if (OsConstants.S_ISLNK(mode)) throw NativeException("INVALID_LOCAL_FILE_URI")
+  val candidate = try { unresolved.canonicalFile }
+  catch (_: Exception) { throw NativeException("INVALID_LOCAL_FILE_URI") }
+  val roots = listOf(context.filesDir, context.cacheDir).map(File::getCanonicalFile)
+  if (!candidate.isFile || roots.none { candidate.path.startsWith(it.path + File.separator) }) {
+    throw NativeException("INVALID_LOCAL_FILE_URI")
+  }
+  return candidate
 }
 
 internal fun buildOCRBlocks(

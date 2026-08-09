@@ -50,6 +50,8 @@ enum ContractFixtureEncoder {
       "engine": "pdfkit",
       "revision": "1",
       "durationMs": 2,
+      "characterCount": 13,
+      "warnings": [],
       "status": "complete",
       "text": "中文 👩🏽‍💻 e\u{0301}",
       "blocks": [],

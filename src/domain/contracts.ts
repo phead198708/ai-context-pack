@@ -96,6 +96,27 @@ export interface OCRCapabilitiesV1 {
   readonly maximumDimension: number;
 }
 
+export const PDF_MAXIMUM_PAGES = 25 as const;
+export const PDF_MAXIMUM_BYTES = 52_428_800 as const;
+
+export type PDFExtractionWarningV1 =
+  | 'PDF_EMBEDDED_TEXT_SPARSE'
+  | 'PDF_PAGE_OCR_FALLBACK'
+  | 'PDF_PAGE_EMPTY'
+  | 'PDF_PAGE_EXTRACTION_FAILED';
+
+export interface PDFDocumentInfoV1 {
+  readonly schemaVersion: 1;
+  readonly pageCount: number;
+  readonly byteCount: number;
+  readonly engine: 'pdfkit' | 'pdf-renderer';
+  readonly revision: string;
+  readonly limit: {
+    readonly pages: typeof PDF_MAXIMUM_PAGES;
+    readonly bytes: typeof PDF_MAXIMUM_BYTES;
+  };
+}
+
 interface PDFPageExtractionBaseV1 {
   readonly schemaVersion: 1;
   readonly pageIndex: number;
@@ -103,6 +124,10 @@ interface PDFPageExtractionBaseV1 {
   readonly engine: 'pdfkit' | 'pdf-renderer' | 'apple-vision' | 'ml-kit';
   readonly revision: string;
   readonly durationMs: number;
+  /** Added compatibly in Issue #11; production native adapters always populate it. */
+  readonly characterCount?: number;
+  /** Added compatibly in Issue #11; production native adapters always populate it. */
+  readonly warnings?: readonly PDFExtractionWarningV1[];
 }
 
 export interface CompletePDFPageExtractionV1 extends PDFPageExtractionBaseV1 {
@@ -119,6 +144,14 @@ export interface FailedPDFPageExtractionV1 extends PDFPageExtractionBaseV1 {
 export type PDFPageExtractionV1 =
   | CompletePDFPageExtractionV1
   | FailedPDFPageExtractionV1;
+
+export interface NativePlainTextFileV1 {
+  readonly schemaVersion: 1;
+  readonly text: string;
+  readonly byteCount: number;
+  readonly encoding: 'utf-8';
+  readonly revision: '1';
+}
 
 export type CheckpointReason =
   | 'periodic'

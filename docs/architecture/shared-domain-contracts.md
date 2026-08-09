@@ -56,7 +56,7 @@ The exported TypeScript validator named in each schema's `$comment` is the seman
 
 V1 timestamps use canonical UTC `YYYY-MM-DDTHH:mm:ss[.fraction]Z` with one to nine optional fractional digits. The date must exist in the proleptic Gregorian calendar, hours are `00`–`23`, and minutes/seconds are `00`–`59`; rollover forms such as `24:00:00`, leap-second `:60`, and parser-normalized nonexistent dates are invalid. JSON Schema, TypeScript, Swift, and Kotlin exercise the same calendar rules, including valid leap-day and nanosecond-precision cases.
 
-`PDFPageExtractionV1.text` is a JSON Unicode string and deliberately has no redundant `characterCount`. JavaScript/Kotlin UTF-16 length and Swift grapheme counts differ for emoji and combining sequences, so persisting a derived count would make V1 platform-dependent. The canonical fixture contains Simplified Chinese, an emoji sequence, and a combining sequence to exercise exact Swift/Kotlin/TypeScript payload parity.
+`PDFPageExtractionV1.text` is the semantic authority for extracted content. Issue #11 adds optional `characterCount` and `warnings` fields compatibly; legacy V1 payloads without them remain valid, while production native adapters require and populate both. `characterCount` is explicitly the UTF-16 code-unit count (`String.length` / Kotlin `String.length` / Swift `String.utf16.count`) so emoji and combining sequences cannot create platform-dependent values. The canonical fixture contains Simplified Chinese, an emoji sequence, and a combining sequence to exercise exact Swift/Kotlin/TypeScript payload parity.
 
 ### Import path rule
 

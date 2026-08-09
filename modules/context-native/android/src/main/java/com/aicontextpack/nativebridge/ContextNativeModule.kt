@@ -22,6 +22,7 @@ import java.io.StringReader
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -36,6 +37,20 @@ internal object AndroidOCRProcessScope {
     ArrayBlockingQueue(4),
     { action ->
       Thread(action, "ai-context-pack-ocr-result").apply { isDaemon = true }
+    },
+    ThreadPoolExecutor.AbortPolicy(),
+  )
+}
+
+internal object AndroidPDFProcessScope {
+  val executor = ThreadPoolExecutor(
+    1,
+    1,
+    0L,
+    TimeUnit.MILLISECONDS,
+    ArrayBlockingQueue(2),
+    { action ->
+      Thread(action, "ai-context-pack-pdf-text").apply { isDaemon = true }
     },
     ThreadPoolExecutor.AbortPolicy(),
   )
@@ -106,7 +121,9 @@ internal class OcrModuleLifecycle {
 
 class ContextNativeModule : Module(), ComponentCallbacks2 {
   private val ocrProcessor = AndroidOCRProcessor(AndroidOCRProcessScope.registry)
+  private val pdfProcessor = AndroidPDFProcessor(AndroidOCRProcessScope.registry)
   private val ocrLifecycle = OcrModuleLifecycle()
+  private val pdfLifecycle = OcrModuleLifecycle()
   private var callbackContext: Context? = null
 
   override fun definition() = ModuleDefinition {
@@ -128,6 +145,11 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       callbackContext = null
       ocrLifecycle.destroy()?.let { active ->
         ocrProcessor.cancel(active.taskId)
+        active.close()
+        active.reject?.invoke()
+      }
+      pdfLifecycle.destroy()?.let { active ->
+        pdfProcessor.cancel(active.taskId)
         active.close()
         active.reject?.invoke()
       }
@@ -439,8 +461,101 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       ocrProcessor.cancel(taskId)
     }
 
+    AsyncFunction("inspectPdf") { fileUri: String, promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      try {
+        AndroidPDFProcessScope.executor.execute {
+          try { promise.resolve(pdfProcessor.inspect(context, fileUri)) }
+          catch (error: NativeException) { promise.reject(error) }
+          catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
+          catch (_: Throwable) { promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED")) }
+        }
+      } catch (_: RejectedExecutionException) {
+        promise.reject(NativeException("PDF_RESOURCE_BUSY"))
+      }
+    }
+
+    AsyncFunction("extractPdfPage") {
+      taskId: String,
+      fileUri: String,
+      pageIndex: Int,
+      script: String,
+      promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      try {
+        pdfProcessor.reserve(taskId)
+      } catch (error: NativeException) {
+        return@AsyncFunction promise.reject(error)
+      }
+      val processor = pdfProcessor
+      val lifecycle = pdfLifecycle
+      if (!lifecycle.register(OcrLifecycleRegistration(
+          taskId = taskId,
+          close = {},
+          rejectOnDestroy = { promise.reject(NativeException("PDF_CANCELLED")) },
+        ))) {
+        processor.cancel(taskId)
+        processor.finish(taskId)
+        return@AsyncFunction promise.reject(NativeException("PDF_CANCELLED"))
+      }
+      try {
+        AndroidPDFProcessScope.executor.execute {
+          try {
+            val result = processor.extractPage(
+              context = context,
+              taskId = taskId,
+              fileUri = fileUri,
+              pageIndex = pageIndex,
+              script = script,
+              reserved = true,
+            )
+            lifecycle.deliver(taskId) { promise.resolve(result) }
+          } catch (error: NativeException) {
+            lifecycle.deliver(taskId) { promise.reject(error) }
+          } catch (_: OutOfMemoryError) {
+            lifecycle.deliver(taskId) {
+              promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
+            }
+          } catch (_: Throwable) {
+            lifecycle.deliver(taskId) {
+              promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
+            }
+          } finally {
+            lifecycle.finish(taskId)
+            processor.finish(taskId)
+          }
+        }
+      } catch (_: RejectedExecutionException) {
+        lifecycle.deliver(taskId) { promise.reject(NativeException("PDF_RESOURCE_BUSY")) }
+        lifecycle.finish(taskId)
+        processor.finish(taskId)
+      }
+    }
+
+    AsyncFunction("cancelPdfExtraction") { taskId: String ->
+      pdfProcessor.cancel(taskId)
+    }
+
+    AsyncFunction("readPlainTextFile") { fileUri: String, promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      try {
+        AndroidPDFProcessScope.executor.execute {
+          try { promise.resolve(AndroidPlainTextFileReader.read(context, fileUri)) }
+          catch (error: NativeException) { promise.reject(error) }
+          catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
+          catch (_: Throwable) { promise.reject(NativeException("TEXT_RESULT_INVALID")) }
+        }
+      } catch (_: RejectedExecutionException) {
+        promise.reject(NativeException("TEXT_RESOURCE_BUSY"))
+      }
+    }
+
     AsyncFunction("probePdf") { fileUri: String ->
-      val file = File(controlledFileUri(fileUri).path ?: throw NativeException("INVALID_LOCAL_FILE_URI"))
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      val file = controlledSandboxFile(context, fileUri)
       if (!file.isFile || file.length() > 52_428_800) throw NativeException("PDF_INVALID_OR_TOO_LARGE")
       val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
       PdfProbe.probe(descriptor)
@@ -541,6 +656,22 @@ internal object InboxManifestScanner {
     "IMPORT_SIZE_LIMIT_EXCEEDED",
     "IMPORT_ITEM_LIMIT_EXCEEDED",
     "IMPORT_PARTIAL_FAILURE",
+    "PDF_CANCELLED",
+    "PDF_CORRUPT",
+    "PDF_ENCRYPTED",
+    "PDF_EMPTY",
+    "PDF_TOO_LARGE",
+    "PDF_TOO_MANY_PAGES",
+    "PDF_PAGE_OUT_OF_RANGE",
+    "PDF_PAGE_EXTRACTION_FAILED",
+    "PDF_RESOURCE_BUSY",
+    "PDF_RESULT_INVALID",
+    "TEXT_INVALID_UTF8",
+    "TEXT_TOO_LARGE",
+    "TEXT_RESOURCE_BUSY",
+    "TEXT_RESULT_INVALID",
+    "URL_INVALID",
+    "URL_TOO_LONG",
     "PIPELINE_STAGE_FAILED",
     "PROCESSOR_OUTPUT_INVALID",
     "PIPELINE_RECOVERY_REQUIRED",

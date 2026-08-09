@@ -13,7 +13,11 @@ public final class ContextNativeModule: Module {
   private let ocrProcessor = AppleVisionOCRProcessor(
     registry: AppleVisionOCRProcessScope.registry
   )
+  private let pdfProcessor = ApplePDFProcessor(
+    registry: AppleVisionOCRProcessScope.registry
+  )
   private let ocrLifetime = OCRModuleLifetime()
+  private let pdfLifetime = OCRModuleLifetime()
   private var memoryWarningObserver: NSObjectProtocol?
 
   public func definition() -> ModuleDefinition {
@@ -42,6 +46,9 @@ public final class ContextNativeModule: Module {
       self?.memoryWarningObserver = nil
       if let taskId = self?.ocrLifetime.destroy() {
         _ = self?.ocrProcessor.cancel(taskId: taskId)
+      }
+      if let taskId = self?.pdfLifetime.destroy() {
+        _ = self?.pdfProcessor.cancel(taskId: taskId)
       }
     }
 
@@ -357,6 +364,83 @@ public final class ContextNativeModule: Module {
         throw NativeError("OCR_RESULT_INVALID")
       }
       return true
+    }
+
+    AsyncFunction("inspectPdf") { (fileUri: String) async throws -> [String: Any] in
+      let url = try controlledArtifactSourceURL(fileUri)
+      do {
+        return try await Task.detached(priority: .userInitiated) {
+          try ApplePDFProcessor().inspect(fileURL: url)
+        }.value
+      } catch let error as PDFProcessingError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
+      }
+    }
+
+    AsyncFunction("extractPdfPage") { [weak self] (
+      taskId: String,
+      fileUri: String,
+      pageIndex: Int,
+      script: String
+    ) async throws -> [String: Any] in
+      guard let self else { throw NativeError("PDF_PAGE_EXTRACTION_FAILED") }
+      let url = try controlledArtifactSourceURL(fileUri)
+      let processor = self.pdfProcessor
+      let lifetime = self.pdfLifetime
+      do {
+        try processor.reserve(taskId: taskId)
+        do {
+          try lifetime.begin(taskId: taskId)
+        } catch {
+          processor.finish(taskId: taskId)
+          throw error
+        }
+        defer { lifetime.finish(taskId: taskId) }
+        let result = try await Task.detached(priority: .userInitiated) {
+          try processor.extractPage(
+            taskId: taskId,
+            fileURL: url,
+            pageIndex: pageIndex,
+            script: script,
+            reserved: true
+          )
+        }.value
+        guard lifetime.claimDelivery(taskId: taskId) else {
+          throw PDFProcessingError.cancelled
+        }
+        return result
+      } catch let error as PDFProcessingError {
+        throw NativeError(error.stableCode)
+      } catch let error as OCRProcessingError {
+        throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
+      } catch is CancellationError {
+        throw NativeError("PDF_CANCELLED")
+      } catch {
+        throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
+      }
+    }
+
+    AsyncFunction("cancelPdfExtraction") { [weak self] (taskId: String) throws -> Bool in
+      guard let self else { throw NativeError("PDF_PAGE_EXTRACTION_FAILED") }
+      guard self.pdfProcessor.cancel(taskId: taskId) else {
+        throw NativeError("PDF_RESULT_INVALID")
+      }
+      return true
+    }
+
+    AsyncFunction("readPlainTextFile") { (fileUri: String) async throws -> [String: Any] in
+      let url = try controlledArtifactSourceURL(fileUri)
+      do {
+        return try await Task.detached(priority: .userInitiated) {
+          try PlainTextFileReader.read(fileURL: url)
+        }.value
+      } catch let error as PlainTextFileReaderError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("TEXT_RESULT_INVALID")
+      }
     }
 
     AsyncFunction("probePdf") { (fileUri: String) throws -> [String: Any] in

@@ -6,6 +6,7 @@ import Foundation
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let output = root.appendingPathComponent("fixtures/media", isDirectory: true)
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+let issue11Only = CommandLine.arguments.contains("--issue-11")
 
 func png(
   named name: String,
@@ -119,21 +120,152 @@ func corruptPdf() throws {
   try bytes.write(to: output.appendingPathComponent("corrupt-truncated.pdf"))
 }
 
+private func drawPDFText(
+  _ text: String,
+  context: CGContext,
+  point: NSPoint = NSPoint(x: 72, y: 650)
+) {
+  let graphics = NSGraphicsContext(cgContext: context, flipped: false)
+  NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = graphics
+  (text as NSString).draw(
+    at: point,
+    withAttributes: [
+      .font: NSFont.systemFont(ofSize: 24),
+      .foregroundColor: NSColor.black,
+    ]
+  )
+  NSGraphicsContext.restoreGraphicsState()
+}
+
+private func issue11PDFOptions(title: String) -> [CFString: Any] {
+  let fixedDate = Date(timeIntervalSince1970: 0)
+  return [
+    kCGPDFContextCreator: "AI Context Pack synthetic fixture generator",
+    kCGPDFContextAuthor: "AI Context Pack",
+    kCGPDFContextTitle: title,
+    kCGPDFContextCreationDate: fixedDate,
+    kCGPDFContextModificationDate: fixedDate,
+  ]
+}
+
+func encryptedPdf() throws {
+  let url = output.appendingPathComponent("encrypted-one-page.pdf")
+  var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+  var options = issue11PDFOptions(title: "Synthetic encrypted PDF")
+  options.merge([
+    kCGPDFContextUserPassword: "synthetic-password",
+    kCGPDFContextOwnerPassword: "synthetic-owner-password",
+    kCGPDFContextEncryptionKeyLength: 128,
+  ]) { _, replacement in replacement }
+  guard let context = CGContext(url as CFURL, mediaBox: &box, options as CFDictionary) else {
+    throw FixtureError.renderFailed
+  }
+  context.beginPDFPage(nil)
+  drawPDFText("Synthetic encrypted PDF", context: context)
+  context.endPDFPage(); context.closePDF()
+}
+
+func emptyPdf() throws {
+  let url = output.appendingPathComponent("empty-one-page.pdf")
+  var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+  guard let context = CGContext(
+    url as CFURL,
+    mediaBox: &box,
+    issue11PDFOptions(title: "Synthetic empty PDF") as CFDictionary
+  ) else {
+    throw FixtureError.renderFailed
+  }
+  context.beginPDFPage(nil)
+  context.endPDFPage(); context.closePDF()
+}
+
+func sparsePdf() throws {
+  let url = output.appendingPathComponent("sparse-one-page.pdf")
+  var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+  guard let context = CGContext(
+    url as CFURL,
+    mediaBox: &box,
+    issue11PDFOptions(title: "Synthetic sparse PDF") as CFDictionary
+  ) else {
+    throw FixtureError.renderFailed
+  }
+  context.beginPDFPage(nil)
+  drawPDFText("A", context: context)
+  context.endPDFPage(); context.closePDF()
+}
+
+func overPageLimitPdf() throws {
+  let url = output.appendingPathComponent("over-limit-26-pages.pdf")
+  var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+  guard let context = CGContext(
+    url as CFURL,
+    mediaBox: &box,
+    issue11PDFOptions(title: "Synthetic 26-page PDF") as CFDictionary
+  ) else {
+    throw FixtureError.renderFailed
+  }
+  for page in 1...26 {
+    context.beginPDFPage(nil)
+    drawPDFText("Synthetic page \(page) of 26", context: context)
+    context.endPDFPage()
+  }
+  context.closePDF()
+}
+
+func mixedTwentyPagePdf(imageURL: URL) throws {
+  guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil),
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+    throw FixtureError.renderFailed
+  }
+  let url = output.appendingPathComponent("mixed-twenty-page.pdf")
+  var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+  guard let context = CGContext(
+    url as CFURL,
+    mediaBox: &box,
+    issue11PDFOptions(title: "Synthetic 20-page mixed PDF") as CFDictionary
+  ) else {
+    throw FixtureError.renderFailed
+  }
+  for page in 1...20 {
+    context.beginPDFPage(nil)
+    if page.isMultiple(of: 2) {
+      context.draw(image, in: CGRect(x: 36, y: 280, width: 540, height: 180))
+    } else {
+      drawPDFText("Synthetic embedded benchmark page \(page)", context: context)
+    }
+    context.endPDFPage()
+  }
+  context.closePDF()
+}
+
 enum FixtureError: Error { case renderFailed }
-let english = try png(
-  named: "ocr-english.png",
-  text: "TypeError E42 retry import",
-  fontSize: 48
-)
-_ = try png(
-  named: "ocr-chinese.png",
-  text: "合成测试：重新导入",
-  fontSize: 64,
-  weight: .regular
-)
-try orientedJpeg(named: "ocr-rotated.jpg", sourceURL: english)
-try corruptImage()
-try textPdf()
-try scannedPdf(imageURL: english)
-try mixedPdf(imageURL: english)
-try corruptPdf()
+let english: URL
+if issue11Only {
+  english = output.appendingPathComponent("ocr-english.png")
+  guard FileManager.default.fileExists(atPath: english.path) else {
+    throw FixtureError.renderFailed
+  }
+} else {
+  english = try png(
+    named: "ocr-english.png",
+    text: "TypeError E42 retry import",
+    fontSize: 48
+  )
+  _ = try png(
+    named: "ocr-chinese.png",
+    text: "合成测试：重新导入",
+    fontSize: 64,
+    weight: .regular
+  )
+  try orientedJpeg(named: "ocr-rotated.jpg", sourceURL: english)
+  try corruptImage()
+  try textPdf()
+  try scannedPdf(imageURL: english)
+  try mixedPdf(imageURL: english)
+  try corruptPdf()
+}
+try encryptedPdf()
+try emptyPdf()
+try sparsePdf()
+try overPageLimitPdf()
+try mixedTwentyPagePdf(imageURL: english)

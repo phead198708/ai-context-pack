@@ -10,13 +10,18 @@ import type {
   OCRCapabilitiesV1,
   OCRBlockV1,
   OCRResultV1,
+  NativePlainTextFileV1,
+  PDFDocumentInfoV1,
+  PDFExtractionWarningV1,
   PDFPageExtractionV1,
   PDFProbeResultV1,
   PipelineCheckpointV1,
   RiskFindingV1,
 } from './contracts';
+import { PDF_MAXIMUM_BYTES, PDF_MAXIMUM_PAGES } from './contracts';
 import { DOMAIN_ERROR_CATALOG, type DomainErrorCode } from './errors';
 import { isCanonicalUuid } from './canonicalUuid';
+import { isValidUnicodeScalarString, utf8ByteCount } from './mainAppImport';
 
 const mediaTypePattern =
   /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
@@ -32,6 +37,9 @@ export const IMPORT_MANIFEST_MAX_RETRY_BYTES = 52_428_800;
 export const OCR_RESULT_MAX_BLOCKS = 10_000;
 export const OCR_RESULT_MAX_TEXT_LENGTH = 1_000_000;
 export const OCR_RESULT_MAX_BLOCK_TEXT_LENGTH = 100_000;
+export const PDF_PAGE_MAX_TEXT_LENGTH = OCR_RESULT_MAX_TEXT_LENGTH;
+export const PDF_PAGE_MAX_BLOCKS = OCR_RESULT_MAX_BLOCKS;
+export const PLAIN_TEXT_FILE_MAX_BYTES = 1_048_576;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -449,13 +457,54 @@ export function isPDFPageExtractionV1(
     !isNonEmptyString(value.revision) ||
     typeof value.durationMs !== 'number' ||
     !Number.isFinite(value.durationMs) ||
-    value.durationMs < 0
+    value.durationMs < 0 ||
+    (value.characterCount !== undefined &&
+      !isNonNegativeInteger(value.characterCount)) ||
+    (value.warnings !== undefined && !isPDFWarnings(value.warnings)) ||
+    !isPDFMethodEnginePair(value.method, value.engine)
   )
     return false;
 
   if (value.status === 'complete') {
+    if (
+      !hasOnlyKeys(
+        value,
+        [
+          'schemaVersion',
+          'pageIndex',
+          'method',
+          'engine',
+          'revision',
+          'durationMs',
+          'status',
+          'text',
+          'blocks',
+        ],
+        ['characterCount', 'warnings'],
+      ) ||
+      typeof value.text !== 'string' ||
+      !isValidUnicodeScalarString(value.text) ||
+      value.text.length > PDF_PAGE_MAX_TEXT_LENGTH ||
+      (value.characterCount !== undefined &&
+        value.characterCount !== value.text.length) ||
+      !Array.isArray(value.blocks) ||
+      value.blocks.length > PDF_PAGE_MAX_BLOCKS ||
+      !value.blocks.every(isOCRBlockV1) ||
+      !hasBoundedOCRBlockText(value.blocks as readonly OCRBlockV1[])
+    )
+      return false;
+    const blocks = value.blocks as readonly OCRBlockV1[];
     return (
-      hasOnlyKeys(value, [
+      blocks.length === 0 ||
+      (areOCRBlocksInReadingOrder(blocks) &&
+        ocrBlocksMatchText(blocks, value.text))
+    );
+  }
+  return (
+    value.status === 'failed' &&
+    hasOnlyKeys(
+      value,
+      [
         'schemaVersion',
         'pageIndex',
         'method',
@@ -463,27 +512,84 @@ export function isPDFPageExtractionV1(
         'revision',
         'durationMs',
         'status',
-        'text',
-        'blocks',
-      ]) &&
-      typeof value.text === 'string' &&
-      Array.isArray(value.blocks) &&
-      value.blocks.every(isOCRBlockV1)
-    );
-  }
+        'errorCode',
+      ],
+      ['characterCount', 'warnings'],
+    ) &&
+    (value.characterCount === undefined || value.characterCount === 0) &&
+    isDomainErrorCode(value.errorCode)
+  );
+}
+
+function isPDFWarnings(value: unknown): value is PDFExtractionWarningV1[] {
   return (
-    value.status === 'failed' &&
+    Array.isArray(value) &&
+    value.length <= 4 &&
+    value.every(
+      warning =>
+        warning === 'PDF_EMBEDDED_TEXT_SPARSE' ||
+        warning === 'PDF_PAGE_OCR_FALLBACK' ||
+        warning === 'PDF_PAGE_EMPTY' ||
+        warning === 'PDF_PAGE_EXTRACTION_FAILED',
+    ) &&
+    new Set(value).size === value.length
+  );
+}
+
+function isPDFMethodEnginePair(method: unknown, engine: unknown): boolean {
+  return method === 'embedded-text'
+    ? engine === 'pdfkit' || engine === 'pdf-renderer'
+    : engine === 'apple-vision' || engine === 'ml-kit';
+}
+
+export function isPDFDocumentInfoV1(
+  value: unknown,
+): value is PDFDocumentInfoV1 {
+  return (
+    record(value) &&
     hasOnlyKeys(value, [
       'schemaVersion',
-      'pageIndex',
-      'method',
+      'pageCount',
+      'byteCount',
       'engine',
       'revision',
-      'durationMs',
-      'status',
-      'errorCode',
+      'limit',
     ]) &&
-    isDomainErrorCode(value.errorCode)
+    value.schemaVersion === 1 &&
+    Number.isSafeInteger(value.pageCount) &&
+    (value.pageCount as number) > 0 &&
+    (value.pageCount as number) <= PDF_MAXIMUM_PAGES &&
+    isNonNegativeInteger(value.byteCount) &&
+    (value.byteCount as number) <= PDF_MAXIMUM_BYTES &&
+    (value.engine === 'pdfkit' || value.engine === 'pdf-renderer') &&
+    isNonEmptyString(value.revision) &&
+    record(value.limit) &&
+    hasOnlyKeys(value.limit, ['pages', 'bytes']) &&
+    value.limit.pages === PDF_MAXIMUM_PAGES &&
+    value.limit.bytes === PDF_MAXIMUM_BYTES
+  );
+}
+
+export function isNativePlainTextFileV1(
+  value: unknown,
+): value is NativePlainTextFileV1 {
+  return (
+    record(value) &&
+    hasOnlyKeys(value, [
+      'schemaVersion',
+      'text',
+      'byteCount',
+      'encoding',
+      'revision',
+    ]) &&
+    value.schemaVersion === 1 &&
+    typeof value.text === 'string' &&
+    isValidUnicodeScalarString(value.text) &&
+    isNonNegativeInteger(value.byteCount) &&
+    (value.byteCount as number) <= PLAIN_TEXT_FILE_MAX_BYTES &&
+    utf8ByteCount(value.text) === value.byteCount &&
+    value.encoding === 'utf-8' &&
+    value.revision === '1'
   );
 }
 

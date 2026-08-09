@@ -21,7 +21,7 @@
       "additionalProperties": false,
       "required": ["text", "bounds"],
       "properties": {
-        "text": { "type": "string" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 100000 },
         "bounds": { "$ref": "#/$defs/bounds" },
         "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
         "language": { "type": "string", "minLength": 1 }
@@ -36,7 +36,25 @@
         "IMPORT_PROVIDER_PERMISSION_EXPIRED",
         "IMPORT_TYPE_UNSUPPORTED",
         "IMPORT_COPY_FAILED",
+        "IMPORT_SIZE_LIMIT_EXCEEDED",
+        "IMPORT_ITEM_LIMIT_EXCEEDED",
         "IMPORT_PARTIAL_FAILURE",
+        "PDF_CANCELLED",
+        "PDF_CORRUPT",
+        "PDF_ENCRYPTED",
+        "PDF_EMPTY",
+        "PDF_TOO_LARGE",
+        "PDF_TOO_MANY_PAGES",
+        "PDF_PAGE_OUT_OF_RANGE",
+        "PDF_PAGE_EXTRACTION_FAILED",
+        "PDF_RESOURCE_BUSY",
+        "PDF_RESULT_INVALID",
+        "TEXT_INVALID_UTF8",
+        "TEXT_TOO_LARGE",
+        "TEXT_RESOURCE_BUSY",
+        "TEXT_RESULT_INVALID",
+        "URL_INVALID",
+        "URL_TOO_LONG",
         "PIPELINE_STAGE_FAILED",
         "PROCESSOR_OUTPUT_INVALID",
         "PIPELINE_RECOVERY_REQUIRED",
@@ -44,7 +62,19 @@
         "PRIVACY_EXPORT_BLOCKED",
         "RESOURCE_LOW_DISK",
         "RESOURCE_MEMORY_PRESSURE",
-        "STORAGE_WRITE_FAILED"
+        "STORAGE_WRITE_FAILED",
+        "STORAGE_DIVERGENCE_DETECTED",
+        "STORAGE_ARTIFACT_IMMUTABLE",
+        "PERSISTENCE_CONFLICT",
+        "DEVELOPMENT_RESET_FORBIDDEN"
+      ]
+    },
+    "warning": {
+      "enum": [
+        "PDF_EMBEDDED_TEXT_SPARSE",
+        "PDF_PAGE_OCR_FALLBACK",
+        "PDF_PAGE_EMPTY",
+        "PDF_PAGE_EXTRACTION_FAILED"
       ]
     },
     "complete": {
@@ -74,10 +104,22 @@
         },
         "revision": { "type": "string", "minLength": 1 },
         "durationMs": { "type": "number", "minimum": 0 },
+        "characterCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "warnings": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/warning" }
+        },
         "status": { "const": "complete" },
-        "text": { "type": "string" },
+        "text": { "type": "string", "maxLength": 1000000 },
         "blocks": {
           "type": "array",
+          "maxItems": 10000,
           "items": { "$ref": "#/$defs/block" }
         }
       }
@@ -108,6 +150,13 @@
         },
         "revision": { "type": "string", "minLength": 1 },
         "durationMs": { "type": "number", "minimum": 0 },
+        "characterCount": { "const": 0 },
+        "warnings": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/warning" }
+        },
         "status": { "const": "failed" },
         "errorCode": { "$ref": "#/$defs/errorCode" }
       }
