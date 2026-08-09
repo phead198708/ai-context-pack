@@ -7,6 +7,7 @@ private let appGroupIdentifier = "group.com.example.aicontextpack"
 
 private enum AppleVisionOCRProcessScope {
   static let registry = OCRCancellationRegistry()
+  static let pdfFinishCoordinator = PDFProcessorFinishCoordinator()
 }
 
 public final class ContextNativeModule: Module {
@@ -16,6 +17,10 @@ public final class ContextNativeModule: Module {
   private let pdfProcessor = ApplePDFProcessor(
     registry: AppleVisionOCRProcessScope.registry
   )
+  private lazy var pdfFinishOwner = PDFProcessorFinishOwner(
+    finishProcessor: pdfProcessor.finish
+  )
+  private let pdfFinishCoordinator = AppleVisionOCRProcessScope.pdfFinishCoordinator
   private let ocrLifetime = OCRModuleLifetime()
   private let pdfLifetime = OCRModuleLifetime()
   private var memoryWarningObserver: NSObjectProtocol?
@@ -39,7 +44,13 @@ public final class ContextNativeModule: Module {
       }
     }
 
-    OnDestroy { [weak self] in
+    OnDestroy { [
+      weak self,
+      pdfFinishCoordinator = self.pdfFinishCoordinator,
+      pdfFinishOwner = self.pdfFinishOwner,
+      pdfLifetime = self.pdfLifetime,
+      pdfProcessor = self.pdfProcessor
+    ] in
       if let observer = self?.memoryWarningObserver {
         NotificationCenter.default.removeObserver(observer)
       }
@@ -47,8 +58,9 @@ public final class ContextNativeModule: Module {
       if let taskId = self?.ocrLifetime.destroy() {
         _ = self?.ocrProcessor.cancel(taskId: taskId)
       }
-      let activePDFTaskId = self?.pdfLifetime.destroy()
-      self?.pdfProcessor.destroy(activeTaskId: activePDFTaskId)
+      let activePDFTaskId = pdfLifetime.destroy()
+      pdfFinishCoordinator.destroyOwner(pdfFinishOwner)
+      pdfProcessor.destroy(activeTaskId: activePDFTaskId)
     }
 
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
@@ -374,19 +386,26 @@ public final class ContextNativeModule: Module {
       let url = try controlledArtifactSourceURL(fileUri)
       let processor = self.pdfProcessor
       let lifetime = self.pdfLifetime
+      let operation: PDFOperationLifetimeLease
       do {
-        try processor.reserve(taskId: taskId)
-        do {
-          try lifetime.begin(taskId: taskId)
-        } catch {
-          processor.finish(taskId: taskId)
-          throw error
+        operation = try beginPDFOperationLifetime(
+          lifetime: lifetime,
+          coordinator: self.pdfFinishCoordinator,
+          owner: self.pdfFinishOwner,
+          taskId: taskId
+        ) {
+          try processor.reserve(taskId: taskId)
         }
-        defer {
-          if lifetime.finish(taskId: taskId) {
-            processor.finish(taskId: taskId)
-          }
-        }
+      } catch let error as PDFProcessingError {
+        throw NativeError(error.stableCode)
+      } catch let error as OCRProcessingError {
+        throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
+      } catch {
+        throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
+      }
+      var keepSession = false
+      defer { operation.finish(keepSession: keepSession) }
+      do {
         let result = try await Task.detached(priority: .userInitiated) {
           try processor.inspect(
             taskId: taskId,
@@ -395,8 +414,8 @@ public final class ContextNativeModule: Module {
             reserved: true
           )
         }.value
-        guard lifetime.claimDelivery(taskId: taskId) else {
-          processor.finish(taskId: taskId)
+        keepSession = operation.claimDelivery()
+        guard keepSession else {
           throw PDFProcessingError.cancelled
         }
         return result
@@ -405,10 +424,8 @@ public final class ContextNativeModule: Module {
       } catch let error as OCRProcessingError {
         throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
       } catch is CancellationError {
-        processor.finish(taskId: taskId)
         throw NativeError("PDF_CANCELLED")
       } catch {
-        processor.finish(taskId: taskId)
         throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
       }
     }
@@ -424,29 +441,29 @@ public final class ContextNativeModule: Module {
       let url = try controlledArtifactSourceURL(fileUri)
       let processor = self.pdfProcessor
       let lifetime = self.pdfLifetime
-      do {
-        try processor.validatePageRequest(
-          taskId: taskId,
-          fileURL: url,
-          expectedSourceSHA256: sourceSha256
-        )
-      } catch let error as PDFProcessingError {
-        throw NativeError(error.stableCode)
-      } catch {
-        throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
-      }
       let operation: PDFOperationLifetimeLease
       do {
         operation = try beginPDFOperationLifetime(
           lifetime: lifetime,
+          coordinator: self.pdfFinishCoordinator,
+          owner: self.pdfFinishOwner,
           taskId: taskId
-        )
+        ) {
+          try processor.validatePageRequest(
+            taskId: taskId,
+            fileURL: url,
+            expectedSourceSHA256: sourceSha256
+          )
+        }
+      } catch let error as PDFProcessingError {
+        throw NativeError(error.stableCode)
       } catch let error as OCRProcessingError {
         throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
       } catch {
         throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
       }
-      defer { operation.finish(finishProcessor: processor.finish) }
+      var keepSession = true
+      defer { operation.finish(keepSession: keepSession) }
       do {
         let result = try await Task.detached(priority: .userInitiated) {
           try processor.extractPage(
@@ -458,39 +475,34 @@ public final class ContextNativeModule: Module {
             reserved: true
           )
         }.value
-        guard operation.claimDelivery(
-          finishProcessor: processor.finish
-        ) else {
+        keepSession = operation.claimDelivery()
+        guard keepSession else {
           throw NativeError("PDF_CANCELLED")
         }
         return result
       } catch let error as NativeError {
         throw error
       } catch let error as PDFProcessingError {
-        guard operation.claimDelivery(
-          finishProcessor: processor.finish
-        ) else {
+        keepSession = operation.claimDelivery()
+        guard keepSession else {
           throw NativeError("PDF_CANCELLED")
         }
         throw NativeError(error.stableCode)
       } catch let error as OCRProcessingError {
-        guard operation.claimDelivery(
-          finishProcessor: processor.finish
-        ) else {
+        keepSession = operation.claimDelivery()
+        guard keepSession else {
           throw NativeError("PDF_CANCELLED")
         }
         throw NativeError(PDFProcessingError.fromOCR(error).stableCode)
       } catch is CancellationError {
-        guard operation.claimDelivery(
-          finishProcessor: processor.finish
-        ) else {
+        keepSession = operation.claimDelivery()
+        guard keepSession else {
           throw NativeError("PDF_CANCELLED")
         }
         throw NativeError("PDF_CANCELLED")
       } catch {
-        guard operation.claimDelivery(
-          finishProcessor: processor.finish
-        ) else {
+        keepSession = operation.claimDelivery()
+        guard keepSession else {
           throw NativeError("PDF_CANCELLED")
         }
         throw NativeError("PDF_PAGE_EXTRACTION_FAILED")
@@ -505,14 +517,16 @@ public final class ContextNativeModule: Module {
       return true
     }
 
-    AsyncFunction("finishPdfExtraction") { [weak self] (taskId: String) throws -> Bool in
+    AsyncFunction("finishPdfExtraction") { [weak self] (taskId: String) async throws -> Bool in
       guard let self else { throw NativeError("PDF_PAGE_EXTRACTION_FAILED") }
-      requestPDFProcessorFinish(
-        lifetime: self.pdfLifetime,
-        taskId: taskId,
-        finishProcessor: self.pdfProcessor.finish
-      )
-      return true
+      return await withCheckedContinuation { continuation in
+        self.pdfFinishCoordinator.requestFinish(
+          fallbackOwner: self.pdfFinishOwner,
+          taskId: taskId
+        ) {
+          continuation.resume(returning: true)
+        }
+      }
     }
 
     AsyncFunction("readPlainTextFile") { (fileUri: String) async throws -> [String: Any] in

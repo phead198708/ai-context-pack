@@ -10,6 +10,7 @@ import org.junit.Test
 class AndroidOCRProcessorTest {
   private val firstTaskId = "123e4567-e89b-42d3-a456-426614174000"
   private val secondTaskId = "223e4567-e89b-42d3-a456-426614174000"
+  private val thirdTaskId = "323e4567-e89b-42d3-a456-426614174000"
 
   @Test
   fun resourcePolicyRejectsCorruptAndOversizeMetadata() {
@@ -158,9 +159,14 @@ class AndroidOCRProcessorTest {
   @Test
   fun rejectedPdfInspectionDeliveryReleasesTheRetainedProcessorSession() {
     val lifecycle = OcrModuleLifecycle()
+    val coordinator = PDFProcessorFinishCoordinator()
     val registry = OcrTaskRegistry()
+    val processor = AndroidPDFProcessor(registry)
+    val owner = PDFProcessorFinishOwner(processor::finish)
     var delivered = 0
-    registry.begin(firstTaskId)
+    val operation = coordinator.beginOperation(owner, firstTaskId) {
+      processor.reserve(firstTaskId)
+    }
     assertTrue(
       lifecycle.register(
         OcrLifecycleRegistration(
@@ -177,8 +183,13 @@ class AndroidOCRProcessorTest {
       deliverPDFOperationCompletion(
         lifecycle = lifecycle,
         taskId = firstTaskId,
-        finishProcessor = registry::finish,
       ) { delivered += 1 },
+    )
+    finishPDFOperationLifecycle(
+      lifecycle = lifecycle,
+      operation = operation,
+      taskId = firstTaskId,
+      keepSession = false,
     )
 
     assertEquals(0, delivered)
@@ -218,10 +229,15 @@ class AndroidOCRProcessorTest {
   @Test
   fun explicitPdfFinishWaitsForMatchingNativeOperationToUnwind() {
     val lifecycle = OcrModuleLifecycle()
+    val coordinator = PDFProcessorFinishCoordinator()
     val registry = OcrTaskRegistry()
     val first = AndroidPDFProcessor(registry)
     val replacement = AndroidPDFProcessor(registry)
-    first.reserve(firstTaskId)
+    val firstOwner = PDFProcessorFinishOwner(first::finish)
+    val replacementOwner = PDFProcessorFinishOwner(replacement::finish)
+    val operation = coordinator.beginOperation(firstOwner, firstTaskId) {
+      first.reserve(firstTaskId)
+    }
     assertTrue(
       lifecycle.register(
         OcrLifecycleRegistration(
@@ -232,23 +248,103 @@ class AndroidOCRProcessorTest {
       ),
     )
 
-    assertEquals(
-      false,
-      requestPDFProcessorFinish(
-        lifecycle = lifecycle,
-        taskId = firstTaskId,
-        finishProcessor = first::finish,
-      ),
-    )
+    var acknowledged = 0
+    assertEquals(false, coordinator.requestFinish(replacementOwner, firstTaskId) {
+      acknowledged += 1
+    })
+    assertEquals(0, acknowledged)
     assertCode("PDF_RESOURCE_BUSY") { replacement.reserve(secondTaskId) }
 
     assertTrue(
       finishPDFOperationLifecycle(
         lifecycle = lifecycle,
+        operation = operation,
         taskId = firstTaskId,
-        finishProcessor = first::finish,
+        keepSession = true,
       ),
     )
+    assertEquals(1, acknowledged)
+    replacement.reserve(secondTaskId)
+    replacement.finish(secondTaskId)
+  }
+
+  @Test
+  fun recreatedModuleCannotReleaseAnotherModulesActivePdfOperation() {
+    val firstLifecycle = OcrModuleLifecycle()
+    val coordinator = PDFProcessorFinishCoordinator()
+    val registry = OcrTaskRegistry()
+    val first = AndroidPDFProcessor(registry)
+    val recreated = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    val firstOwner = PDFProcessorFinishOwner(first::finish)
+    val recreatedOwner = PDFProcessorFinishOwner(recreated::finish)
+    val operation = coordinator.beginOperation(firstOwner, firstTaskId) {
+      first.reserve(firstTaskId)
+    }
+    assertTrue(
+      firstLifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = firstTaskId,
+          close = {},
+          rejectOnDestroy = {},
+        ),
+      ),
+    )
+
+    coordinator.destroyOwner(firstOwner)
+    first.destroy(activeTaskId = firstTaskId, deferRegistryRelease = true)
+    var acknowledged = 0
+    assertEquals(false, coordinator.requestFinish(recreatedOwner, firstTaskId) {
+      acknowledged += 1
+    })
+
+    assertCode("PDF_RESOURCE_BUSY") { replacement.reserve(thirdTaskId) }
+    firstLifecycle.finish(firstTaskId)
+    assertTrue(operation.finish(keepSession = true))
+    assertEquals(1, acknowledged)
+    replacement.reserve(thirdTaskId)
+    replacement.finish(thirdTaskId)
+  }
+
+  @Test
+  fun rejectedPdfExecutionConsumesDeferredFinishBeforeAcknowledgement() {
+    val lifecycle = OcrModuleLifecycle()
+    val coordinator = PDFProcessorFinishCoordinator()
+    val registry = OcrTaskRegistry()
+    val first = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    var acknowledged = 0
+    val firstOwner = PDFProcessorFinishOwner(first::finish)
+    val replacementOwner = PDFProcessorFinishOwner(replacement::finish)
+    val inspection = coordinator.beginOperation(firstOwner, firstTaskId) {
+      first.reserve(firstTaskId)
+    }
+    inspection.finish(keepSession = true)
+    val rejectedPage = coordinator.beginOperation(firstOwner, firstTaskId) {}
+    assertTrue(
+      lifecycle.register(
+        OcrLifecycleRegistration(
+          taskId = firstTaskId,
+          close = {},
+          rejectOnDestroy = {},
+        ),
+      ),
+    )
+
+    assertEquals(false, coordinator.requestFinish(replacementOwner, firstTaskId) {
+      acknowledged += 1
+    })
+    assertEquals(0, acknowledged)
+
+    lifecycle.deliver(firstTaskId) {}
+    finishPDFOperationLifecycle(
+      lifecycle = lifecycle,
+      operation = rejectedPage,
+      taskId = firstTaskId,
+      keepSession = true,
+    )
+
+    assertEquals(1, acknowledged)
     replacement.reserve(secondTaskId)
     replacement.finish(secondTaskId)
   }

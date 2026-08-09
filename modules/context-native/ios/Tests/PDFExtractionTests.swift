@@ -171,32 +171,35 @@ final class PDFExtractionTests: XCTestCase {
     let first = ApplePDFProcessor(registry: registry)
     let replacement = ApplePDFProcessor(registry: registry)
     let lifetime = OCRModuleLifetime()
-    try first.reserve(taskId: firstTaskId)
-    try lifetime.begin(taskId: firstTaskId)
+    let coordinator = PDFProcessorFinishCoordinator()
+    let owner = PDFProcessorFinishOwner(finishProcessor: first.finish)
+    let active = try beginPDFOperationLifetime(
+      lifetime: lifetime,
+      coordinator: coordinator,
+      owner: owner,
+      taskId: firstTaskId
+    ) {
+      try first.reserve(taskId: firstTaskId)
+    }
 
-    XCTAssertTrue(
-      claimPDFOperationDelivery(
-        lifetime: lifetime,
-        taskId: firstTaskId,
-        finishProcessor: first.finish
-      )
-    )
+    XCTAssertTrue(active.claimDelivery())
     XCTAssertThrowsError(try replacement.reserve(taskId: secondTaskId)) {
       XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
     }
 
-    lifetime.finish(taskId: firstTaskId)
-    first.finish(taskId: firstTaskId)
-    try first.reserve(taskId: firstTaskId)
-    try lifetime.begin(taskId: firstTaskId)
+    XCTAssertFalse(active.finish(keepSession: true))
+    XCTAssertTrue(coordinator.requestFinish(fallbackOwner: owner, taskId: firstTaskId) {})
+    let rejected = try beginPDFOperationLifetime(
+      lifetime: lifetime,
+      coordinator: coordinator,
+      owner: owner,
+      taskId: firstTaskId
+    ) {
+      try first.reserve(taskId: firstTaskId)
+    }
     XCTAssertEqual(lifetime.destroy(), firstTaskId)
-    XCTAssertFalse(
-      claimPDFOperationDelivery(
-        lifetime: lifetime,
-        taskId: firstTaskId,
-        finishProcessor: first.finish
-      )
-    )
+    XCTAssertFalse(rejected.claimDelivery())
+    XCTAssertTrue(rejected.finish(keepSession: false))
     XCTAssertNoThrow(try replacement.reserve(taskId: secondTaskId))
     replacement.finish(taskId: secondTaskId)
   }
@@ -206,62 +209,106 @@ final class PDFExtractionTests: XCTestCase {
     let first = ApplePDFProcessor(registry: registry)
     let replacement = ApplePDFProcessor(registry: registry)
     let lifetime = OCRModuleLifetime()
-    try first.reserve(taskId: firstTaskId)
+    let coordinator = PDFProcessorFinishCoordinator()
+    let firstOwner = PDFProcessorFinishOwner(finishProcessor: first.finish)
+    let replacementOwner = PDFProcessorFinishOwner(finishProcessor: replacement.finish)
     let active = try beginPDFOperationLifetime(
       lifetime: lifetime,
+      coordinator: coordinator,
+      owner: firstOwner,
       taskId: firstTaskId
-    )
+    ) { try first.reserve(taskId: firstTaskId) }
 
-    XCTAssertFalse(
-      requestPDFProcessorFinish(
-        lifetime: lifetime,
-        taskId: firstTaskId,
-        finishProcessor: first.finish
-      )
-    )
+    var acknowledged = 0
+    XCTAssertFalse(coordinator.requestFinish(fallbackOwner: replacementOwner, taskId: firstTaskId) {
+      acknowledged += 1
+    })
+    XCTAssertEqual(acknowledged, 0)
     XCTAssertThrowsError(try replacement.reserve(taskId: secondTaskId)) {
       XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
     }
 
-    XCTAssertTrue(active.finish(finishProcessor: first.finish))
+    XCTAssertTrue(active.finish(keepSession: true))
+    XCTAssertEqual(acknowledged, 1)
     XCTAssertNoThrow(try replacement.reserve(taskId: secondTaskId))
     replacement.finish(taskId: secondTaskId)
+  }
+
+  func testRecreatedModuleCannotReleaseAnotherModulesActivePDFOperation() throws {
+    let registry = OCRCancellationRegistry()
+    let first = ApplePDFProcessor(registry: registry)
+    let recreated = ApplePDFProcessor(registry: registry)
+    let replacement = ApplePDFProcessor(registry: registry)
+    let firstLifetime = OCRModuleLifetime()
+    let coordinator = PDFProcessorFinishCoordinator()
+    let firstOwner = PDFProcessorFinishOwner(finishProcessor: first.finish)
+    let recreatedOwner = PDFProcessorFinishOwner(finishProcessor: recreated.finish)
+    let active = try beginPDFOperationLifetime(
+      lifetime: firstLifetime,
+      coordinator: coordinator,
+      owner: firstOwner,
+      taskId: firstTaskId
+    ) { try first.reserve(taskId: firstTaskId) }
+
+    XCTAssertFalse(coordinator.destroyOwner(firstOwner))
+    first.destroy(activeTaskId: firstTaskId)
+    var acknowledged = 0
+    XCTAssertFalse(coordinator.requestFinish(fallbackOwner: recreatedOwner, taskId: firstTaskId) {
+      acknowledged += 1
+    })
+    XCTAssertThrowsError(try replacement.reserve(taskId: thirdTaskId)) {
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
+    }
+
+    XCTAssertTrue(active.finish(keepSession: true))
+    XCTAssertEqual(acknowledged, 1)
+    XCTAssertNoThrow(try replacement.reserve(taskId: thirdTaskId))
+    replacement.finish(taskId: thirdTaskId)
   }
 
   func testConcurrentBeginFailureCannotStealActivePageDeliveryClaim() throws {
     let registry = OCRCancellationRegistry()
     let processor = ApplePDFProcessor(registry: registry)
     let lifetime = OCRModuleLifetime()
-    try processor.reserve(taskId: firstTaskId)
+    let coordinator = PDFProcessorFinishCoordinator()
+    let owner = PDFProcessorFinishOwner(finishProcessor: processor.finish)
     let active = try beginPDFOperationLifetime(
       lifetime: lifetime,
+      coordinator: coordinator,
+      owner: owner,
       taskId: firstTaskId
-    )
+    ) { try processor.reserve(taskId: firstTaskId) }
 
     XCTAssertThrowsError(
       try beginPDFOperationLifetime(
         lifetime: lifetime,
-        taskId: firstTaskId
+        coordinator: coordinator,
+        owner: owner,
+        taskId: firstTaskId,
+        prepare: {}
       )
     ) {
-      XCTAssertEqual($0 as? OCRProcessingError, .resourceBusy)
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
     }
     XCTAssertThrowsError(
       try beginPDFOperationLifetime(
         lifetime: lifetime,
-        taskId: secondTaskId
+        coordinator: coordinator,
+        owner: owner,
+        taskId: secondTaskId,
+        prepare: {}
       )
     ) {
-      XCTAssertEqual($0 as? OCRProcessingError, .resourceBusy)
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
     }
 
-    XCTAssertTrue(active.claimDelivery(finishProcessor: processor.finish))
+    XCTAssertTrue(active.claimDelivery())
     let replacement = ApplePDFProcessor(registry: registry)
     XCTAssertThrowsError(try replacement.reserve(taskId: secondTaskId)) {
       XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
     }
-    active.finish()
-    processor.finish(taskId: firstTaskId)
+    XCTAssertFalse(active.finish(keepSession: true))
+    XCTAssertTrue(coordinator.requestFinish(fallbackOwner: owner, taskId: firstTaskId) {})
   }
 
   func testConcurrentBeginFailureCannotHideActivePageFromDestroy() throws {
@@ -269,29 +316,36 @@ final class PDFExtractionTests: XCTestCase {
     let processor = ApplePDFProcessor(registry: registry)
     let replacement = ApplePDFProcessor(registry: registry)
     let lifetime = OCRModuleLifetime()
-    try processor.reserve(taskId: firstTaskId)
+    let coordinator = PDFProcessorFinishCoordinator()
+    let owner = PDFProcessorFinishOwner(finishProcessor: processor.finish)
     let active = try beginPDFOperationLifetime(
       lifetime: lifetime,
+      coordinator: coordinator,
+      owner: owner,
       taskId: firstTaskId
-    )
+    ) { try processor.reserve(taskId: firstTaskId) }
     XCTAssertThrowsError(
       try beginPDFOperationLifetime(
         lifetime: lifetime,
-        taskId: firstTaskId
+        coordinator: coordinator,
+        owner: owner,
+        taskId: firstTaskId,
+        prepare: {}
       )
     ) {
-      XCTAssertEqual($0 as? OCRProcessingError, .resourceBusy)
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
     }
 
     let destroyedTaskId = try XCTUnwrap(lifetime.destroy())
+    XCTAssertFalse(coordinator.destroyOwner(owner))
     processor.destroy(activeTaskId: destroyedTaskId)
     XCTAssertThrowsError(try replacement.reserve(taskId: secondTaskId)) {
       XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
     }
-    XCTAssertFalse(active.claimDelivery(finishProcessor: processor.finish))
+    XCTAssertFalse(active.claimDelivery())
+    XCTAssertTrue(active.finish(keepSession: false))
     XCTAssertNoThrow(try replacement.reserve(taskId: secondTaskId))
     replacement.finish(taskId: secondTaskId)
-    active.finish()
   }
 
   func testDestroyReleasesRetainedOwnerWhenActivePageTaskDiffers() throws {
@@ -299,6 +353,8 @@ final class PDFExtractionTests: XCTestCase {
     let processor = ApplePDFProcessor(registry: registry)
     let replacement = ApplePDFProcessor(registry: registry)
     let lifetime = OCRModuleLifetime()
+    let coordinator = PDFProcessorFinishCoordinator()
+    let owner = PDFProcessorFinishOwner(finishProcessor: processor.finish)
     let document = fixtureURL("text-one-page.pdf")
     let sourceSHA256 = try beginSession(
       processor,
@@ -323,7 +379,10 @@ final class PDFExtractionTests: XCTestCase {
     }
     let stalePage = try beginPDFOperationLifetime(
       lifetime: lifetime,
-      taskId: secondTaskId
+      coordinator: coordinator,
+      owner: owner,
+      taskId: secondTaskId,
+      prepare: {}
     )
 
     XCTAssertThrowsError(
@@ -340,9 +399,10 @@ final class PDFExtractionTests: XCTestCase {
     }
 
     let destroyedTaskId = try XCTUnwrap(lifetime.destroy())
+    XCTAssertFalse(coordinator.destroyOwner(owner))
     processor.destroy(activeTaskId: destroyedTaskId)
-    XCTAssertFalse(stalePage.claimDelivery(finishProcessor: processor.finish))
-    stalePage.finish()
+    XCTAssertFalse(stalePage.claimDelivery())
+    XCTAssertTrue(stalePage.finish(keepSession: false))
 
     XCTAssertNoThrow(try replacement.reserve(taskId: thirdTaskId))
     replacement.finish(taskId: thirdTaskId)

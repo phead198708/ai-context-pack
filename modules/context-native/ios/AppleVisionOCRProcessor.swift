@@ -130,7 +130,6 @@ final class OCRModuleLifetime: @unchecked Sendable {
   private var destroyed = false
   private var activeTaskId: String?
   private var settled = false
-  private var processorFinishRequested = false
 
   func begin(taskId: String) throws {
     lock.lock()
@@ -139,7 +138,6 @@ final class OCRModuleLifetime: @unchecked Sendable {
     guard activeTaskId == nil else { throw OCRProcessingError.resourceBusy }
     activeTaskId = taskId
     settled = false
-    processorFinishRequested = false
   }
 
   func claimDelivery(taskId: String) -> Bool {
@@ -150,24 +148,12 @@ final class OCRModuleLifetime: @unchecked Sendable {
     return true
   }
 
-  func requestProcessorFinish(taskId: String) -> Bool {
+  func finish(taskId: String) {
     lock.lock()
     defer { lock.unlock() }
-    guard activeTaskId == taskId else { return true }
-    processorFinishRequested = true
-    return false
-  }
-
-  @discardableResult
-  func finish(taskId: String) -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    guard activeTaskId == taskId else { return false }
-    let finishRequested = processorFinishRequested
+    guard activeTaskId == taskId else { return }
     activeTaskId = nil
     settled = false
-    processorFinishRequested = false
-    return finishRequested
   }
 
   func destroy() -> String? {

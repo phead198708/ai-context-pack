@@ -185,7 +185,6 @@ class PDFExtractionInstrumentedTest {
       deliverPDFOperationCompletion(
         lifecycle = lifecycle,
         taskId = secondTaskId,
-        finishProcessor = processor::finish,
       ) {},
     )
     lifecycle.finish(secondTaskId)

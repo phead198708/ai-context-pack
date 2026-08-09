@@ -575,62 +575,234 @@ final class ApplePDFProcessor: @unchecked Sendable {
   }
 }
 
-func claimPDFOperationDelivery(
-  lifetime: OCRModuleLifetime,
-  taskId: String,
-  finishProcessor: (String) -> Void
-) -> Bool {
-  let claimed = lifetime.claimDelivery(taskId: taskId)
-  if !claimed { finishProcessor(taskId) }
-  return claimed
+final class PDFProcessorFinishOwner: @unchecked Sendable {
+  let finishProcessor: (String) -> Void
+
+  init(finishProcessor: @escaping (String) -> Void) {
+    self.finishProcessor = finishProcessor
+  }
 }
 
-@discardableResult
-func requestPDFProcessorFinish(
-  lifetime: OCRModuleLifetime,
-  taskId: String,
-  finishProcessor: (String) -> Void
-) -> Bool {
-  let finishImmediately = lifetime.requestProcessorFinish(taskId: taskId)
-  if finishImmediately { finishProcessor(taskId) }
-  return finishImmediately
+final class PDFProcessorFinishCoordinator: @unchecked Sendable {
+  private final class State {
+    let taskId: String
+    let owner: PDFProcessorFinishOwner
+    var operationActive: Bool
+    var finishRequested = false
+    var completions: [() -> Void] = []
+
+    init(taskId: String, owner: PDFProcessorFinishOwner, operationActive: Bool) {
+      self.taskId = taskId
+      self.owner = owner
+      self.operationActive = operationActive
+    }
+  }
+
+  private struct Cleanup {
+    let taskId: String
+    let finishProcessor: (String) -> Void
+    let completions: [() -> Void]
+  }
+
+  private let lock = NSLock()
+  private var state: State?
+
+  func beginOperation(
+    owner: PDFProcessorFinishOwner,
+    taskId: String,
+    prepare: () throws -> Void
+  ) throws -> PDFProcessorOperationLease {
+    lock.lock()
+    defer { lock.unlock() }
+    if let state,
+       state.taskId != taskId || state.owner !== owner || state.operationActive {
+      throw PDFProcessingError.resourceBusy
+    }
+    try prepare()
+    if let state {
+      state.operationActive = true
+    } else {
+      state = State(taskId: taskId, owner: owner, operationActive: true)
+    }
+    return PDFProcessorOperationLease(coordinator: self, owner: owner, taskId: taskId)
+  }
+
+  @discardableResult
+  func requestFinish(
+    fallbackOwner: PDFProcessorFinishOwner,
+    taskId: String,
+    completion: @escaping () -> Void
+  ) -> Bool {
+    let cleanup: Cleanup?
+    lock.lock()
+    if let state, state.taskId == taskId {
+      state.finishRequested = true
+      state.completions.append(completion)
+      if state.operationActive {
+        lock.unlock()
+        return false
+      }
+      self.state = nil
+      cleanup = Cleanup(
+        taskId: taskId,
+        finishProcessor: state.owner.finishProcessor,
+        completions: state.completions
+      )
+    } else {
+      cleanup = Cleanup(
+        taskId: taskId,
+        finishProcessor: fallbackOwner.finishProcessor,
+        completions: [completion]
+      )
+    }
+    lock.unlock()
+    runCleanup(cleanup!)
+    return true
+  }
+
+  @discardableResult
+  func destroyOwner(_ owner: PDFProcessorFinishOwner) -> Bool {
+    let cleanup: Cleanup?
+    lock.lock()
+    guard let state, state.owner === owner else {
+      lock.unlock()
+      return false
+    }
+    state.finishRequested = true
+    if state.operationActive {
+      lock.unlock()
+      return false
+    }
+    self.state = nil
+    cleanup = Cleanup(
+      taskId: state.taskId,
+      finishProcessor: state.owner.finishProcessor,
+      completions: state.completions
+    )
+    lock.unlock()
+    runCleanup(cleanup!)
+    return true
+  }
+
+  fileprivate func finishOperation(
+    owner: PDFProcessorFinishOwner,
+    taskId: String,
+    keepSession: Bool
+  ) -> Bool {
+    let cleanup: Cleanup?
+    lock.lock()
+    guard let state,
+          state.taskId == taskId,
+          state.owner === owner,
+          state.operationActive else {
+      lock.unlock()
+      return false
+    }
+    state.operationActive = false
+    if keepSession, !state.finishRequested {
+      lock.unlock()
+      return false
+    }
+    self.state = nil
+    cleanup = Cleanup(
+      taskId: taskId,
+      finishProcessor: state.owner.finishProcessor,
+      completions: state.completions
+    )
+    lock.unlock()
+    runCleanup(cleanup!)
+    return true
+  }
+
+  private func runCleanup(_ cleanup: Cleanup) {
+    cleanup.finishProcessor(cleanup.taskId)
+    cleanup.completions.forEach { $0() }
+  }
+}
+
+final class PDFProcessorOperationLease: @unchecked Sendable {
+  private let lock = NSLock()
+  private let coordinator: PDFProcessorFinishCoordinator
+  private let owner: PDFProcessorFinishOwner
+  private let taskId: String
+  private var finished = false
+
+  fileprivate init(
+    coordinator: PDFProcessorFinishCoordinator,
+    owner: PDFProcessorFinishOwner,
+    taskId: String
+  ) {
+    self.coordinator = coordinator
+    self.owner = owner
+    self.taskId = taskId
+  }
+
+  @discardableResult
+  func finish(keepSession: Bool) -> Bool {
+    lock.lock()
+    guard !finished else {
+      lock.unlock()
+      return false
+    }
+    finished = true
+    lock.unlock()
+    return coordinator.finishOperation(
+      owner: owner,
+      taskId: taskId,
+      keepSession: keepSession
+    )
+  }
 }
 
 final class PDFOperationLifetimeLease {
   private let lifetime: OCRModuleLifetime
   private let taskId: String
+  private let processorOperation: PDFProcessorOperationLease
 
-  fileprivate init(lifetime: OCRModuleLifetime, taskId: String) {
+  fileprivate init(
+    lifetime: OCRModuleLifetime,
+    taskId: String,
+    processorOperation: PDFProcessorOperationLease
+  ) {
     self.lifetime = lifetime
     self.taskId = taskId
+    self.processorOperation = processorOperation
   }
 
-  func claimDelivery(finishProcessor: (String) -> Void) -> Bool {
-    claimPDFOperationDelivery(
-      lifetime: lifetime,
-      taskId: taskId,
-      finishProcessor: finishProcessor
-    )
-  }
-
-  func finish() {
-    _ = lifetime.finish(taskId: taskId)
+  func claimDelivery() -> Bool {
+    lifetime.claimDelivery(taskId: taskId)
   }
 
   @discardableResult
-  func finish(finishProcessor: (String) -> Void) -> Bool {
-    let finishRequested = lifetime.finish(taskId: taskId)
-    if finishRequested { finishProcessor(taskId) }
-    return finishRequested
+  func finish(keepSession: Bool) -> Bool {
+    lifetime.finish(taskId: taskId)
+    return processorOperation.finish(keepSession: keepSession)
   }
 }
 
 func beginPDFOperationLifetime(
   lifetime: OCRModuleLifetime,
-  taskId: String
+  coordinator: PDFProcessorFinishCoordinator,
+  owner: PDFProcessorFinishOwner,
+  taskId: String,
+  prepare: () throws -> Void
 ) throws -> PDFOperationLifetimeLease {
-  try lifetime.begin(taskId: taskId)
-  return PDFOperationLifetimeLease(lifetime: lifetime, taskId: taskId)
+  let processorOperation = try coordinator.beginOperation(
+    owner: owner,
+    taskId: taskId,
+    prepare: prepare
+  )
+  do {
+    try lifetime.begin(taskId: taskId)
+  } catch {
+    _ = processorOperation.finish(keepSession: false)
+    throw error
+  }
+  return PDFOperationLifetimeLease(
+    lifetime: lifetime,
+    taskId: taskId,
+    processorOperation: processorOperation
+  )
 }
 
 private func normalizePDFText(_ input: String) -> String {

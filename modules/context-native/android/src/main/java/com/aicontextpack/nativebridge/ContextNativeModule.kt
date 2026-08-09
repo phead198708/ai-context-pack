@@ -43,6 +43,7 @@ internal object AndroidOCRProcessScope {
 }
 
 internal object AndroidPDFProcessScope {
+  val finishCoordinator = PDFProcessorFinishCoordinator()
   val executor = ThreadPoolExecutor(
     1,
     1,
@@ -74,7 +75,6 @@ internal class OcrModuleLifecycle {
     val registration: OcrLifecycleRegistration,
     var settled: Boolean = false,
     var destructionIssued: Boolean = false,
-    var processorFinishRequested: Boolean = false,
   )
 
   private var destroyed = false
@@ -97,19 +97,11 @@ internal class OcrModuleLifecycle {
   }
 
   @Synchronized
-  fun requestProcessorFinish(taskId: String): Boolean {
-    val current = active
-    if (current?.registration?.taskId != taskId) return true
-    current.processorFinishRequested = true
-    return false
-  }
-
-  @Synchronized
   fun finish(taskId: String): Boolean {
     val current = active
     if (current?.registration?.taskId != taskId) return false
     active = null
-    return current.processorFinishRequested
+    return true
   }
 
   @Synchronized
@@ -134,40 +126,154 @@ internal class OcrModuleLifecycle {
   }
 }
 
+internal class PDFProcessorFinishOwner(
+  val finishProcessor: (String) -> Unit,
+)
+
+internal class PDFProcessorFinishCoordinator {
+  private data class State(
+    val taskId: String,
+    val owner: PDFProcessorFinishOwner,
+    var operationActive: Boolean,
+    var finishRequested: Boolean = false,
+    val completions: MutableList<() -> Unit> = mutableListOf(),
+  )
+
+  private data class Cleanup(
+    val taskId: String,
+    val finishProcessor: (String) -> Unit,
+    val completions: List<() -> Unit>,
+  )
+
+  private val lock = Any()
+  private var state: State? = null
+
+  fun beginOperation(
+    owner: PDFProcessorFinishOwner,
+    taskId: String,
+    prepare: () -> Unit,
+  ): PDFProcessorOperationLease {
+    synchronized(lock) {
+      val current = state
+      if (
+        current != null &&
+        (current.taskId != taskId || current.owner !== owner || current.operationActive)
+      ) {
+        throw NativeException("PDF_RESOURCE_BUSY")
+      }
+      prepare()
+      if (current == null) {
+        state = State(taskId = taskId, owner = owner, operationActive = true)
+      } else {
+        current.operationActive = true
+      }
+    }
+    return PDFProcessorOperationLease(this, owner, taskId)
+  }
+
+  fun requestFinish(
+    fallbackOwner: PDFProcessorFinishOwner,
+    taskId: String,
+    completion: () -> Unit,
+  ): Boolean {
+    var cleanup: Cleanup? = null
+    synchronized(lock) {
+      val current = state
+      if (current?.taskId == taskId) {
+        current.finishRequested = true
+        current.completions += completion
+        if (current.operationActive) return false
+        state = null
+        cleanup = Cleanup(taskId, current.owner.finishProcessor, current.completions.toList())
+      } else {
+        cleanup = Cleanup(taskId, fallbackOwner.finishProcessor, listOf(completion))
+      }
+    }
+    runCleanup(checkNotNull(cleanup))
+    return true
+  }
+
+  fun destroyOwner(owner: PDFProcessorFinishOwner): Boolean {
+    var cleanup: Cleanup? = null
+    synchronized(lock) {
+      val current = state
+      if (current?.owner !== owner) return false
+      current.finishRequested = true
+      if (current.operationActive) return false
+      state = null
+      cleanup = Cleanup(current.taskId, current.owner.finishProcessor, current.completions.toList())
+    }
+    runCleanup(checkNotNull(cleanup))
+    return true
+  }
+
+  internal fun finishOperation(
+    owner: PDFProcessorFinishOwner,
+    taskId: String,
+    keepSession: Boolean,
+  ): Boolean {
+    var cleanup: Cleanup? = null
+    synchronized(lock) {
+      val current = state
+      if (current?.taskId != taskId || current.owner !== owner || !current.operationActive) {
+        return false
+      }
+      current.operationActive = false
+      if (keepSession && !current.finishRequested) return false
+      state = null
+      cleanup = Cleanup(taskId, current.owner.finishProcessor, current.completions.toList())
+    }
+    runCleanup(checkNotNull(cleanup))
+    return true
+  }
+
+  private fun runCleanup(cleanup: Cleanup) {
+    try {
+      cleanup.finishProcessor(cleanup.taskId)
+    } finally {
+      cleanup.completions.forEach { it() }
+    }
+  }
+}
+
+internal class PDFProcessorOperationLease(
+  private val coordinator: PDFProcessorFinishCoordinator,
+  private val owner: PDFProcessorFinishOwner,
+  private val taskId: String,
+) {
+  private val finished = AtomicBoolean(false)
+
+  fun finish(keepSession: Boolean): Boolean =
+    if (finished.compareAndSet(false, true)) {
+      coordinator.finishOperation(owner, taskId, keepSession)
+    } else {
+      false
+    }
+}
+
 internal fun deliverPDFOperationCompletion(
   lifecycle: OcrModuleLifecycle,
   taskId: String,
-  finishProcessor: (String) -> Unit,
   action: () -> Unit,
 ): Boolean {
-  val delivered = lifecycle.deliver(taskId, action)
-  if (!delivered) finishProcessor(taskId)
-  return delivered
-}
-
-internal fun requestPDFProcessorFinish(
-  lifecycle: OcrModuleLifecycle,
-  taskId: String,
-  finishProcessor: (String) -> Unit,
-): Boolean {
-  val finishImmediately = lifecycle.requestProcessorFinish(taskId)
-  if (finishImmediately) finishProcessor(taskId)
-  return finishImmediately
+  return lifecycle.deliver(taskId, action)
 }
 
 internal fun finishPDFOperationLifecycle(
   lifecycle: OcrModuleLifecycle,
+  operation: PDFProcessorOperationLease,
   taskId: String,
-  finishProcessor: (String) -> Unit,
+  keepSession: Boolean,
 ): Boolean {
-  val finishRequested = lifecycle.finish(taskId)
-  if (finishRequested) finishProcessor(taskId)
-  return finishRequested
+  lifecycle.finish(taskId)
+  return operation.finish(keepSession)
 }
 
 class ContextNativeModule : Module(), ComponentCallbacks2 {
   private val ocrProcessor = AndroidOCRProcessor(AndroidOCRProcessScope.registry)
   private val pdfProcessor = AndroidPDFProcessor(AndroidOCRProcessScope.registry)
+  private val pdfFinishOwner = PDFProcessorFinishOwner(pdfProcessor::finish)
+  private val pdfFinishCoordinator = AndroidPDFProcessScope.finishCoordinator
   private val ocrLifecycle = OcrModuleLifecycle()
   private val pdfLifecycle = OcrModuleLifecycle()
   private var callbackContext: Context? = null
@@ -195,6 +301,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         active.reject?.invoke()
       }
       val activePDF = pdfLifecycle.destroy()
+      pdfFinishCoordinator.destroyOwner(pdfFinishOwner)
       pdfProcessor.destroy(
         activeTaskId = activePDF?.taskId,
         deferRegistryRelease = activePDF?.deferProcessorRelease == true,
@@ -518,23 +625,26 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       promise: Promise ->
       val context = appContext.reactContext
         ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
-      try {
-        pdfProcessor.reserve(taskId)
+      val processor = pdfProcessor
+      val lifecycle = pdfLifecycle
+      val operation = try {
+        pdfFinishCoordinator.beginOperation(pdfFinishOwner, taskId) {
+          processor.reserve(taskId)
+        }
       } catch (error: NativeException) {
         return@AsyncFunction promise.reject(error)
       }
-      val processor = pdfProcessor
-      val lifecycle = pdfLifecycle
       if (!lifecycle.register(OcrLifecycleRegistration(
           taskId = taskId,
           close = {},
           rejectOnDestroy = { promise.reject(NativeException("PDF_CANCELLED")) },
         ))) {
-        processor.finish(taskId)
+        operation.finish(keepSession = false)
         return@AsyncFunction promise.reject(NativeException("PDF_CANCELLED"))
       }
       try {
         AndroidPDFProcessScope.executor.execute {
+          var keepSession = false
           try {
             val result = processor.inspect(
               context = context,
@@ -543,22 +653,19 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
               expectedSourceSha256 = sourceSha256,
               reserved = true,
             )
-            deliverPDFOperationCompletion(
+            keepSession = deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) { promise.resolve(result) }
           } catch (error: NativeException) {
             deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) { promise.reject(error) }
           } catch (_: OutOfMemoryError) {
             deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) {
               promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
             }
@@ -566,18 +673,22 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
             deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) {
               promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
             }
           } finally {
-            finishPDFOperationLifecycle(lifecycle, taskId, processor::finish)
+            finishPDFOperationLifecycle(
+              lifecycle = lifecycle,
+              operation = operation,
+              taskId = taskId,
+              keepSession = keepSession,
+            )
           }
         }
       } catch (_: RejectedExecutionException) {
         lifecycle.deliver(taskId) { promise.reject(NativeException("PDF_RESOURCE_BUSY")) }
         lifecycle.finish(taskId)
-        processor.finish(taskId)
+        operation.finish(keepSession = false)
       }
     }
 
@@ -592,8 +703,10 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
       val processor = pdfProcessor
       val lifecycle = pdfLifecycle
-      try {
-        processor.validatePageRequest(taskId, fileUri, sourceSha256)
+      val operation = try {
+        pdfFinishCoordinator.beginOperation(pdfFinishOwner, taskId) {
+          processor.validatePageRequest(taskId, fileUri, sourceSha256)
+        }
       } catch (error: NativeException) {
         return@AsyncFunction promise.reject(error)
       }
@@ -602,10 +715,12 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
           close = {},
           rejectOnDestroy = { promise.reject(NativeException("PDF_CANCELLED")) },
         ))) {
+        operation.finish(keepSession = false)
         return@AsyncFunction promise.reject(NativeException("PDF_RESOURCE_BUSY"))
       }
       try {
         AndroidPDFProcessScope.executor.execute {
+          var keepSession = true
           try {
             val result = processor.extractPage(
               context = context,
@@ -616,44 +731,49 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
               script = script,
               reserved = true,
             )
-            deliverPDFOperationCompletion(
+            keepSession = deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) { promise.resolve(result) }
           } catch (error: NativeException) {
-            deliverPDFOperationCompletion(
+            keepSession = deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) { promise.reject(error) }
           } catch (_: OutOfMemoryError) {
-            deliverPDFOperationCompletion(
+            keepSession = deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) {
               promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE"))
             }
           } catch (_: Throwable) {
-            deliverPDFOperationCompletion(
+            keepSession = deliverPDFOperationCompletion(
               lifecycle,
               taskId,
-              processor::finish,
             ) {
               promise.reject(NativeException("PDF_PAGE_EXTRACTION_FAILED"))
             }
           } finally {
-            finishPDFOperationLifecycle(lifecycle, taskId, processor::finish)
+            finishPDFOperationLifecycle(
+              lifecycle = lifecycle,
+              operation = operation,
+              taskId = taskId,
+              keepSession = keepSession,
+            )
           }
         }
       } catch (_: RejectedExecutionException) {
-        deliverPDFOperationCompletion(
+        val keepSession = deliverPDFOperationCompletion(
           lifecycle,
           taskId,
-          processor::finish,
         ) { promise.reject(NativeException("PDF_RESOURCE_BUSY")) }
-        lifecycle.finish(taskId)
+        finishPDFOperationLifecycle(
+          lifecycle = lifecycle,
+          operation = operation,
+          taskId = taskId,
+          keepSession = keepSession,
+        )
       }
     }
 
@@ -661,9 +781,10 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       pdfProcessor.cancel(taskId)
     }
 
-    AsyncFunction("finishPdfExtraction") { taskId: String ->
-      requestPDFProcessorFinish(pdfLifecycle, taskId, pdfProcessor::finish)
-      true
+    AsyncFunction("finishPdfExtraction") { taskId: String, promise: Promise ->
+      pdfFinishCoordinator.requestFinish(pdfFinishOwner, taskId) {
+        promise.resolve(true)
+      }
     }
 
     AsyncFunction("readPlainTextFile") { fileUri: String, promise: Promise ->

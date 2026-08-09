@@ -85,6 +85,10 @@ class AndroidPDFProcessorTest {
         "endstream\nendobj\n",
       trailerDictionary = "<< /Size 2 >>",
     )
+    val binaryStreamDelimiters = classicXrefPDF(
+      prefix = "%PDF-1.7\n1 0 obj << /Length 4 >> stream\n<<[[\nendstream\nendobj\n",
+      trailerDictionary = "<< /Size 2 >>",
+    )
     val harmlessXrefStream = xrefStreamPDF(
       prefix = "%PDF-1.7\n1 0 obj << /Length 16 >> stream\ntrailer /Encrypt\n" +
         "endstream\nendobj\n",
@@ -128,10 +132,25 @@ class AndroidPDFProcessorTest {
     val harmlessTrailerComment = classicXrefPDF(
       trailerDictionary = "<< /Size 2 % trailer\n/Root 1 0 R >>",
     )
+    val incrementallyEncrypted = incrementalClassicXrefPDF(
+      previousTrailerDictionary = "<< /Size 2 /Encrypt 1 0 R >>",
+      latestTrailerEntries = "/Size 3 /Root 2 0 R",
+    )
+    val incrementallyEncryptedXrefStream = incrementalXrefStreamPDF(
+      previousDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length 0 /En#63rypt 1 0 R >>",
+      latestDictionaryEntries = "/Type /XRef /Size 3 /W [1 1 1] /Length 0",
+    )
+    val incrementallyUnencrypted = incrementalClassicXrefPDF(
+      previousTrailerDictionary = "<< /Size 2 /Root 1 0 R >>",
+      latestTrailerEntries = "/Size 3 /Root 2 0 R",
+    )
+    val largeIncrementallyEncrypted = largeIncrementalEncryptedPDF()
+    val cyclicPreviousRevision = cyclicPreviousRevisionPDF()
     try {
       assertTrue(hasPDFEncryptionMarker(encrypted))
       assertEquals(false, hasPDFEncryptionMarker(metadataOnly))
       assertEquals(false, hasPDFEncryptionMarker(harmlessContent))
+      assertEquals(false, hasPDFEncryptionMarker(binaryStreamDelimiters))
       assertEquals(false, hasPDFEncryptionMarker(harmlessXrefStream))
       assertTrue(hasPDFEncryptionMarker(encryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(nestedClassic))
@@ -141,6 +160,13 @@ class AndroidPDFProcessorTest {
       assertTrue(hasPDFEncryptionMarker(lateEncryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessTrailerString))
       assertEquals(false, hasPDFEncryptionMarker(harmlessTrailerComment))
+      assertTrue(hasPDFEncryptionMarker(incrementallyEncrypted))
+      assertTrue(hasPDFEncryptionMarker(incrementallyEncryptedXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(incrementallyUnencrypted))
+      assertTrue(hasPDFEncryptionMarker(largeIncrementallyEncrypted))
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(cyclicPreviousRevision)
+      }
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(oversizedIncompleteXrefStream)
       }
@@ -154,6 +180,7 @@ class AndroidPDFProcessorTest {
       encrypted.delete()
       metadataOnly.delete()
       harmlessContent.delete()
+      binaryStreamDelimiters.delete()
       harmlessXrefStream.delete()
       encryptedXrefStream.delete()
       nestedClassic.delete()
@@ -166,6 +193,11 @@ class AndroidPDFProcessorTest {
       incompleteClassicTrailer.delete()
       harmlessTrailerString.delete()
       harmlessTrailerComment.delete()
+      incrementallyEncrypted.delete()
+      incrementallyEncryptedXrefStream.delete()
+      incrementallyUnencrypted.delete()
+      largeIncrementallyEncrypted.delete()
+      cyclicPreviousRevision.delete()
     }
   }
 
@@ -208,6 +240,77 @@ class AndroidPDFProcessorTest {
       prefix +
         "2 0 obj\n$xrefDictionary\nstream\n\nendstream\nendobj\n" +
         "startxref\n$xrefOffset\n%%EOF",
+    )
+  }
+
+  private fun incrementalClassicXrefPDF(
+    previousTrailerDictionary: String,
+    latestTrailerEntries: String,
+  ): File {
+    val prefix = "%PDF-1.7\n"
+    val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val previousRevision =
+      "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n$previousTrailerDictionary\n" +
+        "startxref\n$previousXrefOffset\n%%EOF\n"
+    val latestXrefOffset = previousXrefOffset + previousRevision.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix + previousRevision +
+        "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< $latestTrailerEntries /Prev $previousXrefOffset >>\n" +
+        "startxref\n$latestXrefOffset\n%%EOF",
+    )
+  }
+
+  private fun incrementalXrefStreamPDF(
+    previousDictionary: String,
+    latestDictionaryEntries: String,
+  ): File {
+    val prefix = "%PDF-1.7\n"
+    val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val previousRevision =
+      "2 0 obj\n$previousDictionary\nstream\n\nendstream\nendobj\n" +
+        "startxref\n$previousXrefOffset\n%%EOF\n"
+    val latestXrefOffset = previousXrefOffset + previousRevision.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix + previousRevision +
+        "3 0 obj\n<< $latestDictionaryEntries /Prev $previousXrefOffset >>\n" +
+        "stream\n\nendstream\nendobj\n" +
+        "startxref\n$latestXrefOffset\n%%EOF",
+    )
+  }
+
+  private fun cyclicPreviousRevisionPDF(): File {
+    val prefix = "%PDF-1.7\n"
+    val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val previousRevision =
+      "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< /Size 2 /Prev $previousXrefOffset >>\n" +
+        "startxref\n$previousXrefOffset\n%%EOF\n"
+    val latestXrefOffset = previousXrefOffset + previousRevision.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix + previousRevision +
+        "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< /Size 3 /Prev $previousXrefOffset >>\n" +
+        "startxref\n$latestXrefOffset\n%%EOF",
+    )
+  }
+
+  private fun largeIncrementalEncryptedPDF(): File {
+    val prefix = "%PDF-1.7\n"
+    val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val entry = "0000000000 00000 n \n"
+    val entryCount = AndroidPDFResourcePolicy.maximumXrefDictionaryBytes / entry.length + 64
+    val previousRevision =
+      "xref\n0 $entryCount\n" + entry.repeat(entryCount) +
+        "trailer\n<< /Size $entryCount /Encrypt 1 0 R >>\n" +
+        "startxref\n$previousXrefOffset\n%%EOF\n"
+    val latestXrefOffset = previousXrefOffset + previousRevision.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix + previousRevision +
+        "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< /Size ${entryCount + 1} /Prev $previousXrefOffset >>\n" +
+        "startxref\n$latestXrefOffset\n%%EOF",
     )
   }
 }
