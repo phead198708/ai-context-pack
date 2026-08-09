@@ -167,6 +167,44 @@ export class InboxEventWorkflow {
       );
   }
 
+  /**
+   * Refreshes durable product state after an empty Pack is written directly to persistence.
+   * Historical failed-share warnings remain visible, but operational refresh failures reject
+   * so the caller cannot navigate to stale Detail state.
+   */
+  async refreshForCreatedPack(packId: string): Promise<InboxPackSummary> {
+    let outcome:
+      | { readonly ok: true; readonly pack: InboxPackSummary }
+      | { readonly ok: false; readonly code: string }
+      | undefined;
+    await this.enqueue(async () => {
+      if (
+        this.hasOperationalBlocker() &&
+        !(await this.retryQueued(false, false))
+      ) {
+        outcome = { ok: false, code: this.latestBlockerCode() };
+        return;
+      }
+      const refreshed = await this.refresh(false, true);
+      if (!refreshed || this.hasOperationalBlocker()) {
+        outcome = { ok: false, code: this.latestBlockerCode() };
+        return;
+      }
+      const pack = this.lastPersistedPacks?.find(value => value.id === packId);
+      if (!pack) {
+        this.latch('scan', null, 'INBOX_SCAN_FAILED');
+        outcome = { ok: false, code: this.latestBlockerCode() };
+        return;
+      }
+      outcome = { ok: true, pack };
+    });
+    if (!outcome || !outcome.ok)
+      throw new InboxWorkflowRefreshError(
+        outcome?.code ?? this.latestBlockerCode(),
+      );
+    return outcome.pack;
+  }
+
   retry(): Promise<void> {
     return this.enqueue(() =>
       this.retryQueued(true, true).then(() => undefined),

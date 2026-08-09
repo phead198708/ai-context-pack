@@ -954,4 +954,56 @@ describe('App interactions', () => {
     expect(renderedText(renderer)).toContain(`ID ${ingestionId}`);
     act(() => renderer.unmount());
   });
+
+  test('creates and selects an empty Pack while preserving a historical share warning', async () => {
+    const createdPack = {
+      ...persistedPack,
+      id: newerPackId,
+      updatedAt: '2026-01-02T00:00:00Z',
+    };
+    mockCreateEmptyDraftPack.mockResolvedValue(createdPack);
+    mockPersistenceInboxProcessor.listPersistedPacks
+      .mockResolvedValueOnce([persistedPack])
+      .mockResolvedValueOnce([persistedPack, createdPack]);
+    const renderer = await renderApp();
+    await act(async () => {
+      inboxListener?.({
+        schemaVersion: 1,
+        id: eventId,
+        result: 'failed',
+        code: 'SHARE_IMPORT_FAILED',
+      });
+      await flushWorkflow();
+    });
+
+    await press(control(renderer, 'button', 'Create Empty Draft'));
+
+    expect(mockNative.scanInbox).toHaveBeenCalledTimes(2);
+    expect(renderedText(renderer)).toContain('Import detail');
+    expect(renderedText(renderer)).toContain(`ID ${newerPackId}`);
+    expect(renderedText(renderer)).not.toContain(`ID ${ingestionId}`);
+    await press(control(renderer, 'tab', 'inbox'));
+    expect(renderedText(renderer)).toContain('SHARE_IMPORT_FAILED');
+    act(() => renderer.unmount());
+  });
+
+  test('does not navigate to stale Detail when empty-Pack refresh fails', async () => {
+    mockNative.scanInbox
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'));
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([]);
+    const renderer = await renderApp();
+
+    await press(control(renderer, 'button', 'Create Empty Draft'));
+
+    expect(mockCreateEmptyDraftPack).toHaveBeenCalledTimes(1);
+    expect(renderedText(renderer)).toContain('STORAGE_WRITE_FAILED');
+    expect(renderedText(renderer)).toContain('Inbox unavailable');
+    expect(renderedText(renderer)).not.toContain('Import detail');
+    expect(
+      control(renderer, 'button', 'Create Empty Draft').props
+        .accessibilityState,
+    ).toEqual({ disabled: true });
+    act(() => renderer.unmount());
+  });
 });

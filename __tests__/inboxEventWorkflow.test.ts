@@ -604,6 +604,95 @@ describe('InboxEventWorkflow integration', () => {
     });
   });
 
+  test('created-Pack refresh scans through a historical warning and returns the requested Pack', async () => {
+    const oldPack = {
+      id: ids[0]!,
+      schemaVersion: 1 as const,
+      title: 'Older Pack',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      state: 'draft' as const,
+      itemCount: 0,
+    };
+    const createdPack = {
+      ...oldPack,
+      id: ids[2]!,
+      title: 'Created Pack',
+      updatedAt: '2026-01-02T00:00:00Z',
+    };
+    const listPersistedPacks = jest
+      .fn()
+      .mockResolvedValueOnce([oldPack])
+      .mockResolvedValueOnce([oldPack, createdPack]);
+    const h = harness(
+      {},
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks,
+      },
+    );
+    await h.workflow.bootstrap();
+    await h.workflow.receive(
+      event(0, 'failed', { code: 'SHARE_IMPORT_FAILED' }),
+    );
+
+    await expect(
+      h.workflow.refreshForCreatedPack(createdPack.id),
+    ).resolves.toEqual(createdPack);
+
+    expect(h.native.scanInbox).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'ready',
+      manifests: [manifest],
+      packs: [oldPack, createdPack],
+      warningCode: 'SHARE_IMPORT_FAILED',
+    });
+  });
+
+  test('created-Pack refresh rejects an operational scan failure', async () => {
+    const scanInbox = jest
+      .fn()
+      .mockResolvedValueOnce([manifest])
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'));
+    const h = harness(
+      { scanInbox },
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks: jest.fn().mockResolvedValue([]),
+      },
+    );
+    await h.workflow.bootstrap();
+
+    await expect(
+      h.workflow.refreshForCreatedPack(ids[2]!),
+    ).rejects.toMatchObject({ code: 'STORAGE_WRITE_FAILED' });
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'STORAGE_WRITE_FAILED',
+    });
+  });
+
+  test('created-Pack refresh fails closed when the requested Pack is absent', async () => {
+    const h = harness(
+      {},
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks: jest.fn().mockResolvedValue([]),
+      },
+    );
+    await h.workflow.bootstrap();
+
+    await expect(
+      h.workflow.refreshForCreatedPack(ids[2]!),
+    ).rejects.toMatchObject({ code: 'INBOX_SCAN_FAILED' });
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'INBOX_SCAN_FAILED',
+    });
+  });
+
   test('durable persistence completes before a successful share event is ACKed', async () => {
     const order: string[] = [];
     const pending = event(0, 'complete');

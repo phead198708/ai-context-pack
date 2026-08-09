@@ -153,9 +153,15 @@ function App(): React.JSX.Element {
                   setCreatingEmptyDraft(true);
                   setEmptyDraftError(undefined);
                   try {
-                    await createEmptyDraftPack();
-                    await workflow.current?.appBecameActive();
-                    setSelectedDetailPackId(undefined);
+                    const created = await createEmptyDraftPack();
+                    const activeWorkflow = workflow.current;
+                    if (!activeWorkflow) {
+                      setEmptyDraftError('INBOX_SCAN_FAILED');
+                      return;
+                    }
+                    const refreshed =
+                      await activeWorkflow.refreshForCreatedPack(created.id);
+                    setSelectedDetailPackId(refreshed.id);
                     setScreen('detail');
                   } catch (error) {
                     setEmptyDraftError(appErrorCode(error));
