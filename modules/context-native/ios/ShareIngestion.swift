@@ -98,7 +98,9 @@ struct ShareIngestionSummary {
 enum ShareIngestionFatalError: Error, Equatable {
   case invalidInput
   case recoveryRequired
+  case committedRecoveryRequired
   case storageWriteFailed
+  case artifactIntegrityFailed
   case interrupted
 }
 
@@ -129,8 +131,10 @@ final class ShareIngestionSession {
   private let ingestionId: String
   private let staging: URL
   private let published: URL
+  private let source: String
   private let now: () -> Date
   private let operationHook: (Point) throws -> Void
+  private let publishedManifestReader: (URL, String) throws -> [String: Any]
   private var ownership: InboxWriterOwnership?
   private var items: [[String: Any]] = []
   private var replayedSummary: ShareIngestionSummary?
@@ -139,18 +143,24 @@ final class ShareIngestionSession {
   init(
     container: URL,
     ingestionId: String,
+    source: String = "ios-share-extension",
     now: @escaping () -> Date = Date.init,
-    operationHook: @escaping (Point) throws -> Void = { _ in }
+    operationHook: @escaping (Point) throws -> Void = { _ in },
+    publishedManifestReader: @escaping (URL, String) throws -> [String: Any] = {
+      try InboxManifestValidator.readPublished(inbox: $0, ingestionId: $1)
+    }
   ) throws {
-    guard Self.canonicalUUID(ingestionId) else {
+    guard Self.canonicalUUID(ingestionId), Self.allowedSources.contains(source) else {
       throw ShareIngestionFatalError.invalidInput
     }
     self.container = container
     self.ingestionId = ingestionId
     self.staging = container.appendingPathComponent("InboxStaging/\(ingestionId)", isDirectory: true)
     self.published = container.appendingPathComponent("Inbox/\(ingestionId)", isDirectory: true)
+    self.source = source
     self.now = now
     self.operationHook = operationHook
+    self.publishedManifestReader = publishedManifestReader
     let manifest = published.appendingPathComponent("manifest.json")
     ownership = try Self.acquireOwnership(
       container: container,
@@ -192,9 +202,9 @@ final class ShareIngestionSession {
       // Replay detection and validation must remain inside per-ingestion ownership.
       // Otherwise handoff/ACK can remove the directory between the check and read.
       try operationHook(.afterLockedReplayManifestCheck)
-      let validated = try InboxManifestValidator.readPublished(
-        inbox: container.appendingPathComponent("Inbox", isDirectory: true),
-        ingestionId: ingestionId
+      let validated = try publishedManifestReader(
+        container.appendingPathComponent("Inbox", isDirectory: true),
+        ingestionId
       )
       replayedSummary = try Self.summary(validated, ingestionId: ingestionId, replayed: true)
       return
@@ -254,10 +264,13 @@ final class ShareIngestionSession {
     id: String,
     order: Int,
     declaredMediaType: String?,
-    source: URL
+    source: URL,
+    retainFailedSource: Bool = false,
+    expectedByteCount: Int64? = nil,
+    expectedSha256: String? = nil
   ) throws {
-    try requireNext(id: id, order: order)
     guard replayedSummary == nil else { return }
+    try requireNext(id: id, order: order)
     let accessed = source.startAccessingSecurityScopedResource()
     defer { if accessed { source.stopAccessingSecurityScopedResource() } }
     do {
@@ -272,6 +285,9 @@ final class ShareIngestionSession {
         id: id,
         order: order,
         declaredMediaType: declaredMediaType,
+        retainFailedSource: retainFailedSource,
+        expectedByteCount: expectedByteCount,
+        expectedSha256: expectedSha256,
         read: {
           let count = input.read(&buffer, maxLength: bufferSize)
           if count < 0 {
@@ -288,7 +304,9 @@ final class ShareIngestionSession {
         id: id,
         order: order,
         mediaType: failure.detectedMediaType ?? declaredMediaType,
-        code: failure.code
+        code: failure.code,
+        retryByteCount: failure.retryByteCount,
+        retrySha256: failure.retrySha256
       )
     } catch {
       appendFailure(id: id, order: order, mediaType: declaredMediaType, code: "IMPORT_COPY_FAILED")
@@ -301,8 +319,8 @@ final class ShareIngestionSession {
     declaredMediaType: String?,
     data: Data
   ) throws {
-    try requireNext(id: id, order: order)
     guard replayedSummary == nil else { return }
+    try requireNext(id: id, order: order)
     var offset = 0
     do {
       try copyAndRecord(
@@ -336,11 +354,11 @@ final class ShareIngestionSession {
     declaredMediaType: String?,
     code: String
   ) throws {
+    guard replayedSummary == nil else { return }
     try requireNext(id: id, order: order)
     guard Self.failedItemCodes.contains(code) else {
       throw ShareIngestionFatalError.invalidInput
     }
-    guard replayedSummary == nil else { return }
     appendFailure(id: id, order: order, mediaType: declaredMediaType, code: code)
   }
 
@@ -355,7 +373,7 @@ final class ShareIngestionSession {
       "schemaVersion": 1,
       "ingestionId": ingestionId,
       "createdAt": formatter.string(from: now()),
-      "source": "ios-share-extension",
+      "source": source,
       "status": status,
       "items": items,
     ]
@@ -381,10 +399,7 @@ final class ShareIngestionSession {
       // fsync (or its fault-injection hook) fails.
       try? operationHook(.afterDirectoryPublish)
       try? Self.synchronizeDirectory(inbox)
-      let validated = try InboxManifestValidator.readPublished(
-        inbox: inbox,
-        ingestionId: ingestionId
-      )
+      let validated = try publishedManifestReader(inbox, ingestionId)
       ownership?.release()
       ownership = nil
       return try Self.summary(
@@ -393,8 +408,18 @@ final class ShareIngestionSession {
         replayed: false
       )
     } catch ShareIngestionFatalError.interrupted {
+      if committed {
+        ownership?.release()
+        ownership = nil
+        throw ShareIngestionFatalError.committedRecoveryRequired
+      }
       throw ShareIngestionFatalError.interrupted
     } catch {
+      if committed {
+        ownership?.release()
+        ownership = nil
+        throw ShareIngestionFatalError.committedRecoveryRequired
+      }
       throw ShareIngestionFatalError.storageWriteFailed
     }
   }
@@ -403,6 +428,9 @@ final class ShareIngestionSession {
     id: String,
     order: Int,
     declaredMediaType: String?,
+    retainFailedSource: Bool = false,
+    expectedByteCount: Int64? = nil,
+    expectedSha256: String? = nil,
     read: () throws -> Data
   ) throws {
     let partial = staging.appendingPathComponent("\(id).partial")
@@ -431,8 +459,28 @@ final class ShareIngestionSession {
       }
     }
     try output.synchronize()
+    let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    guard expectedByteCount.map({ $0 == Int64(byteCount) }) ?? true,
+          expectedSha256.map({ $0 == digest }) ?? true else {
+      throw ShareIngestionFatalError.artifactIntegrityFailed
+    }
     let detectedMediaType = try Self.detectMediaType(partial)
     guard Self.declaredTypeAllows(declaredMediaType, detected: detectedMediaType) else {
+      if retainFailedSource {
+        let retry = staging.appendingPathComponent("\(id).retry")
+        do {
+          try Self.atomicRename(partial, retry)
+          try Self.synchronizeDirectory(staging)
+        } catch {
+          throw ShareIngestionFatalError.storageWriteFailed
+        }
+        throw ShareInputFailure(
+          "IMPORT_TYPE_UNSUPPORTED",
+          detectedMediaType: detectedMediaType,
+          retryByteCount: byteCount,
+          retrySha256: digest
+        )
+      }
       throw ShareInputFailure("IMPORT_TYPE_UNSUPPORTED", detectedMediaType: detectedMediaType)
     }
     try operationHook(.beforeItemPublish)
@@ -445,7 +493,7 @@ final class ShareIngestionSession {
       "status": "copied",
       "byteCount": byteCount,
       "relativePath": destination.lastPathComponent,
-      "sha256": hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+      "sha256": digest,
     ])
   }
 
@@ -461,16 +509,23 @@ final class ShareIngestionSession {
     id: String,
     order: Int,
     mediaType: String?,
-    code: String
+    code: String,
+    retryByteCount: Int? = nil,
+    retrySha256: String? = nil
   ) {
-    items.append([
+    var item: [String: Any] = [
       "id": id,
       "order": order,
       "mediaType": Self.concreteOrFallbackMediaType(mediaType),
       "status": "failed",
       "byteCount": 0,
       "errorCode": code,
-    ])
+    ]
+    if let retryByteCount, let retrySha256 {
+      item["retryByteCount"] = retryByteCount
+      item["retrySha256"] = retrySha256
+    }
+    items.append(item)
   }
 
   private static func summary(
@@ -677,14 +732,29 @@ final class ShareIngestionSession {
     "IMPORT_COPY_FAILED",
     "IMPORT_SIZE_LIMIT_EXCEEDED",
   ]
+
+  private static let allowedSources: Set<String> = [
+    "ios-share-extension",
+    "main-app-picker",
+    "main-app-text",
+  ]
 }
 
 private struct ShareInputFailure: Error {
   let code: String
   let detectedMediaType: String?
+  let retryByteCount: Int?
+  let retrySha256: String?
 
-  init(_ code: String, detectedMediaType: String? = nil) {
+  init(
+    _ code: String,
+    detectedMediaType: String? = nil,
+    retryByteCount: Int? = nil,
+    retrySha256: String? = nil
+  ) {
     self.code = code
     self.detectedMediaType = detectedMediaType
+    self.retryByteCount = retryByteCount
+    self.retrySha256 = retrySha256
   }
 }

@@ -54,6 +54,12 @@ const appendedIngestionId = '923e4567-e89b-42d3-a456-426614174000';
 const appendedItemId = 'a23e4567-e89b-42d3-a456-426614174000';
 const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
 const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
+const mainAppPackId = 'd23e4567-e89b-42d3-a456-426614174000';
+const mainAppIngestionId = 'e23e4567-e89b-42d3-a456-426614174000';
+const mainAppImageId = 'f23e4567-e89b-42d3-a456-426614174000';
+const mainAppPdfId = 'd33e4567-e89b-42d3-a456-426614174000';
+const mainAppTextId = 'e33e4567-e89b-42d3-a456-426614174000';
+const mainAppUrlId = 'f33e4567-e89b-42d3-a456-426614174000';
 const createdAt = '2026-08-05T00:00:00Z';
 
 class NodeSqlConnection {
@@ -266,6 +272,61 @@ describe('production repository against SQLite', () => {
     expect((await repository.findPackGraph(packId))?.revision).toBe(3);
   });
 
+  test('materializes photo, PDF, text, and URL main-app imports as ordered ContextItems', async () => {
+    const items = [
+      { id: mainAppImageId, mediaType: 'image/png', bytes: 4, hash: '1' },
+      { id: mainAppPdfId, mediaType: 'application/pdf', bytes: 8, hash: '2' },
+      { id: mainAppTextId, mediaType: 'text/plain', bytes: 12, hash: '3' },
+      { id: mainAppUrlId, mediaType: 'text/uri-list', bytes: 24, hash: '4' },
+    ] as const;
+    await repository.commitImport({
+      packId: mainAppPackId,
+      manifest: {
+        schemaVersion: 1,
+        ingestionId: mainAppIngestionId,
+        createdAt: '2026-08-05T00:00:01Z',
+        source: 'main-app-picker',
+        status: 'complete',
+        items: items.map((item, order) => ({
+          id: item.id,
+          order,
+          mediaType: item.mediaType,
+          status: 'copied' as const,
+          byteCount: item.bytes,
+          relativePath: `${item.id}.bin`,
+          sha256: item.hash.repeat(64),
+        })),
+      },
+      manifestFingerprint: '5'.repeat(64),
+      artifacts: items.map(item => ({
+        id: item.id,
+        itemId: item.id,
+        relativePath: `Packs/${mainAppPackId}/originals/${item.id}.bin`,
+        mediaType: item.mediaType,
+        byteCount: item.bytes,
+        sha256: item.hash.repeat(64),
+      })),
+    });
+
+    const graph = await repository.findPackGraph(mainAppPackId);
+    expect(graph?.pack.orderedItemIds).toEqual(items.map(item => item.id));
+    expect(graph?.items.map(item => item.sourceType)).toEqual([
+      'image',
+      'pdf',
+      'text',
+      'url',
+    ]);
+    expect(graph?.items.map(item => item.state)).toEqual([
+      'imported',
+      'imported',
+      'imported',
+      'imported',
+    ]);
+    expect(
+      graph?.items.every(item => item.originalDisplayName === undefined),
+    ).toBe(true);
+  });
+
   test('round-trips risk/export records and releases only unreferenced artifacts on Pack deletion', async () => {
     const finding: RiskFinding = {
       id: findingId,
@@ -305,6 +366,18 @@ describe('production repository against SQLite', () => {
         immutable: true,
       },
     });
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        ingestionId,
+        packId,
+        itemCount: 2,
+        artifactCount: 2,
+        items: [
+          expect.objectContaining({ id: firstItemId, status: 'copied' }),
+          expect.objectContaining({ id: secondItemId, status: 'copied' }),
+        ],
+      }),
+    ]);
     const record: ExportRecord = {
       id: exportId,
       packId,

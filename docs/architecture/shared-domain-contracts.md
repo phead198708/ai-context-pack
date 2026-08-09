@@ -62,6 +62,8 @@ V1 timestamps use canonical UTC `YYYY-MM-DDTHH:mm:ss[.fraction]Z` with one to ni
 
 `ImportManifestV1` stores an item-relative generated filename such as `<item-uuid>.bin`. Both native scanners require strict JSON syntax before contract validation, resolve the item only below the ingestion directory, and verify its file byte count. When `sha256` is present they stream the owned file through SHA-256 and compare the lowercase digest. Missing files, byte-count mismatches, unreadable item bytes, and digest mismatches are `ARTIFACT_INTEGRITY_FAILED`; malformed contract syntax or fields remain `SCHEMA_INVALID`. The readers also reject `localUri`, provider URIs, absolute paths, traversal, nested paths, item/path identity mismatch, duplicate item IDs, and inconsistent aggregate status.
 
+A failed item may carry the all-or-nothing `retryByteCount` and `retrySha256` pair only when native ingestion retained complete, bounded bytes as `<item-uuid>.retry` in the same atomic Inbox transaction. The item ID fixes the anonymous filename; native readers require a regular non-symbolic-link file with the exact bound size and digest, and handoff verifies one no-follow file descriptor before publishing it to the canonical Pack/item-owned path. A retry file without metadata, metadata without a retry file, or any identity/content substitution fails closed.
+
 Infrastructure may resolve a validated relative path to a controlled file URL at the moment a native processor needs it. That URL is not persisted back into the contract.
 
 ### Privacy shape

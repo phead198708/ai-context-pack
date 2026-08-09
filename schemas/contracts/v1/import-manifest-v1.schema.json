@@ -22,7 +22,12 @@
       "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d{1,9})?Z$"
     },
     "source": {
-      "enum": ["ios-share-extension", "android-share-intent"]
+      "enum": [
+        "ios-share-extension",
+        "android-share-intent",
+        "main-app-picker",
+        "main-app-text"
+      ]
     },
     "status": { "enum": ["complete", "partial", "failed"] },
     "items": {
@@ -117,6 +122,7 @@
         "IMPORT_TYPE_UNSUPPORTED",
         "IMPORT_COPY_FAILED",
         "IMPORT_SIZE_LIMIT_EXCEEDED",
+        "IMPORT_ITEM_LIMIT_EXCEEDED",
         "IMPORT_PARTIAL_FAILURE",
         "PIPELINE_STAGE_FAILED",
         "PROCESSOR_OUTPUT_INVALID",
@@ -178,6 +184,10 @@
         "byteCount",
         "errorCode"
       ],
+      "dependentRequired": {
+        "retryByteCount": ["retrySha256"],
+        "retrySha256": ["retryByteCount"]
+      },
       "properties": {
         "id": { "$ref": "#/$defs/uuid" },
         "order": {
@@ -188,7 +198,16 @@
         "mediaType": { "$ref": "#/$defs/mediaType" },
         "status": { "const": "failed" },
         "byteCount": { "const": 0 },
-        "errorCode": { "$ref": "#/$defs/errorCode" }
+        "errorCode": { "$ref": "#/$defs/errorCode" },
+        "retryByteCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 52428800
+        },
+        "retrySha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     }
   }

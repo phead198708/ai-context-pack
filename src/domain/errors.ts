@@ -44,6 +44,10 @@ export const DOMAIN_ERROR_CATALOG = {
     disposition: 'user-action-required',
     category: 'input',
   },
+  IMPORT_ITEM_LIMIT_EXCEEDED: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
   IMPORT_PARTIAL_FAILURE: {
     disposition: 'user-action-required',
     category: 'input',

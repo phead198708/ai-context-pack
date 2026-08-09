@@ -27,6 +27,7 @@ const safeRelativePathPattern =
 
 export const IMPORT_MANIFEST_MAX_ITEMS = 128;
 export const IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH = 127;
+export const IMPORT_MANIFEST_MAX_RETRY_BYTES = 52_428_800;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -158,20 +159,21 @@ function isFailedImportItemV1(
   value: Record<string, unknown>,
 ): value is Record<string, unknown> & ImportItemV1 {
   return (
-    hasOnlyKeys(value, [
-      'id',
-      'order',
-      'mediaType',
-      'status',
-      'byteCount',
-      'errorCode',
-    ]) &&
+    hasOnlyKeys(
+      value,
+      ['id', 'order', 'mediaType', 'status', 'byteCount', 'errorCode'],
+      ['retryByteCount', 'retrySha256'],
+    ) &&
     value.status === 'failed' &&
     isCanonicalUuid(value.id) &&
     isNonNegativeInteger(value.order) &&
     isMediaType(value.mediaType) &&
     value.byteCount === 0 &&
-    isDomainErrorCode(value.errorCode)
+    isDomainErrorCode(value.errorCode) &&
+    ((value.retryByteCount === undefined && value.retrySha256 === undefined) ||
+      (isNonNegativeInteger(value.retryByteCount) &&
+        value.retryByteCount <= IMPORT_MANIFEST_MAX_RETRY_BYTES &&
+        isSha256(value.retrySha256)))
   );
 }
 
@@ -197,7 +199,9 @@ export function isImportManifestV1(value: unknown): value is ImportManifestV1 {
     !isCanonicalUuid(value.ingestionId) ||
     !isIsoDateTime(value.createdAt) ||
     (value.source !== 'ios-share-extension' &&
-      value.source !== 'android-share-intent') ||
+      value.source !== 'android-share-intent' &&
+      value.source !== 'main-app-picker' &&
+      value.source !== 'main-app-text') ||
     (value.status !== 'complete' &&
       value.status !== 'partial' &&
       value.status !== 'failed') ||

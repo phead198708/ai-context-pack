@@ -43,6 +43,30 @@ describe('versioned native contracts', () => {
   test('rejects breaking manifest versions', () => {
     expect(isImportManifestV1({ schemaVersion: 2, items: [] })).toBe(false);
   });
+  test.each(['main-app-picker', 'main-app-text'] as const)(
+    'accepts the versioned %s manifest source',
+    source => {
+      expect(
+        isImportManifestV1({
+          schemaVersion: 1,
+          ingestionId,
+          createdAt: '2026-08-07T00:00:00Z',
+          source,
+          status: 'complete',
+          items: [
+            {
+              id: itemId,
+              order: 0,
+              mediaType: 'text/plain',
+              status: 'copied',
+              byteCount: 1,
+              relativePath: `${itemId}.bin`,
+            },
+          ],
+        }),
+      ).toBe(true);
+    },
+  );
   test.each(Object.keys(DOMAIN_ERROR_CATALOG))(
     'accepts catalogued failed-item error code %s',
     errorCode => {
@@ -67,6 +91,40 @@ describe('versioned native contracts', () => {
       ).toBe(true);
     },
   );
+  test('binds optional failed-item retry bytes as an all-or-nothing pair', () => {
+    const failed = {
+      schemaVersion: 1,
+      ingestionId,
+      createdAt: '2026-01-01T00:00:00Z',
+      source: 'main-app-picker',
+      status: 'failed',
+      items: [
+        {
+          id: itemId,
+          order: 0,
+          mediaType: 'image/png',
+          byteCount: 0,
+          status: 'failed',
+          errorCode: 'IMPORT_TYPE_UNSUPPORTED',
+          retryByteCount: 8,
+          retrySha256: 'a'.repeat(64),
+        },
+      ],
+    };
+    expect(isImportManifestV1(failed)).toBe(true);
+    expect(
+      isImportManifestV1({
+        ...failed,
+        items: [{ ...failed.items[0], retrySha256: undefined }],
+      }),
+    ).toBe(false);
+    expect(
+      isImportManifestV1({
+        ...failed,
+        items: [{ ...failed.items[0], retryByteCount: 52_428_801 }],
+      }),
+    ).toBe(false);
+  });
   test.each([
     'content://provider/item',
     '/private/container/item.bin',

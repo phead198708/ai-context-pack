@@ -91,6 +91,65 @@ class ContextNativeModule : Module() {
       catch (error: InboxArtifactHandoffException) { throw NativeException(error.stableCode) }
     }
 
+    AsyncFunction("publishMainAppImport") {
+      ingestionId: String,
+      source: String,
+      inputs: List<Map<String, Any?>> ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        MainAppImportPublisher.publish(
+          context.filesDir,
+          context.cacheDir,
+          ingestionId,
+          source,
+          inputs,
+        )
+      } catch (error: MainAppImportException) {
+        throw NativeException(error.stableCode)
+      } catch (_: ShareIngestionInterruptionException) {
+        throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+      } catch (_: ShareIngestionCommittedRecoveryException) {
+        throw NativeException("MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED")
+      } catch (_: ShareIngestionIntegrityException) {
+        throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+      } catch (error: IllegalStateException) {
+        if (error.message?.contains("RECOVERY_REQUIRED") == true) {
+          throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        }
+        throw NativeException("STORAGE_WRITE_FAILED")
+      } catch (_: Exception) {
+        throw NativeException("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("discardMainAppPickerFiles") { fileUris: List<String> ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.discard(context.cacheDir, fileUris) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
+    AsyncFunction("stageMainAppPickerFiles") { fileUris: List<String> ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.stagePickerFiles(context.cacheDir, fileUris) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_PICKER_STAGING_FAILED") }
+    }
+
+    AsyncFunction("cleanupMainAppPickerTransients") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.cleanupPickerTransients(context.cacheDir) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
+    AsyncFunction("recoverMainAppPickerCache") {
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { MainAppImportPublisher.recoverPickerCache(context.cacheDir) }
+      catch (error: MainAppImportException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
     AsyncFunction("publishArtifact") {
       sourceFileUri: String,
       relativePath: String,
@@ -259,6 +318,7 @@ internal object InboxManifestScanner {
   private val failedItemKeys = setOf(
     "id", "order", "mediaType", "status", "byteCount", "errorCode",
   )
+  private val failedRetryItemKeys = setOf("retryByteCount", "retrySha256")
   private val stableErrorCodes = setOf(
     "DOMAIN_INVALID_TRANSITION",
     "SCHEMA_INVALID",
@@ -268,6 +328,7 @@ internal object InboxManifestScanner {
     "IMPORT_TYPE_UNSUPPORTED",
     "IMPORT_COPY_FAILED",
     "IMPORT_SIZE_LIMIT_EXCEEDED",
+    "IMPORT_ITEM_LIMIT_EXCEEDED",
     "IMPORT_PARTIAL_FAILURE",
     "PIPELINE_STAGE_FAILED",
     "PROCESSOR_OUTPUT_INVALID",
@@ -466,7 +527,14 @@ internal object InboxManifestScanner {
     check(ingestionIdPattern.matches(ingestionId) && UUID.fromString(ingestionId).toString() == ingestionId)
     check(ingestionId == expectedIngestionId)
     check(isIsoDateTime(manifest.getString("createdAt")))
-    check(manifest.getString("source") in setOf("ios-share-extension", "android-share-intent"))
+    check(
+      manifest.getString("source") in setOf(
+        "ios-share-extension",
+        "android-share-intent",
+        "main-app-picker",
+        "main-app-text",
+      ),
+    )
     val manifestStatus = manifest.getString("status")
     check(manifestStatus in setOf("complete", "partial", "failed"))
     val canonicalOwnedDirectory = ownedDirectory?.canonicalFile
@@ -508,9 +576,42 @@ internal object InboxManifestScanner {
           copied += 1
         }
         "failed" -> {
-          check(item.keys().asSequence().toSet() == failedItemKeys)
+          val itemKeys = item.keys().asSequence().toSet()
+          val retryByteCount = nonNegativeInteger(item.opt("retryByteCount"))
+          val retrySha256 = item.opt("retrySha256") as? String
+          val hasRetryMetadata = retryByteCount != null || retrySha256 != null
+          check(
+            itemKeys == failedItemKeys ||
+              itemKeys == failedItemKeys + failedRetryItemKeys,
+          )
           check(nonNegativeInteger(item.opt("byteCount")) == 0L)
           check(item.getString("errorCode") in stableErrorCodes)
+          check(
+            !hasRetryMetadata ||
+              (
+                retryByteCount != null &&
+                  retryByteCount <= ShareIngestionWriter.maximumBinaryBytes &&
+                  retrySha256 != null &&
+                  sha256Pattern.matches(retrySha256)
+              ),
+          )
+          if (ownedDirectory != null) {
+            val retry = File(ownedDirectory, "$itemId.retry")
+            val stat = runCatching { Os.lstat(retry.path) }.getOrNull()
+            if (retryByteCount != null && retrySha256 != null) {
+              if (
+                stat == null ||
+                !OsConstants.S_ISREG(stat.st_mode) ||
+                OsConstants.S_ISLNK(stat.st_mode) ||
+                stat.st_size != retryByteCount ||
+                sha256(retry) != retrySha256
+              ) {
+                throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+              }
+            } else if (stat != null) {
+              throw InboxManifestValidationException("ARTIFACT_INTEGRITY_FAILED")
+            }
+          }
           failed += 1
         }
         else -> throw InboxManifestValidationException("SCHEMA_INVALID")

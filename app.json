@@ -4,6 +4,17 @@
     "slug": "AIContextPack",
     "scheme": "aicontextpack",
     "version": "1.0.0",
-    "plugins": ["expo-sqlite"]
+    "plugins": [
+      "expo-sqlite",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Select photos to copy into a local Context Pack.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      "expo-document-picker"
+    ]
   }
 }

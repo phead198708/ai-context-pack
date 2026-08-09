@@ -25,6 +25,9 @@ data class ShareIngestionInput(
   val declaredMediaType: String?,
   val openStream: (() -> InputStream?)? = null,
   val preflightError: String? = null,
+  val retainFailedSource: Boolean = false,
+  val expectedByteCount: Long? = null,
+  val expectedSha256: String? = null,
 )
 
 data class ShareIngestionSummary(
@@ -38,6 +41,9 @@ data class ShareIngestionSummary(
 )
 
 class ShareIngestionInterruptionException : Exception("SHARE_INGESTION_INTERRUPTED")
+
+class ShareIngestionCommittedRecoveryException :
+  Exception("MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED")
 
 class ShareInputCollectionException(
   val stableCode: String,
@@ -72,14 +78,18 @@ object ShareIngestionWriter {
     filesDir: File,
     ingestionId: String,
     inputs: List<ShareIngestionInput>,
+    source: String = "android-share-intent",
     now: () -> Date = { Date() },
     operationHook: (Point) -> Unit = {},
+    publishedManifestReader: (File, String) -> Map<String, Any?> =
+      InboxManifestScanner::readPublished,
   ): ShareIngestionSummary {
     requireCanonicalUuid(ingestionId)
     require(inputs.isNotEmpty())
     require(inputs.size <= maximumReportedItemCount)
     require(inputs.map { it.order } == inputs.indices.toList())
     require(inputs.map { it.id }.distinct().size == inputs.size)
+    require(source in allowedSources)
     inputs.forEach { requireCanonicalUuid(it.id) }
 
     val inbox = File(filesDir, "Inbox")
@@ -102,7 +112,7 @@ object ShareIngestionWriter {
         // Otherwise handoff/ACK can remove the directory between the check and read.
         operationHook(Point.AFTER_LOCKED_REPLAY_MANIFEST_CHECK)
         validatedResult = summary(
-          InboxManifestScanner.readPublished(inbox, ingestionId),
+          publishedManifestReader(inbox, ingestionId),
           replayed = true,
         )
       } else {
@@ -124,7 +134,7 @@ object ShareIngestionWriter {
           .put("schemaVersion", 1)
           .put("ingestionId", ingestionId)
           .put("createdAt", isoTimestamp(now()))
-          .put("source", "android-share-intent")
+          .put("source", source)
           .put("status", status)
           .put("items", JSONArray(items))
         val partialManifest = File(staging, "manifest.partial")
@@ -143,7 +153,7 @@ object ShareIngestionWriter {
         operationHook(Point.AFTER_DIRECTORY_PUBLISH)
         synchronizeDirectory(inbox)
         validatedResult = summary(
-          InboxManifestScanner.readPublished(inbox, ingestionId),
+          publishedManifestReader(inbox, ingestionId),
           replayed = false,
         )
       }
@@ -156,7 +166,7 @@ object ShareIngestionWriter {
         // Reconcile while ownership still excludes handoff/ACK. Once the lock is
         // released, the containing app may legitimately remove the Inbox directory.
         validatedResult = summary(
-          InboxManifestScanner.readPublished(inbox, ingestionId),
+          publishedManifestReader(inbox, ingestionId),
           replayed = false,
         )
       } catch (reconciliationFailure: Throwable) {
@@ -178,8 +188,9 @@ object ShareIngestionWriter {
 
     if (committed) {
       validatedResult?.let { return it }
-      failure?.let { throw it }
-      error("INGESTION_COMMITTED_RESULT_MISSING")
+      val committedFailure = ShareIngestionCommittedRecoveryException()
+      failure?.let(committedFailure::addSuppressed)
+      throw committedFailure
     }
 
     validatedResult?.let { return it }
@@ -241,8 +252,26 @@ object ShareIngestionWriter {
           total
         }
       }
+      val actualHash = digest.digest().toHex()
+      if (
+        input.expectedByteCount?.let { it != byteCount } == true ||
+        input.expectedSha256?.let { it != actualHash } == true
+      ) {
+        throw ShareIngestionIntegrityException()
+      }
       val detectedMediaType = detectMediaType(partial)
       if (!declaredTypeAllows(input.declaredMediaType, detectedMediaType)) {
+        if (input.retainFailedSource) {
+          val retry = File(staging, "${input.id}.retry")
+          atomicRename(partial, retry)
+          synchronizeDirectory(staging)
+          throw ShareInputException(
+            "IMPORT_TYPE_UNSUPPORTED",
+            detectedMediaType,
+            byteCount,
+            actualHash,
+          )
+        }
         throw ShareInputException("IMPORT_TYPE_UNSUPPORTED", detectedMediaType)
       }
       operationHook(Point.BEFORE_ITEM_PUBLISH)
@@ -255,14 +284,22 @@ object ShareIngestionWriter {
         .put("status", "copied")
         .put("byteCount", byteCount)
         .put("relativePath", destination.name)
-        .put("sha256", digest.digest().toHex())
+        .put("sha256", actualHash)
     } catch (error: ShareIngestionInterruptionException) {
       throw error
     } catch (error: ShareIngestionStorageException) {
       throw error
+    } catch (error: ShareIngestionIntegrityException) {
+      throw error
     } catch (error: ShareInputException) {
       partial.delete()
-      failedItem(input, error.stableCode, error.detectedMediaType)
+      failedItem(
+        input,
+        error.stableCode,
+        error.detectedMediaType,
+        error.retryByteCount,
+        error.retrySha256,
+      )
     } catch (_: SecurityException) {
       partial.delete()
       failedItem(input, "IMPORT_PROVIDER_PERMISSION_EXPIRED")
@@ -298,16 +335,25 @@ object ShareIngestionWriter {
     input: ShareIngestionInput,
     code: String,
     detectedMediaType: String? = null,
-  ): JSONObject = JSONObject()
-    .put("id", input.id)
-    .put("order", input.order)
-    .put(
-      "mediaType",
-      detectedMediaType ?: concreteOrFallbackMediaType(input.declaredMediaType),
-    )
-    .put("status", "failed")
-    .put("byteCount", 0)
-    .put("errorCode", code)
+    retryByteCount: Long? = null,
+    retrySha256: String? = null,
+  ): JSONObject {
+    val item = JSONObject()
+      .put("id", input.id)
+      .put("order", input.order)
+      .put(
+        "mediaType",
+        detectedMediaType ?: concreteOrFallbackMediaType(input.declaredMediaType),
+      )
+      .put("status", "failed")
+      .put("byteCount", 0)
+      .put("errorCode", code)
+    if (retryByteCount != null && retrySha256 != null) {
+      item.put("retryByteCount", retryByteCount)
+      item.put("retrySha256", retrySha256)
+    }
+    return item
+  }
 
   private fun summary(manifest: Map<String, Any?>, replayed: Boolean): ShareIngestionSummary {
     @Suppress("UNCHECKED_CAST")
@@ -507,11 +553,20 @@ object ShareIngestionWriter {
     "IMPORT_COPY_FAILED",
     "IMPORT_SIZE_LIMIT_EXCEEDED",
   )
+
+  private val allowedSources = setOf(
+    "android-share-intent",
+    "main-app-picker",
+    "main-app-text",
+  )
 }
 
 private class ShareInputException(
   val stableCode: String,
   val detectedMediaType: String? = null,
+  val retryByteCount: Long? = null,
+  val retrySha256: String? = null,
 ) : Exception(stableCode)
 
 private class ShareIngestionStorageException : Exception("SHARE_INGESTION_STORAGE_FAILED")
+class ShareIngestionIntegrityException : Exception("ARTIFACT_INTEGRITY_FAILED")

@@ -2,6 +2,7 @@ package com.aicontextpack.nativebridge
 
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import android.system.Os
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -448,6 +449,104 @@ class InboxArtifactHandoffInstrumentedTest {
     assertEquals("ARTIFACT_INTEGRITY_FAILED", error.stableCode)
   }
 
+  @Test fun destinationAncestorsRejectPreexistingSymlinks() {
+    listOf("Packs", "pack", "originals").forEach { level ->
+      val caseRoot = File(root, "case-$level").also { assertTrue(it.mkdirs()) }
+      val outside = File(root, "outside-$level").also { assertTrue(it.mkdirs()) }
+      val ingestionId = uuid()
+      val packId = uuid()
+      val itemId = uuid()
+      writeManifest(
+        ingestionId,
+        listOf(Item(itemId, "image/png", byteArrayOf(1, 2, 3))),
+        caseRoot,
+      )
+      val packs = File(caseRoot, "Packs")
+      when (level) {
+        "Packs" -> Os.symlink(outside.path, packs.path)
+        "pack" -> {
+          assertTrue(packs.mkdir())
+          Os.symlink(outside.path, File(packs, packId).path)
+        }
+        else -> {
+          val pack = File(packs, packId)
+          assertTrue(pack.mkdirs())
+          Os.symlink(outside.path, File(pack, "originals").path)
+        }
+      }
+
+      val error = assertThrows(InboxArtifactHandoffException::class.java) {
+        InboxArtifactHandoff.handoff(
+          caseRoot, ingestionId, packId, 0, availableBytes = { Long.MAX_VALUE },
+        )
+      }
+      assertEquals("ARTIFACT_INTEGRITY_FAILED", error.stableCode)
+      assertFalse(File(outside, "$itemId.bin").exists())
+    }
+  }
+
+  @Test fun destinationAncestorSwapBeforeCopyFailsClosed() {
+    val ingestionId = uuid()
+    val packId = uuid()
+    val itemId = uuid()
+    writeManifest(ingestionId, listOf(Item(itemId, "image/png", byteArrayOf(1, 2, 3))))
+    val originals = File(root, "Packs/$packId/originals")
+    val displaced = File(root, "Packs/$packId/originals-displaced")
+    val outside = File(root, "outside-swap").also { assertTrue(it.mkdir()) }
+    var swapped = false
+
+    val error = assertThrows(InboxArtifactHandoffException::class.java) {
+      InboxArtifactHandoff.handoff(
+        root,
+        ingestionId,
+        packId,
+        0,
+        availableBytes = { Long.MAX_VALUE },
+        operationHook = { point ->
+          if (point == InboxArtifactHandoff.Point.BEFORE_COPY && !swapped) {
+            swapped = true
+            assertTrue(originals.renameTo(displaced))
+            Os.symlink(outside.path, originals.path)
+          }
+        },
+      )
+    }
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", error.stableCode)
+    assertTrue(swapped)
+    assertFalse(File(outside, "$itemId.bin").exists())
+    assertFalse(File(displaced, "$itemId.bin").exists())
+  }
+
+  @Test fun destinationPacksSwapBackToDisplacedTreeFailsClosed() {
+    val ingestionId = uuid()
+    val packId = uuid()
+    val itemId = uuid()
+    writeManifest(ingestionId, listOf(Item(itemId, "image/png", byteArrayOf(1, 2, 3))))
+    val packs = File(root, "Packs")
+    val displaced = File(root, "Packs-displaced")
+    var swapped = false
+
+    val error = assertThrows(InboxArtifactHandoffException::class.java) {
+      InboxArtifactHandoff.handoff(
+        root,
+        ingestionId,
+        packId,
+        0,
+        availableBytes = { Long.MAX_VALUE },
+        operationHook = { point ->
+          if (point == InboxArtifactHandoff.Point.BEFORE_COPY && !swapped) {
+            swapped = true
+            assertTrue(packs.renameTo(displaced))
+            Os.symlink(displaced.path, packs.path)
+          }
+        },
+      )
+    }
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", error.stableCode)
+    assertTrue(swapped)
+    assertFalse(File(displaced, "$packId/originals/$itemId.bin").exists())
+  }
+
   @Test fun twentyImageAndNearLimitPdfCopyBenchmarkDoesNotRunOcr() {
     val imageIngestion = uuid()
     val imagePack = uuid()
@@ -485,8 +584,12 @@ class InboxArtifactHandoffInstrumentedTest {
     assertTrue("near-limit PDF handoff took ${pdfDurationMs}ms", pdfDurationMs < 10_000)
   }
 
-  private fun writeManifest(ingestionId: String, items: List<Item>) {
-    val directory = File(root, "Inbox/$ingestionId")
+  private fun writeManifest(
+    ingestionId: String,
+    items: List<Item>,
+    filesRoot: File = root,
+  ) {
+    val directory = File(filesRoot, "Inbox/$ingestionId")
     assertTrue(directory.mkdirs())
     val payloadItems = JSONArray()
     items.forEachIndexed { index, item ->

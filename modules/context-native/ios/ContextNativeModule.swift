@@ -106,6 +106,95 @@ public final class ContextNativeModule: Module {
       catch { throw NativeError("STORAGE_WRITE_FAILED") }
     }
 
+    AsyncFunction("publishMainAppImport") { (
+      ingestionId: String,
+      source: String,
+      inputs: [[String: Any]]
+    ) throws -> [String: Any] in
+      guard let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      ), let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("APP_GROUP_UNAVAILABLE")
+      }
+      do {
+        return try MainAppImportPublisher.publish(
+          container: container,
+          cacheRoot: cacheRoot,
+          ownedRoot: try ownedApplicationSupportRoot(),
+          ingestionId: ingestionId,
+          source: source,
+          rawInputs: inputs
+        )
+      } catch let error as MainAppImportError {
+        throw NativeError(error.stableCode)
+      } catch let error as InboxManifestValidationError {
+        throw NativeError(error.stableCode)
+      } catch let error as ShareIngestionFatalError {
+        switch error {
+        case .invalidInput: throw NativeError("MAIN_APP_IMPORT_INPUT_INVALID")
+        case .recoveryRequired, .interrupted:
+          throw NativeError("PIPELINE_RECOVERY_REQUIRED")
+        case .committedRecoveryRequired:
+          throw NativeError("MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED")
+        case .storageWriteFailed: throw NativeError("STORAGE_WRITE_FAILED")
+        case .artifactIntegrityFailed: throw NativeError("ARTIFACT_INTEGRITY_FAILED")
+        }
+      } catch {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("discardMainAppPickerFiles") { (fileUris: [String]) throws -> Bool in
+      guard let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      do { return try MainAppImportPublisher.discard(cacheRoot: cacheRoot, fileUris: fileUris) }
+      catch let error as MainAppImportError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
+    AsyncFunction("stageMainAppPickerFiles") { (fileUris: [String]) throws -> [String] in
+      guard let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      do { return try MainAppImportPublisher.stagePickerFiles(cacheRoot: cacheRoot, fileUris: fileUris) }
+      catch let error as MainAppImportError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("MAIN_APP_PICKER_STAGING_FAILED") }
+    }
+
+    AsyncFunction("cleanupMainAppPickerTransients") { () throws -> Bool in
+      guard let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      do { return try MainAppImportPublisher.cleanupPickerTransients(cacheRoot: cacheRoot) }
+      catch let error as MainAppImportError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
+    AsyncFunction("recoverMainAppPickerCache") { () throws -> Bool in
+      guard let cacheRoot = FileManager.default.urls(
+        for: .cachesDirectory,
+        in: .userDomainMask
+      ).first else {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+      do { return try MainAppImportPublisher.recoverPickerCache(cacheRoot: cacheRoot) }
+      catch let error as MainAppImportError { throw NativeError(error.stableCode) }
+      catch { throw NativeError("MAIN_APP_IMPORT_CLEANUP_FAILED") }
+    }
+
     AsyncFunction("publishArtifact") { (
       sourceFileUri: String,
       relativePath: String,

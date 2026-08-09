@@ -1,5 +1,6 @@
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
+import type { ImportManifestV1 } from '../../domain/contracts';
 import {
   DomainError,
   isDomainErrorCode,
@@ -12,7 +13,10 @@ import type {
   ExportRecord,
   RiskFinding,
 } from '../../domain/models';
-import { isImportManifestV1 } from '../../domain/validation';
+import {
+  IMPORT_MANIFEST_MAX_ITEMS,
+  isImportManifestV1,
+} from '../../domain/validation';
 import {
   DEVELOPMENT_RESET_CONFIRMATION,
   PERSISTENCE_SCHEMA_VERSION,
@@ -20,6 +24,7 @@ import {
   type CommitImportInput,
   type DeletePackResult,
   type PersistedArtifactRecord,
+  type PersistedImportDetail,
   type PersistedImportSummary,
   type PersistedPackGraph,
   type PersistenceMigrationHook,
@@ -238,6 +243,136 @@ export class ExpoSqlitePersistenceRepository
           };
         })
       : null;
+  }
+
+  listImportDetails(): Promise<readonly PersistedImportDetail[]> {
+    return this.connection.exclusive(async transaction => {
+      const imports = await transaction.all<{
+        ingestion_id: string;
+        pack_id: string;
+        manifest_fingerprint: string;
+        status: string;
+        created_at: string;
+      }>(
+        `SELECT ingestion_id, pack_id, manifest_fingerprint, status, created_at
+         FROM imports ORDER BY created_at DESC, ingestion_id`,
+      );
+      const details: PersistedImportDetail[] = [];
+      for (const row of imports) {
+        const items = await transaction.all<{
+          id: string;
+          sort_index: number;
+          media_type: string;
+          status: string;
+          error_code: string | null;
+          artifact_count: number;
+          artifact_relative_path: string | null;
+          artifact_byte_count: number | null;
+          artifact_sha256: string | null;
+        }>(
+          `SELECT item.id, item.sort_index, item.media_type, item.status, item.error_code,
+             (SELECT COUNT(*) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_count,
+             (SELECT MAX(relative_path) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_relative_path,
+             (SELECT MAX(byte_count) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_byte_count,
+             (SELECT MAX(sha256) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_sha256
+           FROM import_items item WHERE item.ingestion_id = ?
+           ORDER BY item.sort_index, item.id`,
+          [row.ingestion_id],
+        );
+        details.push(
+          decodePersisted(() => {
+            requireCanonicalId(row.ingestion_id);
+            requireCanonicalId(row.pack_id);
+            requireIsoDateTime(row.created_at);
+            if (
+              !/^[0-9a-f]{64}$/.test(row.manifest_fingerprint) ||
+              items.length === 0 ||
+              items.length > IMPORT_MANIFEST_MAX_ITEMS
+            )
+              throw new DomainError('SCHEMA_INVALID');
+            const decodedItems = items.map((item, index) => {
+              const artifactRelativePath = item.artifact_relative_path ?? null;
+              const artifactByteCount = item.artifact_byte_count ?? null;
+              const artifactSha256 = item.artifact_sha256 ?? null;
+              requireCanonicalId(item.id);
+              if (
+                item.sort_index !== index ||
+                !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(
+                  item.media_type,
+                ) ||
+                item.media_type.length > 127 ||
+                !Number.isSafeInteger(item.artifact_count) ||
+                item.artifact_count < 0
+              )
+                throw new DomainError('SCHEMA_INVALID');
+              const status = importItemStatus(item.status);
+              if (
+                (status === 'failed') !== (item.error_code !== null) ||
+                (status === 'copied' && item.artifact_count !== 1) ||
+                (status === 'failed' && item.artifact_count > 1) ||
+                (item.artifact_count === 0 &&
+                  (artifactRelativePath !== null ||
+                    artifactByteCount !== null ||
+                    artifactSha256 !== null)) ||
+                (item.artifact_count === 1 &&
+                  (typeof artifactRelativePath !== 'string' ||
+                    artifactRelativePath !==
+                      ownedOriginalPath(row.pack_id, item.id) ||
+                    !Number.isSafeInteger(artifactByteCount) ||
+                    (artifactByteCount ?? -1) < 0 ||
+                    typeof artifactSha256 !== 'string' ||
+                    !/^[0-9a-f]{64}$/.test(artifactSha256)))
+              )
+                throw new DomainError('SCHEMA_INVALID');
+              return {
+                id: item.id,
+                order: item.sort_index,
+                mediaType: item.media_type,
+                status,
+                ...(item.error_code
+                  ? { errorCode: domainErrorCode(item.error_code) }
+                  : {}),
+                ...(status === 'failed' && item.artifact_count === 1
+                  ? {
+                      retrySource: {
+                        relativePath: artifactRelativePath!,
+                        byteCount: artifactByteCount!,
+                        sha256: artifactSha256!,
+                      },
+                    }
+                  : {}),
+              };
+            });
+            const status = importStatus(row.status);
+            const copied = decodedItems.filter(
+              item => item.status === 'copied',
+            ).length;
+            const expectedStatus =
+              copied === decodedItems.length
+                ? 'complete'
+                : copied === 0
+                ? 'failed'
+                : 'partial';
+            if (status !== expectedStatus)
+              throw new DomainError('SCHEMA_INVALID');
+            return {
+              ingestionId: row.ingestion_id,
+              packId: row.pack_id,
+              manifestFingerprint: row.manifest_fingerprint,
+              status,
+              itemCount: decodedItems.length,
+              artifactCount: items.reduce(
+                (total, item) => total + item.artifact_count,
+                0,
+              ),
+              createdAt: row.created_at,
+              items: decodedItems,
+            };
+          }),
+        );
+      }
+      return details;
+    });
   }
 
   async commitImport(
@@ -1565,18 +1700,23 @@ function validateCommitImport(input: CommitImportInput): void {
     !/^[0-9a-f]{64}$/.test(input.manifestFingerprint)
   )
     throw new DomainError('SCHEMA_INVALID');
-  const copiedItems = input.manifest.items.filter(
-    item => item.status === 'copied',
+  const artifactBackedItems = input.manifest.items.filter(
+    item =>
+      item.status === 'copied' ||
+      (item.status === 'failed' &&
+        item.retryByteCount !== undefined &&
+        item.retrySha256 !== undefined),
   );
-  const copiedItemsById = new Map(
-    copiedItems.map(item => [item.id, item] as const),
+  const itemsById = new Map(
+    input.manifest.items.map(item => [item.id, item] as const),
   );
   const artifactIds = new Set(input.artifacts.map(artifact => artifact.id));
   if (
-    input.artifacts.length !== copiedItems.length ||
+    input.artifacts.length < artifactBackedItems.length ||
+    input.artifacts.length > input.manifest.items.length ||
     artifactIds.size !== input.artifacts.length ||
     input.artifacts.some(artifact => {
-      const item = copiedItemsById.get(artifact.itemId);
+      const item = itemsById.get(artifact.itemId);
       return (
         !isCanonicalUuid(artifact.id) ||
         artifact.id !== artifact.itemId ||
@@ -1586,11 +1726,21 @@ function validateCommitImport(input: CommitImportInput): void {
         artifact.mediaType !== item.mediaType ||
         !Number.isSafeInteger(artifact.byteCount) ||
         artifact.byteCount < 0 ||
-        artifact.byteCount !== item.byteCount ||
+        (item.status === 'copied' && artifact.byteCount !== item.byteCount) ||
+        (item.status === 'failed' &&
+          (item.retryByteCount === undefined ||
+            item.retrySha256 === undefined ||
+            artifact.byteCount !== item.retryByteCount)) ||
         !/^[0-9a-f]{64}$/.test(artifact.sha256) ||
-        (item.sha256 !== undefined && item.sha256 !== artifact.sha256)
+        (item.status === 'copied' &&
+          item.sha256 !== undefined &&
+          item.sha256 !== artifact.sha256) ||
+        (item.status === 'failed' && item.retrySha256 !== artifact.sha256)
       );
-    })
+    }) ||
+    artifactBackedItems.some(
+      item => !input.artifacts.some(artifact => artifact.itemId === item.id),
+    )
   )
     throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
   input.artifacts.forEach(artifact =>
@@ -1806,6 +1956,13 @@ function requireSchemaVersionOne(value: number): 1 {
 function importStatus(value: string): PersistedImportSummary['status'] {
   if (value === 'complete' || value === 'partial' || value === 'failed')
     return value;
+  throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+}
+
+function importItemStatus(
+  value: string,
+): ImportManifestV1['items'][number]['status'] {
+  if (value === 'copied' || value === 'failed') return value;
   throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
 }
 

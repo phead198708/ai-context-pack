@@ -21,6 +21,7 @@ import type {
   CleanupCandidate,
   CommitImportInput,
   PersistedArtifactRecord,
+  PersistedImportDetail,
   PersistedImportSummary,
   PersistedPackGraph,
   ProductionPersistenceRepository,
@@ -31,7 +32,10 @@ import type {
   SavePackGraphInput,
   StorageUsageSummary,
 } from '../src/infrastructure/persistence/contracts';
-import { ProductionInboxManifestProcessor } from '../src/infrastructure/persistence/runtime';
+import {
+  createEmptyDraftPack,
+  ProductionInboxManifestProcessor,
+} from '../src/infrastructure/persistence/runtime';
 import { ownedOriginalPath } from '../src/infrastructure/persistence/ownedPaths';
 
 const firstIngestion = '123e4567-e89b-42d3-a456-426614174000';
@@ -93,12 +97,14 @@ function packGraph(id: string, createdAt: string): PersistedPackGraph {
 
 class RuntimeRepository implements ProductionPersistenceRepository {
   readonly imports = new Map<string, PersistedImportSummary>();
+  readonly importDetails = new Map<string, PersistedImportDetail>();
   readonly recoveries = new Map<string, RecoveryJournalEntry>();
   readonly artifacts: PersistedArtifactRecord[] = [];
   readonly diagnostics: RecoveryDiagnosticInput[] = [];
   readonly commits: string[] = [];
   readonly quarantines: QuarantineRecordInput[] = [];
   readonly packGraphs: PersistedPackGraph[] = [];
+  readonly savedPackInputs: SavePackGraphInput[] = [];
   createdCount = 0;
   leaseHeld = false;
 
@@ -106,6 +112,10 @@ class RuntimeRepository implements ProductionPersistenceRepository {
 
   async findImport(id: string) {
     return this.imports.get(id) ?? null;
+  }
+
+  async listImportDetails() {
+    return [...this.importDetails.values()];
   }
 
   async commitImport(input: CommitImportInput) {
@@ -121,6 +131,17 @@ class RuntimeRepository implements ProductionPersistenceRepository {
       status: input.manifest.status,
       itemCount: input.manifest.items.length,
       artifactCount: input.artifacts.length,
+    });
+    this.importDetails.set(input.manifest.ingestionId, {
+      ...this.imports.get(input.manifest.ingestionId)!,
+      createdAt: input.manifest.createdAt,
+      items: input.manifest.items.map(item => ({
+        id: item.id,
+        order: item.order,
+        mediaType: item.mediaType,
+        status: item.status,
+        ...(item.status === 'failed' ? { errorCode: item.errorCode } : {}),
+      })),
     });
     for (const value of input.artifacts)
       this.artifacts.push({
@@ -174,7 +195,8 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     return this.packGraphs;
   }
 
-  async savePackGraph(_input: SavePackGraphInput) {
+  async savePackGraph(input: SavePackGraphInput) {
+    this.savedPackInputs.push(input);
     return 1;
   }
 
@@ -318,6 +340,20 @@ class RuntimeNative implements NativeAdapter {
     this.acknowledgements.push(id);
   }
 
+  async publishMainAppImport(): Promise<ImportManifestV1> {
+    throw new Error('unused-main-app-import');
+  }
+
+  async stageMainAppPickerFiles(fileUris: readonly string[]) {
+    return fileUris;
+  }
+
+  async cleanupMainAppPickerTransients() {}
+
+  async recoverMainAppPickerCache() {}
+
+  async discardMainAppPickerFiles() {}
+
   async publishArtifact(
     _sourceFileUri: string,
     relativePath: string,
@@ -378,6 +414,37 @@ class RuntimeNative implements NativeAdapter {
 }
 
 describe('production Inbox persistence runtime', () => {
+  test('creates an intentionally empty Draft only through the explicit helper', async () => {
+    const repository = new RuntimeRepository();
+    const createdAt = new Date('2026-08-07T08:00:00.000Z');
+
+    await expect(
+      createEmptyDraftPack(
+        () => createdAt,
+        () => firstIngestion,
+        async () => repository,
+      ),
+    ).resolves.toEqual({
+      id: firstIngestion,
+      schemaVersion: 1,
+      title: 'Context Pack',
+      createdAt: createdAt.toISOString(),
+      updatedAt: createdAt.toISOString(),
+      state: 'draft',
+      itemCount: 0,
+    });
+    expect(repository.savedPackInputs).toEqual([
+      expect.objectContaining({
+        items: [],
+        pack: expect.objectContaining({
+          id: firstIngestion,
+          orderedItemIds: [],
+          state: 'draft',
+        }),
+      }),
+    ]);
+  });
+
   test('projects persisted Pack graphs for product hydration after Inbox ACK', async () => {
     const repository = new RuntimeRepository();
     repository.packGraphs.push(

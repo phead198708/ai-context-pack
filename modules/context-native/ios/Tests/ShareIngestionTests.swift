@@ -777,6 +777,40 @@ final class ShareIngestionTests: XCTestCase {
     ).finish().replayed)
   }
 
+  func testPostCommitManifestReadFailureRequiresLockedRecoveryAndPreservesPublishedInbox() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    let session = try ShareIngestionSession(
+      container: root,
+      ingestionId: ingestionId,
+      publishedManifestReader: { _, _ in
+        throw InboxManifestValidationError.invalidManifest
+      }
+    )
+    try session.recordFile(
+      id: itemId,
+      order: 0,
+      declaredMediaType: "image/png",
+      source: fixture("ocr-english.png")
+    )
+
+    XCTAssertThrowsError(try session.finish()) { error in
+      XCTAssertEqual(error as? ShareIngestionFatalError, .committedRecoveryRequired)
+    }
+    XCTAssertTrue(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("Inbox/\(ingestionId)/manifest.json").path
+    ))
+
+    let retry = try ShareIngestionSession(container: root, ingestionId: ingestionId).finish()
+    XCTAssertTrue(retry.replayed)
+    XCTAssertEqual(retry.copied, 1)
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Inbox").path)
+        .count,
+      1
+    )
+  }
+
   func testOversizedTextAndDeclaredTypeMismatchHaveStableRejectedCodes() throws {
     let session = try ShareIngestionSession(
       container: root,

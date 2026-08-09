@@ -39,6 +39,11 @@ function harness(
     ackRecoveryEvent: jest.fn().mockResolvedValue(undefined),
     handoffInbox: jest.fn().mockResolvedValue([]),
     acknowledgeInbox: jest.fn().mockResolvedValue(undefined),
+    publishMainAppImport: jest.fn(),
+    stageMainAppPickerFiles: jest.fn(),
+    cleanupMainAppPickerTransients: jest.fn(),
+    recoverMainAppPickerCache: jest.fn().mockResolvedValue(undefined),
+    discardMainAppPickerFiles: jest.fn(),
     publishArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
     listOwnedArtifacts: jest.fn(),
@@ -69,20 +74,22 @@ describe('InboxEventWorkflow integration', () => {
     await h.workflow.receive(event(0, 'failed'));
     await h.workflow.receive(event(1, 'complete'));
     expect(h.states.at(-1)).toEqual({
-      kind: 'error',
-      code: 'SHARE_IMPORT_FAILED',
+      kind: 'ready',
+      manifests: [manifest],
+      warningCode: 'SHARE_IMPORT_FAILED',
     });
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledWith(ids[1]);
     expect(h.native.ackPendingShareEvent).not.toHaveBeenCalledWith(ids[0]);
   });
 
-  test('complete then failed finishes with failure and retains its ID', async () => {
+  test('complete then failed retains the visible import with a warning and its ID', async () => {
     const h = harness();
     await h.workflow.receive(event(0, 'complete'));
     await h.workflow.receive(event(1, 'failed'));
     expect(h.states.at(-1)).toEqual({
-      kind: 'error',
-      code: 'SHARE_IMPORT_FAILED',
+      kind: 'ready',
+      manifests: [manifest],
+      warningCode: 'SHARE_IMPORT_FAILED',
     });
     await h.workflow.retry();
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledWith(ids[1]);
@@ -96,6 +103,30 @@ describe('InboxEventWorkflow integration', () => {
     await h.workflow.bootstrap();
     await h.workflow.receive(duplicate);
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails closed on cold-start picker-cache recovery and Retry clears it', async () => {
+    const recover = jest
+      .fn()
+      .mockRejectedValueOnce({ code: 'STORAGE_WRITE_FAILED' })
+      .mockResolvedValueOnce(undefined);
+    const h = harness({ recoverMainAppPickerCache: recover });
+
+    await h.workflow.bootstrap();
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'STORAGE_WRITE_FAILED',
+    });
+    expect(h.native.scanInbox).not.toHaveBeenCalled();
+    expect(h.workflow.isPickerCacheRecovered()).toBe(false);
+
+    await h.workflow.retry();
+
+    expect(recover).toHaveBeenCalledTimes(2);
+    expect(h.native.scanInbox).toHaveBeenCalledTimes(1);
+    expect(h.workflow.isPickerCacheRecovered()).toBe(true);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
   });
 
   test('Retry commits partial failed ACK progress before a later ACK fails', async () => {
@@ -423,9 +454,243 @@ describe('InboxEventWorkflow integration', () => {
       kind: 'error',
       code: 'NATIVE_MANIFEST_INVALID',
     });
+    expect(h.workflow.isPackCreationReady()).toBe(false);
 
     await h.workflow.retry();
     expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+    expect(h.workflow.isPackCreationReady()).toBe(true);
+  });
+
+  test('a visible failed-share item does not block unrelated Pack creation', async () => {
+    const h = harness();
+    await h.workflow.bootstrap();
+    expect(h.workflow.isPackCreationReady()).toBe(true);
+
+    await h.workflow.receive(
+      event(0, 'failed', { code: 'SHARE_IMPORT_FAILED' }),
+    );
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'SHARE_IMPORT_FAILED',
+    });
+    expect(h.workflow.isPackCreationReady()).toBe(true);
+  });
+
+  test('a failed share arriving last keeps persisted Packs visible with a warning', async () => {
+    const packs = [
+      {
+        id: ids[2]!,
+        schemaVersion: 1 as const,
+        title: 'Context Pack',
+        createdAt: '2026-08-03T00:00:00Z',
+        updatedAt: '2026-08-03T00:00:00Z',
+        state: 'draft' as const,
+        itemCount: 1,
+      },
+    ];
+    const h = harness(
+      {},
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks: jest.fn().mockResolvedValue(packs),
+      },
+    );
+    await h.workflow.bootstrap();
+
+    await h.workflow.receive(event(0, 'failed'));
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'ready',
+      manifests: [],
+      packs,
+      warningCode: 'SHARE_IMPORT_FAILED',
+    });
+  });
+
+  test('a failed share cannot mask an already latched operational error', async () => {
+    const scan = jest
+      .fn()
+      .mockResolvedValueOnce([manifest])
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'));
+    const h = harness({ scanInbox: scan });
+    await h.workflow.bootstrap();
+
+    await h.workflow.appBecameActive();
+    await h.workflow.receive(event(0, 'failed'));
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'STORAGE_WRITE_FAILED',
+    });
+  });
+
+  test('committed recovery reports the operational cause ahead of a later failure warning', async () => {
+    const scan = jest
+      .fn()
+      .mockResolvedValueOnce([manifest])
+      .mockRejectedValue(new NativeBoundaryError('STORAGE_WRITE_FAILED'));
+    const h = harness({ scanInbox: scan });
+    await h.workflow.bootstrap();
+    await h.workflow.appBecameActive();
+    await h.workflow.receive(event(0, 'failed'));
+
+    await expect(h.workflow.refreshForMainAppImport()).rejects.toMatchObject({
+      code: 'STORAGE_WRITE_FAILED',
+    });
+  });
+
+  test('main-app refresh rejects with the latched persistence code and retries it', async () => {
+    const process = jest
+      .fn()
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'))
+      .mockResolvedValueOnce(undefined);
+    const h = harness({}, { process });
+
+    await expect(h.workflow.refreshForMainAppImport()).rejects.toMatchObject({
+      code: 'STORAGE_WRITE_FAILED',
+    });
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'STORAGE_WRITE_FAILED',
+    });
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+    expect(process).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('committed recovery clears a live invalid-event blocker before refreshing', async () => {
+    const h = harness();
+    await h.workflow.bootstrap();
+    await h.workflow.receive({
+      schemaVersion: 1,
+      id: ids[0],
+      result: 'unknown',
+    });
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+
+    expect(h.native.getPendingShareEvents).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('committed recovery retries a complete-event ACK blocker', async () => {
+    const ack = jest
+      .fn()
+      .mockRejectedValueOnce(new NativeBoundaryError('NATIVE_SHARE_ACK_FAILED'))
+      .mockResolvedValueOnce(undefined);
+    const h = harness({ ackPendingShareEvent: ack });
+    await h.workflow.receive(event(0, 'complete'));
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+
+    expect(ack).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({ kind: 'ready', manifests: [manifest] });
+  });
+
+  test('a committed main-app import refresh ignores an older failed share item', async () => {
+    const h = harness();
+    await h.workflow.receive(
+      event(0, 'failed', { code: 'SHARE_IMPORT_FAILED' }),
+    );
+
+    await expect(h.workflow.refreshForMainAppImport()).resolves.toBeUndefined();
+    expect(h.native.scanInbox).toHaveBeenCalledTimes(1);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'ready',
+      manifests: [manifest],
+      warningCode: 'SHARE_IMPORT_FAILED',
+    });
+  });
+
+  test('created-Pack refresh scans through a historical warning and returns the requested Pack', async () => {
+    const oldPack = {
+      id: ids[0]!,
+      schemaVersion: 1 as const,
+      title: 'Older Pack',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      state: 'draft' as const,
+      itemCount: 0,
+    };
+    const createdPack = {
+      ...oldPack,
+      id: ids[2]!,
+      title: 'Created Pack',
+      updatedAt: '2026-01-02T00:00:00Z',
+    };
+    const listPersistedPacks = jest
+      .fn()
+      .mockResolvedValueOnce([oldPack])
+      .mockResolvedValueOnce([oldPack, createdPack]);
+    const h = harness(
+      {},
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks,
+      },
+    );
+    await h.workflow.bootstrap();
+    await h.workflow.receive(
+      event(0, 'failed', { code: 'SHARE_IMPORT_FAILED' }),
+    );
+
+    await expect(
+      h.workflow.refreshForCreatedPack(createdPack.id),
+    ).resolves.toEqual(createdPack);
+
+    expect(h.native.scanInbox).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toEqual({
+      kind: 'ready',
+      manifests: [manifest],
+      packs: [oldPack, createdPack],
+      warningCode: 'SHARE_IMPORT_FAILED',
+    });
+  });
+
+  test('created-Pack refresh rejects an operational scan failure', async () => {
+    const scanInbox = jest
+      .fn()
+      .mockResolvedValueOnce([manifest])
+      .mockRejectedValueOnce(new NativeBoundaryError('STORAGE_WRITE_FAILED'));
+    const h = harness(
+      { scanInbox },
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks: jest.fn().mockResolvedValue([]),
+      },
+    );
+    await h.workflow.bootstrap();
+
+    await expect(
+      h.workflow.refreshForCreatedPack(ids[2]!),
+    ).rejects.toMatchObject({ code: 'STORAGE_WRITE_FAILED' });
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'STORAGE_WRITE_FAILED',
+    });
+  });
+
+  test('created-Pack refresh fails closed when the requested Pack is absent', async () => {
+    const h = harness(
+      {},
+      {
+        process: jest.fn().mockResolvedValue(undefined),
+        listPersistedPacks: jest.fn().mockResolvedValue([]),
+      },
+    );
+    await h.workflow.bootstrap();
+
+    await expect(
+      h.workflow.refreshForCreatedPack(ids[2]!),
+    ).rejects.toMatchObject({ code: 'INBOX_SCAN_FAILED' });
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'INBOX_SCAN_FAILED',
+    });
   });
 
   test('durable persistence completes before a successful share event is ACKed', async () => {

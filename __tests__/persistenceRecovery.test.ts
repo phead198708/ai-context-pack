@@ -121,6 +121,10 @@ class MemoryRepository implements PersistenceRepository {
     return this.imports.get(id) ?? null;
   }
 
+  async listImportDetails() {
+    return [];
+  }
+
   async commitImport(
     input: CommitImportInput,
   ): Promise<'created' | 'replayed'> {
@@ -432,6 +436,42 @@ describe('persistence and dual-Inbox recovery spike', () => {
     expect(handoff.acknowledgementCount).toBe(1);
     expect(repository.journals.get(ingestionId)?.phase).toBe('files-published');
   });
+
+  test.each([
+    ['retry byte count', 9, 'b'.repeat(64)],
+    ['retry sha256', 8, 'c'.repeat(64)],
+  ] as const)(
+    'failed-item artifact must match manifest %s before commit or ACK',
+    async (_label, retryByteCount, retrySha256) => {
+      const repository = new MemoryRepository();
+      const handoff = new MemoryHandoff();
+      handoff.manifestValue = {
+        ...manifest(),
+        status: 'partial',
+        items: [
+          {
+            id: itemId,
+            order: 0,
+            mediaType: 'image/png',
+            status: 'failed',
+            byteCount: 0,
+            errorCode: 'IMPORT_PROVIDER_PERMISSION_EXPIRED',
+            retryByteCount,
+            retrySha256,
+          },
+        ],
+      };
+
+      await expect(
+        new InboxPersistenceCoordinator(repository, handoff).recover({
+          packId,
+          ingestionId,
+        }),
+      ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+      expect(repository.commitCount).toBe(0);
+      expect(handoff.acknowledgementCount).toBe(0);
+    },
+  );
 
   test('valid owned path for a different Pack still fails closed', async () => {
     const repository = new MemoryRepository();

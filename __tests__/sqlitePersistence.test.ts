@@ -4,6 +4,7 @@ import type { ImportManifestV1 } from '../src/domain/contracts';
 import type { Artifact } from '../src/domain/models';
 import type { CommitImportInput } from '../src/infrastructure/persistence/contracts';
 import { DEVELOPMENT_RESET_CONFIRMATION } from '../src/infrastructure/persistence/contracts';
+import { IMPORT_MANIFEST_MAX_ITEMS } from '../src/domain/validation';
 import { ExpoSqlitePersistenceRepository } from '../src/infrastructure/persistence/sqlite';
 import { ownedDerivedPath } from '../src/infrastructure/persistence/ownedPaths';
 
@@ -166,6 +167,46 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
     ]);
   });
 
+  test.each([
+    ['retry byte count', 9, 'b'.repeat(64)],
+    ['retry sha256', 8, 'c'.repeat(64)],
+  ] as const)(
+    'rejects failed-item artifact metadata that diverges from %s',
+    async (_label, retryByteCount, retrySha256) => {
+      const { connection, statements } = existingImportConnection(
+        'b'.repeat(64),
+      );
+      const original = replayInput('b'.repeat(64));
+      const input: CommitImportInput = {
+        ...original,
+        manifest: {
+          ...original.manifest,
+          status: 'failed',
+          items: [
+            {
+              id: itemId,
+              order: 0,
+              mediaType: 'image/png',
+              status: 'failed',
+              byteCount: 0,
+              errorCode: 'IMPORT_PROVIDER_PERMISSION_EXPIRED',
+              retryByteCount,
+              retrySha256,
+            },
+          ],
+        },
+      };
+      const repository = new ExpoSqlitePersistenceRepository(
+        connection as never,
+      );
+
+      await expect(repository.commitImport(input)).rejects.toMatchObject({
+        code: 'ARTIFACT_INTEGRITY_FAILED',
+      });
+      expect(statements).toEqual([]);
+    },
+  );
+
   test('rejects a replay when its materialized context item is missing', async () => {
     const { connection, statements } = existingImportConnection('b'.repeat(64));
     const loadAll = connection.all;
@@ -199,6 +240,140 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       repository.commitImport(replayInput('b'.repeat(64))),
     ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
     expect(statements).toEqual([]);
+  });
+
+  test('rehydrates durable partial-item failures for Inbox visibility', async () => {
+    const failedItemId = '423e4567-e89b-42d3-a456-426614174000';
+    let swapRetryOwner = false;
+    const connection = {
+      exec: async () => undefined,
+      run: async () => ({ changes: 0 }),
+      first: async <T>() => null as T | null,
+      all: async <T>(source: string) =>
+        (source.includes('FROM imports ORDER BY')
+          ? [
+              {
+                ingestion_id: ingestionId,
+                pack_id: packId,
+                manifest_fingerprint: 'a'.repeat(64),
+                status: 'partial',
+                created_at: '2026-08-03T00:00:00Z',
+              },
+            ]
+          : source.includes('FROM import_items item')
+          ? [
+              {
+                id: itemId,
+                sort_index: 0,
+                media_type: 'image/png',
+                status: 'copied',
+                error_code: null,
+                artifact_count: 1,
+                artifact_relative_path: `Packs/${packId}/originals/${itemId}.bin`,
+                artifact_byte_count: 4,
+                artifact_sha256: 'b'.repeat(64),
+              },
+              {
+                id: failedItemId,
+                sort_index: 1,
+                media_type: 'application/zip',
+                status: 'failed',
+                error_code: 'IMPORT_TYPE_UNSUPPORTED',
+                artifact_count: 1,
+                artifact_relative_path: swapRetryOwner
+                  ? `Packs/${packId}/originals/${itemId}.bin`
+                  : `Packs/${packId}/originals/${failedItemId}.bin`,
+                artifact_byte_count: 7,
+                artifact_sha256: 'c'.repeat(64),
+              },
+            ]
+          : []) as T[],
+      exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
+        task(connection),
+    };
+    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      {
+        ingestionId,
+        packId,
+        manifestFingerprint: 'a'.repeat(64),
+        status: 'partial',
+        itemCount: 2,
+        artifactCount: 2,
+        createdAt: '2026-08-03T00:00:00Z',
+        items: [
+          {
+            id: itemId,
+            order: 0,
+            mediaType: 'image/png',
+            status: 'copied',
+          },
+          {
+            id: failedItemId,
+            order: 1,
+            mediaType: 'application/zip',
+            status: 'failed',
+            errorCode: 'IMPORT_TYPE_UNSUPPORTED',
+            retrySource: {
+              relativePath: `Packs/${packId}/originals/${failedItemId}.bin`,
+              byteCount: 7,
+              sha256: 'c'.repeat(64),
+            },
+          },
+        ],
+      },
+    ]);
+
+    swapRetryOwner = true;
+    await expect(repository.listImportDetails()).rejects.toMatchObject({
+      code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
+  });
+
+  test('rehydrates the contract maximum of 128 reported share items', async () => {
+    const items = Array.from(
+      { length: IMPORT_MANIFEST_MAX_ITEMS },
+      (_, index) => ({
+        id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+        sort_index: index,
+        media_type: 'application/octet-stream',
+        status: 'failed',
+        error_code: 'IMPORT_TYPE_UNSUPPORTED',
+        artifact_count: 0,
+        artifact_relative_path: null,
+        artifact_byte_count: null,
+        artifact_sha256: null,
+      }),
+    );
+    const connection = {
+      exec: async () => undefined,
+      run: async () => ({ changes: 0 }),
+      first: async <T>() => null as T | null,
+      all: async <T>(source: string) =>
+        (source.includes('FROM imports ORDER BY')
+          ? [
+              {
+                ingestion_id: ingestionId,
+                pack_id: packId,
+                manifest_fingerprint: 'a'.repeat(64),
+                status: 'failed',
+                created_at: '2026-08-03T00:00:00Z',
+              },
+            ]
+          : source.includes('FROM import_items item')
+          ? items
+          : []) as T[],
+      exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
+        task(connection),
+    };
+    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+
+    const details = await repository.listImportDetails();
+
+    expect(details).toHaveLength(1);
+    expect(details[0]?.itemCount).toBe(IMPORT_MANIFEST_MAX_ITEMS);
+    expect(details[0]?.items).toHaveLength(IMPORT_MANIFEST_MAX_ITEMS);
   });
 
   test('registers an exact verified derivative and rejects immutable replacement', async () => {

@@ -1,9 +1,12 @@
 package com.aicontextpack.nativebridge
 
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
+import java.io.FileDescriptor
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
@@ -11,6 +14,11 @@ import java.util.UUID
 internal class InboxArtifactHandoffException(val stableCode: String) : Exception(stableCode)
 
 internal object InboxArtifactHandoff {
+  private data class SourceDescriptor(
+    val name: String,
+    val byteCount: Long,
+    val sha256: String?,
+  )
   enum class Point { BEFORE_COPY, DURING_COPY, AFTER_FILE_CLOSE, BEFORE_PUBLISH_RENAME }
   enum class AcknowledgementPoint {
     AFTER_RECEIPT_PUBLISH,
@@ -60,63 +68,62 @@ internal object InboxArtifactHandoff {
     @Suppress("UNCHECKED_CAST")
     val items = manifest["items"] as? List<Map<String, Any?>>
       ?: throw InboxArtifactHandoffException("SCHEMA_INVALID")
-    val destinationDirectory = File(filesDir, "Packs/$packId/originals")
+    val packsDirectory = File(filesDir, "Packs")
+    val packDirectory = File(packsDirectory, packId)
+    val destinationDirectory = File(packDirectory, "originals")
+    val ownedDestinationDirectories = listOf(
+      filesDir, packsDirectory, packDirectory, destinationDirectory,
+    )
     var requiredFreeBytes = requiredHeadroomBytes
-    items.filter { it["status"] == "copied" }.forEach { item ->
+    items.forEach { item ->
       val itemId = item["id"] as? String
         ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val byteCount = (item["byteCount"] as? Number)?.toLong()
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       requireCanonicalUuid(itemId)
-      if (byteCount < 0) {
-        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      }
+      val descriptor = sourceDescriptor(sourceDirectory, item) ?: return@forEach
       if (File(destinationDirectory, "$itemId.bin").exists()) return@forEach
-      if (requiredFreeBytes > Long.MAX_VALUE - byteCount) {
+      if (requiredFreeBytes > Long.MAX_VALUE - descriptor.byteCount) {
         throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       }
-      requiredFreeBytes += byteCount
+      requiredFreeBytes += descriptor.byteCount
     }
     if (availableBytes(filesDir) < requiredFreeBytes) {
       throw InboxArtifactHandoffException("RESOURCE_LOW_DISK")
     }
     ensureDestinationHierarchy(filesDir, packId, directorySynchronizer)
-    val artifacts: List<Map<String, Any>> = items.mapNotNull { item ->
-      if (item["status"] != "copied") return@mapNotNull null
-      val itemId = item["id"] as? String
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val mediaType = item["mediaType"] as? String
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val sourceName = item["relativePath"] as? String
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val byteCount = (item["byteCount"] as? Number)?.toLong()
-        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-      val expectedHash = item["sha256"] as? String
-      requireCanonicalUuid(itemId)
-      if (sourceName != "$itemId.bin" || byteCount < 0) {
-        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    val artifacts: List<Map<String, Any>> = withDestinationDirectory(
+      destinationDirectory,
+      ownedDestinationDirectories,
+    ) { anchoredDirectory, destinationDescriptor ->
+      items.mapNotNull { item ->
+        val itemId = item["id"] as? String
+          ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        val mediaType = item["mediaType"] as? String
+          ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        val descriptor = sourceDescriptor(sourceDirectory, item) ?: return@mapNotNull null
+        requireCanonicalUuid(itemId)
+        val source = File(sourceDirectory, descriptor.name)
+        val actualHash = publish(
+          source,
+          destinationDirectory,
+          ownedDestinationDirectories,
+          anchoredDirectory,
+          destinationDescriptor,
+          itemId,
+          descriptor.byteCount,
+          descriptor.sha256,
+          operationHook,
+          directorySynchronizer,
+        )
+        val result = mutableMapOf<String, Any>(
+          "id" to itemId,
+          "itemId" to itemId,
+          "relativePath" to "Packs/$packId/originals/$itemId.bin",
+          "mediaType" to mediaType,
+          "byteCount" to descriptor.byteCount,
+        )
+        result["sha256"] = actualHash
+        result
       }
-      val source = File(sourceDirectory, sourceName)
-      val destination = File(destinationDirectory, "$itemId.bin")
-      val partial = File(destinationDirectory, "$itemId.bin.partial")
-      val actualHash = publish(
-        source,
-        partial,
-        destination,
-        byteCount,
-        expectedHash,
-        operationHook,
-        directorySynchronizer,
-      )
-      val result = mutableMapOf<String, Any>(
-        "id" to itemId,
-        "itemId" to itemId,
-        "relativePath" to "Packs/$packId/originals/$itemId.bin",
-        "mediaType" to mediaType,
-        "byteCount" to byteCount,
-      )
-      result["sha256"] = actualHash
-      result
     }
     val finalManifestBytes = try { manifestFile.readBytes() }
     catch (_: Exception) { throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED") }
@@ -128,6 +135,46 @@ internal object InboxArtifactHandoff {
       "manifestFingerprint" to manifestFingerprint,
       "artifacts" to artifacts,
     )
+  }
+
+  private fun sourceDescriptor(
+    sourceDirectory: File,
+    item: Map<String, Any?>,
+  ): SourceDescriptor? {
+    val itemId = item["id"] as? String
+      ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    requireCanonicalUuid(itemId)
+    if (item["status"] == "copied") {
+      val sourceName = item["relativePath"] as? String
+        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      val byteCount = (item["byteCount"] as? Number)?.toLong()
+        ?: throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      if (sourceName != "$itemId.bin" || byteCount < 0) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      return SourceDescriptor(sourceName, byteCount, item["sha256"] as? String)
+    }
+    if (item["status"] != "failed") {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    val source = File(sourceDirectory, "$itemId.retry")
+    val mode = runCatching { Os.lstat(source.path).st_mode }.getOrNull()
+    val retryByteCount = (item["retryByteCount"] as? Number)?.toLong()
+    val retrySha256 = item["retrySha256"] as? String
+    if (mode == null && retryByteCount == null && retrySha256 == null) return null
+    if (
+      mode == null ||
+      !OsConstants.S_ISREG(mode) ||
+      OsConstants.S_ISLNK(mode) ||
+      retryByteCount == null ||
+      retryByteCount !in 0..ShareIngestionWriter.maximumBinaryBytes ||
+      source.length() != retryByteCount ||
+      retrySha256 == null ||
+      !Regex("^[0-9a-f]{64}$").matches(retrySha256)
+    ) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    return SourceDescriptor(source.name, retryByteCount, retrySha256)
   }
 
   fun acknowledge(
@@ -287,50 +334,109 @@ internal object InboxArtifactHandoff {
 
   private fun publish(
     source: File,
-    partial: File,
-    destination: File,
+    destinationDirectory: File,
+    ownedDirectories: List<File>,
+    anchoredDirectory: File,
+    destinationDescriptor: FileDescriptor,
+    itemId: String,
     byteCount: Long,
     expectedHash: String?,
     operationHook: (Point) -> Unit,
     directorySynchronizer: (File) -> Unit,
   ): String {
+    val destination = File(anchoredDirectory, "$itemId.bin")
+    val partial = File(anchoredDirectory, "$itemId.bin.partial")
+    requireDestinationIdentity(
+      destinationDirectory, ownedDirectories, destinationDescriptor,
+    )
     if (destination.exists()) {
       val sourceHash = verify(source, byteCount, expectedHash)
-      return verify(destination, byteCount, sourceHash)
+      val existingHash = verify(destination, byteCount, sourceHash)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
+      return existingHash
     }
-    if (partial.exists() && !partial.delete()) {
-      throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    if (partial.exists()) {
+      try { Os.remove(partial.path) }
+      catch (_: Exception) { throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED") }
     }
     operationHook(Point.BEFORE_COPY)
+    requireDestinationIdentity(
+      destinationDirectory, ownedDirectories, destinationDescriptor,
+    )
+    val outputDescriptor = try {
+      Os.open(
+        partial.path,
+        OsConstants.O_WRONLY or OsConstants.O_CREAT or OsConstants.O_EXCL or
+          OsConstants.O_NOFOLLOW,
+        0b110000000,
+      )
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    }
+    var outputOwned = true
+    var published = false
     try {
-      source.inputStream().buffered().use { input ->
-        FileOutputStream(partial).buffered().use { output ->
+      openRegularInput(source, byteCount).buffered().use { input ->
+        FileOutputStream(outputDescriptor).use { fileOutput ->
+          outputOwned = false
+          val output = fileOutput.buffered()
           val buffer = ByteArray(64 * 1024)
           var firstChunk = true
+          var total = 0L
           while (true) {
             val count = input.read(buffer)
             if (count < 0) break
+            total += count
+            if (total > byteCount) {
+              throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+            }
             output.write(buffer, 0, count)
             if (firstChunk) {
               firstChunk = false
               operationHook(Point.DURING_COPY)
+              requireDestinationIdentity(
+                destinationDirectory, ownedDirectories, destinationDescriptor,
+              )
             }
           }
+          if (total != byteCount) {
+            throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+          }
           output.flush()
+          Os.fsync(fileOutput.fd)
         }
       }
-      FileOutputStream(partial, true).use { it.fd.sync() }
       operationHook(Point.AFTER_FILE_CLOSE)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
       val actualHash = verify(partial, byteCount, expectedHash)
       operationHook(Point.BEFORE_PUBLISH_RENAME)
-      atomicMove(partial, destination)
-      directorySynchronizer(
-        destination.parentFile ?: throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED"),
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
+      try { Os.rename(partial.path, destination.path) }
+      catch (_: Exception) { throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED") }
+      published = true
+      try { Os.fsync(destinationDescriptor) }
+      catch (_: Exception) { throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED") }
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
+      directorySynchronizer(destinationDirectory)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
       )
       return actualHash
     } catch (error: InboxArtifactHandoffException) {
+      if (outputOwned) runCatching { Os.close(outputDescriptor) }
+      runCatching { Os.remove(if (published) destination.path else partial.path) }
       throw error
     } catch (_: Exception) {
+      if (outputOwned) runCatching { Os.close(outputDescriptor) }
+      runCatching { Os.remove(if (published) destination.path else partial.path) }
       throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
     }
   }
@@ -355,11 +461,14 @@ internal object InboxArtifactHandoff {
       ?: throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
     try {
       if (directory.exists()) {
-        if (!directory.isDirectory) {
-          throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
-        }
+        requireSafeDestinationDirectory(directory)
       } else {
-        if (!directory.mkdir()) throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+        if (!directory.mkdir()) {
+          // A concurrent creator may win. It is acceptable only when the
+          // resulting owned ancestor is a real directory, never a symlink.
+          requireSafeDestinationDirectory(directory)
+        }
+        requireSafeDestinationDirectory(directory)
       }
       directorySynchronizer(directory)
       directorySynchronizer(parent)
@@ -367,6 +476,99 @@ internal object InboxArtifactHandoff {
       throw error
     } catch (_: Exception) {
       throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED")
+    }
+  }
+
+  private fun requireSafeDestinationDirectory(directory: File) {
+    val mode = try { Os.lstat(directory.path).st_mode }
+    catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    if (OsConstants.S_ISLNK(mode) || !OsConstants.S_ISDIR(mode)) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    val descriptor = try {
+      Os.open(
+        directory.path,
+        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
+        0,
+      )
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    try {
+      if (!OsConstants.S_ISDIR(Os.fstat(descriptor).st_mode)) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+    } finally {
+      runCatching { Os.close(descriptor) }
+    }
+  }
+
+  private fun <T> withDestinationDirectory(
+    directory: File,
+    ownedDirectories: List<File>,
+    block: (anchoredDirectory: File, descriptor: FileDescriptor) -> T,
+  ): T {
+    val rawDescriptor = try {
+      Os.open(
+        directory.path,
+        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
+        0,
+      )
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    val holder = try { ParcelFileDescriptor.dup(rawDescriptor) }
+    catch (_: Exception) {
+      runCatching { Os.close(rawDescriptor) }
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    runCatching { Os.close(rawDescriptor) }
+    holder.use {
+      val descriptor = it.fileDescriptor
+      val anchoredDirectory = File("/proc/self/fd/${it.fd}")
+      requireDestinationIdentity(directory, ownedDirectories, descriptor)
+      val result = block(anchoredDirectory, descriptor)
+      requireDestinationIdentity(directory, ownedDirectories, descriptor)
+      return result
+    }
+  }
+
+  private fun requireDestinationIdentity(
+    directory: File,
+    ownedDirectories: List<File>,
+    descriptor: FileDescriptor,
+  ) {
+    val held = try { Os.fstat(descriptor) }
+    catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    if (!OsConstants.S_ISDIR(held.st_mode)) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
+    ownedDirectories.forEach { ownedDirectory ->
+      val currentDescriptor = try {
+        Os.open(
+          ownedDirectory.path,
+          OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
+          0,
+        )
+      } catch (_: Exception) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      try {
+        val current = Os.fstat(currentDescriptor)
+        if (
+          !OsConstants.S_ISDIR(current.st_mode) ||
+          (ownedDirectory.path == directory.path &&
+            (current.st_dev != held.st_dev || current.st_ino != held.st_ino))
+        ) {
+          throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        }
+      } finally {
+        runCatching { Os.close(currentDescriptor) }
+      }
     }
   }
 
@@ -426,27 +628,53 @@ internal object InboxArtifactHandoff {
   }
 
   private fun verify(file: File, byteCount: Long, expectedHash: String?): String {
-    if (!file.isFile || file.length() != byteCount) {
-      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    val digest = MessageDigest.getInstance("SHA-256")
+    openRegularInput(file, byteCount).buffered().use { input ->
+      val buffer = ByteArray(64 * 1024)
+      var total = 0L
+      while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        total += count
+        if (total > byteCount) {
+          throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        }
+        digest.update(buffer, 0, count)
+      }
+      if (total != byteCount) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
     }
-    val actualHash = sha256(file)
+    val actualHash = digest.digest().joinToString("") {
+      "%02x".format(it.toInt() and 0xff)
+    }
     if (expectedHash != null && actualHash != expectedHash) {
       throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
     }
     return actualHash
   }
 
-  private fun sha256(file: File): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    file.inputStream().buffered().use { input ->
-      val buffer = ByteArray(64 * 1024)
-      while (true) {
-        val count = input.read(buffer)
-        if (count < 0) break
-        digest.update(buffer, 0, count)
-      }
+  private fun openRegularInput(file: File, byteCount: Long): FileInputStream {
+    val descriptor = try {
+      Os.open(
+        file.path,
+        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
+        0,
+      )
+    } catch (_: Exception) {
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
     }
-    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    try {
+      val stat = Os.fstat(descriptor)
+      if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_size != byteCount) {
+        throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      return FileInputStream(descriptor)
+    } catch (error: Exception) {
+      runCatching { Os.close(descriptor) }
+      if (error is InboxArtifactHandoffException) throw error
+      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+    }
   }
 
   private fun sha256(bytes: ByteArray): String =

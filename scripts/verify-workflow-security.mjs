@@ -1531,9 +1531,9 @@ for (const [index, example] of auditWorkflowRejectedExamples.entries()) {
 }
 if (
   packageManifest.scripts?.['audit:ci'] !==
-    'npm audit --json | node scripts/verify-npm-audit-policy.mjs' ||
+    'node scripts/verify-vendored-image-size.mjs && npm audit --json | node scripts/verify-npm-audit-policy.mjs' ||
   packageManifest.scripts?.['test:npm-audit-policy'] !==
-    'node --test scripts/verify-npm-audit-policy.test.mjs' ||
+    'node --test scripts/verify-npm-audit-policy.test.mjs scripts/verify-vendored-image-size.test.mjs' ||
   !packageManifest.scripts?.['test:workflows']?.includes(
     'npm run test:npm-audit-policy',
   )

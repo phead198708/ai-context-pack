@@ -5,14 +5,14 @@
   "packageManager": "npm@10.9.2",
   "scripts": {
     "android": "expo run:android",
-    "audit:ci": "npm audit --json | node scripts/verify-npm-audit-policy.mjs",
+    "audit:ci": "node scripts/verify-vendored-image-size.mjs && npm audit --json | node scripts/verify-npm-audit-policy.mjs",
     "doctor": "expo-doctor",
     "ios": "PATH=\"$PWD/scripts/cocoapods-bin:$PATH\" BUNDLE_GEMFILE=\"$PWD/Gemfile\" RUBYOPT=-rlogger expo run:ios",
     "lint": "eslint .",
     "test:fixtures": "node scripts/verify-fixtures.mjs",
     "test:persistence-migrations": "node scripts/verify-persistence-migrations.mjs",
     "test:persistence-production": "node scripts/verify-production-persistence.mjs",
-    "test:npm-audit-policy": "node --test scripts/verify-npm-audit-policy.test.mjs",
+    "test:npm-audit-policy": "node --test scripts/verify-npm-audit-policy.test.mjs scripts/verify-vendored-image-size.test.mjs",
     "test:v01-verification-policy": "node --test scripts/verify-v01-virtual-verification-policy.test.mjs && node scripts/verify-v01-virtual-verification-policy.mjs",
     "test:workflows": "node scripts/verify-workflow-security.mjs && npm run test:npm-audit-policy && npm run test:v01-verification-policy",
     "start": "expo start --dev-client",
@@ -24,8 +24,11 @@
     "@react-native/new-app-screen": "0.86.2",
     "expo": "57.0.11",
     "expo-dev-client": "57.0.10",
+    "expo-document-picker": "57.0.1",
+    "expo-image-picker": "57.0.8",
     "expo-sqlite": "~57.0.1",
     "expo-status-bar": "57.0.1",
+    "image-size": "file:vendor/image-size",
     "react": "19.2.3",
     "react-native": "0.86.2",
     "react-native-safe-area-context": "5.7.0"
@@ -60,6 +63,7 @@
     "@expo/metro-config": "57.0.7"
   },
   "overrides": {
+    "image-size": "$image-size",
     "xcode": {
       "uuid": "11.1.1"
     }
