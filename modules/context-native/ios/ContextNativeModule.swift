@@ -137,6 +137,8 @@ public final class ContextNativeModule: Module {
         case .invalidInput: throw NativeError("MAIN_APP_IMPORT_INPUT_INVALID")
         case .recoveryRequired, .interrupted:
           throw NativeError("PIPELINE_RECOVERY_REQUIRED")
+        case .committedRecoveryRequired:
+          throw NativeError("MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED")
         case .storageWriteFailed: throw NativeError("STORAGE_WRITE_FAILED")
         case .artifactIntegrityFailed: throw NativeError("ARTIFACT_INTEGRITY_FAILED")
         }

@@ -327,6 +327,7 @@ export const NewPackFlow = React.forwardRef<
       if (
         nativePublicationReturned ||
         code === 'MAIN_APP_IMPORT_COMMITTED_CLEANUP_REQUIRED' ||
+        code === 'MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED' ||
         code === 'NATIVE_MAIN_APP_IMPORT_RESULT_INVALID'
       )
         setPublicationCommitted(true);

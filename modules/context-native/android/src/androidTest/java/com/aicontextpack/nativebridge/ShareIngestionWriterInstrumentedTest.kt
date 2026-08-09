@@ -501,6 +501,29 @@ class ShareIngestionWriterInstrumentedTest {
     )
   }
 
+  @Test fun postCommitManifestReadFailureRequiresLockedRecoveryAndPreservesPublishedInbox() {
+    val ingestionId = UUID.randomUUID().toString()
+    val sharedInput = input(0, "image/png", fixture("ocr-english.png"))
+
+    val error = assertThrows(ShareIngestionCommittedRecoveryException::class.java) {
+      ShareIngestionWriter.publish(
+        filesDir,
+        ingestionId,
+        listOf(sharedInput),
+        publishedManifestReader = { _, _ ->
+          throw ShareIngestionIntegrityException()
+        },
+      )
+    }
+
+    assertEquals("MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED", error.message)
+    assertTrue(java.io.File(filesDir, "Inbox/$ingestionId/manifest.json").isFile)
+    val retry = ShareIngestionWriter.publish(filesDir, ingestionId, listOf(sharedInput))
+    assertTrue(retry.replayed)
+    assertEquals(1, retry.copied)
+    assertEquals(1, java.io.File(filesDir, "Inbox").listFiles().orEmpty().size)
+  }
+
   @Test fun ownershipCleanupFailureAfterCommitReturnsTheValidatedPublishedImport() {
     val ingestionId = UUID.randomUUID().toString()
     val lockFile = java.io.File(filesDir, "InboxWriterLocks/$ingestionId.lock")

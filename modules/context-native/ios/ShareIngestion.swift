@@ -98,6 +98,7 @@ struct ShareIngestionSummary {
 enum ShareIngestionFatalError: Error, Equatable {
   case invalidInput
   case recoveryRequired
+  case committedRecoveryRequired
   case storageWriteFailed
   case artifactIntegrityFailed
   case interrupted
@@ -133,6 +134,7 @@ final class ShareIngestionSession {
   private let source: String
   private let now: () -> Date
   private let operationHook: (Point) throws -> Void
+  private let publishedManifestReader: (URL, String) throws -> [String: Any]
   private var ownership: InboxWriterOwnership?
   private var items: [[String: Any]] = []
   private var replayedSummary: ShareIngestionSummary?
@@ -143,7 +145,10 @@ final class ShareIngestionSession {
     ingestionId: String,
     source: String = "ios-share-extension",
     now: @escaping () -> Date = Date.init,
-    operationHook: @escaping (Point) throws -> Void = { _ in }
+    operationHook: @escaping (Point) throws -> Void = { _ in },
+    publishedManifestReader: @escaping (URL, String) throws -> [String: Any] = {
+      try InboxManifestValidator.readPublished(inbox: $0, ingestionId: $1)
+    }
   ) throws {
     guard Self.canonicalUUID(ingestionId), Self.allowedSources.contains(source) else {
       throw ShareIngestionFatalError.invalidInput
@@ -155,6 +160,7 @@ final class ShareIngestionSession {
     self.source = source
     self.now = now
     self.operationHook = operationHook
+    self.publishedManifestReader = publishedManifestReader
     let manifest = published.appendingPathComponent("manifest.json")
     ownership = try Self.acquireOwnership(
       container: container,
@@ -196,9 +202,9 @@ final class ShareIngestionSession {
       // Replay detection and validation must remain inside per-ingestion ownership.
       // Otherwise handoff/ACK can remove the directory between the check and read.
       try operationHook(.afterLockedReplayManifestCheck)
-      let validated = try InboxManifestValidator.readPublished(
-        inbox: container.appendingPathComponent("Inbox", isDirectory: true),
-        ingestionId: ingestionId
+      let validated = try publishedManifestReader(
+        container.appendingPathComponent("Inbox", isDirectory: true),
+        ingestionId
       )
       replayedSummary = try Self.summary(validated, ingestionId: ingestionId, replayed: true)
       return
@@ -393,10 +399,7 @@ final class ShareIngestionSession {
       // fsync (or its fault-injection hook) fails.
       try? operationHook(.afterDirectoryPublish)
       try? Self.synchronizeDirectory(inbox)
-      let validated = try InboxManifestValidator.readPublished(
-        inbox: inbox,
-        ingestionId: ingestionId
-      )
+      let validated = try publishedManifestReader(inbox, ingestionId)
       ownership?.release()
       ownership = nil
       return try Self.summary(
@@ -405,8 +408,18 @@ final class ShareIngestionSession {
         replayed: false
       )
     } catch ShareIngestionFatalError.interrupted {
+      if committed {
+        ownership?.release()
+        ownership = nil
+        throw ShareIngestionFatalError.committedRecoveryRequired
+      }
       throw ShareIngestionFatalError.interrupted
     } catch {
+      if committed {
+        ownership?.release()
+        ownership = nil
+        throw ShareIngestionFatalError.committedRecoveryRequired
+      }
       throw ShareIngestionFatalError.storageWriteFailed
     }
   }

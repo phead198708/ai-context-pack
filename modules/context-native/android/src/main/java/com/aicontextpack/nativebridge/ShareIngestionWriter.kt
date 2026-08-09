@@ -42,6 +42,9 @@ data class ShareIngestionSummary(
 
 class ShareIngestionInterruptionException : Exception("SHARE_INGESTION_INTERRUPTED")
 
+class ShareIngestionCommittedRecoveryException :
+  Exception("MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED")
+
 class ShareInputCollectionException(
   val stableCode: String,
 ) : Exception(stableCode)
@@ -78,6 +81,8 @@ object ShareIngestionWriter {
     source: String = "android-share-intent",
     now: () -> Date = { Date() },
     operationHook: (Point) -> Unit = {},
+    publishedManifestReader: (File, String) -> Map<String, Any?> =
+      InboxManifestScanner::readPublished,
   ): ShareIngestionSummary {
     requireCanonicalUuid(ingestionId)
     require(inputs.isNotEmpty())
@@ -107,7 +112,7 @@ object ShareIngestionWriter {
         // Otherwise handoff/ACK can remove the directory between the check and read.
         operationHook(Point.AFTER_LOCKED_REPLAY_MANIFEST_CHECK)
         validatedResult = summary(
-          InboxManifestScanner.readPublished(inbox, ingestionId),
+          publishedManifestReader(inbox, ingestionId),
           replayed = true,
         )
       } else {
@@ -148,7 +153,7 @@ object ShareIngestionWriter {
         operationHook(Point.AFTER_DIRECTORY_PUBLISH)
         synchronizeDirectory(inbox)
         validatedResult = summary(
-          InboxManifestScanner.readPublished(inbox, ingestionId),
+          publishedManifestReader(inbox, ingestionId),
           replayed = false,
         )
       }
@@ -161,7 +166,7 @@ object ShareIngestionWriter {
         // Reconcile while ownership still excludes handoff/ACK. Once the lock is
         // released, the containing app may legitimately remove the Inbox directory.
         validatedResult = summary(
-          InboxManifestScanner.readPublished(inbox, ingestionId),
+          publishedManifestReader(inbox, ingestionId),
           replayed = false,
         )
       } catch (reconciliationFailure: Throwable) {
@@ -183,8 +188,9 @@ object ShareIngestionWriter {
 
     if (committed) {
       validatedResult?.let { return it }
-      failure?.let { throw it }
-      error("INGESTION_COMMITTED_RESULT_MISSING")
+      val committedFailure = ShareIngestionCommittedRecoveryException()
+      failure?.let(committedFailure::addSuppressed)
+      throw committedFailure
     }
 
     validatedResult?.let { return it }

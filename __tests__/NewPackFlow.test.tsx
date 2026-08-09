@@ -15,7 +15,7 @@ import {
 } from '../src/domain/mainAppImport';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
-import { NewPackFlow } from '../src/ui/NewPackFlow';
+import { NewPackFlow, type NewPackFlowHandle } from '../src/ui/NewPackFlow';
 
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 
@@ -62,11 +62,18 @@ type RenderProps = Omit<
   readonly creationReady?: boolean;
 };
 
-async function render(props: RenderProps): Promise<ReactTestRenderer> {
+async function render(
+  props: RenderProps,
+  ref?: React.Ref<NewPackFlowHandle>,
+): Promise<ReactTestRenderer> {
   let renderer: ReactTestRenderer | undefined;
   await act(async () => {
     renderer = TestRenderer.create(
-      <NewPackFlow {...props} creationReady={props.creationReady ?? true} />,
+      <NewPackFlow
+        {...props}
+        ref={ref}
+        creationReady={props.creationReady ?? true}
+      />,
     );
   });
   return renderer as ReactTestRenderer;
@@ -766,6 +773,80 @@ describe('NewPackFlow interactions', () => {
     await press(byLabel(renderer, 'Retry Import Recovery'));
 
     expect(native.publishMainAppImport).toHaveBeenCalledTimes(2);
+    expect(onImported).toHaveBeenCalledWith(committed);
+    expect(text(renderer).replace(/[·\s]+/g, ' ')).toContain('Import complete');
+    expect(onCancel).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  test('locks cancel and back after post-commit validation failure and retries idempotently', async () => {
+    const native = nativeAdapter();
+    const flowRef = React.createRef<NewPackFlowHandle>();
+    const onCancel = jest.fn();
+    const onImported = jest.fn().mockResolvedValue(undefined);
+    const input: MainAppImportInput = {
+      id: '223e4567-e89b-42d3-a456-426614174000',
+      order: 0,
+      kind: 'text',
+      declaredMediaType: 'text/plain',
+      byteCount: 7,
+      text: 'fixture',
+    };
+    const committed: ImportManifestV1 = {
+      schemaVersion: 1,
+      ingestionId,
+      createdAt: '2026-08-07T00:00:00Z',
+      source: 'main-app-text',
+      status: 'complete',
+      items: [
+        {
+          id: input.id,
+          order: 0,
+          mediaType: input.declaredMediaType,
+          status: 'copied',
+          byteCount: input.byteCount,
+          relativePath: `${input.id}.bin`,
+        },
+      ],
+    };
+    native.publishMainAppImport
+      .mockRejectedValueOnce({
+        code: 'MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED',
+      })
+      .mockResolvedValueOnce(committed);
+    const renderer = await render(
+      {
+        native,
+        picker: picker(),
+        onCancel,
+        onImported,
+        createDraft: () => draft([input]),
+      },
+      flowRef,
+    );
+
+    await press(byLabel(renderer, 'Import Pack'));
+
+    expect(text(renderer)).toContain(
+      'MAIN_APP_IMPORT_COMMITTED_RECOVERY_REQUIRED',
+    );
+    expect(text(renderer)).toContain('Import recovery required');
+    expect(
+      renderer.root.findAll(
+        node => node.props.accessibilityLabel === 'Cancel New Pack',
+      ),
+    ).toHaveLength(0);
+    await act(async () => {
+      await flowRef.current?.cancel();
+    });
+    expect(onCancel).not.toHaveBeenCalled();
+
+    await press(byLabel(renderer, 'Retry Import Recovery'));
+
+    expect(native.publishMainAppImport).toHaveBeenCalledTimes(2);
+    expect(native.publishMainAppImport.mock.calls.map(call => call[0])).toEqual(
+      [ingestionId, ingestionId],
+    );
     expect(onImported).toHaveBeenCalledWith(committed);
     expect(text(renderer).replace(/[·\s]+/g, ' ')).toContain('Import complete');
     expect(onCancel).not.toHaveBeenCalled();
