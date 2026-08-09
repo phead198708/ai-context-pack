@@ -525,6 +525,21 @@ describe('InboxEventWorkflow integration', () => {
     });
   });
 
+  test('committed recovery reports the operational cause ahead of a later failure warning', async () => {
+    const scan = jest
+      .fn()
+      .mockResolvedValueOnce([manifest])
+      .mockRejectedValue(new NativeBoundaryError('STORAGE_WRITE_FAILED'));
+    const h = harness({ scanInbox: scan });
+    await h.workflow.bootstrap();
+    await h.workflow.appBecameActive();
+    await h.workflow.receive(event(0, 'failed'));
+
+    await expect(h.workflow.refreshForMainAppImport()).rejects.toMatchObject({
+      code: 'STORAGE_WRITE_FAILED',
+    });
+  });
+
   test('main-app refresh rejects with the latched persistence code and retries it', async () => {
     const process = jest
       .fn()

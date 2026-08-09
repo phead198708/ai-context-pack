@@ -447,8 +447,8 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
   });
 
-  test('reports an oversized failed-item retry set without opening a truncated draft', async () => {
-    const failedItems = Array.from({ length: 21 }, (_, index) => {
+  test('makes every contract-sized failed-item retry batch actionable', async () => {
+    const failedItems = Array.from({ length: 128 }, (_, index) => {
       const itemId = `${String(index + 10).padStart(
         8,
         '0',
@@ -481,11 +481,14 @@ describe('App interactions', () => {
     const renderer = await renderApp();
 
     await press(control(renderer, 'tab', 'detail'));
-    await press(control(renderer, 'button', 'Retry failed items in New Pack'));
+    control(renderer, 'button', 'Retry failed items in New Pack 1–20');
+    await press(
+      control(renderer, 'button', 'Retry failed items in New Pack 121–128'),
+    );
 
-    expect(renderedText(renderer)).toContain('IMPORT_ITEM_LIMIT_EXCEEDED');
-    expect(renderedText(renderer)).toContain('Import detail');
-    expect(renderedText(renderer)).not.toContain('21 selected');
+    expect(renderedText(renderer)).toContain('8 selected');
+    expect(renderedText(renderer)).not.toContain('IMPORT_ITEM_LIMIT_EXCEEDED');
+    expect(renderedText(renderer)).toContain('New Pack');
     expect(mockNative.publishMainAppImport).not.toHaveBeenCalled();
     act(() => renderer.unmount());
   });

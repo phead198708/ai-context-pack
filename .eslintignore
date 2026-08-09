@@ -2,6 +2,7 @@ android/build/
 android/app/build/
 android/**/.cxx/
 coverage/
+vendor/image-size/
 ios/build/
 ios/Pods/
 modules/context-native/android/build/

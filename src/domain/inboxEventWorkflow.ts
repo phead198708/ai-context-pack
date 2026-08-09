@@ -404,7 +404,13 @@ export class InboxEventWorkflow {
   }
 
   private latestBlockerCode(): string {
-    return [...this.blockers.values()].at(-1) ?? 'INBOX_SCAN_FAILED';
+    return (
+      [...this.blockers]
+        .filter(([key]) => !key.startsWith('failure:'))
+        .at(-1)?.[1] ??
+      this.latestFailureBlockerCode() ??
+      'INBOX_SCAN_FAILED'
+    );
   }
 
   private latestFailureBlockerCode(): string | undefined {

@@ -20,6 +20,7 @@ import {
 import type { ImportManifestV1 } from './src/domain/contracts';
 import {
   createRetryMainAppImportDraft,
+  MAIN_APP_IMPORT_MAX_ITEMS,
   type MainAppImportDraft,
 } from './src/domain/mainAppImport';
 import { nativeAdapter } from './src/infrastructure/nativeAdapter';
@@ -355,6 +356,21 @@ function ImportDetail({
           ]
         : [],
     ) ?? [];
+  const retryBatches = Array.from(
+    { length: Math.ceil(retrySources.length / MAIN_APP_IMPORT_MAX_ITEMS) },
+    (_, index) => {
+      const start = index * MAIN_APP_IMPORT_MAX_ITEMS;
+      const end = Math.min(
+        start + MAIN_APP_IMPORT_MAX_ITEMS,
+        retrySources.length,
+      );
+      return {
+        start,
+        end,
+        sources: retrySources.slice(start, end),
+      };
+    },
+  );
   return (
     <StateCard
       title={t(locale, 'importDetail')}
@@ -384,12 +400,15 @@ function ImportDetail({
           : t(locale, 'noImportSelected')
       }
     >
-      {retrySources.length > 0 ? (
+      {retryBatches.map(batch => (
         <Action
-          label={t(locale, 'retryFailedItems')}
-          onPress={() => onRetryFailed(retrySources)}
+          key={`${batch.start}-${batch.end}`}
+          label={`${t(locale, 'retryFailedItems')}${
+            retryBatches.length > 1 ? ` ${batch.start + 1}–${batch.end}` : ''
+          }`}
+          onPress={() => onRetryFailed(batch.sources)}
         />
-      ) : null}
+      ))}
       {retryError ? (
         <Text accessibilityRole="alert" style={styles.error}>
           {retryError}

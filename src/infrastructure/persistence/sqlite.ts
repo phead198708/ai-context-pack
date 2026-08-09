@@ -271,10 +271,10 @@ export class ExpoSqlitePersistenceRepository
           artifact_sha256: string | null;
         }>(
           `SELECT item.id, item.sort_index, item.media_type, item.status, item.error_code,
-             (SELECT COUNT(*) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_count,
-             (SELECT MAX(relative_path) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_relative_path,
-             (SELECT MAX(byte_count) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_byte_count,
-             (SELECT MAX(sha256) FROM artifacts artifact WHERE artifact.item_id = item.id) AS artifact_sha256
+             (SELECT COUNT(*) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_count,
+             (SELECT MAX(relative_path) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_relative_path,
+             (SELECT MAX(byte_count) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_byte_count,
+             (SELECT MAX(sha256) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_sha256
            FROM import_items item WHERE item.ingestion_id = ?
            ORDER BY item.sort_index, item.id`,
           [row.ingestion_id],
@@ -297,7 +297,7 @@ export class ExpoSqlitePersistenceRepository
               requireCanonicalId(item.id);
               if (
                 item.sort_index !== index ||
-                !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(
+                !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(
                   item.media_type,
                 ) ||
                 item.media_type.length > 127 ||

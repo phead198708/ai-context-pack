@@ -1478,6 +1478,48 @@ final class InboxArtifactHandoffTests: XCTestCase {
     ))
   }
 
+  func testDestinationPacksSwapBackToDisplacedTreeFailsClosed() throws {
+    let ingestionId = UUID().uuidString.lowercased()
+    let packId = UUID().uuidString.lowercased()
+    let itemId = UUID().uuidString.lowercased()
+    try writeManifest(
+      ingestionId: ingestionId,
+      items: [(itemId, "image/png", Data([1, 2, 3]))]
+    )
+    let packs = applicationSupport.appendingPathComponent("Packs", isDirectory: true)
+    let displaced = applicationSupport.appendingPathComponent(
+      "Packs-displaced",
+      isDirectory: true
+    )
+    var swapped = false
+
+    XCTAssertThrowsError(try InboxArtifactHandoff.handoff(
+      container: container,
+      applicationSupport: applicationSupport,
+      ingestionId: ingestionId,
+      packId: packId,
+      requiredHeadroomBytes: 0,
+      availableBytes: { _ in Int64.max },
+      operationHook: { point in
+        guard samePoint(point, .beforeCopy), !swapped else { return }
+        swapped = true
+        try FileManager.default.moveItem(at: packs, to: displaced)
+        try FileManager.default.createSymbolicLink(
+          at: packs,
+          withDestinationURL: displaced
+        )
+      }
+    )) { error in
+      XCTAssertEqual(error as? InboxArtifactHandoffError, .integrityFailed)
+    }
+    XCTAssertTrue(swapped)
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: displaced
+        .appendingPathComponent("\(packId)/originals/\(itemId).bin")
+        .path
+    ))
+  }
+
   func testTwentyImageAndNearLimitPdfCopyBenchmarkDoesNotRunOcr() throws {
     let imageIngestion = UUID().uuidString.lowercased()
     let imagePack = UUID().uuidString.lowercased()

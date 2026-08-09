@@ -366,6 +366,18 @@ describe('production repository against SQLite', () => {
         immutable: true,
       },
     });
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        ingestionId,
+        packId,
+        itemCount: 2,
+        artifactCount: 2,
+        items: [
+          expect.objectContaining({ id: firstItemId, status: 'copied' }),
+          expect.objectContaining({ id: secondItemId, status: 'copied' }),
+        ],
+      }),
+    ]);
     const record: ExportRecord = {
       id: exportId,
       packId,

@@ -1,0 +1,53 @@
+{
+  "name": "@aicp/image-size",
+  "version": "1.2.1",
+  "description": "get dimensions of any image file",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "bin/image-size.js"
+  ],
+  "engines": {
+    "node": ">=16.x"
+  },
+  "bin": "bin/image-size.js",
+  "keywords": [
+    "image",
+    "size",
+    "dimensions",
+    "resolution",
+    "width",
+    "height",
+    "avif",
+    "bmp",
+    "cur",
+    "gif",
+    "heic",
+    "heif",
+    "icns",
+    "ico",
+    "jpeg",
+    "jxl",
+    "png",
+    "psd",
+    "svg",
+    "tga",
+    "tiff",
+    "webp"
+  ],
+  "repository": "git://github.com/image-size/image-size.git",
+  "author": "netroy <aditya@netroy.in> (http://netroy.in/)",
+  "license": "MIT",
+  "aicpSecurityPatch": {
+    "upstream": "image-size@1.2.1",
+    "advisories": [
+      "GHSA-w3rx-r6r6-pgpr",
+      "GHSA-5p2g-fcmc-qvqq"
+    ],
+    "scope": "Reject non-advancing BMFF boxes and ICNS entries before parsing."
+  },
+  "dependencies": {
+    "queue": "6.0.2"
+  }
+}

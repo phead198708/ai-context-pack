@@ -92,10 +92,12 @@ enum InboxArtifactHandoff {
     guard let items = manifest["items"] as? [[String: Any]] else {
       throw InboxArtifactHandoffError.manifestMissing
     }
-    let destinationDirectory = applicationSupport
-      .appendingPathComponent("Packs", isDirectory: true)
-      .appendingPathComponent(packId, isDirectory: true)
-      .appendingPathComponent("originals", isDirectory: true)
+    let packsDirectory = applicationSupport.appendingPathComponent("Packs", isDirectory: true)
+    let packDirectory = packsDirectory.appendingPathComponent(packId, isDirectory: true)
+    let destinationDirectory = packDirectory.appendingPathComponent("originals", isDirectory: true)
+    let ownedDestinationDirectories = [
+      applicationSupport, packsDirectory, packDirectory, destinationDirectory,
+    ]
     func sourceDescriptor(
       _ item: [String: Any]
     ) throws -> (name: String, byteCount: Int64, sha256: String?)? {
@@ -160,7 +162,10 @@ enum InboxArtifactHandoff {
       packId: packId,
       directorySynchronizer: directorySynchronizer
     )
-    let destinationDescriptor = try openDestinationDirectory(destinationDirectory)
+    let destinationDescriptor = try openDestinationDirectory(
+      destinationDirectory,
+      ownedDirectories: ownedDestinationDirectories
+    )
     defer { Darwin.close(destinationDescriptor) }
 
     let artifacts: [[String: Any]] = try items.compactMap { item -> [String: Any]? in
@@ -174,6 +179,7 @@ enum InboxArtifactHandoff {
       let actualHash = try publish(
         source: source,
         destinationDirectory: destinationDirectory,
+        ownedDirectories: ownedDestinationDirectories,
         destinationDescriptor: destinationDescriptor,
         itemId: itemId,
         byteCount: descriptor.byteCount,
@@ -418,6 +424,7 @@ enum InboxArtifactHandoff {
   private static func publish(
     source: URL,
     destinationDirectory: URL,
+    ownedDirectories: [URL],
     destinationDescriptor: Int32,
     itemId: String,
     byteCount: Int64,
@@ -427,7 +434,11 @@ enum InboxArtifactHandoff {
   ) throws -> String {
     let destinationName = "\(itemId).bin"
     let partialName = "\(destinationName).partial"
-    try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+    try requireDestinationIdentity(
+      destinationDirectory,
+      ownedDirectories: ownedDirectories,
+      descriptor: destinationDescriptor
+    )
     if Darwin.faccessat(destinationDescriptor, destinationName, F_OK, AT_SYMLINK_NOFOLLOW) == 0 {
       let sourceHash = try verify(url: source, byteCount: byteCount, sha256: sha256)
       let existingHash = try verify(
@@ -436,14 +447,22 @@ enum InboxArtifactHandoff {
         byteCount: byteCount,
         sha256: sourceHash
       )
-      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      try requireDestinationIdentity(
+        destinationDirectory,
+        ownedDirectories: ownedDirectories,
+        descriptor: destinationDescriptor
+      )
       return existingHash
     }
     if Darwin.unlinkat(destinationDescriptor, partialName, 0) != 0 && errno != ENOENT {
       throw InboxArtifactHandoffError.writeFailed
     }
     try operationHook(.beforeCopy)
-    try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+    try requireDestinationIdentity(
+      destinationDirectory,
+      ownedDirectories: ownedDirectories,
+      descriptor: destinationDescriptor
+    )
     let outputDescriptor = Darwin.openat(
       destinationDescriptor,
       partialName,
@@ -477,6 +496,7 @@ enum InboxArtifactHandoff {
             try operationHook(.duringCopy)
             try requireDestinationIdentity(
               destinationDirectory,
+              ownedDirectories: ownedDirectories,
               descriptor: destinationDescriptor
             )
           }
@@ -493,7 +513,11 @@ enum InboxArtifactHandoff {
         throw error
       }
       try operationHook(.afterFileClose)
-      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      try requireDestinationIdentity(
+        destinationDirectory,
+        ownedDirectories: ownedDirectories,
+        descriptor: destinationDescriptor
+      )
       let actualHash = try verify(
         directoryDescriptor: destinationDescriptor,
         name: partialName,
@@ -501,7 +525,11 @@ enum InboxArtifactHandoff {
         sha256: sha256
       )
       try operationHook(.beforePublishRename)
-      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      try requireDestinationIdentity(
+        destinationDirectory,
+        ownedDirectories: ownedDirectories,
+        descriptor: destinationDescriptor
+      )
       guard Darwin.renameat(
         destinationDescriptor,
         partialName,
@@ -514,9 +542,17 @@ enum InboxArtifactHandoff {
       guard Darwin.fsync(destinationDescriptor) == 0 else {
         throw InboxArtifactHandoffError.writeFailed
       }
-      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      try requireDestinationIdentity(
+        destinationDirectory,
+        ownedDirectories: ownedDirectories,
+        descriptor: destinationDescriptor
+      )
       try directorySynchronizer(destinationDirectory)
-      try requireDestinationIdentity(destinationDirectory, descriptor: destinationDescriptor)
+      try requireDestinationIdentity(
+        destinationDirectory,
+        ownedDirectories: ownedDirectories,
+        descriptor: destinationDescriptor
+      )
       return actualHash
     } catch let error as InboxArtifactHandoffError {
       _ = Darwin.unlinkat(
@@ -625,11 +661,18 @@ enum InboxArtifactHandoff {
     }
   }
 
-  private static func openDestinationDirectory(_ directory: URL) throws -> Int32 {
+  private static func openDestinationDirectory(
+    _ directory: URL,
+    ownedDirectories: [URL]
+  ) throws -> Int32 {
     let descriptor = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
     guard descriptor >= 0 else { throw InboxArtifactHandoffError.integrityFailed }
     do {
-      try requireDestinationIdentity(directory, descriptor: descriptor)
+      try requireDestinationIdentity(
+        directory,
+        ownedDirectories: ownedDirectories,
+        descriptor: descriptor
+      )
       return descriptor
     } catch {
       Darwin.close(descriptor)
@@ -639,6 +682,7 @@ enum InboxArtifactHandoff {
 
   private static func requireDestinationIdentity(
     _ directory: URL,
+    ownedDirectories: [URL],
     descriptor: Int32
   ) throws {
     var held = stat()
@@ -646,19 +690,24 @@ enum InboxArtifactHandoff {
           (held.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
       throw InboxArtifactHandoffError.integrityFailed
     }
-    let currentDescriptor = Darwin.open(
-      directory.path,
-      O_RDONLY | O_DIRECTORY | O_NOFOLLOW
-    )
-    guard currentDescriptor >= 0 else {
-      throw InboxArtifactHandoffError.integrityFailed
-    }
-    defer { Darwin.close(currentDescriptor) }
-    var current = stat()
-    guard Darwin.fstat(currentDescriptor, &current) == 0,
-          current.st_dev == held.st_dev,
-          current.st_ino == held.st_ino else {
-      throw InboxArtifactHandoffError.integrityFailed
+    for ownedDirectory in ownedDirectories {
+      let currentDescriptor = Darwin.open(
+        ownedDirectory.path,
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+      )
+      guard currentDescriptor >= 0 else {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
+      defer { Darwin.close(currentDescriptor) }
+      var current = stat()
+      guard Darwin.fstat(currentDescriptor, &current) == 0,
+            (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
+      if ownedDirectory.standardizedFileURL.path == directory.standardizedFileURL.path,
+         (current.st_dev != held.st_dev || current.st_ino != held.st_ino) {
+        throw InboxArtifactHandoffError.integrityFailed
+      }
     }
   }
 

@@ -68,7 +68,12 @@ internal object InboxArtifactHandoff {
     @Suppress("UNCHECKED_CAST")
     val items = manifest["items"] as? List<Map<String, Any?>>
       ?: throw InboxArtifactHandoffException("SCHEMA_INVALID")
-    val destinationDirectory = File(filesDir, "Packs/$packId/originals")
+    val packsDirectory = File(filesDir, "Packs")
+    val packDirectory = File(packsDirectory, packId)
+    val destinationDirectory = File(packDirectory, "originals")
+    val ownedDestinationDirectories = listOf(
+      filesDir, packsDirectory, packDirectory, destinationDirectory,
+    )
     var requiredFreeBytes = requiredHeadroomBytes
     items.forEach { item ->
       val itemId = item["id"] as? String
@@ -87,6 +92,7 @@ internal object InboxArtifactHandoff {
     ensureDestinationHierarchy(filesDir, packId, directorySynchronizer)
     val artifacts: List<Map<String, Any>> = withDestinationDirectory(
       destinationDirectory,
+      ownedDestinationDirectories,
     ) { anchoredDirectory, destinationDescriptor ->
       items.mapNotNull { item ->
         val itemId = item["id"] as? String
@@ -99,6 +105,7 @@ internal object InboxArtifactHandoff {
         val actualHash = publish(
           source,
           destinationDirectory,
+          ownedDestinationDirectories,
           anchoredDirectory,
           destinationDescriptor,
           itemId,
@@ -328,6 +335,7 @@ internal object InboxArtifactHandoff {
   private fun publish(
     source: File,
     destinationDirectory: File,
+    ownedDirectories: List<File>,
     anchoredDirectory: File,
     destinationDescriptor: FileDescriptor,
     itemId: String,
@@ -338,11 +346,15 @@ internal object InboxArtifactHandoff {
   ): String {
     val destination = File(anchoredDirectory, "$itemId.bin")
     val partial = File(anchoredDirectory, "$itemId.bin.partial")
-    requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+    requireDestinationIdentity(
+      destinationDirectory, ownedDirectories, destinationDescriptor,
+    )
     if (destination.exists()) {
       val sourceHash = verify(source, byteCount, expectedHash)
       val existingHash = verify(destination, byteCount, sourceHash)
-      requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
       return existingHash
     }
     if (partial.exists()) {
@@ -350,7 +362,9 @@ internal object InboxArtifactHandoff {
       catch (_: Exception) { throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED") }
     }
     operationHook(Point.BEFORE_COPY)
-    requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+    requireDestinationIdentity(
+      destinationDirectory, ownedDirectories, destinationDescriptor,
+    )
     val outputDescriptor = try {
       Os.open(
         partial.path,
@@ -382,7 +396,9 @@ internal object InboxArtifactHandoff {
             if (firstChunk) {
               firstChunk = false
               operationHook(Point.DURING_COPY)
-              requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+              requireDestinationIdentity(
+                destinationDirectory, ownedDirectories, destinationDescriptor,
+              )
             }
           }
           if (total != byteCount) {
@@ -393,18 +409,26 @@ internal object InboxArtifactHandoff {
         }
       }
       operationHook(Point.AFTER_FILE_CLOSE)
-      requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
       val actualHash = verify(partial, byteCount, expectedHash)
       operationHook(Point.BEFORE_PUBLISH_RENAME)
-      requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
       try { Os.rename(partial.path, destination.path) }
       catch (_: Exception) { throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED") }
       published = true
       try { Os.fsync(destinationDescriptor) }
       catch (_: Exception) { throw InboxArtifactHandoffException("STORAGE_WRITE_FAILED") }
-      requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
       directorySynchronizer(destinationDirectory)
-      requireDestinationIdentity(destinationDirectory, destinationDescriptor)
+      requireDestinationIdentity(
+        destinationDirectory, ownedDirectories, destinationDescriptor,
+      )
       return actualHash
     } catch (error: InboxArtifactHandoffException) {
       if (outputOwned) runCatching { Os.close(outputDescriptor) }
@@ -483,6 +507,7 @@ internal object InboxArtifactHandoff {
 
   private fun <T> withDestinationDirectory(
     directory: File,
+    ownedDirectories: List<File>,
     block: (anchoredDirectory: File, descriptor: FileDescriptor) -> T,
   ): T {
     val rawDescriptor = try {
@@ -503,15 +528,16 @@ internal object InboxArtifactHandoff {
     holder.use {
       val descriptor = it.fileDescriptor
       val anchoredDirectory = File("/proc/self/fd/${it.fd}")
-      requireDestinationIdentity(directory, descriptor)
+      requireDestinationIdentity(directory, ownedDirectories, descriptor)
       val result = block(anchoredDirectory, descriptor)
-      requireDestinationIdentity(directory, descriptor)
+      requireDestinationIdentity(directory, ownedDirectories, descriptor)
       return result
     }
   }
 
   private fun requireDestinationIdentity(
     directory: File,
+    ownedDirectories: List<File>,
     descriptor: FileDescriptor,
   ) {
     val held = try { Os.fstat(descriptor) }
@@ -521,26 +547,28 @@ internal object InboxArtifactHandoff {
     if (!OsConstants.S_ISDIR(held.st_mode)) {
       throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
     }
-    val currentDescriptor = try {
-      Os.open(
-        directory.path,
-        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
-        0,
-      )
-    } catch (_: Exception) {
-      throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
-    }
-    try {
-      val current = Os.fstat(currentDescriptor)
-      if (
-        !OsConstants.S_ISDIR(current.st_mode) ||
-        current.st_dev != held.st_dev ||
-        current.st_ino != held.st_ino
-      ) {
+    ownedDirectories.forEach { ownedDirectory ->
+      val currentDescriptor = try {
+        Os.open(
+          ownedDirectory.path,
+          OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW,
+          0,
+        )
+      } catch (_: Exception) {
         throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
       }
-    } finally {
-      runCatching { Os.close(currentDescriptor) }
+      try {
+        val current = Os.fstat(currentDescriptor)
+        if (
+          !OsConstants.S_ISDIR(current.st_mode) ||
+          (ownedDirectory.path == directory.path &&
+            (current.st_dev != held.st_dev || current.st_ino != held.st_ino))
+        ) {
+          throw InboxArtifactHandoffException("ARTIFACT_INTEGRITY_FAILED")
+        }
+      } finally {
+        runCatching { Os.close(currentDescriptor) }
+      }
     }
   }
 

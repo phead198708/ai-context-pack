@@ -6,6 +6,8 @@ ios/Pods/
 modules/context-native/android/build/
 modules/context-native/ios/.build/
 coverage/
+build/
+vendor/image-size/
 docs/wiki/
 .github/
 ios/**/Images.xcassets/
