@@ -496,9 +496,10 @@ export function isPDFPageExtractionV1(
       return false;
     const blocks = value.blocks as readonly OCRBlockV1[];
     if (blocks.length > 0 && !areOCRBlocksInReadingOrder(blocks)) return false;
+    if (value.method === 'embedded-text') return blocks.length === 0;
     return typeof value.embeddedText === 'string'
       ? sparsePDFBlocksReconcileToText(value.embeddedText, blocks, value.text)
-      : blocks.length === 0 || ocrBlocksMatchText(blocks, value.text);
+      : ocrBlocksMatchText(blocks, value.text);
   }
   return (
     value.status === 'failed' &&

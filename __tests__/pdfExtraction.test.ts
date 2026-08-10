@@ -366,6 +366,30 @@ describe('PDFTaskRunner', () => {
     ).toThrow(new PDFTaskError('PDF_RESULT_INVALID'));
   });
 
+  test('fails closed when export-readiness receives unsupported rendered OCR text', () => {
+    const forgedPage = {
+      ...completePage(0),
+      method: 'rendered-ocr' as const,
+      engine: 'ml-kit' as const,
+      revision: '16.0.1',
+      characterCount: 6,
+      warnings: ['PDF_PAGE_OCR_FALLBACK'] as const,
+      text: 'forged',
+      blocks: [],
+    };
+
+    expect(() =>
+      getPDFExtractionReadiness({
+        schemaVersion: 1,
+        taskId: ids[0],
+        document: { ...document, pageCount: 1 },
+        status: 'complete',
+        pages: [forgedPage],
+        failedPageIndexes: [],
+      }),
+    ).toThrow(new PDFTaskError('PDF_RESULT_INVALID'));
+  });
+
   test('checkpoints cancellation and never starts a queued native page', async () => {
     const firstPage = deferred<PDFPageExtractionV1>();
     const cancelPdfExtraction = jest.fn().mockResolvedValue(undefined);

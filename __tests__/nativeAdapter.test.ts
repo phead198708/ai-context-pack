@@ -264,6 +264,37 @@ describe('native adapter runtime boundary', () => {
     });
   });
 
+  test('rejects rendered OCR text without supporting native blocks', async () => {
+    const taskId = '123e4567-e89b-42d3-a456-426614174000';
+    const forgedPage = {
+      schemaVersion: 1,
+      pageIndex: 0,
+      method: 'rendered-ocr',
+      engine: 'ml-kit',
+      revision: '16.0.1',
+      durationMs: 1,
+      characterCount: 6,
+      warnings: ['PDF_PAGE_OCR_FALLBACK'],
+      status: 'complete',
+      text: 'forged',
+      blocks: [],
+    };
+    const guarded = createNativeAdapter({
+      ...mockNativeModule,
+      extractPdfPage: jest.fn().mockResolvedValue(forgedPage),
+    });
+
+    await expect(
+      guarded.extractPdfPage({
+        taskId,
+        fileUri: 'file:///cache/synthetic.pdf',
+        sourceSha256: 'a'.repeat(64),
+        pageIndex: 0,
+        script: 'latin',
+      }),
+    ).rejects.toMatchObject({ code: 'PDF_RESULT_INVALID' });
+  });
+
   test('fails closed on invalid PDF/text requests, DTOs, and unknown native errors', async () => {
     const taskId = '123e4567-e89b-42d3-a456-426614174000';
     const native = {
