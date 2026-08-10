@@ -307,6 +307,51 @@ describe('production repository against SQLite', () => {
     ).toMatchObject({ state: 'failed', retryStage: 'package' });
   });
 
+  test('migrates a retained v3 import failure to the import retry checkpoint', async () => {
+    database
+      .prepare(
+        "UPDATE import_items SET status = 'failed', error_code = 'IMPORT_COPY_FAILED' WHERE id = ?",
+      )
+      .run(firstItemId);
+    database
+      .prepare("UPDATE imports SET status = 'partial' WHERE ingestion_id = ?")
+      .run(ingestionId);
+    database
+      .prepare("UPDATE context_items SET state = 'failed' WHERE id = ?")
+      .run(firstItemId);
+    database.exec('ALTER TABLE context_items DROP COLUMN retry_stage');
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 3');
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === firstItemId,
+      ),
+    ).toMatchObject({ state: 'failed', retryStage: 'import' });
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        status: 'partial',
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            id: firstItemId,
+            status: 'failed',
+            retrySource: expect.objectContaining({
+              relativePath: `Packs/${packId}/originals/${firstItemId}.bin`,
+            }),
+          }),
+        ]),
+      }),
+    ]);
+  });
+
   test('materializes photo, PDF, text, and URL main-app imports as ordered ContextItems', async () => {
     const items = [
       { id: mainAppImageId, mediaType: 'image/png', bytes: 4, hash: '1' },
@@ -432,6 +477,27 @@ describe('production repository against SQLite', () => {
     expect(
       (await repository.findPackGraph(packId))?.pack.orderedItemIds,
     ).toEqual([secondItemId]);
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        ingestionId,
+        items: [
+          expect.objectContaining({
+            id: firstItemId,
+            status: 'copied',
+            originalReleased: true,
+          }),
+          expect.objectContaining({ id: secondItemId, status: 'copied' }),
+        ],
+      }),
+    ]);
   });
 
   test('round-trips risk/export records and releases only unreferenced artifacts on Pack deletion', async () => {

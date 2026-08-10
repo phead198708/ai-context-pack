@@ -6,6 +6,7 @@ import type {
   SavePackGraphInput,
 } from '../src/infrastructure/persistence/contracts';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
+import type { PackProcessingScheduler } from '../src/features/packLibrary/processing';
 
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const firstId = '223e4567-e89b-42d3-a456-426614174000';
@@ -85,6 +86,29 @@ function repository(graph = fixture()) {
   return { value, saves };
 }
 
+function scheduler(): jest.Mocked<PackProcessingScheduler> {
+  return {
+    launch: jest.fn(),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+}
+
+function graphWithPackagedItems(
+  state: ContextPack['state'],
+): PersistedPackGraph {
+  const graph = fixture();
+  return {
+    ...graph,
+    pack: { ...graph.pack, state },
+    items: graph.items.map(item => {
+      const checkpoint = { ...item };
+      delete checkpoint.retryStage;
+      return { ...checkpoint, state: 'packaged' as const };
+    }),
+  };
+}
+
 test('serializes rename/reorder and persists downstream order', async () => {
   const repo = repository();
   const controller = new PackLibraryController(
@@ -102,12 +126,7 @@ test('serializes rename/reorder and persists downstream order', async () => {
 });
 
 test('reorder invalidates packaged rows and restarts downstream packaging', async () => {
-  const graph = fixture();
-  const readyGraph: PersistedPackGraph = {
-    ...graph,
-    pack: { ...graph.pack, state: 'ready' },
-    items: graph.items.map(item => ({ ...item, state: 'packaged' as const })),
-  };
+  const readyGraph = graphWithPackagedItems('ready');
   const repo = repository(readyGraph);
   const controller = new PackLibraryController(
     async () => repo.value,
@@ -140,11 +159,36 @@ test('preserves originals by default and requires explicit release for destructi
   expect(repo.saves[0]?.items.map(item => item.id)).toEqual([secondId]);
 });
 
+test.each(['ready', 'exporting', 'exported'] as const)(
+  'removal from a %s Pack invalidates packaged output and restarts packaging',
+  async state => {
+    const repo = repository(graphWithPackagedItems(state));
+    const controller = new PackLibraryController(async () => repo.value);
+
+    await controller.removeItem(packId, firstId, 'preserve');
+
+    expect(repo.saves[0]?.pack).toMatchObject({
+      state: 'processing',
+      orderedItemIds: [secondId],
+    });
+    expect(repo.saves[0]?.items).toEqual([
+      expect.objectContaining({
+        id: secondId,
+        state: 'reviewed',
+        sortIndex: 0,
+      }),
+    ]);
+    expect(repo.saves[0]?.removedItemOriginalDisposition).toBe('preserve');
+  },
+);
+
 test('retries at the durable extraction checkpoint without duplicating the original', async () => {
   const repo = repository();
+  const processing = scheduler();
   const controller = new PackLibraryController(
     async () => repo.value,
     () => '2026-08-10T00:00:02Z',
+    processing,
   );
 
   await expect(controller.retryItem(packId, secondId)).resolves.toEqual({
@@ -155,6 +199,17 @@ test('retries at the durable extraction checkpoint without duplicating the origi
   });
   expect(repo.saves).toHaveLength(1);
   expect(repo.saves[0]?.pack.state).toBe('processing');
+  expect(repo.saves[0]?.startedPipelineRuns).toEqual([
+    expect.objectContaining({
+      packId,
+      itemId: secondId,
+      stage: 'extract',
+      startedAt: '2026-08-10T00:00:02Z',
+    }),
+  ]);
+  expect(processing.launch).toHaveBeenCalledWith(
+    repo.saves[0]?.startedPipelineRuns,
+  );
   expect(repo.saves[0]?.items.find(item => item.id === secondId)).toMatchObject(
     {
       state: 'imported',
@@ -200,11 +255,21 @@ test('cancels only active work through the shared state machines', async () => {
     ...graph,
     pack: { ...graph.pack, state: 'processing' },
   });
-  const controller = new PackLibraryController(async () => repo.value);
+  const processing = scheduler();
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:04Z',
+    processing,
+  );
 
   await controller.cancelProcessing(packId);
 
   expect(repo.saves[0]?.pack.state).toBe('cancelled');
+  expect(repo.saves[0]?.cancelActivePipelineRuns).toBe(true);
+  expect(processing.cancel).toHaveBeenCalledWith(
+    packId,
+    '2026-08-10T00:00:04Z',
+  );
   expect(repo.saves[0]?.items.map(item => item.state)).toEqual([
     'imported',
     'failed',
@@ -229,6 +294,12 @@ test('Pack retry resumes item checkpoints while retaining immutable originals', 
       stage: 'extract',
       completedArtifactIds: [secondId],
     },
+    {
+      packId,
+      itemId: firstId,
+      stage: 'extract',
+      completedArtifactIds: [firstId],
+    },
   ]);
   expect(repo.saves[0]?.pack.state).toBe('processing');
   expect(repo.saves[0]?.items).toEqual(
@@ -241,6 +312,53 @@ test('Pack retry resumes item checkpoints while retaining immutable originals', 
       }),
     ]),
   );
+});
+
+test('Pack retry reactivates an export-level failure when every item is packaged', async () => {
+  const repo = repository(graphWithPackagedItems('failed'));
+  const controller = new PackLibraryController(async () => repo.value);
+
+  await expect(controller.retryPack(packId)).resolves.toEqual([]);
+
+  expect(repo.saves).toHaveLength(1);
+  expect(repo.saves[0]?.pack.state).toBe('ready');
+  expect(repo.saves[0]?.items.map(item => item.state)).toEqual([
+    'packaged',
+    'packaged',
+  ]);
+});
+
+test('Pack retry does not hide a provider-less failed item behind a packaged item', async () => {
+  const graph = graphWithPackagedItems('failed');
+  const failed = graph.items[1]!;
+  const failedWithoutOriginal: ContextItem = {
+    id: failed.id,
+    packId: failed.packId,
+    sourceType: failed.sourceType,
+    mediaType: failed.mediaType,
+    ...(failed.originalDisplayName
+      ? { originalDisplayName: failed.originalDisplayName }
+      : {}),
+    artifactIds: [],
+    state: 'failed',
+    retryStage: 'import',
+    riskFindingIds: failed.riskFindingIds,
+    inclusionMode: failed.inclusionMode,
+    sortIndex: failed.sortIndex,
+  };
+  const repo = repository({
+    ...graph,
+    items: [graph.items[0]!, failedWithoutOriginal],
+  });
+  (repo.value.listArtifactRecords as jest.Mock).mockResolvedValue([
+    original(firstId),
+  ]);
+  const controller = new PackLibraryController(async () => repo.value);
+
+  await expect(controller.retryPack(packId)).rejects.toMatchObject({
+    code: 'DOMAIN_INVALID_TRANSITION',
+  });
+  expect(repo.saves).toHaveLength(0);
 });
 
 test('packaging retry restores reviewed without repeating analysis or review', async () => {

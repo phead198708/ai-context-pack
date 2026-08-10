@@ -90,6 +90,7 @@ function App(): React.JSX.Element {
   const effectivePackCreationReady = packCreationReady && !creatingEmptyDraft;
   useEffect(() => {
     let mounted = true;
+    packLibraryController.recoverProcessing().catch(() => undefined);
     workflow.current?.bootstrap().finally(() => {
       if (mounted)
         setPackCreationReady(workflow.current?.isPackCreationReady() === true);

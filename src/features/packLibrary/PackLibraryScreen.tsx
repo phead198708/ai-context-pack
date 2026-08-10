@@ -192,6 +192,7 @@ export function PackLibraryScreen({
           busy={busy}
           controller={controller}
           detail={detail}
+          key={detail.pack.id}
           locale={locale}
           mutate={mutate}
         />
@@ -287,17 +288,10 @@ function PackEditor({
   readonly locale: AppLocale;
   readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
 }): React.JSX.Element {
-  const [title, setTitle] = useState(detail.pack.title);
-  const [instruction, setInstruction] = useState(detail.pack.userInstruction);
-  useEffect(() => {
-    setTitle(detail.pack.title);
-    setInstruction(detail.pack.userInstruction);
-  }, [
-    detail.pack.id,
-    detail.pack.title,
+  const [title, setTitle] = usePersistedDraft(detail.pack.title);
+  const [instruction, setInstruction] = usePersistedDraft(
     detail.pack.userInstruction,
-    detail.revision,
-  ]);
+  );
   return (
     <View style={styles.editor} testID={`pack-editor-${detail.pack.id}`}>
       <Text accessibilityRole="header" style={styles.heading}>
@@ -317,6 +311,7 @@ function PackEditor({
       </Text>
       <TextInput
         accessibilityLabel={t(locale, 'packTitle')}
+        editable={!busy}
         maxLength={120}
         onChangeText={setTitle}
         style={styles.input}
@@ -331,6 +326,7 @@ function PackEditor({
       />
       <TextInput
         accessibilityLabel={t(locale, 'taskInstruction')}
+        editable={!busy}
         maxLength={4_000}
         multiline
         onChangeText={setInstruction}
@@ -402,8 +398,7 @@ function ItemEditorRow({
   readonly packId: string;
   readonly total: number;
 }): React.JSX.Element {
-  const [name, setName] = useState(item.displayName);
-  useEffect(() => setName(item.displayName), [item.displayName, item.id]);
+  const [name, setName] = usePersistedDraft(item.displayName);
   const move = useCallback(
     (target: number) => {
       if (busy || target < 0 || target >= total || target === index) return;
@@ -492,6 +487,7 @@ function ItemEditorRow({
       ) : null}
       <TextInput
         accessibilityLabel={`${t(locale, 'itemName')} ${index + 1}`}
+        editable={!busy}
         maxLength={160}
         onChangeText={setName}
         style={styles.input}
@@ -563,6 +559,28 @@ function ItemEditorRow({
       </View>
     </View>
   );
+}
+
+/** Preserve edits to one field while an unrelated mutation refreshes the graph. */
+function usePersistedDraft(
+  persistedValue: string,
+): readonly [string, (value: string) => void] {
+  const [value, setValue] = useState(persistedValue);
+  const dirty = useRef(false);
+  useEffect(() => {
+    setValue(current => {
+      if (current === persistedValue) {
+        dirty.current = false;
+        return current;
+      }
+      return dirty.current ? current : persistedValue;
+    });
+  }, [persistedValue]);
+  const change = useCallback((next: string) => {
+    dirty.current = true;
+    setValue(next);
+  }, []);
+  return [value, change] as const;
 }
 
 function Button({

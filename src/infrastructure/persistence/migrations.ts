@@ -227,6 +227,11 @@ ALTER TABLE context_items ADD COLUMN retry_stage TEXT;
 -- executable stage from immutable evidence; all v4 writes persist the exact stage.
 UPDATE context_items
 SET retry_stage = CASE
+  WHEN EXISTS (
+    SELECT 1 FROM import_items imported_item
+    WHERE imported_item.id = context_items.id
+      AND imported_item.status = 'failed'
+  ) THEN 'import'
   WHEN original_relative_path IS NULL THEN 'import'
   WHEN EXISTS (
     SELECT 1 FROM artifacts artifact
@@ -238,5 +243,49 @@ END
 WHERE state IN ('recovering', 'failed', 'cancelled');
 
 PRAGMA user_version = 4;
+`,
+  `
+ALTER TABLE import_items ADD COLUMN original_disposition TEXT NOT NULL
+  DEFAULT 'retained'
+  CHECK (original_disposition IN ('retained', 'released', 'unavailable'));
+
+-- Failed provider items may never have published an owned original. Preserve that
+-- distinction separately from explicit user-authorized deletion.
+UPDATE import_items
+SET original_disposition = 'unavailable'
+WHERE status = 'failed'
+  AND NOT EXISTS (
+    SELECT 1 FROM artifacts artifact
+    WHERE artifact.item_id = import_items.id AND artifact.kind = 'original'
+  );
+
+CREATE TABLE pipeline_runs (
+  id TEXT PRIMARY KEY NOT NULL,
+  pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE RESTRICT,
+  item_id TEXT NOT NULL REFERENCES import_items(id) ON DELETE RESTRICT,
+  stage TEXT NOT NULL CHECK (stage IN ('import', 'extract', 'analyze', 'review', 'package')),
+  status TEXT NOT NULL CHECK (
+    status IN ('queued', 'running', 'recovering', 'succeeded', 'failed', 'cancelled')
+  ),
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  claim_version INTEGER NOT NULL DEFAULT 0 CHECK (claim_version >= 0),
+  completed_at TEXT,
+  error_code TEXT,
+  CHECK (
+    (status IN ('queued', 'running', 'recovering') AND completed_at IS NULL AND error_code IS NULL)
+    OR (status IN ('succeeded', 'cancelled') AND completed_at IS NOT NULL AND error_code IS NULL)
+    OR (status = 'failed' AND completed_at IS NOT NULL AND error_code IS NOT NULL)
+  )
+);
+CREATE INDEX pipeline_runs_runnable_index
+  ON pipeline_runs(status, updated_at, id);
+CREATE INDEX pipeline_runs_item_index
+  ON pipeline_runs(pack_id, item_id, updated_at);
+CREATE UNIQUE INDEX pipeline_runs_one_active_item
+  ON pipeline_runs(pack_id, item_id)
+  WHERE status IN ('queued', 'running', 'recovering');
+
+PRAGMA user_version = 5;
 `,
 ] as const;

@@ -362,6 +362,77 @@ test('supports rename, persisted reorder, retry, cancel, and non-destructive rem
   act(() => renderer.unmount());
 });
 
+test('locks editor fields while a mutation is pending so reload cannot discard late typing', async () => {
+  let finishMutation: (() => void) | undefined;
+  const value = controller();
+  value.renamePack.mockReturnValue(
+    new Promise(resolve => {
+      finishMutation = resolve;
+    }),
+  );
+  const renderer = await render(value);
+
+  expect(
+    renderer.root.findAllByType(TextInput).every(input => input.props.editable),
+  ).toBe(true);
+
+  await press(button(renderer, 'Save Pack title'));
+
+  expect(
+    renderer.root
+      .findAllByType(TextInput)
+      .every(input => input.props.editable === false),
+  ).toBe(true);
+
+  await act(async () => {
+    finishMutation?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(
+    renderer.root.findAllByType(TextInput).every(input => input.props.editable),
+  ).toBe(true);
+  act(() => renderer.unmount());
+});
+
+test('preserves an unsaved instruction when saving the Pack title refreshes the graph', async () => {
+  const value = controller();
+  value.load.mockResolvedValueOnce(snapshot).mockResolvedValueOnce({
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: { ...snapshot.selected!.pack, title: 'Renamed Pack' },
+      revision: snapshot.selected!.revision + 1,
+    },
+  });
+  const renderer = await render(value);
+  const inputs = () => renderer.root.findAllByType(TextInput);
+  const title = inputs().find(
+    node => node.props.accessibilityLabel === 'Pack title',
+  )!;
+  const instruction = inputs().find(
+    node => node.props.accessibilityLabel === 'Task instruction',
+  )!;
+
+  act(() => {
+    instruction.props.onChangeText('Unsaved instruction');
+    title.props.onChangeText('Renamed Pack');
+  });
+  await press(button(renderer, 'Save Pack title'));
+
+  expect(
+    inputs().find(node => node.props.accessibilityLabel === 'Task instruction')!
+      .props.value,
+  ).toBe('Unsaved instruction');
+  expect(
+    inputs().find(node => node.props.accessibilityLabel === 'Pack title')!.props
+      .value,
+  ).toBe('Renamed Pack');
+  act(() => renderer.unmount());
+});
+
 test('resumes a cancelled Pack from its durable item checkpoints', async () => {
   const value = controller();
   value.load.mockResolvedValue({

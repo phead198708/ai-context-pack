@@ -75,6 +75,8 @@ export interface NativeMethods {
     expectedByteCount: number | null,
     expectedSha256: string | null,
   ): Promise<unknown>;
+  resolveOwnedArtifactFileUri?(relativePath: string): Promise<unknown>;
+  writeTextArtifact?(relativePath: string, text: string): Promise<unknown>;
   verifyArtifact?(
     relativePath: string,
     expectedByteCount: number,
@@ -282,6 +284,38 @@ export const createNativeAdapter = (
             expectedSha256 ?? null,
           );
           if (!isNativePublishedArtifact(value))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
+        resolveOwnedArtifactFileUri: async relativePath => {
+          if (!isOwnedArtifactPath(relativePath))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_INPUT_INVALID');
+          if (!nativeModule.resolveOwnedArtifactFileUri)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.resolveOwnedArtifactFileUri(
+            relativePath,
+          );
+          if (typeof value !== 'string' || !value.startsWith('file://'))
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
+          return value;
+        },
+        writeTextArtifact: async (relativePath, text) => {
+          if (
+            !isOwnedArtifactPath(relativePath) ||
+            !relativePath.endsWith('.txt') ||
+            !isValidUnicodeScalarString(text)
+          )
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_INPUT_INVALID');
+          if (!nativeModule.writeTextArtifact)
+            throw new NativeBoundaryError('NATIVE_ARTIFACT_STORE_UNAVAILABLE');
+          const value = await nativeModule.writeTextArtifact(
+            relativePath,
+            text,
+          );
+          if (
+            !isNativePublishedArtifact(value) ||
+            value.relativePath !== relativePath
+          )
             throw new NativeBoundaryError('NATIVE_ARTIFACT_RESULT_INVALID');
           return value;
         },
@@ -528,6 +562,12 @@ export const createNativeAdapter = (
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         publishArtifact: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        resolveOwnedArtifactFileUri: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        writeTextArtifact: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         verifyArtifact: async () => {

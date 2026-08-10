@@ -1,5 +1,6 @@
 package com.aicontextpack.nativebridge
 
+import android.net.Uri
 import android.os.Build
 import android.system.Os
 import android.system.OsConstants
@@ -120,6 +121,66 @@ internal object OwnedArtifactStore {
       "byteCount" to byteCount,
       "sha256" to hash,
     )
+  }
+
+  fun resolveFileUri(root: File, relativePath: String): String {
+    val path = validate(root, relativePath)
+    requireAncestorDirectories(root, requireNotNull(path.file.parentFile))
+    requireRegularFile(path.file)
+    return Uri.fromFile(path.file).toString()
+  }
+
+  fun writeText(root: File, relativePath: String, text: String): Map<String, Any> {
+    val path = validate(root, relativePath)
+    val bytes = text.toByteArray(Charsets.UTF_8)
+    if (!relativePath.endsWith(".txt") || bytes.size > 16 * 1024 * 1024) {
+      throw OwnedArtifactStoreException("SCHEMA_INVALID")
+    }
+    return withArtifactLock(root, path.artifactId) {
+      ensureDirectoryChain(path.file.parentFile
+        ?: throw OwnedArtifactStoreException("STORAGE_WRITE_FAILED"))
+      val expectedHash = MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
+      if (path.file.exists()) {
+        requireRegularFile(path.file)
+        if (path.file.length() != bytes.size.toLong() || sha256(path.file) != expectedHash) {
+          throw OwnedArtifactStoreException("STORAGE_ARTIFACT_IMMUTABLE")
+        }
+        return@withArtifactLock mapOf(
+          "relativePath" to relativePath,
+          "byteCount" to bytes.size.toLong(),
+          "sha256" to expectedHash,
+          "created" to false,
+        )
+      }
+      val partial = File(path.file.parentFile, "${path.file.name}.partial")
+      try {
+        if (partial.exists()) {
+          if (!partial.delete()) throw OwnedArtifactStoreException("STORAGE_WRITE_FAILED")
+          syncDirectory(requireNotNull(partial.parentFile))
+        }
+        FileOutputStream(partial).use { output ->
+          output.write(bytes)
+          output.fd.sync()
+        }
+        requireRegularFile(partial)
+        if (partial.length() != bytes.size.toLong() || sha256(partial) != expectedHash) {
+          throw OwnedArtifactStoreException("ARTIFACT_INTEGRITY_FAILED")
+        }
+        atomicMove(partial, path.file)
+        syncDirectory(requireNotNull(path.file.parentFile))
+      } catch (error: OwnedArtifactStoreException) {
+        throw error
+      } catch (_: Exception) {
+        throw OwnedArtifactStoreException("STORAGE_WRITE_FAILED")
+      }
+      mapOf(
+        "relativePath" to relativePath,
+        "byteCount" to bytes.size.toLong(),
+        "sha256" to expectedHash,
+        "created" to true,
+      )
+    }
   }
 
   fun list(root: File): List<Map<String, Any>> {

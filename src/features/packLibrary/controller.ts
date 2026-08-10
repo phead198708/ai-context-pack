@@ -14,6 +14,7 @@ import {
   type PackLibrarySnapshot,
   type RetryPlan,
 } from './domain';
+import { createPipelineRun, type PackProcessingScheduler } from './processing';
 
 export type RemovedOriginalDisposition = 'preserve' | 'release';
 
@@ -23,7 +24,12 @@ export class PackLibraryController {
   constructor(
     private readonly getRepository: () => Promise<ProductionPersistenceRepository>,
     private readonly now: () => string = () => new Date().toISOString(),
+    private readonly processing?: PackProcessingScheduler,
   ) {}
+
+  recoverProcessing(): Promise<void> {
+    return this.processing?.recover() ?? Promise.resolve();
+  }
 
   async load(selectedPackId?: string): Promise<PackLibrarySnapshot> {
     const repository = await this.getRepository();
@@ -72,16 +78,9 @@ export class PackLibraryController {
       return {
         pack: {
           ...graph.pack,
-          state: packStateAfterReorder(graph.pack.state),
+          state: packStateAfterPackagingInputChange(graph.pack.state),
         },
-        items: reordered.map(item =>
-          item.state === 'packaged'
-            ? {
-                ...item,
-                state: transitionItem(item.state, 'invalidate-package'),
-              }
-            : item,
-        ),
+        items: invalidatePackagedItems(reordered),
       };
     });
   }
@@ -99,7 +98,13 @@ export class PackLibraryController {
         const items = graph.items
           .filter(item => item.id !== itemId)
           .map((item, sortIndex) => ({ ...item, sortIndex }));
-        return { pack: graph.pack, items };
+        return {
+          pack: {
+            ...graph.pack,
+            state: packStateAfterPackagingInputChange(graph.pack.state),
+          },
+          items: invalidatePackagedItems(items),
+        };
       },
       originalDisposition,
     );
@@ -126,15 +131,19 @@ export class PackLibraryController {
           stateAtRetryCheckpoint(plan!.stage),
         ),
       }));
+      const updatedAt = this.timestamp(graph.pack);
+      const runs = this.processing ? [createPipelineRun(plan!, updatedAt)] : [];
       await repository.savePackGraph({
         pack: updatedPack(
           { ...graph.pack, state: packStateForRetry(graph.pack.state) },
           items,
-          this.timestamp(graph.pack),
+          updatedAt,
         ),
         items,
         expectedRevision: graph.revision,
+        ...(runs.length > 0 ? { startedPipelineRuns: runs } : {}),
       });
+      this.processing?.launch(runs);
       return plan;
     });
   }
@@ -165,6 +174,25 @@ export class PackLibraryController {
           ),
         };
       });
+      for (const item of items) {
+        if (
+          plans.some(plan => plan.itemId === item.id) ||
+          ![
+            'received',
+            'imported',
+            'extracted',
+            'analyzed',
+            'reviewed',
+          ].includes(item.state)
+        )
+          continue;
+        const plan = retryPlanForItem(
+          packId,
+          item,
+          artifacts.filter(value => value.itemId === item.id),
+        );
+        if (plan.stage !== 'import') plans.push(plan);
+      }
       const hasRunnableCheckpoint =
         plans.length > 0 ||
         items.some(item =>
@@ -175,35 +203,62 @@ export class PackLibraryController {
             'analyzed',
             'reviewed',
           ].includes(item.state),
-        );
+        ) ||
+        // A failed Pack whose items are all packaged represents a pack-level
+        // packaging/export checkpoint. Retrying must reactivate that checkpoint
+        // without fabricating item work or silently accepting a failed item.
+        (items.length > 0 && items.every(item => item.state === 'packaged'));
       if (!hasRunnableCheckpoint)
         throw new DomainError('DOMAIN_INVALID_TRANSITION');
+      const updatedAt = this.timestamp(graph.pack);
+      const runs = this.processing
+        ? plans.map(plan => createPipelineRun(plan, updatedAt))
+        : [];
+      const allPackaged =
+        items.length > 0 && items.every(item => item.state === 'packaged');
+      const retriedPackState = packStateForRetry(graph.pack.state);
       await repository.savePackGraph({
         pack: updatedPack(
-          { ...graph.pack, state: packStateForRetry(graph.pack.state) },
+          {
+            ...graph.pack,
+            state: allPackaged
+              ? transitionPack(retriedPackState, 'mark-ready')
+              : retriedPackState,
+          },
           items,
-          this.timestamp(graph.pack),
+          updatedAt,
         ),
         items,
         expectedRevision: graph.revision,
+        ...(runs.length > 0 ? { startedPipelineRuns: runs } : {}),
       });
+      this.processing?.launch(runs);
       return plans;
     });
   }
 
   cancelProcessing(packId: string): Promise<void> {
-    return this.mutate(packId, graph => {
+    return this.enqueue(async () => {
+      const repository = await this.getRepository();
+      const graph = await repository.findPackGraph(packId);
+      if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
       if (!['processing', 'recovering'].includes(graph.pack.state))
         throw new DomainError('DOMAIN_INVALID_TRANSITION');
-      return {
-        pack: {
-          ...graph.pack,
-          state: transitionPack(graph.pack.state, 'cancel'),
-        },
-        // Item state is the last durable checkpoint, not a running-task flag. The Pack
-        // cancellation gate stops queued work while preserving the exact resume point.
+      const updatedAt = this.timestamp(graph.pack);
+      await repository.savePackGraph({
+        pack: updatedPack(
+          {
+            ...graph.pack,
+            state: transitionPack(graph.pack.state, 'cancel'),
+          },
+          graph.items,
+          updatedAt,
+        ),
         items: graph.items,
-      };
+        expectedRevision: graph.revision,
+        cancelActivePipelineRuns: true,
+      });
+      await this.processing?.cancel(packId, updatedAt);
     });
   }
 
@@ -274,12 +329,25 @@ function packStateForRetry(state: ContextPack['state']): ContextPack['state'] {
   throw new DomainError('DOMAIN_INVALID_TRANSITION');
 }
 
-function packStateAfterReorder(
+function packStateAfterPackagingInputChange(
   state: ContextPack['state'],
 ): ContextPack['state'] {
   if (state === 'ready' || state === 'exporting' || state === 'exported')
     return transitionPack(state, 'restart-packaging');
   return state;
+}
+
+function invalidatePackagedItems(
+  items: readonly ContextItem[],
+): readonly ContextItem[] {
+  return items.map(item =>
+    item.state === 'packaged'
+      ? {
+          ...item,
+          state: transitionItem(item.state, 'invalidate-package'),
+        }
+      : item,
+  );
 }
 
 function replaceItem(

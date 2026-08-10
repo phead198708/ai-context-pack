@@ -665,8 +665,8 @@ describe('persistence path and migration decisions', () => {
       expect(isOwnedArtifactPath(invalid)).toBe(false);
   });
 
-  test('schema migrates through v1-v4 without BLOB content columns', () => {
-    expect(PERSISTENCE_MIGRATIONS).toHaveLength(4);
+  test('schema migrates through v1-v5 without BLOB content columns', () => {
+    expect(PERSISTENCE_MIGRATIONS).toHaveLength(5);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
       'relative_path TEXT NOT NULL UNIQUE',
@@ -684,6 +684,16 @@ describe('persistence path and migration decisions', () => {
     expect(PERSISTENCE_MIGRATIONS[3]).toContain('PRAGMA user_version = 4');
     expect(PERSISTENCE_MIGRATIONS[3]).toContain(
       'ALTER TABLE context_items ADD COLUMN retry_stage TEXT',
+    );
+    expect(PERSISTENCE_MIGRATIONS[3]).toContain(
+      "imported_item.status = 'failed'",
+    );
+    expect(PERSISTENCE_MIGRATIONS[4]).toContain('PRAGMA user_version = 5');
+    expect(PERSISTENCE_MIGRATIONS[4]).toContain(
+      'original_disposition TEXT NOT NULL',
+    );
+    expect(PERSISTENCE_MIGRATIONS[4]).toContain(
+      'CREATE UNIQUE INDEX pipeline_runs_one_active_item',
     );
     for (const migration of PERSISTENCE_MIGRATIONS)
       expect(migration).not.toMatch(/\bBLOB\b/);

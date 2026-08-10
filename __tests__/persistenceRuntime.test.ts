@@ -208,6 +208,28 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     return { removedItemCount: 0, releasedArtifactCount: 0 };
   }
 
+  async startPipelineRun() {}
+
+  async listRunnablePipelineRuns() {
+    return [];
+  }
+
+  async markPipelineRunRunning() {
+    return null;
+  }
+
+  async completePipelineRun() {
+    return false;
+  }
+
+  async failPipelineRun() {
+    return false;
+  }
+
+  async cancelPipelineRuns() {
+    return 0;
+  }
+
   async listItemsForPack() {
     return [];
   }
@@ -368,6 +390,19 @@ class RuntimeNative implements NativeAdapter {
       relativePath,
       byteCount: expectedByteCount,
       sha256: expectedSha256,
+      created: true,
+    };
+  }
+
+  async resolveOwnedArtifactFileUri(relativePath: string) {
+    return `file:///${relativePath}`;
+  }
+
+  async writeTextArtifact(relativePath: string) {
+    return {
+      relativePath,
+      byteCount: 0,
+      sha256: '0'.repeat(64),
       created: true,
     };
   }

@@ -5,11 +5,12 @@ import type {
   ContextItem,
   ContextPack,
   ExportRecord,
+  PipelineStage,
   RiskFinding,
 } from '../../domain/models';
 import type { NativeHandoffResult } from '../../domain/nativeAdapter';
 
-export const PERSISTENCE_SCHEMA_VERSION = 4 as const;
+export const PERSISTENCE_SCHEMA_VERSION = 5 as const;
 export const DEVELOPMENT_RESET_CONFIRMATION =
   'RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA' as const;
 
@@ -52,6 +53,8 @@ export interface PersistedImportItemSummary {
   readonly mediaType: string;
   readonly status: ImportManifestV1['items'][number]['status'];
   readonly errorCode?: DomainErrorCode;
+  /** True only after an explicit destructive local-original release. */
+  readonly originalReleased?: true;
   readonly retrySource?: {
     readonly relativePath: string;
     readonly byteCount: number;
@@ -95,6 +98,39 @@ export interface SavePackGraphInput {
    * artifact. Destructive release is opt-in and must be guarded by explicit UI confirmation.
    */
   readonly removedItemOriginalDisposition?: 'preserve' | 'release';
+  /** Runs inserted in the same transaction as the restored item checkpoints. */
+  readonly startedPipelineRuns?: readonly StartPipelineRunInput[];
+  /** Cancels active runs atomically with the Pack cancellation transition. */
+  readonly cancelActivePipelineRuns?: true;
+}
+
+export interface StartPipelineRunInput {
+  readonly id: string;
+  readonly packId: string;
+  readonly itemId: string;
+  readonly stage: PipelineStage;
+  readonly startedAt: string;
+}
+
+export interface PersistedPipelineRun extends StartPipelineRunInput {
+  readonly status: 'queued' | 'running' | 'recovering';
+  readonly updatedAt: string;
+  /** Monotonic claim token; only its current owner may settle the run. */
+  readonly claimVersion: number;
+}
+
+export interface CompletePipelineRunInput {
+  readonly runId: string;
+  readonly claimVersion: number;
+  readonly updatedAt: string;
+  readonly artifact?: Artifact;
+}
+
+export interface FailPipelineRunInput {
+  readonly runId: string;
+  readonly claimVersion: number;
+  readonly updatedAt: string;
+  readonly errorCode: DomainErrorCode;
 }
 
 export interface DeletePackResult {
@@ -152,6 +188,16 @@ export interface ContextPackRepository {
     packId: string,
     expectedRevision: number,
   ): Promise<DeletePackResult>;
+  startPipelineRun(input: StartPipelineRunInput): Promise<void>;
+  listRunnablePipelineRuns(): Promise<readonly PersistedPipelineRun[]>;
+  markPipelineRunRunning(
+    runId: string,
+    expectedClaimVersion: number,
+    updatedAt: string,
+  ): Promise<number | null>;
+  completePipelineRun(input: CompletePipelineRunInput): Promise<boolean>;
+  failPipelineRun(input: FailPipelineRunInput): Promise<boolean>;
+  cancelPipelineRuns(packId: string, updatedAt: string): Promise<number>;
 }
 
 export interface ContextItemRepository {

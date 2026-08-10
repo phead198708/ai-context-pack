@@ -146,10 +146,13 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       '2->3:applied',
       '3->4:starting',
       '3->4:applied',
+      '4->5:starting',
+      '4->5:applied',
     ]);
     expect(executed[0]).toContain('PRAGMA foreign_keys = ON');
     expect(executed[1]).toContain('PRAGMA user_version = 3');
     expect(executed[2]).toContain('PRAGMA user_version = 4');
+    expect(executed[3]).toContain('PRAGMA user_version = 5');
   });
 
   test('rejects a different artifact hash before deleting the recovery journal', async () => {
@@ -252,6 +255,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
   test('rehydrates durable partial-item failures for Inbox visibility', async () => {
     const failedItemId = '423e4567-e89b-42d3-a456-426614174000';
     let swapRetryOwner = false;
+    let retryOriginalReleased = false;
     const connection = {
       exec: async () => undefined,
       run: async () => ({ changes: 0 }),
@@ -275,6 +279,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
                 media_type: 'image/png',
                 status: 'copied',
                 error_code: null,
+                original_disposition: 'retained',
                 artifact_count: 1,
                 artifact_relative_path: `Packs/${packId}/originals/${itemId}.bin`,
                 artifact_byte_count: 4,
@@ -286,6 +291,9 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
                 media_type: 'application/zip',
                 status: 'failed',
                 error_code: 'IMPORT_TYPE_UNSUPPORTED',
+                original_disposition: retryOriginalReleased
+                  ? 'released'
+                  : 'retained',
                 artifact_count: 1,
                 artifact_relative_path: swapRetryOwner
                   ? `Packs/${packId}/originals/${itemId}.bin`
@@ -332,6 +340,23 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       },
     ]);
 
+    retryOriginalReleased = true;
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            id: failedItemId,
+            status: 'failed',
+            originalReleased: true,
+          }),
+        ]),
+      }),
+    ]);
+    expect(
+      (await repository.listImportDetails())[0]?.items[1],
+    ).not.toHaveProperty('retrySource');
+
+    retryOriginalReleased = false;
     swapRetryOwner = true;
     await expect(repository.listImportDetails()).rejects.toMatchObject({
       code: 'STORAGE_DIVERGENCE_DETECTED',
@@ -347,6 +372,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
         media_type: 'application/octet-stream',
         status: 'failed',
         error_code: 'IMPORT_TYPE_UNSUPPORTED',
+        original_disposition: 'unavailable',
         artifact_count: 0,
         artifact_relative_path: null,
         artifact_byte_count: null,

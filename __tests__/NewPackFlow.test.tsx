@@ -36,6 +36,8 @@ function nativeAdapter(): jest.Mocked<NativeAdapter> {
     recoverMainAppPickerCache: jest.fn().mockResolvedValue(undefined),
     discardMainAppPickerFiles: jest.fn().mockResolvedValue(undefined),
     publishArtifact: jest.fn(),
+    resolveOwnedArtifactFileUri: jest.fn(),
+    writeTextArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
     listOwnedArtifacts: jest.fn(),
     removeOwnedArtifact: jest.fn(),

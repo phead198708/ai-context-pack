@@ -84,6 +84,22 @@ class OwnedArtifactStoreInstrumentedTest {
   }
 
   @Test
+  fun textPublicationAndOwnedFileResolutionAreBoundToImmutableBytes() {
+    val path = "Packs/$packId/derived/$artifactId.txt"
+    val created = OwnedArtifactStore.writeText(root, path, "synthetic text")
+    assertEquals(true, created["created"])
+    assertEquals(14L, created["byteCount"])
+    val resolved = OwnedArtifactStore.resolveFileUri(root, path)
+    assertTrue(resolved.startsWith("file://"))
+    assertTrue(resolved.endsWith(File(root, path).absolutePath))
+    assertEquals(false, OwnedArtifactStore.writeText(root, path, "synthetic text")["created"])
+    val error = assertThrows(OwnedArtifactStoreException::class.java) {
+      OwnedArtifactStore.writeText(root, path, "replacement")
+    }
+    assertEquals("STORAGE_ARTIFACT_IMMUTABLE", error.stableCode)
+  }
+
+  @Test
   fun abandonedPartialIsListedCountedQuarantinedAndPurged() {
     val path = "Packs/$packId/derived/$artifactId.txt"
     val partialPath = "$path.partial"

@@ -494,6 +494,20 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       }
     }
 
+    AsyncFunction("resolveOwnedArtifactFileUri") { relativePath: String ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { OwnedArtifactStore.resolveFileUri(context.filesDir, relativePath) }
+      catch (error: OwnedArtifactStoreException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("STORAGE_WRITE_FAILED") }
+    }
+
+    AsyncFunction("writeTextArtifact") { relativePath: String, text: String ->
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try { OwnedArtifactStore.writeText(context.filesDir, relativePath, text) }
+      catch (error: OwnedArtifactStoreException) { throw NativeException(error.stableCode) }
+      catch (_: Exception) { throw NativeException("STORAGE_WRITE_FAILED") }
+    }
+
     AsyncFunction("verifyArtifact") {
       relativePath: String,
       expectedByteCount: Double,

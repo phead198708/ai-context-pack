@@ -11,6 +11,7 @@ import type {
   ContextItem,
   ContextPack,
   ExportRecord,
+  PipelineStage,
   RiskFinding,
 } from '../../domain/models';
 import {
@@ -22,11 +23,14 @@ import {
   PERSISTENCE_SCHEMA_VERSION,
   type CleanupCandidate,
   type CommitImportInput,
+  type CompletePipelineRunInput,
   type DeletePackResult,
+  type FailPipelineRunInput,
   type PersistedArtifactRecord,
   type PersistedImportDetail,
   type PersistedImportSummary,
   type PersistedPackGraph,
+  type PersistedPipelineRun,
   type PersistenceMigrationHook,
   type ProductionPersistenceRepository,
   type RecoveryDiagnostic,
@@ -34,6 +38,7 @@ import {
   type RecoveryJournalEntry,
   type RegisterPublishedArtifactInput,
   type SavePackGraphInput,
+  type StartPipelineRunInput,
   type QuarantineRecordInput,
   type StorageUsageSummary,
 } from './contracts';
@@ -265,12 +270,14 @@ export class ExpoSqlitePersistenceRepository
           media_type: string;
           status: string;
           error_code: string | null;
+          original_disposition: string;
           artifact_count: number;
           artifact_relative_path: string | null;
           artifact_byte_count: number | null;
           artifact_sha256: string | null;
         }>(
           `SELECT item.id, item.sort_index, item.media_type, item.status, item.error_code,
+             item.original_disposition,
              (SELECT COUNT(*) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_count,
              (SELECT MAX(relative_path) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_relative_path,
              (SELECT MAX(byte_count) FROM artifacts artifact WHERE artifact.item_id = item.id AND artifact.kind = 'original') AS artifact_byte_count,
@@ -306,10 +313,22 @@ export class ExpoSqlitePersistenceRepository
               )
                 throw new DomainError('SCHEMA_INVALID');
               const status = importItemStatus(item.status);
+              const originalDisposition = importOriginalDisposition(
+                item.original_disposition,
+              );
               if (
                 (status === 'failed') !== (item.error_code !== null) ||
-                (status === 'copied' && item.artifact_count !== 1) ||
+                (status === 'copied' &&
+                  originalDisposition === 'retained' &&
+                  item.artifact_count !== 1) ||
+                (status === 'copied' &&
+                  originalDisposition === 'unavailable') ||
                 (status === 'failed' && item.artifact_count > 1) ||
+                (originalDisposition === 'unavailable' &&
+                  item.artifact_count !== 0) ||
+                (originalDisposition === 'retained' &&
+                  status === 'failed' &&
+                  item.artifact_count !== 1) ||
                 (item.artifact_count === 0 &&
                   (artifactRelativePath !== null ||
                     artifactByteCount !== null ||
@@ -332,7 +351,12 @@ export class ExpoSqlitePersistenceRepository
                 ...(item.error_code
                   ? { errorCode: domainErrorCode(item.error_code) }
                   : {}),
-                ...(status === 'failed' && item.artifact_count === 1
+                ...(originalDisposition === 'released'
+                  ? { originalReleased: true as const }
+                  : {}),
+                ...(status === 'failed' &&
+                originalDisposition === 'retained' &&
+                item.artifact_count === 1
                   ? {
                       retrySource: {
                         relativePath: artifactRelativePath!,
@@ -512,8 +536,9 @@ export class ExpoSqlitePersistenceRepository
       for (const item of input.manifest.items) {
         await transaction.run(
           `INSERT INTO import_items
-            (id, ingestion_id, sort_index, media_type, status, error_code)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+            (id, ingestion_id, sort_index, media_type, status, error_code,
+             original_disposition)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             item.id,
             input.manifest.ingestionId,
@@ -521,6 +546,7 @@ export class ExpoSqlitePersistenceRepository
             item.mediaType,
             item.status,
             item.status === 'failed' ? item.errorCode : null,
+            artifactsByItem.has(item.id) ? 'retained' : 'unavailable',
           ],
         );
         const artifact = artifactsByItem.get(item.id);
@@ -728,8 +754,205 @@ export class ExpoSqlitePersistenceRepository
         input.pack.updatedAt,
         input.removedItemOriginalDisposition ?? 'preserve',
       );
+      if (input.cancelActivePipelineRuns)
+        await transaction.run(
+          `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?
+           WHERE pack_id = ? AND status IN ('queued', 'running', 'recovering')`,
+          [input.pack.updatedAt, input.pack.updatedAt, input.pack.id],
+        );
+      for (const run of input.startedPipelineRuns ?? [])
+        await startPipelineRunInTransaction(transaction, run);
       return nextRevision;
     });
+  }
+
+  async startPipelineRun(input: StartPipelineRunInput): Promise<void> {
+    validateStartPipelineRun(input);
+    await this.connection.exclusive(transaction =>
+      startPipelineRunInTransaction(transaction, input),
+    );
+  }
+
+  async listRunnablePipelineRuns(): Promise<readonly PersistedPipelineRun[]> {
+    const rows = await this.connection.all<{
+      id: string;
+      pack_id: string;
+      item_id: string;
+      stage: string;
+      status: string;
+      started_at: string;
+      updated_at: string;
+      claim_version: number;
+    }>(
+      `SELECT id, pack_id, item_id, stage, status, started_at, updated_at,
+         claim_version
+       FROM pipeline_runs
+       WHERE status IN ('queued', 'running', 'recovering')
+       ORDER BY updated_at, id`,
+    );
+    return rows.map(row =>
+      decodePersisted(() => {
+        requireCanonicalId(row.id);
+        requireCanonicalId(row.pack_id);
+        requireCanonicalId(row.item_id);
+        requireIsoDateTime(row.started_at);
+        requireIsoDateTime(row.updated_at);
+        if (!Number.isSafeInteger(row.claim_version) || row.claim_version < 0)
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        if (!isRunnablePipelineStatus(row.status))
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        return {
+          id: row.id,
+          packId: row.pack_id,
+          itemId: row.item_id,
+          stage: pipelineStage(row.stage),
+          status: row.status,
+          startedAt: row.started_at,
+          updatedAt: row.updated_at,
+          claimVersion: row.claim_version,
+        };
+      }),
+    );
+  }
+
+  async markPipelineRunRunning(
+    runId: string,
+    expectedClaimVersion: number,
+    updatedAt: string,
+  ): Promise<number | null> {
+    requireCanonicalId(runId);
+    if (
+      !Number.isSafeInteger(expectedClaimVersion) ||
+      expectedClaimVersion < 0 ||
+      expectedClaimVersion === Number.MAX_SAFE_INTEGER
+    )
+      throw new DomainError('SCHEMA_INVALID');
+    requireIsoDateTime(updatedAt);
+    const result = await this.connection.run(
+      `UPDATE pipeline_runs SET status = 'running', updated_at = ?,
+         claim_version = claim_version + 1
+       WHERE id = ? AND claim_version = ?
+         AND status IN ('queued', 'running', 'recovering')`,
+      [updatedAt, runId, expectedClaimVersion],
+    );
+    return result.changes === 1 ? expectedClaimVersion + 1 : null;
+  }
+
+  async completePipelineRun(input: CompletePipelineRunInput): Promise<boolean> {
+    requireCanonicalId(input.runId);
+    requirePipelineClaimVersion(input.claimVersion);
+    requireIsoDateTime(input.updatedAt);
+    if (input.artifact) assertArtifact(input.artifact);
+    return this.connection.exclusive(async transaction => {
+      const run = await loadPipelineRunForSettlement(
+        transaction,
+        input.runId,
+        input.claimVersion,
+      );
+      if (!run || !isRunnablePipelineStatus(run.status)) return false;
+      if (
+        !['processing', 'recovering'].includes(run.pack_state) ||
+        run.item_state !== pipelineCheckpointState(pipelineStage(run.stage))
+      )
+        return false;
+      const stage = pipelineStage(run.stage);
+      if (
+        (stage === 'extract') !== (input.artifact !== undefined) ||
+        (input.artifact &&
+          (input.artifact.itemId !== run.item_id ||
+            input.artifact.kind !==
+              (run.source_type === 'pdf' ? 'pdf-page-text' : 'ocr-text')))
+      )
+        throw new DomainError('SCHEMA_INVALID');
+      if (input.artifact) {
+        validatePublishedArtifact({
+          packId: run.pack_id,
+          artifact: input.artifact,
+        });
+        await registerPublishedArtifactInTransaction(transaction, {
+          packId: run.pack_id,
+          artifact: input.artifact,
+        });
+      }
+      const itemUpdate = await transaction.run(
+        `UPDATE context_items SET state = ?, retry_stage = NULL, updated_at = ?
+         WHERE id = ? AND pack_id = ? AND state = ?`,
+        [
+          pipelineCompletedState(stage),
+          input.updatedAt,
+          run.item_id,
+          run.pack_id,
+          pipelineCheckpointState(stage),
+        ],
+      );
+      if (itemUpdate.changes !== 1) return false;
+      await transaction.run(
+        `UPDATE pipeline_runs SET status = 'succeeded', updated_at = ?,
+           completed_at = ?, error_code = NULL WHERE id = ?`,
+        [input.updatedAt, input.updatedAt, input.runId],
+      );
+      await transaction.run(
+        `UPDATE packs SET updated_at = ?, revision = revision + 1
+         WHERE id = ? AND deleted_at IS NULL`,
+        [input.updatedAt, run.pack_id],
+      );
+      return true;
+    });
+  }
+
+  async failPipelineRun(input: FailPipelineRunInput): Promise<boolean> {
+    requireCanonicalId(input.runId);
+    requirePipelineClaimVersion(input.claimVersion);
+    requireIsoDateTime(input.updatedAt);
+    if (!isDomainErrorCode(input.errorCode))
+      throw new DomainError('SCHEMA_INVALID');
+    return this.connection.exclusive(async transaction => {
+      const run = await loadPipelineRunForSettlement(
+        transaction,
+        input.runId,
+        input.claimVersion,
+      );
+      if (!run || !isRunnablePipelineStatus(run.status)) return false;
+      const stage = pipelineStage(run.stage);
+      if (
+        !['processing', 'recovering'].includes(run.pack_state) ||
+        run.item_state !== pipelineCheckpointState(stage)
+      )
+        return false;
+      await transaction.run(
+        `UPDATE context_items SET state = 'failed', retry_stage = ?, updated_at = ?
+         WHERE id = ? AND pack_id = ?`,
+        [stage, input.updatedAt, run.item_id, run.pack_id],
+      );
+      await transaction.run(
+        `UPDATE pipeline_runs SET status = 'failed', updated_at = ?,
+           completed_at = ?, error_code = ? WHERE id = ?`,
+        [input.updatedAt, input.updatedAt, input.errorCode, input.runId],
+      );
+      await transaction.run(
+        `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?
+         WHERE pack_id = ? AND id <> ?
+           AND status IN ('queued', 'running', 'recovering')`,
+        [input.updatedAt, input.updatedAt, run.pack_id, input.runId],
+      );
+      await transaction.run(
+        `UPDATE packs SET state = 'failed', updated_at = ?, revision = revision + 1
+         WHERE id = ? AND deleted_at IS NULL`,
+        [input.updatedAt, run.pack_id],
+      );
+      return true;
+    });
+  }
+
+  async cancelPipelineRuns(packId: string, updatedAt: string): Promise<number> {
+    requireCanonicalId(packId);
+    requireIsoDateTime(updatedAt);
+    const result = await this.connection.run(
+      `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?
+       WHERE pack_id = ? AND status IN ('queued', 'running', 'recovering')`,
+      [updatedAt, updatedAt, packId],
+    );
+    return result.changes;
   }
 
   async deletePack(
@@ -774,13 +997,23 @@ export class ExpoSqlitePersistenceRepository
               (SELECT id FROM export_records WHERE pack_id = ?))`,
         [packId, packId],
       );
+      await transaction.run(
+        `UPDATE import_items SET original_disposition = 'released'
+         WHERE id IN (SELECT id FROM context_items WHERE pack_id = ?)`,
+        [packId],
+      );
+      const deletedAt = new Date().toISOString();
+      await transaction.run(
+        `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?
+         WHERE pack_id = ? AND status IN ('queued', 'running', 'recovering')`,
+        [deletedAt, deletedAt, packId],
+      );
       await transaction.run('DELETE FROM export_records WHERE pack_id = ?', [
         packId,
       ]);
       await transaction.run('DELETE FROM context_items WHERE pack_id = ?', [
         packId,
       ]);
-      const deletedAt = new Date().toISOString();
       const update = await transaction.run(
         `UPDATE packs SET title = '', user_instruction = '', warning_codes_json = '[]',
            state = 'cancelled', updated_at = ?, deleted_at = ?, revision = revision + 1
@@ -1264,6 +1497,7 @@ export class ExpoSqlitePersistenceRepository
         DROP TABLE IF EXISTS export_record_artifacts;
         DROP TABLE IF EXISTS export_records;
         DROP TABLE IF EXISTS risk_findings;
+        DROP TABLE IF EXISTS pipeline_runs;
         DROP TABLE IF EXISTS context_items;
         DROP TABLE IF EXISTS artifact_references;
         DROP TABLE IF EXISTS artifacts;
@@ -1543,6 +1777,12 @@ async function replaceContextItems(
   const retained = new Set(items.map(item => item.id));
   for (const row of existing) {
     if (retained.has(row.id)) continue;
+    await transaction.run(
+      `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?
+       WHERE pack_id = ? AND item_id = ?
+         AND status IN ('queued', 'running', 'recovering')`,
+      [updatedAt, updatedAt, packId, row.id],
+    );
     if (removedItemOriginalDisposition === 'preserve')
       await transaction.run(
         `INSERT OR IGNORE INTO artifact_references (owner_type, owner_id, artifact_id)
@@ -1551,6 +1791,11 @@ async function replaceContextItems(
         [row.id, row.id],
       );
     else
+      await transaction.run(
+        `UPDATE import_items SET original_disposition = 'released' WHERE id = ?`,
+        [row.id],
+      );
+    if (removedItemOriginalDisposition === 'release')
       await transaction.run(
         `DELETE FROM artifact_references
          WHERE owner_type = 'library-item' AND owner_id = ?`,
@@ -1688,6 +1933,163 @@ async function assertArtifactsReferencedByPack(
     );
     if (!row) throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
   }
+}
+
+interface PipelineSettlementRow {
+  readonly pack_id: string;
+  readonly item_id: string;
+  readonly stage: string;
+  readonly status: string;
+  readonly pack_state: string;
+  readonly item_state: string;
+  readonly source_type: string;
+}
+
+async function startPipelineRunInTransaction(
+  transaction: SqlConnection,
+  input: StartPipelineRunInput,
+): Promise<void> {
+  validateStartPipelineRun(input);
+  const existing = await transaction.first<{
+    pack_id: string;
+    item_id: string;
+    stage: string;
+    status: string;
+    started_at: string;
+  }>(
+    `SELECT pack_id, item_id, stage, status, started_at
+     FROM pipeline_runs WHERE id = ?`,
+    [input.id],
+  );
+  if (existing) {
+    if (
+      existing.pack_id !== input.packId ||
+      existing.item_id !== input.itemId ||
+      existing.stage !== input.stage ||
+      existing.started_at !== input.startedAt ||
+      !isRunnablePipelineStatus(existing.status)
+    )
+      throw new DomainError('PERSISTENCE_CONFLICT');
+    return;
+  }
+  const pack = await transaction.first<{ state: string }>(
+    'SELECT state FROM packs WHERE id = ? AND deleted_at IS NULL',
+    [input.packId],
+  );
+  const item = await transaction.first<{ state: string }>(
+    'SELECT state FROM context_items WHERE id = ? AND pack_id = ?',
+    [input.itemId, input.packId],
+  );
+  if (
+    !pack ||
+    !['processing', 'recovering'].includes(pack.state) ||
+    !item ||
+    item.state !== pipelineCheckpointState(input.stage)
+  )
+    throw new DomainError('PERSISTENCE_CONFLICT');
+  const active = await transaction.first<{ id: string }>(
+    `SELECT id FROM pipeline_runs
+     WHERE pack_id = ? AND item_id = ?
+       AND status IN ('queued', 'running', 'recovering') LIMIT 1`,
+    [input.packId, input.itemId],
+  );
+  if (active) throw new DomainError('PERSISTENCE_CONFLICT');
+  await transaction.run(
+    `INSERT INTO pipeline_runs
+      (id, pack_id, item_id, stage, status, started_at, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?)`,
+    [
+      input.id,
+      input.packId,
+      input.itemId,
+      input.stage,
+      input.startedAt,
+      input.startedAt,
+    ],
+  );
+}
+
+async function loadPipelineRunForSettlement(
+  transaction: SqlConnection,
+  runId: string,
+  claimVersion: number,
+): Promise<PipelineSettlementRow | null> {
+  return transaction.first<PipelineSettlementRow>(
+    `SELECT run.pack_id, run.item_id, run.stage, run.status,
+       pack.state AS pack_state, item.state AS item_state,
+       item.source_type
+     FROM pipeline_runs run
+     JOIN packs pack ON pack.id = run.pack_id AND pack.deleted_at IS NULL
+     JOIN context_items item ON item.id = run.item_id AND item.pack_id = run.pack_id
+     WHERE run.id = ? AND run.claim_version = ?`,
+    [runId, claimVersion],
+  );
+}
+
+async function registerPublishedArtifactInTransaction(
+  transaction: SqlConnection,
+  input: RegisterPublishedArtifactInput,
+): Promise<'created' | 'replayed'> {
+  const pack = await transaction.first<{ id: string }>(
+    'SELECT id FROM packs WHERE id = ? AND deleted_at IS NULL',
+    [input.packId],
+  );
+  if (!pack) throw new DomainError('PERSISTENCE_CONFLICT');
+  if (input.artifact.itemId !== undefined) {
+    const item = await transaction.first<{ id: string }>(
+      'SELECT id FROM context_items WHERE id = ? AND pack_id = ?',
+      [input.artifact.itemId, input.packId],
+    );
+    if (!item) throw new DomainError('PERSISTENCE_CONFLICT');
+  }
+  if (input.artifact.kind === 'original') {
+    const original = await transaction.first<{ id: string }>(
+      "SELECT id FROM artifacts WHERE item_id = ? AND kind = 'original'",
+      [input.artifact.itemId ?? null],
+    );
+    if (original && original.id !== input.artifact.id)
+      throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+  }
+  const existing = await transaction.first<ArtifactRow>(
+    `SELECT id, item_id, relative_path, media_type, byte_count, sha256,
+       kind, processor_version_json, created_at, last_verified_at
+     FROM artifacts WHERE id = ? OR relative_path = ?`,
+    [input.artifact.id, input.artifact.relativePath],
+  );
+  if (existing) {
+    if (!persistedArtifactEquals(existing, input.artifact))
+      throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+    await transaction.run(
+      `INSERT OR IGNORE INTO artifact_references
+        (owner_type, owner_id, artifact_id) VALUES ('pack', ?, ?)`,
+      [input.packId, input.artifact.id],
+    );
+    return 'replayed';
+  }
+  await transaction.run(
+    `INSERT INTO artifacts
+      (id, item_id, relative_path, media_type, byte_count, sha256, created_at,
+       last_verified_at, kind, processor_version_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.artifact.id,
+      input.artifact.itemId ?? null,
+      input.artifact.relativePath,
+      input.artifact.mediaType,
+      input.artifact.byteCount,
+      input.artifact.sha256,
+      input.artifact.createdAt,
+      input.artifact.createdAt,
+      input.artifact.kind,
+      encodeProcessorVersion(input.artifact.processorVersion),
+    ],
+  );
+  await transaction.run(
+    `INSERT INTO artifact_references (owner_type, owner_id, artifact_id)
+     VALUES ('pack', ?, ?)`,
+    [input.packId, input.artifact.id],
+  );
+  return 'created';
 }
 
 async function loadImportArtifactIdentities(
@@ -1991,6 +2393,14 @@ function importItemStatus(
   throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
 }
 
+function importOriginalDisposition(
+  value: string,
+): 'retained' | 'released' | 'unavailable' {
+  if (value === 'retained' || value === 'released' || value === 'unavailable')
+    return value;
+  throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+}
+
 function recoveryPhase(value: string): RecoveryJournalEntry['phase'] {
   if (
     value === 'discovered' ||
@@ -2049,6 +2459,48 @@ function pipelineStage(value: string): NonNullable<ContextItem['retryStage']> {
     default:
       throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
   }
+}
+
+function validateStartPipelineRun(input: StartPipelineRunInput): void {
+  requireCanonicalId(input.id);
+  requireCanonicalId(input.packId);
+  requireCanonicalId(input.itemId);
+  requireIsoDateTime(input.startedAt);
+  if (
+    !['import', 'extract', 'analyze', 'review', 'package'].includes(input.stage)
+  )
+    throw new DomainError('SCHEMA_INVALID');
+}
+
+function isRunnablePipelineStatus(
+  value: string,
+): value is PersistedPipelineRun['status'] {
+  return value === 'queued' || value === 'running' || value === 'recovering';
+}
+
+function requirePipelineClaimVersion(value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0)
+    throw new DomainError('SCHEMA_INVALID');
+}
+
+function pipelineCheckpointState(stage: PipelineStage): ContextItem['state'] {
+  return {
+    import: 'received',
+    extract: 'imported',
+    analyze: 'extracted',
+    review: 'analyzed',
+    package: 'reviewed',
+  }[stage] as ContextItem['state'];
+}
+
+function pipelineCompletedState(stage: PipelineStage): ContextItem['state'] {
+  return {
+    import: 'imported',
+    extract: 'extracted',
+    analyze: 'analyzed',
+    review: 'reviewed',
+    package: 'packaged',
+  }[stage] as ContextItem['state'];
 }
 
 function contextItemSource(value: string): ContextItem['sourceType'] {
