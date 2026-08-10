@@ -147,6 +147,12 @@ class AndroidPDFProcessorTest {
         interveningObjectsAfterXrefStream =
           "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n",
       )
+    val harmlessBackwardLengthWithPercentInsideLiteral =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        objectsAfterBackwardLengthBeforeXrefStream =
+          "7 0 obj (abc%def) endobj\n",
+      )
     val harmlessDirectLengthWithBidirectionalBackwardDependencies =
       xrefStreamPDFWithDirectLength(
         streamPayload = "x".repeat(70),
@@ -371,6 +377,10 @@ class AndroidPDFProcessorTest {
       )
       assertEquals(
         false,
+        hasPDFEncryptionMarker(harmlessBackwardLengthWithPercentInsideLiteral),
+      )
+      assertEquals(
+        false,
         hasPDFEncryptionMarker(harmlessDirectLengthWithBidirectionalBackwardDependencies),
       )
       assertEquals(
@@ -477,6 +487,7 @@ class AndroidPDFProcessorTest {
       harmlessForwardIndirectLengthXrefStream.delete()
       harmlessDirectLengthWithInterveningBackwardLengthStream.delete()
       harmlessDirectLengthWithCommentedTerminatorAndHeader.delete()
+      harmlessBackwardLengthWithPercentInsideLiteral.delete()
       harmlessDirectLengthWithBidirectionalBackwardDependencies.delete()
       mismatchedDirectLengthWithBidirectionalBackwardDependencies.delete()
       harmlessForwardIndirectLengthWithBackwardOrdinaryLength.delete()
@@ -639,6 +650,7 @@ class AndroidPDFProcessorTest {
     forwardObjectsAfterLength: String = "",
     interveningObjectsAfterXrefStream: String = "",
     objectsBeforeXrefStream: String = "",
+    objectsAfterBackwardLengthBeforeXrefStream: String = "",
   ): File {
     val streamLength = streamPayload.toByteArray(Charsets.US_ASCII).size
     val declaredLength = declaredLengthOverride ?: streamLength
@@ -646,7 +658,8 @@ class AndroidPDFProcessorTest {
       "%PDF-1.7\n$objectsBeforeXrefStream"
     } else {
       "%PDF-1.7\n$objectsBeforeXrefStream" +
-        "1 0 obj\n$declaredLength\nendobj\n"
+        "1 0 obj\n$declaredLength\nendobj\n" +
+        objectsAfterBackwardLengthBeforeXrefStream
     }
     val xrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
     val beforeEndstream = if (includeEndstreamLineEnding) "\n" else ""

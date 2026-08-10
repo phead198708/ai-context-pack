@@ -1592,7 +1592,11 @@ private class BackwardPDFIntegerResolver(
     val bytes = input.read(windowStart, (upperBound - windowStart).toInt())
     val objectIndex = indexBackwardPDFObjects(bytes, onWork)
     val budget = BackwardPDFParseBudget()
-    var end = skipPDFWhitespaceAndCommentsBackward(bytes, bytes.size)
+    var end = skipPDFWhitespaceAndCommentsBackward(
+      bytes,
+      bytes.size,
+      objectIndex.commentBytes,
+    )
     var objectCount = 0
     val seenObjects = mutableSetOf<ForwardPDFObjectKey>()
     val pendingStreams = mutableListOf<PendingBackwardPDFStream>()
@@ -1617,7 +1621,11 @@ private class BackwardPDFIntegerResolver(
       }
       parsed.pendingStream?.let(pendingStreams::add)
       objectCount += 1
-      end = skipPDFWhitespaceAndCommentsBackward(bytes, parsed.start)
+      end = skipPDFWhitespaceAndCommentsBackward(
+        bytes,
+        parsed.start,
+        objectIndex.commentBytes,
+      )
     }
     pendingStreams.forEach { pending ->
       onWork()
@@ -1663,7 +1671,10 @@ private fun indexBackwardPDFObjects(
   var escapedLiteralByte = false
   while (start < bytes.size) {
     if (start % 1_024 == 0) onWork()
-    commentBytes[start] = inComment
+    val value = bytes[start].toInt() and 0xff
+    val startsComment =
+      !inComment && literalDepth == 0 && !inHexString && value == '%'.code
+    commentBytes[start] = inComment || startsComment
     if (isPDFKeywordAt(bytes, start, "endobj")) {
       endObjectStarts += start
       if (endObjectStarts.size > 512) {
@@ -1677,7 +1688,6 @@ private fun indexBackwardPDFObjects(
         throw IOException("Too many backward PDF object headers")
       }
     }
-    val value = bytes[start].toInt() and 0xff
     when {
       inComment -> if (value == '\n'.code || value == '\r'.code) inComment = false
       literalDepth > 0 -> when {
@@ -1764,6 +1774,7 @@ private fun parseBackwardPDFObjectEndingAt(
         keywordStart = keywordStart,
         header = candidate.header,
         knownIntegers = knownIntegers,
+        commentBytes = objectIndex.commentBytes,
       ) ?: continue
       if (result != null) throw IOException("Backward PDF object is ambiguous")
       result = parsed
@@ -1782,6 +1793,7 @@ private fun parseBackwardPDFObjectCandidate(
   keywordStart: Int,
   header: ParsedBackwardPDFObjectHeader,
   knownIntegers: Map<ForwardPDFObjectKey, Long>,
+  commentBytes: BooleanArray,
 ): ParsedBackwardPDFObject? {
   val directInteger = parsePDFNonNegativeIntegerToken(bytes, header.valueStart, bytes.size)
   if (directInteger != null) {
@@ -1824,7 +1836,11 @@ private fun parseBackwardPDFObjectCandidate(
   val directLength = dictionary.integerValues["Length"]
   val indirectLength = dictionary.indirectReferences["Length"]?.asForwardObjectKey()
   if ((directLength == null) == (indirectLength == null)) return null
-  val beforeEndobj = skipPDFWhitespaceAndCommentsBackward(bytes, keywordStart)
+  val beforeEndobj = skipPDFWhitespaceAndCommentsBackward(
+    bytes,
+    keywordStart,
+    commentBytes,
+  )
   val endstreamStart = beforeEndobj - "endstream".length
   if (
     endstreamStart < streamStart ||
@@ -1861,25 +1877,22 @@ private fun parseBackwardPDFObjectCandidate(
   )
 }
 
-private fun skipPDFWhitespaceAndCommentsBackward(bytes: ByteArray, start: Int): Int {
+private fun skipPDFWhitespaceAndCommentsBackward(
+  bytes: ByteArray,
+  start: Int,
+  commentBytes: BooleanArray,
+): Int {
+  if (commentBytes.size != bytes.size) {
+    throw IOException("PDF lexical index bounds are invalid")
+  }
   var index = start.coerceIn(0, bytes.size)
   while (index > 0) {
-    while (index > 0 && isPDFWhitespace(bytes[index - 1].toInt() and 0xff)) index -= 1
-    var lineStart = index
-    while (lineStart > 0) {
-      val previous = bytes[lineStart - 1].toInt() and 0xff
-      if (previous == '\n'.code || previous == '\r'.code) break
-      lineStart -= 1
-    }
-    var commentStart = -1
-    for (candidate in lineStart until index) {
-      if (bytes[candidate] == '%'.code.toByte()) {
-        commentStart = candidate
-        break
-      }
-    }
-    if (commentStart < 0) break
-    index = commentStart
+    val candidate = index - 1
+    if (
+      !isPDFWhitespace(bytes[candidate].toInt() and 0xff) &&
+      !commentBytes[candidate]
+    ) break
+    index = candidate
   }
   return index
 }
