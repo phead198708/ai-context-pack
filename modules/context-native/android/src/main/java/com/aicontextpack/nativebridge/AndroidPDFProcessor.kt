@@ -920,8 +920,12 @@ private fun readXrefRevision(
   xrefOffset: Long,
   revisionUpperBound: Long,
   onWork: () -> Unit,
+  structuralDepth: Int = 0,
 ): XrefRevision {
   onWork()
+  if (structuralDepth >= AndroidPDFResourcePolicy.maximumXrefRevisions) {
+    throw IOException("PDF xref structure exceeds its bounded parser policy")
+  }
   val prefixLength = minOf(256L, input.length - xrefOffset).toInt()
   val prefix = input.read(xrefOffset, prefixLength)
   val dictionaryStart = skipPDFWhitespace(prefix, 0, prefix.size)
@@ -961,6 +965,7 @@ private fun readXrefRevision(
       revisionUpperBound = revisionUpperBound,
       expectedXrefOffset = xrefOffset,
       onWork = onWork,
+      structuralDepth = structuralDepth,
     ),
   )
 }
@@ -1093,6 +1098,7 @@ private fun readXrefStreamRevisionTerminator(
   revisionUpperBound: Long,
   expectedXrefOffset: Long,
   onWork: () -> Unit,
+  structuralDepth: Int,
 ): Long {
   if (
     dictionary.duplicateKeys.contains("Length") ||
@@ -1117,6 +1123,7 @@ private fun readXrefStreamRevisionTerminator(
     upperBound = expectedXrefOffset,
     previousXrefOffset = previousXrefOffset,
     onWork = onWork,
+    structuralDepth = structuralDepth,
   )
   if (streamLength == null) {
     val lengthReference = dictionary.indirectReferences["Length"]
@@ -1579,6 +1586,7 @@ private class BackwardPDFIntegerResolver(
   private val upperBound: Long,
   private val previousXrefOffset: Long?,
   private val onWork: () -> Unit,
+  private val structuralDepth: Int,
 ) {
   private var scanned = false
   private val values = mutableMapOf<ForwardPDFObjectKey, Long>()
@@ -1600,12 +1608,19 @@ private class BackwardPDFIntegerResolver(
     val bytes = input.read(windowStart, (upperBound - windowStart).toInt())
     val candidateStarts = findForwardPDFObjectCandidateStarts(bytes, onWork)
     val currentRevisionStart = previousXrefOffset?.let { previous ->
-      findCurrentPDFRevisionStart(
-        bytes = bytes,
-        windowStart = windowStart,
-        previousXrefOffset = previous,
+      val previousTerminator = readXrefRevision(
+        input = input,
+        xrefOffset = previous,
+        revisionUpperBound = upperBound,
         onWork = onWork,
-      )
+        structuralDepth = structuralDepth + 1,
+      ).startXrefOffset
+      if (previousTerminator <= previous || previousTerminator >= upperBound) {
+        throw IOException("Previous PDF revision terminator is invalid")
+      }
+      (previousTerminator - windowStart)
+        .coerceIn(0L, bytes.size.toLong())
+        .toInt()
     } ?: 0
     var authoritative: Map<ForwardPDFObjectKey, Long>? = null
     for (start in candidateStarts) {
@@ -1662,58 +1677,6 @@ private fun parseBackwardPDFObjectSequenceCandidate(
     throw IOException("Backward PDF object sequence is ambiguous")
   }
   return parsed.singleOrNull()?.directIntegers
-}
-
-private fun findCurrentPDFRevisionStart(
-  bytes: ByteArray,
-  windowStart: Long,
-  previousXrefOffset: Long,
-  onWork: () -> Unit,
-): Int {
-  if (previousXrefOffset < 0 || previousXrefOffset >= windowStart + bytes.size) {
-    throw IOException("Previous PDF revision bounds are invalid")
-  }
-  var index = 0
-  while (index < bytes.size) {
-    if (index % 1_024 == 0) onWork()
-    if (
-      windowStart + index > previousXrefOffset &&
-      isPDFKeywordAt(bytes, index, "startxref")
-    ) {
-      val revisionEnd = parseCompletedPDFRevisionEnd(
-        bytes = bytes,
-        start = index,
-        expectedXrefOffset = previousXrefOffset,
-      )
-      if (revisionEnd != null) {
-        onWork()
-        return revisionEnd
-      }
-    }
-    index += 1
-  }
-  onWork()
-  return 0
-}
-
-private fun parseCompletedPDFRevisionEnd(
-  bytes: ByteArray,
-  start: Int,
-  expectedXrefOffset: Long,
-): Int? {
-  var index = start + "startxref".length
-  index = skipPDFWhitespace(bytes, index, bytes.size)
-  val parsedOffset = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
-  if (parsedOffset.value != expectedXrefOffset) return null
-  index = skipPDFWhitespace(bytes, parsedOffset.end, bytes.size)
-  val marker = "%%EOF".toByteArray(Charsets.US_ASCII)
-  if (!bytes.regionMatches(index, marker)) return null
-  val end = index + marker.size
-  if (end < bytes.size) {
-    val boundary = bytes[end].toInt() and 0xff
-    if (!isPDFWhitespace(boundary)) return null
-  }
-  return end
 }
 
 private fun findForwardPDFObjectCandidateStarts(

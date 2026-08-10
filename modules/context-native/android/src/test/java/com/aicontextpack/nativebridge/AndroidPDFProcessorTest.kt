@@ -364,6 +364,11 @@ class AndroidPDFProcessorTest {
     )
     val incrementalXrefStreamWithBackwardLength =
       incrementalXrefStreamPDFWithBackwardLength()
+    val incrementalXrefStreamWithEmbeddedPreviousRevisionMarker =
+      incrementalXrefStreamPDFWithBackwardLength { previousXrefOffset ->
+        "/Custom (startxref\n$previousXrefOffset\n%%EOF\n" +
+          "8 0 obj\n2\nendobj\n)"
+      }
     val incrementalXrefStreamWithMalformedCurrentObjectBeforeBackwardLength =
       incrementalXrefStreamPDFWithBackwardLength(
         currentObjectsBeforeLength =
@@ -462,6 +467,10 @@ class AndroidPDFProcessorTest {
       assertTrue(hasPDFEncryptionMarker(incrementallyEncrypted))
       assertTrue(hasPDFEncryptionMarker(incrementallyEncryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(incrementalXrefStreamWithBackwardLength))
+      assertEquals(
+        false,
+        hasPDFEncryptionMarker(incrementalXrefStreamWithEmbeddedPreviousRevisionMarker),
+      )
       assertEquals(false, hasPDFEncryptionMarker(incrementallyUnencrypted))
       assertEquals(false, hasPDFEncryptionMarker(spoofedPreviousStartXref))
       assertEquals(false, hasPDFEncryptionMarker(positivePreviousRevision))
@@ -583,6 +592,7 @@ class AndroidPDFProcessorTest {
       incrementallyEncrypted.delete()
       incrementallyEncryptedXrefStream.delete()
       incrementalXrefStreamWithBackwardLength.delete()
+      incrementalXrefStreamWithEmbeddedPreviousRevisionMarker.delete()
       incrementalXrefStreamWithMalformedCurrentObjectBeforeBackwardLength.delete()
       incrementallyUnencrypted.delete()
       largeIncrementallyEncrypted.delete()
@@ -801,16 +811,18 @@ class AndroidPDFProcessorTest {
 
   private fun incrementalXrefStreamPDFWithBackwardLength(
     currentObjectsBeforeLength: String = "",
+    previousTrailerEntries: (Long) -> String = { "" },
   ): File {
     val prefix =
       "%PDF-1.7\n" +
         "1 0 obj\n<< /Type /Catalog >>\nendobj\n"
     val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val previousTrailer = previousTrailerEntries(previousXrefOffset.toLong())
     val previousRevision =
       "xref\n0 2\n" +
         "0000000000 65535 f \n" +
         "0000000009 00000 n \n" +
-        "trailer\n<< /Size 2 /Root 1 0 R >>\n" +
+        "trailer\n<< /Size 2 /Root 1 0 R $previousTrailer >>\n" +
         "startxref\n$previousXrefOffset\n%%EOF\n"
     val backwardLengthObject = currentObjectsBeforeLength + "4 0 obj\n3\nendobj\n"
     val latestXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size +
