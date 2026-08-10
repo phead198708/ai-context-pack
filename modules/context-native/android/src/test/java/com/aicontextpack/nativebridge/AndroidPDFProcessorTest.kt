@@ -362,6 +362,14 @@ class AndroidPDFProcessorTest {
       previousDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length 0 /En#63rypt 1 0 R >>",
       latestDictionaryEntries = "/Type /XRef /Size 3 /W [1 1 1] /Length 0",
     )
+    val incrementalXrefStreamWithBackwardLength =
+      incrementalXrefStreamPDFWithBackwardLength()
+    val incrementalXrefStreamWithMalformedCurrentObjectBeforeBackwardLength =
+      incrementalXrefStreamPDFWithBackwardLength(
+        currentObjectsBeforeLength =
+          "6 0 obj\n<< /Length 7 0 R >>\nstream\nxyz\nendstream\nendobj\n" +
+            "7 0 obj\n2\nendobj\n",
+      )
     val incrementallyUnencrypted = incrementalClassicXrefPDF(
       previousTrailerDictionary = "<< /Size 2 /Root 1 0 R >>",
       latestTrailerEntries = "/Size 3 /Root 2 0 R",
@@ -453,6 +461,7 @@ class AndroidPDFProcessorTest {
       assertEquals(false, hasPDFEncryptionMarker(harmlessTrailerComment))
       assertTrue(hasPDFEncryptionMarker(incrementallyEncrypted))
       assertTrue(hasPDFEncryptionMarker(incrementallyEncryptedXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(incrementalXrefStreamWithBackwardLength))
       assertEquals(false, hasPDFEncryptionMarker(incrementallyUnencrypted))
       assertEquals(false, hasPDFEncryptionMarker(spoofedPreviousStartXref))
       assertEquals(false, hasPDFEncryptionMarker(positivePreviousRevision))
@@ -519,6 +528,11 @@ class AndroidPDFProcessorTest {
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(negativePreviousRevision)
       }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(
+          incrementalXrefStreamWithMalformedCurrentObjectBeforeBackwardLength,
+        )
+      }
     } finally {
       encrypted.delete()
       metadataOnly.delete()
@@ -568,6 +582,8 @@ class AndroidPDFProcessorTest {
       harmlessTrailerComment.delete()
       incrementallyEncrypted.delete()
       incrementallyEncryptedXrefStream.delete()
+      incrementalXrefStreamWithBackwardLength.delete()
+      incrementalXrefStreamWithMalformedCurrentObjectBeforeBackwardLength.delete()
       incrementallyUnencrypted.delete()
       largeIncrementallyEncrypted.delete()
       cyclicPreviousRevision.delete()
@@ -779,6 +795,33 @@ class AndroidPDFProcessorTest {
       prefix + previousRevision +
         "3 0 obj\n<< $latestDictionaryEntries /Prev $previousXrefOffset >>\n" +
         "stream\n\nendstream\nendobj\n" +
+        "startxref\n$latestXrefOffset\n%%EOF",
+    )
+  }
+
+  private fun incrementalXrefStreamPDFWithBackwardLength(
+    currentObjectsBeforeLength: String = "",
+  ): File {
+    val prefix =
+      "%PDF-1.7\n" +
+        "1 0 obj\n<< /Type /Catalog >>\nendobj\n"
+    val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val previousRevision =
+      "xref\n0 2\n" +
+        "0000000000 65535 f \n" +
+        "0000000009 00000 n \n" +
+        "trailer\n<< /Size 2 /Root 1 0 R >>\n" +
+        "startxref\n$previousXrefOffset\n%%EOF\n"
+    val backwardLengthObject = currentObjectsBeforeLength + "4 0 obj\n3\nendobj\n"
+    val latestXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size +
+      previousRevision.toByteArray(Charsets.US_ASCII).size +
+      backwardLengthObject.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix + previousRevision + backwardLengthObject +
+        "5 0 obj\n" +
+        "<< /Type /XRef /Size 6 /W [1 1 1] /Length 4 0 R " +
+        "/Prev $previousXrefOffset >>\n" +
+        "stream\nabc\nendstream\nendobj\n" +
         "startxref\n$latestXrefOffset\n%%EOF",
     )
   }

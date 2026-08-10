@@ -1107,7 +1107,17 @@ private fun readXrefStreamRevisionTerminator(
   index = consumeRequiredPDFLineEnding(header, index)
   val streamStartOffset = dictionaryEndOffset + index
   val streamLength = dictionary.integerValues["Length"]
-  val backwardIntegers = BackwardPDFIntegerResolver(input, expectedXrefOffset, onWork)
+  val previousXrefOffset = dictionary.integerValues["Prev"]?.takeIf { previous ->
+    !dictionary.duplicateKeys.contains("Prev") &&
+      !dictionary.invalidDirectIntegerKeys.contains("Prev") &&
+      previous < expectedXrefOffset
+  }
+  val backwardIntegers = BackwardPDFIntegerResolver(
+    input = input,
+    upperBound = expectedXrefOffset,
+    previousXrefOffset = previousXrefOffset,
+    onWork = onWork,
+  )
   if (streamLength == null) {
     val lengthReference = dictionary.indirectReferences["Length"]
       ?: throw IOException("PDF xref-stream length is invalid")
@@ -1567,6 +1577,7 @@ private fun isPDFPrimitiveObjectToken(bytes: ByteArray, start: Int, end: Int): B
 private class BackwardPDFIntegerResolver(
   private val input: PDFRandomAccessReader,
   private val upperBound: Long,
+  private val previousXrefOffset: Long?,
   private val onWork: () -> Unit,
 ) {
   private var scanned = false
@@ -1588,44 +1599,121 @@ private class BackwardPDFIntegerResolver(
     val windowStart = maxOf(0L, upperBound - maximumObjectBytes)
     val bytes = input.read(windowStart, (upperBound - windowStart).toInt())
     val candidateStarts = findForwardPDFObjectCandidateStarts(bytes, onWork)
+    val currentRevisionStart = previousXrefOffset?.let { previous ->
+      findCurrentPDFRevisionStart(
+        bytes = bytes,
+        windowStart = windowStart,
+        previousXrefOffset = previous,
+        onWork = onWork,
+      )
+    } ?: 0
     var authoritative: Map<ForwardPDFObjectKey, Long>? = null
-    candidateStarts.firstOrNull()?.let { start ->
+    for (start in candidateStarts) {
       onWork()
-      var workFailure: Throwable? = null
-      val guardedWork = {
-        try {
-          onWork()
-        } catch (error: Throwable) {
-          workFailure = error
-          throw error
-        }
+      val parsed = parseBackwardPDFObjectSequenceCandidate(bytes, start, onWork)
+      if (parsed != null) {
+        authoritative = parsed
+        break
       }
-      val parsed = try {
-        parseForwardPDFObjectSequence(
-          bytes = bytes,
-          start = start,
-          directIntegers = emptyMap(),
-          seenObjects = emptySet(),
-          pendingStreams = emptyList(),
-          objectCount = 0,
-          budget = ForwardPDFObjectParseBudget(),
-          terminator = ForwardPDFObjectSequenceTerminator.END_OF_INPUT,
-          resolveBackwardInteger = { null },
-          onWork = guardedWork,
-        )
-      } catch (_: IOException) {
-        workFailure?.let { throw it }
-        emptyList()
-      }
-      workFailure?.let { throw it }
-      if (parsed.size > 1) {
-        throw IOException("Backward PDF object sequence is ambiguous")
-      }
-      authoritative = parsed.singleOrNull()?.directIntegers
+      // An older revision may contain many object headers before its xref syntax. Only the
+      // Prev-bound completed-revision marker authorizes trying a later candidate. Once the
+      // current revision begins, a malformed leading object fails closed instead of letting a
+      // shorter scalar-only suffix hide it.
+      if (start >= currentRevisionStart) break
     }
     authoritative?.let(values::putAll)
     scanned = true
   }
+}
+
+private fun parseBackwardPDFObjectSequenceCandidate(
+  bytes: ByteArray,
+  start: Int,
+  onWork: () -> Unit,
+): Map<ForwardPDFObjectKey, Long>? {
+  var workFailure: Throwable? = null
+  val guardedWork = {
+    try {
+      onWork()
+    } catch (error: Throwable) {
+      workFailure = error
+      throw error
+    }
+  }
+  val parsed = try {
+    parseForwardPDFObjectSequence(
+      bytes = bytes,
+      start = start,
+      directIntegers = emptyMap(),
+      seenObjects = emptySet(),
+      pendingStreams = emptyList(),
+      objectCount = 0,
+      budget = ForwardPDFObjectParseBudget(),
+      terminator = ForwardPDFObjectSequenceTerminator.END_OF_INPUT,
+      resolveBackwardInteger = { null },
+      onWork = guardedWork,
+    )
+  } catch (_: IOException) {
+    workFailure?.let { throw it }
+    emptyList()
+  }
+  workFailure?.let { throw it }
+  if (parsed.size > 1) {
+    throw IOException("Backward PDF object sequence is ambiguous")
+  }
+  return parsed.singleOrNull()?.directIntegers
+}
+
+private fun findCurrentPDFRevisionStart(
+  bytes: ByteArray,
+  windowStart: Long,
+  previousXrefOffset: Long,
+  onWork: () -> Unit,
+): Int {
+  if (previousXrefOffset < 0 || previousXrefOffset >= windowStart + bytes.size) {
+    throw IOException("Previous PDF revision bounds are invalid")
+  }
+  var index = 0
+  while (index < bytes.size) {
+    if (index % 1_024 == 0) onWork()
+    if (
+      windowStart + index > previousXrefOffset &&
+      isPDFKeywordAt(bytes, index, "startxref")
+    ) {
+      val revisionEnd = parseCompletedPDFRevisionEnd(
+        bytes = bytes,
+        start = index,
+        expectedXrefOffset = previousXrefOffset,
+      )
+      if (revisionEnd != null) {
+        onWork()
+        return revisionEnd
+      }
+    }
+    index += 1
+  }
+  onWork()
+  return 0
+}
+
+private fun parseCompletedPDFRevisionEnd(
+  bytes: ByteArray,
+  start: Int,
+  expectedXrefOffset: Long,
+): Int? {
+  var index = start + "startxref".length
+  index = skipPDFWhitespace(bytes, index, bytes.size)
+  val parsedOffset = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
+  if (parsedOffset.value != expectedXrefOffset) return null
+  index = skipPDFWhitespace(bytes, parsedOffset.end, bytes.size)
+  val marker = "%%EOF".toByteArray(Charsets.US_ASCII)
+  if (!bytes.regionMatches(index, marker)) return null
+  val end = index + marker.size
+  if (end < bytes.size) {
+    val boundary = bytes[end].toInt() and 0xff
+    if (!isPDFWhitespace(boundary)) return null
+  }
+  return end
 }
 
 private fun findForwardPDFObjectCandidateStarts(
