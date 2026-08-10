@@ -685,8 +685,7 @@ internal fun reconcilePDFSparseEmbeddedText(
   }.orEmpty()
   if (densitySafeEmbedded.isEmpty()) return recognized
   if (recognized.isEmpty()) return embedded
-  if (recognized.contains(densitySafeEmbedded)) return recognized
-  if (densitySafeEmbedded.contains(recognized)) return densitySafeEmbedded
+  if (densitySafeEmbedded == recognized) return densitySafeEmbedded
   return "$densitySafeEmbedded\n$recognized"
 }
 
@@ -977,14 +976,14 @@ private fun readXrefStreamRevisionTerminator(
   val streamStartOffset = dictionaryEndOffset + index
   val streamLength = dictionary.integerValues["Length"]
   if (streamLength == null) {
-    if (!dictionary.indirectReferences.containsKey("Length")) {
-      throw IOException("PDF xref-stream length is invalid")
-    }
+    val lengthReference = dictionary.indirectReferences["Length"]
+      ?: throw IOException("PDF xref-stream length is invalid")
     return findIndirectLengthXrefStreamTerminator(
       input = input,
       streamStartOffset = streamStartOffset,
       revisionUpperBound = revisionUpperBound,
       expectedXrefOffset = expectedXrefOffset,
+      lengthReference = lengthReference,
     )
   }
   val streamEndOffset = streamStartOffset + streamLength
@@ -992,22 +991,72 @@ private fun readXrefStreamRevisionTerminator(
     throw IOException("PDF xref-stream bounds are invalid")
   }
   val suffix = readBoundedXrefSyntax(input, streamEndOffset, revisionUpperBound)
-  val marker = parseXrefStreamSuffix(suffix, 0, expectedXrefOffset)
-  return streamEndOffset + marker
+  val parsed = parseXrefStreamSuffix(suffix, 0, expectedXrefOffset)
+  return streamEndOffset + parsed.marker
 }
+
+private data class ParsedXrefStreamSuffix(
+  val marker: Int,
+  val forwardLength: Long?,
+)
+
+private data class ParsedForwardIndirectLengthObject(
+  val length: Long,
+  val end: Int,
+)
 
 private fun parseXrefStreamSuffix(
   suffix: ByteArray,
   start: Int,
   expectedXrefOffset: Long,
-): Int {
+  lengthReference: PDFIndirectReference? = null,
+): ParsedXrefStreamSuffix {
   var index = consumeOptionalPDFLineEnding(suffix, start)
   if (!isPDFKeywordAt(suffix, index, "endstream")) throw IOException("Missing PDF endstream")
   index += "endstream".length
   index = skipPDFWhitespaceAndComments(suffix, index, suffix.size)
   if (!isPDFKeywordAt(suffix, index, "endobj")) throw IOException("Missing PDF endobj")
   index += "endobj".length
-  return parseStartXrefTerminator(suffix, index, expectedXrefOffset)
+  val afterStreamObject = skipPDFWhitespaceAndComments(suffix, index, suffix.size)
+  if (isPDFKeywordAt(suffix, afterStreamObject, "startxref")) {
+    return ParsedXrefStreamSuffix(
+      marker = parseStartXrefTerminator(suffix, afterStreamObject, expectedXrefOffset),
+      forwardLength = null,
+    )
+  }
+  val reference = lengthReference ?: throw IOException("Missing PDF startxref")
+  val forwardLength = parseForwardIndirectLengthObject(
+    suffix,
+    afterStreamObject,
+    reference,
+  ) ?: throw IOException("Invalid forward PDF xref-stream length object")
+  return ParsedXrefStreamSuffix(
+    marker = parseStartXrefTerminator(suffix, forwardLength.end, expectedXrefOffset),
+    forwardLength = forwardLength.length,
+  )
+}
+
+private fun parseForwardIndirectLengthObject(
+  bytes: ByteArray,
+  start: Int,
+  reference: PDFIndirectReference,
+): ParsedForwardIndirectLengthObject? {
+  var index = skipPDFWhitespaceAndComments(bytes, start, bytes.size)
+  val objectNumber = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
+  if (objectNumber.value != reference.objectNumber) return null
+  index = skipPDFWhitespaceAndComments(bytes, objectNumber.end, bytes.size)
+  val generation = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
+  if (generation.value != reference.generation) return null
+  index = skipPDFWhitespaceAndComments(bytes, generation.end, bytes.size)
+  if (!isPDFKeywordAt(bytes, index, "obj")) return null
+  index = skipPDFWhitespaceAndComments(bytes, index + "obj".length, bytes.size)
+  val length = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
+  index = skipPDFWhitespaceAndComments(bytes, length.end, bytes.size)
+  if (!isPDFKeywordAt(bytes, index, "endobj")) return null
+  return ParsedForwardIndirectLengthObject(
+    length = length.value,
+    end = index + "endobj".length,
+  )
 }
 
 private fun findIndirectLengthXrefStreamTerminator(
@@ -1015,6 +1064,7 @@ private fun findIndirectLengthXrefStreamTerminator(
   streamStartOffset: Long,
   revisionUpperBound: Long,
   expectedXrefOffset: Long,
+  lengthReference: PDFIndirectReference,
 ): Long {
   if (
     streamStartOffset < 0 ||
@@ -1038,20 +1088,32 @@ private fun findIndirectLengthXrefStreamTerminator(
     for (candidateIndex in 0..window.size - keyword.size) {
       if (!window.regionMatches(candidateIndex, keyword)) continue
       val candidateOffset = windowOffset + candidateIndex
-      if (candidateOffset <= streamStartOffset || candidateOffset >= revisionUpperBound) continue
-      val preceding = input.read(candidateOffset - 1, 1).single().toInt() and 0xff
-      if (preceding != '\n'.code && preceding != '\r'.code) continue
+      if (candidateOffset < streamStartOffset || candidateOffset >= revisionUpperBound) continue
       candidateCount += 1
       if (candidateCount > maximumCandidates) {
         throw IOException("PDF xref stream has too many structural candidates")
       }
       val suffix = readBoundedXrefSyntax(input, candidateOffset, revisionUpperBound)
-      val marker = try {
-        parseXrefStreamSuffix(suffix, 0, expectedXrefOffset)
+      val parsed = try {
+        parseXrefStreamSuffix(
+          suffix,
+          0,
+          expectedXrefOffset,
+          lengthReference,
+        )
       } catch (_: IOException) {
         continue
       }
-      val absoluteMarker = candidateOffset + marker
+      if (
+        parsed.forwardLength != null &&
+        !matchesDeclaredXrefStreamLength(
+          input,
+          streamStartOffset,
+          candidateOffset,
+          parsed.forwardLength,
+        )
+      ) continue
+      val absoluteMarker = candidateOffset + parsed.marker
       if (validMarkerOffset != null && validMarkerOffset != absoluteMarker) {
         throw IOException("PDF xref-stream terminator is ambiguous")
       }
@@ -1062,6 +1124,29 @@ private fun findIndirectLengthXrefStreamTerminator(
     cursor += chunk.size
   }
   return validMarkerOffset ?: throw IOException("Missing PDF xref-stream terminator")
+}
+
+private fun matchesDeclaredXrefStreamLength(
+  input: PDFRandomAccessReader,
+  streamStartOffset: Long,
+  endstreamOffset: Long,
+  declaredLength: Long,
+): Boolean {
+  val declaredEnd = streamStartOffset + declaredLength
+  if (declaredLength < 0 || declaredEnd < streamStartOffset || declaredEnd > endstreamOffset) {
+    return false
+  }
+  return when (endstreamOffset - declaredEnd) {
+    0L -> true
+    1L -> {
+      val separator = input.read(declaredEnd, 1).single().toInt() and 0xff
+      separator == '\n'.code || separator == '\r'.code
+    }
+    2L -> input.read(declaredEnd, 2).contentEquals(
+      byteArrayOf('\r'.code.toByte(), '\n'.code.toByte()),
+    )
+    else -> false
+  }
 }
 
 private fun readBoundedXrefSyntax(
@@ -1089,16 +1174,12 @@ private fun parseStartXrefTerminator(
   if (!isPDFKeywordAt(bytes, index, "startxref")) throw IOException("Missing PDF startxref")
   index += "startxref".length
   index = skipPDFWhitespace(bytes, index, bytes.size)
-  val integerStart = index
-  while (index < bytes.size && bytes[index].toInt().toChar() in '0'..'9') index += 1
-  if (index == integerStart || !isPDFTokenBoundary(bytes, index)) {
-    throw IOException("Invalid PDF startxref")
+  val parsedOffset = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)
+    ?: throw IOException("Invalid PDF startxref")
+  if (parsedOffset.value != expectedXrefOffset) {
+    throw IOException("PDF startxref target is inconsistent")
   }
-  val parsedOffset = bytes.copyOfRange(integerStart, index)
-    .toString(Charsets.US_ASCII)
-    .toLongOrNull()
-  if (parsedOffset != expectedXrefOffset) throw IOException("PDF startxref target is inconsistent")
-  index = skipPDFWhitespace(bytes, index, bytes.size)
+  index = skipPDFWhitespace(bytes, parsedOffset.end, bytes.size)
   if (!bytes.regionMatches(index, "%%EOF".toByteArray(Charsets.US_ASCII))) {
     throw IOException("Missing PDF EOF marker")
   }
@@ -1143,10 +1224,28 @@ private fun sha256(
 private fun parseStartXrefOffset(bytes: ByteArray, keyword: Int): Long? {
   var index = keyword + "startxref".length
   while (index < bytes.size && isPDFWhitespace(bytes[index].toInt() and 0xff)) index += 1
-  val start = index
-  while (index < bytes.size && bytes[index].toInt().toChar() in '0'..'9') index += 1
-  if (index == start) return null
-  return bytes.copyOfRange(start, index).toString(Charsets.US_ASCII).toLongOrNull()
+  return parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)?.value
+}
+
+private data class ParsedPDFInteger(val value: Long, val end: Int)
+
+private fun parsePDFNonNegativeIntegerToken(
+  bytes: ByteArray,
+  start: Int,
+  end: Int,
+): ParsedPDFInteger? {
+  val limit = minOf(end, bytes.size)
+  if (start >= limit) return null
+  var index = start
+  if (bytes[index] == '+'.code.toByte()) index += 1
+  val digitsStart = index
+  while (index < limit && bytes[index].toInt().toChar() in '0'..'9') index += 1
+  if (index == digitsStart || !isPDFTokenBoundary(bytes, index)) return null
+  val value = bytes.copyOfRange(start, index)
+    .toString(Charsets.US_ASCII)
+    .toLongOrNull()
+    ?: return null
+  return ParsedPDFInteger(value, index)
 }
 
 private fun skipPDFWhitespace(bytes: ByteArray, start: Int, end: Int): Int {

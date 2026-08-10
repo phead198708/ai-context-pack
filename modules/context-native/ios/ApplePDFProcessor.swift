@@ -81,36 +81,8 @@ internal func reconcilePDFSparseEmbeddedText(
     : embedded
   guard !densitySafeEmbedded.isEmpty else { return recognized }
   guard !recognized.isEmpty else { return embedded }
-  if pdfRawUTF16Contains(recognized, densitySafeEmbedded) { return recognized }
-  if pdfRawUTF16Contains(densitySafeEmbedded, recognized) { return densitySafeEmbedded }
+  if densitySafeEmbedded.utf16.elementsEqual(recognized.utf16) { return densitySafeEmbedded }
   return densitySafeEmbedded + "\n" + recognized
-}
-
-private func pdfRawUTF16Contains(_ haystack: String, _ needle: String) -> Bool {
-  let pattern = Array(needle.utf16)
-  if pattern.isEmpty { return true }
-  let input = Array(haystack.utf16)
-  if pattern.count > input.count { return false }
-
-  var prefix = [Int](repeating: 0, count: pattern.count)
-  var matched = 0
-  for index in 1..<pattern.count {
-    while matched > 0, pattern[index] != pattern[matched] {
-      matched = prefix[matched - 1]
-    }
-    if pattern[index] == pattern[matched] { matched += 1 }
-    prefix[index] = matched
-  }
-
-  matched = 0
-  for unit in input {
-    while matched > 0, unit != pattern[matched] {
-      matched = prefix[matched - 1]
-    }
-    if unit == pattern[matched] { matched += 1 }
-    if matched == pattern.count { return true }
-  }
-  return false
 }
 
 private struct ApplePDFSourceSession {

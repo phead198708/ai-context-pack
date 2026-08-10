@@ -24,7 +24,9 @@ class AndroidPDFProcessorTest {
       pdfEmbeddedTextNonWhitespaceUTF16Count(" \n\u0085\u00A0\u3000😀😀😀😀😀😀😀"),
     )
     assertEquals("A\n4", reconcilePDFSparseEmbeddedText("A", "4"))
-    assertEquals("OCR A result", reconcilePDFSparseEmbeddedText("A", "OCR A result"))
+    assertEquals("A\nOCR A result", reconcilePDFSparseEmbeddedText("A", "OCR A result"))
+    assertEquals("A\nCAT", reconcilePDFSparseEmbeddedText("A", "CAT"))
+    assertEquals("A", reconcilePDFSparseEmbeddedText("A", "A"))
     assertEquals("é\ne\u0301", reconcilePDFSparseEmbeddedText("é", "e\u0301"))
     assertEquals(
       "Recovered by OCR",
@@ -99,6 +101,22 @@ class AndroidPDFProcessorTest {
       xrefDictionary = "<< /Type /XRef /Size 3 /W [1 1 1] /Length 0 >>",
     )
     val harmlessIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength()
+    val harmlessNoEolIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      includeEndstreamLineEnding = false,
+    )
+    val harmlessZeroLengthNoEolXrefStream = xrefStreamPDFWithIndirectLength(
+      includeEndstreamLineEnding = false,
+    )
+    val harmlessForwardIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+    )
+    val mismatchedForwardIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+      declaredLengthOverride = 2,
+    )
     val harmlessPositiveLengthXrefStream = xrefStreamPDF(
       xrefDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length +0 >>",
     )
@@ -167,6 +185,11 @@ class AndroidPDFProcessorTest {
     val positivePreviousRevision = incrementalClassicXrefWithRawPrevPDF { previousOffset ->
       "/Size 3 /Prev +$previousOffset"
     }
+    val positiveStartXrefRevision = incrementalClassicXrefWithRawPrevPDF(
+      signedLatestStartXref = true,
+    ) { previousOffset ->
+      "/Size 3 /Prev +$previousOffset"
+    }
     val negativePreviousRevision = incrementalClassicXrefWithRawPrevPDF { previousOffset ->
       "/Size 3 /Prev -$previousOffset"
     }
@@ -177,6 +200,9 @@ class AndroidPDFProcessorTest {
       assertEquals(false, hasPDFEncryptionMarker(binaryStreamDelimiters))
       assertEquals(false, hasPDFEncryptionMarker(harmlessXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessIndirectLengthXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessNoEolIndirectLengthXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessZeroLengthNoEolXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessForwardIndirectLengthXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessPositiveLengthXrefStream))
       assertTrue(hasPDFEncryptionMarker(encryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(nestedClassic))
@@ -191,6 +217,7 @@ class AndroidPDFProcessorTest {
       assertEquals(false, hasPDFEncryptionMarker(incrementallyUnencrypted))
       assertEquals(false, hasPDFEncryptionMarker(spoofedPreviousStartXref))
       assertEquals(false, hasPDFEncryptionMarker(positivePreviousRevision))
+      assertEquals(false, hasPDFEncryptionMarker(positiveStartXrefRevision))
       assertTrue(hasPDFEncryptionMarker(largeIncrementallyEncrypted))
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(cyclicPreviousRevision)
@@ -214,6 +241,9 @@ class AndroidPDFProcessorTest {
         hasPDFEncryptionMarker(negativeLengthXrefStream)
       }
       assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(mismatchedForwardIndirectLengthXrefStream)
+      }
+      assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(negativePreviousRevision)
       }
     } finally {
@@ -223,6 +253,10 @@ class AndroidPDFProcessorTest {
       binaryStreamDelimiters.delete()
       harmlessXrefStream.delete()
       harmlessIndirectLengthXrefStream.delete()
+      harmlessNoEolIndirectLengthXrefStream.delete()
+      harmlessZeroLengthNoEolXrefStream.delete()
+      harmlessForwardIndirectLengthXrefStream.delete()
+      mismatchedForwardIndirectLengthXrefStream.delete()
       harmlessPositiveLengthXrefStream.delete()
       negativeLengthXrefStream.delete()
       encryptedXrefStream.delete()
@@ -245,6 +279,7 @@ class AndroidPDFProcessorTest {
       indirectPreviousRevision.delete()
       duplicatePreviousRevision.delete()
       positivePreviousRevision.delete()
+      positiveStartXrefRevision.delete()
       negativePreviousRevision.delete()
     }
   }
@@ -291,13 +326,31 @@ class AndroidPDFProcessorTest {
     )
   }
 
-  private fun xrefStreamPDFWithIndirectLength(): File {
-    val prefix = "%PDF-1.7\n1 0 obj\n0\nendobj\n"
+  private fun xrefStreamPDFWithIndirectLength(
+    streamPayload: String = "",
+    includeEndstreamLineEnding: Boolean = true,
+    forwardLengthObject: Boolean = false,
+    declaredLengthOverride: Int? = null,
+  ): File {
+    val streamLength = streamPayload.toByteArray(Charsets.US_ASCII).size
+    val declaredLength = declaredLengthOverride ?: streamLength
+    val prefix = if (forwardLengthObject) {
+      "%PDF-1.7\n"
+    } else {
+      "%PDF-1.7\n1 0 obj\n$declaredLength\nendobj\n"
+    }
     val xrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val beforeEndstream = if (includeEndstreamLineEnding) "\n" else ""
+    val forwardObject = if (forwardLengthObject) {
+      "1 0 obj\n$declaredLength\nendobj\n"
+    } else {
+      ""
+    }
     return temporaryPDF(
       prefix +
         "2 0 obj\n<< /Type /XRef /Size 3 /W [1 1 1] /Length 1 0 R >>\n" +
-        "stream\n\nendstream\nendobj\n" +
+        "stream\n$streamPayload${beforeEndstream}endstream\nendobj\n" +
+        forwardObject +
         "startxref\n$xrefOffset\n%%EOF",
     )
   }
@@ -380,6 +433,7 @@ class AndroidPDFProcessorTest {
   }
 
   private fun incrementalClassicXrefWithRawPrevPDF(
+    signedLatestStartXref: Boolean = false,
     latestTrailerEntries: (previousOffset: Int) -> String,
   ): File {
     val prefix = "%PDF-1.7\n%" + "a".repeat(240) + "\n"
@@ -390,11 +444,12 @@ class AndroidPDFProcessorTest {
         "trailer\n<< /Size 2 /Root 1 0 R >>\n" +
         "startxref\n$previousXrefOffset\n%%EOF\n"
     val latestXrefOffset = previousXrefOffset + previousRevision.toByteArray(Charsets.US_ASCII).size
+    val latestStartXref = if (signedLatestStartXref) "+$latestXrefOffset" else "$latestXrefOffset"
     return temporaryPDF(
       prefix + previousRevision +
         "xref\n0 1\n0000000000 65535 f \n" +
         "trailer\n<< ${latestTrailerEntries(previousXrefOffset)} >>\n" +
-        "startxref\n$latestXrefOffset\n%%EOF",
+        "startxref\n$latestStartXref\n%%EOF",
     )
   }
 

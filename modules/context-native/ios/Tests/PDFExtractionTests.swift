@@ -668,8 +668,10 @@ final class PDFExtractionTests: XCTestCase {
     )
     XCTAssertEqual(
       reconcilePDFSparseEmbeddedText(embedded: "A", recognized: "OCR A result"),
-      "OCR A result"
+      "A\nOCR A result"
     )
+    XCTAssertEqual(reconcilePDFSparseEmbeddedText(embedded: "A", recognized: "CAT"), "A\nCAT")
+    XCTAssertEqual(reconcilePDFSparseEmbeddedText(embedded: "A", recognized: "A"), "A")
     XCTAssertEqual(
       reconcilePDFSparseEmbeddedText(embedded: "é", recognized: "e\u{301}"),
       "é\ne\u{301}"

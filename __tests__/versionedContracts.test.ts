@@ -493,6 +493,26 @@ describe('V1 contract fixtures and machine-readable schemas', () => {
         text: 'e\u0301',
       }),
     ).toBe(false);
+
+    const incidentalSubstring = {
+      ...sparse,
+      characterCount: 5,
+      text: 'A\nCAT',
+      blocks: [
+        {
+          text: 'CAT',
+          bounds: { x: 0, y: 0, width: 0.1, height: 0.1 },
+        },
+      ],
+    };
+    expect(contract.validate(incidentalSubstring)).toBe(true);
+    expect(
+      contract.validate({
+        ...incidentalSubstring,
+        characterCount: 3,
+        text: 'CAT',
+      }),
+    ).toBe(false);
   });
 
   test.each([

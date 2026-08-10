@@ -547,9 +547,7 @@ function sparsePDFBlocksReconcileToText(
       ? recognizedText
       : recognizedText.length === 0
       ? embeddedText
-      : recognizedText.includes(embeddedText)
-      ? recognizedText
-      : embeddedText.includes(recognizedText)
+      : recognizedText === embeddedText
       ? embeddedText
       : `${embeddedText}\n${recognizedText}`;
   return reconciled === expectedText;
