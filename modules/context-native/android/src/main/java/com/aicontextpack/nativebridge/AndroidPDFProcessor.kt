@@ -926,7 +926,12 @@ private fun readXrefRevision(
   val prefix = input.read(xrefOffset, prefixLength)
   val dictionaryStart = skipPDFWhitespace(prefix, 0, prefix.size)
   if (isPDFKeywordAt(prefix, dictionaryStart, "xref")) {
-    val parsed = readCompleteClassicTrailerDictionary(input, xrefOffset, revisionUpperBound)
+    val parsed = readCompleteClassicTrailerDictionary(
+      input,
+      xrefOffset,
+      revisionUpperBound,
+      onWork,
+    )
     return XrefRevision(
       dictionary = parsed.dictionary,
       startXrefOffset = readClassicRevisionTerminator(
@@ -934,11 +939,12 @@ private fun readXrefRevision(
         dictionaryEndOffset = parsed.dictionaryEndOffset,
         revisionUpperBound = revisionUpperBound,
         expectedXrefOffset = xrefOffset,
+        onWork = onWork,
       ),
     )
   }
 
-  val parsed = readCompleteXrefStreamDictionary(input, xrefOffset)
+  val parsed = readCompleteXrefStreamDictionary(input, xrefOffset, onWork)
   val xrefDictionary = parsed.dictionary
   if (
     xrefDictionary.nameValues["Type"] != "XRef" ||
@@ -963,9 +969,10 @@ private fun readCompleteClassicTrailerDictionary(
   input: PDFRandomAccessReader,
   xrefOffset: Long,
   revisionUpperBound: Long,
+  onWork: () -> Unit,
 ): ParsedXrefDictionary {
   if (revisionUpperBound <= xrefOffset) throw IOException("PDF xref bounds are invalid")
-  val trailerOffset = findClassicTrailerOffset(input, xrefOffset, revisionUpperBound)
+  val trailerOffset = findClassicTrailerOffset(input, xrefOffset, revisionUpperBound, onWork)
   val dictionaryOffset = trailerOffset + "trailer".length
   val windowLength = minOf(
     revisionUpperBound - dictionaryOffset,
@@ -988,6 +995,7 @@ private fun findClassicTrailerOffset(
   input: PDFRandomAccessReader,
   xrefOffset: Long,
   upperBound: Long,
+  onWork: () -> Unit,
 ): Long {
   if (xrefOffset < 0 || upperBound <= xrefOffset || upperBound > input.length) {
     throw IOException("PDF xref revision bounds are invalid")
@@ -1000,6 +1008,7 @@ private fun findClassicTrailerOffset(
   var tokenLength = 0
   var tokenMatches = true
   while (cursor < upperBound) {
+    onWork()
     val requested = minOf(chunkBytes.toLong(), upperBound - cursor).toInt()
     val chunk = input.read(cursor, requested)
     if (chunk.isEmpty()) break
@@ -1039,6 +1048,7 @@ private fun findClassicTrailerOffset(
 private fun readCompleteXrefStreamDictionary(
   input: PDFRandomAccessReader,
   xrefOffset: Long,
+  onWork: () -> Unit,
 ): ParsedXrefDictionary {
   val available = input.length - xrefOffset
   val limit = minOf(
@@ -1048,6 +1058,7 @@ private fun readCompleteXrefStreamDictionary(
   val output = ByteArrayOutputStream(minOf(limit, 65_536L).toInt())
   var consumed = 0L
   while (consumed < limit) {
+    onWork()
     val requested = minOf(65_536L, limit - consumed).toInt()
     val chunk = input.read(xrefOffset + consumed, requested)
     if (chunk.isEmpty()) break
@@ -1067,7 +1078,9 @@ private fun readClassicRevisionTerminator(
   dictionaryEndOffset: Long,
   revisionUpperBound: Long,
   expectedXrefOffset: Long,
+  onWork: () -> Unit,
 ): Long {
+  onWork()
   val suffix = readBoundedXrefSyntax(input, dictionaryEndOffset, revisionUpperBound)
   val marker = parseStartXrefTerminator(suffix, 0, expectedXrefOffset)
   return dictionaryEndOffset + marker
@@ -1107,6 +1120,7 @@ private fun readXrefStreamRevisionTerminator(
       lengthReference = lengthReference,
       backwardLength = backwardLength,
       resolveBackwardInteger = backwardIntegers::resolve,
+      onWork = onWork,
     )
   }
   val streamEndOffset = streamStartOffset + streamLength
@@ -1119,6 +1133,7 @@ private fun readXrefStreamRevisionTerminator(
     start = 0,
     expectedXrefOffset = expectedXrefOffset,
     resolveBackwardInteger = backwardIntegers::resolve,
+    onWork = onWork,
   )
   return streamEndOffset + parsed.marker
 }
@@ -1158,7 +1173,9 @@ private fun parseXrefStreamSuffix(
   lengthReference: PDFIndirectReference? = null,
   backwardLength: Long? = null,
   resolveBackwardInteger: (ForwardPDFObjectKey) -> Long? = { null },
+  onWork: () -> Unit = {},
 ): ParsedXrefStreamSuffix {
+  onWork()
   var index = consumeOptionalPDFLineEnding(suffix, start)
   if (!isPDFKeywordAt(suffix, index, "endstream")) throw IOException("Missing PDF endstream")
   index += "endstream".length
@@ -1181,6 +1198,7 @@ private fun parseXrefStreamSuffix(
     lengthReference,
     backwardLength,
     resolveBackwardInteger,
+    onWork,
   )
   return ParsedXrefStreamSuffix(
     marker = parseStartXrefTerminator(suffix, forwardObjects.end, expectedXrefOffset),
@@ -1199,6 +1217,7 @@ private fun parseForwardXrefObjects(
   reference: PDFIndirectReference?,
   backwardLength: Long?,
   resolveBackwardInteger: (ForwardPDFObjectKey) -> Long?,
+  onWork: () -> Unit,
 ): ParsedForwardXrefObjects {
   val lengthKey = reference?.asForwardObjectKey()
   val initialIntegers = if (backwardLength == null || lengthKey == null) {
@@ -1215,6 +1234,7 @@ private fun parseForwardXrefObjects(
     objectCount = 0,
     budget = ForwardPDFObjectParseBudget(),
     resolveBackwardInteger = resolveBackwardInteger,
+    onWork = onWork,
   )
   if (parsed.size != 1) {
     throw IOException("Forward PDF xref-stream object sequence is ambiguous")
@@ -1240,7 +1260,9 @@ private fun parseForwardPDFObjectSequence(
   objectCount: Int,
   budget: ForwardPDFObjectParseBudget,
   resolveBackwardInteger: (ForwardPDFObjectKey) -> Long?,
+  onWork: () -> Unit,
 ): List<ParsedForwardPDFObjectSequence> {
+  onWork()
   var index = skipPDFWhitespaceAndComments(bytes, start, bytes.size)
   if (isPDFKeywordAt(bytes, index, "startxref")) {
     val pendingValid = pendingStreams.all { pending ->
@@ -1292,6 +1314,7 @@ private fun parseForwardPDFObjectSequence(
         objectCount = objectCount + 1,
         budget = budget,
         resolveBackwardInteger = resolveBackwardInteger,
+        onWork = onWork,
       )
     }
   }
@@ -1348,6 +1371,7 @@ private fun parseForwardPDFObjectSequence(
         objectCount = objectCount + 1,
         budget = budget,
         resolveBackwardInteger = resolveBackwardInteger,
+        onWork = onWork,
       )
     }
     val reference = checkNotNull(indirectLength)
@@ -1367,11 +1391,13 @@ private fun parseForwardPDFObjectSequence(
         objectCount = objectCount + 1,
         budget = budget,
         resolveBackwardInteger = resolveBackwardInteger,
+        onWork = onWork,
       )
     }
     val results = mutableListOf<ParsedForwardPDFObjectSequence>()
     val keyword = "endstream".toByteArray(Charsets.US_ASCII)
     for (candidate in streamStart..bytes.size - keyword.size) {
+      if ((candidate - streamStart) % 1_024 == 0) onWork()
       if (!isForwardPDFEndstreamAt(bytes, candidate)) continue
       budget.structuralCandidates += 1
       if (budget.structuralCandidates > 128) {
@@ -1396,6 +1422,7 @@ private fun parseForwardPDFObjectSequence(
           objectCount = objectCount + 1,
           budget = budget,
           resolveBackwardInteger = resolveBackwardInteger,
+          onWork = onWork,
         )
       } catch (_: IOException) {
         emptyList()
@@ -1417,6 +1444,7 @@ private fun parseForwardPDFObjectSequence(
     objectCount = objectCount + 1,
     budget = budget,
     resolveBackwardInteger = resolveBackwardInteger,
+    onWork = onWork,
   )
 }
 
@@ -1532,6 +1560,7 @@ private data class IndexedBackwardPDFObjectHeader(
 private data class BackwardPDFObjectIndex(
   val headers: List<IndexedBackwardPDFObjectHeader>,
   val endObjectStarts: List<Int>,
+  val commentBytes: BooleanArray,
 )
 
 private class BackwardPDFParseBudget(
@@ -1547,7 +1576,9 @@ private class BackwardPDFIntegerResolver(
   private val values = mutableMapOf<ForwardPDFObjectKey, Long>()
 
   fun resolve(reference: ForwardPDFObjectKey): Long? {
+    onWork()
     scanIfNeeded()
+    onWork()
     return values[reference]
   }
 
@@ -1564,6 +1595,7 @@ private class BackwardPDFIntegerResolver(
     var end = skipPDFWhitespaceAndCommentsBackward(bytes, bytes.size)
     var objectCount = 0
     val seenObjects = mutableSetOf<ForwardPDFObjectKey>()
+    val pendingStreams = mutableListOf<PendingBackwardPDFStream>()
     while (end > 0) {
       onWork()
       val parsed = parseBackwardPDFObjectEndingAt(
@@ -1583,17 +1615,38 @@ private class BackwardPDFIntegerResolver(
       parsed.directInteger?.let { value ->
         values[parsed.header.objectKey] = value
       }
+      parsed.pendingStream?.let(pendingStreams::add)
       objectCount += 1
       end = skipPDFWhitespaceAndCommentsBackward(bytes, parsed.start)
+    }
+    pendingStreams.forEach { pending ->
+      onWork()
+      val length = values[pending.lengthReference]
+        ?: throw IOException("Missing backward PDF stream length object")
+      if (
+        !matchesDeclaredForwardPDFStreamLength(
+          bytes = bytes,
+          streamStart = pending.streamStart,
+          endstreamStart = pending.endstreamStart,
+          declaredLength = length,
+        )
+      ) throw IOException("Backward PDF stream length is inconsistent")
     }
     scanned = true
   }
 }
 
+private data class PendingBackwardPDFStream(
+  val lengthReference: ForwardPDFObjectKey,
+  val streamStart: Int,
+  val endstreamStart: Int,
+)
+
 private data class ParsedBackwardPDFObject(
   val header: ParsedBackwardPDFObjectHeader,
   val start: Int,
   val directInteger: Long?,
+  val pendingStream: PendingBackwardPDFStream? = null,
 )
 
 private fun indexBackwardPDFObjects(
@@ -1602,9 +1655,15 @@ private fun indexBackwardPDFObjects(
 ): BackwardPDFObjectIndex {
   val headers = mutableListOf<IndexedBackwardPDFObjectHeader>()
   val endObjectStarts = mutableListOf<Int>()
+  val commentBytes = BooleanArray(bytes.size)
   var start = 0
+  var inComment = false
+  var literalDepth = 0
+  var inHexString = false
+  var escapedLiteralByte = false
   while (start < bytes.size) {
     if (start % 1_024 == 0) onWork()
+    commentBytes[start] = inComment
     if (isPDFKeywordAt(bytes, start, "endobj")) {
       endObjectStarts += start
       if (endObjectStarts.size > 512) {
@@ -1618,10 +1677,26 @@ private fun indexBackwardPDFObjects(
         throw IOException("Too many backward PDF object headers")
       }
     }
+    val value = bytes[start].toInt() and 0xff
+    when {
+      inComment -> if (value == '\n'.code || value == '\r'.code) inComment = false
+      literalDepth > 0 -> when {
+        escapedLiteralByte -> escapedLiteralByte = false
+        value == '\\'.code -> escapedLiteralByte = true
+        value == '('.code -> literalDepth += 1
+        value == ')'.code -> literalDepth -= 1
+      }
+      inHexString -> if (value == '>'.code) inHexString = false
+      value == '%'.code -> inComment = true
+      value == '('.code -> literalDepth = 1
+      value == '<'.code && bytes.getOrNull(start + 1) != '<'.code.toByte() -> {
+        inHexString = true
+      }
+    }
     start += 1
   }
   onWork()
-  return BackwardPDFObjectIndex(headers, endObjectStarts)
+  return BackwardPDFObjectIndex(headers, endObjectStarts, commentBytes)
 }
 
 private fun lowerBoundBackwardHeader(
@@ -1675,21 +1750,9 @@ private fun parseBackwardPDFObjectEndingAt(
     val segmentStart = previousTerminator?.plus(keyword.length) ?: minimumStart
     val headerLower = lowerBoundBackwardHeader(objectIndex.headers, segmentStart)
     var result: ParsedBackwardPDFObject? = null
-    var lexicalCursor = segmentStart
-    var inComment = false
     for (headerIndex in headerLower until headerUpper) {
       val candidate = objectIndex.headers[headerIndex]
-      while (lexicalCursor < candidate.start) {
-        if (lexicalCursor % 1_024 == 0) onWork()
-        val value = bytes[lexicalCursor].toInt() and 0xff
-        if (inComment) {
-          if (value == '\n'.code || value == '\r'.code) inComment = false
-        } else if (value == '%'.code) {
-          inComment = true
-        }
-        lexicalCursor += 1
-      }
-      if (inComment) continue
+      if (objectIndex.commentBytes[candidate.start]) continue
       budget.candidateAttempts += 1
       if (budget.candidateAttempts > 384) {
         throw IOException("Too many backward PDF object candidates")
@@ -1698,7 +1761,6 @@ private fun parseBackwardPDFObjectEndingAt(
       val parsed = parseBackwardPDFObjectCandidate(
         bytes = bytes,
         start = candidate.start,
-        end = end,
         keywordStart = keywordStart,
         header = candidate.header,
         knownIntegers = knownIntegers,
@@ -1717,7 +1779,6 @@ private fun parseBackwardPDFObjectEndingAt(
 private fun parseBackwardPDFObjectCandidate(
   bytes: ByteArray,
   start: Int,
-  end: Int,
   keywordStart: Int,
   header: ParsedBackwardPDFObjectHeader,
   knownIntegers: Map<ForwardPDFObjectKey, Long>,
@@ -1763,14 +1824,41 @@ private fun parseBackwardPDFObjectCandidate(
   val directLength = dictionary.integerValues["Length"]
   val indirectLength = dictionary.indirectReferences["Length"]?.asForwardObjectKey()
   if ((directLength == null) == (indirectLength == null)) return null
-  val streamLength = directLength ?: indirectLength?.let(knownIntegers::get) ?: return null
-  val objectEnd = try {
-    parseForwardPDFStreamObjectEnd(bytes, streamStart, streamLength)
-  } catch (_: IOException) {
-    return null
-  }
-  if (objectEnd != end) return null
-  return ParsedBackwardPDFObject(header, start, null)
+  val beforeEndobj = skipPDFWhitespaceAndCommentsBackward(bytes, keywordStart)
+  val endstreamStart = beforeEndobj - "endstream".length
+  if (
+    endstreamStart < streamStart ||
+    !isForwardPDFEndstreamAt(bytes, endstreamStart) ||
+    skipPDFWhitespaceAndComments(
+      bytes,
+      endstreamStart + "endstream".length,
+      bytes.size,
+    ) != keywordStart
+  ) return null
+  val resolvedLength = directLength ?: indirectLength?.let(knownIntegers::get)
+  if (
+    resolvedLength != null &&
+    !matchesDeclaredForwardPDFStreamLength(
+      bytes = bytes,
+      streamStart = streamStart,
+      endstreamStart = endstreamStart,
+      declaredLength = resolvedLength,
+    )
+  ) return null
+  return ParsedBackwardPDFObject(
+    header = header,
+    start = start,
+    directInteger = null,
+    pendingStream = if (resolvedLength == null) {
+      PendingBackwardPDFStream(
+        lengthReference = checkNotNull(indirectLength),
+        streamStart = streamStart,
+        endstreamStart = endstreamStart,
+      )
+    } else {
+      null
+    },
+  )
 }
 
 private fun skipPDFWhitespaceAndCommentsBackward(bytes: ByteArray, start: Int): Int {
@@ -1821,6 +1909,7 @@ private fun findIndirectLengthXrefStreamTerminator(
   lengthReference: PDFIndirectReference,
   backwardLength: Long?,
   resolveBackwardInteger: (ForwardPDFObjectKey) -> Long?,
+  onWork: () -> Unit,
 ): Long {
   if (
     streamStartOffset < 0 ||
@@ -1836,12 +1925,14 @@ private fun findIndirectLengthXrefStreamTerminator(
   var carry = ByteArray(0)
   var cursor = streamStartOffset
   while (cursor < revisionUpperBound) {
+    onWork()
     val requested = minOf(65_536L, revisionUpperBound - cursor).toInt()
     val chunk = input.read(cursor, requested)
     if (chunk.isEmpty()) break
     val window = carry + chunk
     val windowOffset = cursor - carry.size
     for (candidateIndex in 0..window.size - keyword.size) {
+      if (candidateIndex % 1_024 == 0) onWork()
       if (!window.regionMatches(candidateIndex, keyword)) continue
       val candidateOffset = windowOffset + candidateIndex
       if (candidateOffset < streamStartOffset || candidateOffset >= revisionUpperBound) continue
@@ -1858,6 +1949,7 @@ private fun findIndirectLengthXrefStreamTerminator(
           lengthReference,
           backwardLength,
           resolveBackwardInteger,
+          onWork,
         )
       } catch (_: IOException) {
         continue

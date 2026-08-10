@@ -139,6 +139,36 @@ class AndroidPDFProcessorTest {
         interveningObjectsAfterXrefStream =
           "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n",
       )
+    val harmlessDirectLengthWithCommentedTerminatorAndHeader =
+      xrefStreamPDFWithDirectLength(
+        streamPayload = "x".repeat(56),
+        objectsBeforeXrefStream =
+          "4 0 obj\n% endobj 99 0 obj\n3\nendobj\n",
+        interveningObjectsAfterXrefStream =
+          "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n",
+      )
+    val harmlessDirectLengthWithBidirectionalBackwardDependencies =
+      xrefStreamPDFWithDirectLength(
+        streamPayload = "x".repeat(70),
+        size = 10,
+        objectsBeforeXrefStream =
+          "1 0 obj\n3\nendobj\n" +
+          "8 0 obj\n3\nendobj\n" +
+          "9 0 obj\n<< /Length 8 0 R >>\nstream\nxyzendstream\nendobj\n",
+        interveningObjectsAfterXrefStream =
+          "3 0 obj\n<< /Length 1 0 R >>\nstream\nxyzendstream\nendobj\n",
+      )
+    val mismatchedDirectLengthWithBidirectionalBackwardDependencies =
+      xrefStreamPDFWithDirectLength(
+        streamPayload = "x".repeat(70),
+        size = 10,
+        objectsBeforeXrefStream =
+          "1 0 obj\n3\nendobj\n" +
+          "8 0 obj\n2\nendobj\n" +
+          "9 0 obj\n<< /Length 8 0 R >>\nstream\nxyzendstream\nendobj\n",
+        interveningObjectsAfterXrefStream =
+          "3 0 obj\n<< /Length 1 0 R >>\nstream\nxyzendstream\nendobj\n",
+      )
     val harmlessForwardIndirectLengthWithBackwardOrdinaryLength =
       xrefStreamPDFWithIndirectLength(
         streamPayload = "abc",
@@ -170,12 +200,26 @@ class AndroidPDFProcessorTest {
           "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n" +
           "4 0 obj\n3\nendobj\n",
       )
+    val harmlessBackwardIndirectLengthWithReverseDependencyStream =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        objectsBeforeXrefStream =
+          "4 0 obj\n3\nendobj\n" +
+          "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n",
+      )
     val mismatchedBackwardIndirectLengthWithInterveningStreamXrefStream =
       xrefStreamPDFWithIndirectLength(
         streamPayload = "abc",
         interveningObjectsAfterXrefStream =
           "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n" +
           "4 0 obj\n2\nendobj\n",
+      )
+    val mismatchedBackwardIndirectLengthWithReverseDependencyStream =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        objectsBeforeXrefStream =
+          "4 0 obj\n2\nendobj\n" +
+          "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n",
       )
     val harmlessInterveningForwardObjectsXrefStream = xrefStreamPDFWithIndirectLength(
       streamPayload = "abc",
@@ -323,11 +367,23 @@ class AndroidPDFProcessorTest {
       )
       assertEquals(
         false,
+        hasPDFEncryptionMarker(harmlessDirectLengthWithCommentedTerminatorAndHeader),
+      )
+      assertEquals(
+        false,
+        hasPDFEncryptionMarker(harmlessDirectLengthWithBidirectionalBackwardDependencies),
+      )
+      assertEquals(
+        false,
         hasPDFEncryptionMarker(harmlessForwardIndirectLengthWithBackwardOrdinaryLength),
       )
       assertEquals(
         false,
         hasPDFEncryptionMarker(harmlessBackwardIndirectLengthWithInterveningStreamXrefStream),
+      )
+      assertEquals(
+        false,
+        hasPDFEncryptionMarker(harmlessBackwardIndirectLengthWithReverseDependencyStream),
       )
       assertEquals(false, hasPDFEncryptionMarker(harmlessInterveningForwardObjectsXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessInterveningIndirectLengthStreamsXrefStream))
@@ -379,6 +435,9 @@ class AndroidPDFProcessorTest {
         hasPDFEncryptionMarker(mismatchedBackwardIndirectLengthXrefStream)
       }
       assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(mismatchedDirectLengthWithBidirectionalBackwardDependencies)
+      }
+      assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(embeddedFakeBackwardScalarXrefStream)
       }
       assertThrows(IOException::class.java) {
@@ -399,6 +458,11 @@ class AndroidPDFProcessorTest {
         )
       }
       assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(
+          mismatchedBackwardIndirectLengthWithReverseDependencyStream,
+        )
+      }
+      assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(negativePreviousRevision)
       }
     } finally {
@@ -412,11 +476,16 @@ class AndroidPDFProcessorTest {
       harmlessZeroLengthNoEolXrefStream.delete()
       harmlessForwardIndirectLengthXrefStream.delete()
       harmlessDirectLengthWithInterveningBackwardLengthStream.delete()
+      harmlessDirectLengthWithCommentedTerminatorAndHeader.delete()
+      harmlessDirectLengthWithBidirectionalBackwardDependencies.delete()
+      mismatchedDirectLengthWithBidirectionalBackwardDependencies.delete()
       harmlessForwardIndirectLengthWithBackwardOrdinaryLength.delete()
       mismatchedBackwardIndirectLengthXrefStream.delete()
       embeddedFakeBackwardScalarXrefStream.delete()
       harmlessBackwardIndirectLengthWithInterveningStreamXrefStream.delete()
+      harmlessBackwardIndirectLengthWithReverseDependencyStream.delete()
       mismatchedBackwardIndirectLengthWithInterveningStreamXrefStream.delete()
+      mismatchedBackwardIndirectLengthWithReverseDependencyStream.delete()
       harmlessInterveningForwardObjectsXrefStream.delete()
       harmlessInterveningIndirectLengthStreamsXrefStream.delete()
       harmlessResolvedInterveningIndirectLengthStreamXrefStream.delete()
@@ -456,18 +525,64 @@ class AndroidPDFProcessorTest {
   fun backwardObjectIndexIsCancellableWithinItsBoundedSinglePassScan() {
     val file = xrefStreamPDFWithIndirectLength(
       streamPayload = "abc",
-      objectsBeforeXrefStream = " ".repeat(60_000),
+      objectsBeforeXrefStream = " ".repeat(2 * 1_024 * 1_024),
     )
     try {
       var workChecks = 0
       val cancelled = assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(file) {
           workChecks += 1
-          if (workChecks == 3) throw IOException("cancelled")
+          if (workChecks == 40) throw IOException("cancelled")
         }
       }
       assertEquals("cancelled", cancelled.message)
-      assertEquals(3, workChecks)
+      assertEquals(40, workChecks)
+    } finally {
+      file.delete()
+    }
+  }
+
+  @Test
+  fun indirectXrefPayloadScanChecksCancellationWithinEachChunk() {
+    val file = xrefStreamPDFWithIndirectLength(
+      streamPayload = "x".repeat(2 * 1_024 * 1_024),
+    )
+    try {
+      var workChecks = 0
+      val cancelled = assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(file) {
+          workChecks += 1
+          if (workChecks == 12) throw IOException("cancelled")
+        }
+      }
+      assertEquals("cancelled", cancelled.message)
+      assertEquals(12, workChecks)
+    } finally {
+      file.delete()
+    }
+  }
+
+  @Test
+  fun classicXrefTableScanChecksCancellationWithinEachChunk() {
+    val prefix = "%PDF-1.7\n"
+    val xrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    val entry = "0000000000 00000 n \n"
+    val file = temporaryPDF(
+      prefix +
+        "xref\n0 1\n" +
+        entry.repeat((2 * 1_024 * 1_024) / entry.length) +
+        "trailer\n<< /Size 2 >>\nstartxref\n$xrefOffset\n%%EOF",
+    )
+    try {
+      var workChecks = 0
+      val cancelled = assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(file) {
+          workChecks += 1
+          if (workChecks == 6) throw IOException("cancelled")
+        }
+      }
+      assertEquals("cancelled", cancelled.message)
+      assertEquals(6, workChecks)
     } finally {
       file.delete()
     }
@@ -554,6 +669,7 @@ class AndroidPDFProcessorTest {
 
   private fun xrefStreamPDFWithDirectLength(
     streamPayload: String,
+    size: Int = 5,
     objectsBeforeXrefStream: String = "",
     interveningObjectsAfterXrefStream: String = "",
   ): File {
@@ -562,7 +678,7 @@ class AndroidPDFProcessorTest {
     val xrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
     return temporaryPDF(
       prefix +
-        "2 0 obj\n<< /Type /XRef /Size 5 /W [1 4 2] /Length $streamLength >>\n" +
+        "2 0 obj\n<< /Type /XRef /Size $size /W [1 4 2] /Length $streamLength >>\n" +
         "stream\n$streamPayload\nendstream\nendobj\n" +
         interveningObjectsAfterXrefStream +
         "startxref\n$xrefOffset\n%%EOF",
