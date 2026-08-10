@@ -32,6 +32,24 @@ class AndroidPDFProcessorTest {
       "Recovered by OCR",
       reconcilePDFSparseEmbeddedText(" \n\u0085\u00A0\u3000", "Recovered by OCR"),
     )
+    val sparseAtLimit = "A" + " ".repeat(999_995)
+    assertEquals(
+      AndroidPDFResourcePolicy.maximumPageTextLength,
+      reconcilePDFSparseEmbeddedTextWithinLimit(
+        sparseAtLimit,
+        "CAT",
+        AndroidPDFResourcePolicy.maximumPageTextLength,
+      )?.length,
+    )
+    val sparseOverLimit = "A" + " ".repeat(999_999)
+    assertEquals(
+      null,
+      reconcilePDFSparseEmbeddedTextWithinLimit(
+        sparseOverLimit,
+        "CAT",
+        AndroidPDFResourcePolicy.maximumPageTextLength,
+      ),
+    )
   }
 
   @Test
@@ -111,6 +129,24 @@ class AndroidPDFProcessorTest {
     val harmlessForwardIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength(
       streamPayload = "abc",
       forwardLengthObject = true,
+    )
+    val harmlessInterveningForwardObjectsXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+      forwardObjectsBeforeLength =
+        "3 0 obj\n[(safe) << /Nested true >>]\nendobj\n",
+      forwardObjectsAfterLength =
+        "4 0 obj\n<< /Length 3 >>\nstream\nabc\nendstream\nendobj\n",
+    )
+    val duplicateForwardIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+      forwardObjectsBeforeLength = "1 0 obj\n3\nendobj\n",
+    )
+    val malformedInterveningForwardObjectXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+      forwardObjectsBeforeLength = "3 0 obj\n<< /Broken true\nendobj\n",
     )
     val mismatchedForwardIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength(
       streamPayload = "abc",
@@ -203,6 +239,7 @@ class AndroidPDFProcessorTest {
       assertEquals(false, hasPDFEncryptionMarker(harmlessNoEolIndirectLengthXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessZeroLengthNoEolXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessForwardIndirectLengthXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessInterveningForwardObjectsXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessPositiveLengthXrefStream))
       assertTrue(hasPDFEncryptionMarker(encryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(nestedClassic))
@@ -244,6 +281,12 @@ class AndroidPDFProcessorTest {
         hasPDFEncryptionMarker(mismatchedForwardIndirectLengthXrefStream)
       }
       assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(duplicateForwardIndirectLengthXrefStream)
+      }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(malformedInterveningForwardObjectXrefStream)
+      }
+      assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(negativePreviousRevision)
       }
     } finally {
@@ -256,6 +299,9 @@ class AndroidPDFProcessorTest {
       harmlessNoEolIndirectLengthXrefStream.delete()
       harmlessZeroLengthNoEolXrefStream.delete()
       harmlessForwardIndirectLengthXrefStream.delete()
+      harmlessInterveningForwardObjectsXrefStream.delete()
+      duplicateForwardIndirectLengthXrefStream.delete()
+      malformedInterveningForwardObjectXrefStream.delete()
       mismatchedForwardIndirectLengthXrefStream.delete()
       harmlessPositiveLengthXrefStream.delete()
       negativeLengthXrefStream.delete()
@@ -331,6 +377,8 @@ class AndroidPDFProcessorTest {
     includeEndstreamLineEnding: Boolean = true,
     forwardLengthObject: Boolean = false,
     declaredLengthOverride: Int? = null,
+    forwardObjectsBeforeLength: String = "",
+    forwardObjectsAfterLength: String = "",
   ): File {
     val streamLength = streamPayload.toByteArray(Charsets.US_ASCII).size
     val declaredLength = declaredLengthOverride ?: streamLength
@@ -342,7 +390,9 @@ class AndroidPDFProcessorTest {
     val xrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
     val beforeEndstream = if (includeEndstreamLineEnding) "\n" else ""
     val forwardObject = if (forwardLengthObject) {
-      "1 0 obj\n$declaredLength\nendobj\n"
+      forwardObjectsBeforeLength +
+        "1 0 obj\n$declaredLength\nendobj\n" +
+        forwardObjectsAfterLength
     } else {
       ""
     }

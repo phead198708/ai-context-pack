@@ -683,6 +683,23 @@ final class PDFExtractionTests: XCTestCase {
       ),
       "Recovered by OCR"
     )
+    let sparseAtLimit = "A" + String(repeating: " ", count: 999_995)
+    XCTAssertEqual(
+      reconcilePDFSparseEmbeddedTextWithinLimit(
+        embedded: sparseAtLimit,
+        recognized: "CAT",
+        maximumUTF16Length: PDFResourcePolicy.maximumPageTextLength
+      )?.utf16.count,
+      PDFResourcePolicy.maximumPageTextLength
+    )
+    let sparseOverLimit = "A" + String(repeating: " ", count: 999_999)
+    XCTAssertNil(
+      reconcilePDFSparseEmbeddedTextWithinLimit(
+        embedded: sparseOverLimit,
+        recognized: "CAT",
+        maximumUTF16Length: PDFResourcePolicy.maximumPageTextLength
+      )
+    )
   }
 
   func testPlainTextReaderIsStrictBoundedAndPreservesBytes() throws {

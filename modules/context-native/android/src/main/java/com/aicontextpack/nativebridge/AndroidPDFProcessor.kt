@@ -313,10 +313,14 @@ internal class AndroidPDFProcessor(
             prepared.height,
             script,
           )
-          val reconciledText = reconcilePDFSparseEmbeddedText(
+          val reconciledText = reconcilePDFSparseEmbeddedTextWithinLimit(
             embedded = prepared.embeddedText,
             recognized = recognized.first,
-          )
+            maximumUTF16Length = AndroidPDFResourcePolicy.maximumPageTextLength,
+          ) ?: run {
+            warnings += "PDF_PAGE_EXTRACTION_FAILED"
+            return failedResult(pageIndex, warnings, prepared.started)
+          }
           if (reconciledText.isEmpty()) warnings += "PDF_PAGE_EMPTY"
           return completeResult(
             pageIndex = pageIndex,
@@ -679,13 +683,35 @@ private fun isPDFDensityWhitespace(value: Int): Boolean =
 internal fun reconcilePDFSparseEmbeddedText(
   embedded: String,
   recognized: String,
-): String {
+): String = checkNotNull(
+  reconcilePDFSparseEmbeddedTextWithinLimit(
+    embedded = embedded,
+    recognized = recognized,
+    maximumUTF16Length = Int.MAX_VALUE,
+  ),
+)
+
+internal fun reconcilePDFSparseEmbeddedTextWithinLimit(
+  embedded: String,
+  recognized: String,
+  maximumUTF16Length: Int,
+): String? {
+  if (maximumUTF16Length < 0) return null
   val densitySafeEmbedded = embedded.takeIf {
     pdfEmbeddedTextNonWhitespaceUTF16Count(it) > 0
   }.orEmpty()
-  if (densitySafeEmbedded.isEmpty()) return recognized
-  if (recognized.isEmpty()) return embedded
-  if (densitySafeEmbedded == recognized) return densitySafeEmbedded
+  if (densitySafeEmbedded.isEmpty()) {
+    return recognized.takeIf { it.length <= maximumUTF16Length }
+  }
+  if (recognized.isEmpty()) return embedded.takeIf { it.length <= maximumUTF16Length }
+  if (densitySafeEmbedded == recognized) {
+    return densitySafeEmbedded.takeIf { it.length <= maximumUTF16Length }
+  }
+  if (
+    densitySafeEmbedded.length > maximumUTF16Length ||
+    recognized.length >= maximumUTF16Length ||
+    densitySafeEmbedded.length > maximumUTF16Length - recognized.length - 1
+  ) return null
   return "$densitySafeEmbedded\n$recognized"
 }
 
@@ -1000,8 +1026,15 @@ private data class ParsedXrefStreamSuffix(
   val forwardLength: Long?,
 )
 
-private data class ParsedForwardIndirectLengthObject(
+private data class ParsedForwardIndirectLengthObjects(
   val length: Long,
+  val end: Int,
+)
+
+private data class ParsedForwardIndirectObject(
+  val objectNumber: Long,
+  val generation: Long,
+  val directLength: Long?,
   val end: Int,
 )
 
@@ -1025,38 +1058,171 @@ private fun parseXrefStreamSuffix(
     )
   }
   val reference = lengthReference ?: throw IOException("Missing PDF startxref")
-  val forwardLength = parseForwardIndirectLengthObject(
+  val forwardLength = parseForwardIndirectLengthObjects(
     suffix,
     afterStreamObject,
     reference,
-  ) ?: throw IOException("Invalid forward PDF xref-stream length object")
+  )
   return ParsedXrefStreamSuffix(
     marker = parseStartXrefTerminator(suffix, forwardLength.end, expectedXrefOffset),
     forwardLength = forwardLength.length,
   )
 }
 
-private fun parseForwardIndirectLengthObject(
+private fun parseForwardIndirectLengthObjects(
   bytes: ByteArray,
   start: Int,
   reference: PDFIndirectReference,
-): ParsedForwardIndirectLengthObject? {
+): ParsedForwardIndirectLengthObjects {
   var index = skipPDFWhitespaceAndComments(bytes, start, bytes.size)
-  val objectNumber = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
-  if (objectNumber.value != reference.objectNumber) return null
+  var declaredLength: Long? = null
+  var objectCount = 0
+  while (!isPDFKeywordAt(bytes, index, "startxref")) {
+    objectCount += 1
+    if (objectCount > 256) {
+      throw IOException("Too many forward PDF xref-stream objects")
+    }
+    val parsed = parseForwardIndirectObject(bytes, index, reference)
+    if (
+      parsed.objectNumber == reference.objectNumber &&
+      parsed.generation == reference.generation
+    ) {
+      if (declaredLength != null || parsed.directLength == null) {
+        throw IOException("Ambiguous forward PDF xref-stream length object")
+      }
+      declaredLength = parsed.directLength
+    }
+    index = skipPDFWhitespaceAndComments(bytes, parsed.end, bytes.size)
+  }
+  return ParsedForwardIndirectLengthObjects(
+    length = declaredLength
+      ?: throw IOException("Missing forward PDF xref-stream length object"),
+    end = index,
+  )
+}
+
+private fun parseForwardIndirectObject(
+  bytes: ByteArray,
+  start: Int,
+  lengthReference: PDFIndirectReference,
+): ParsedForwardIndirectObject {
+  var index = skipPDFWhitespaceAndComments(bytes, start, bytes.size)
+  val objectNumber = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)
+    ?: throw IOException("Invalid forward PDF indirect object number")
   index = skipPDFWhitespaceAndComments(bytes, objectNumber.end, bytes.size)
-  val generation = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
-  if (generation.value != reference.generation) return null
+  val generation = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)
+    ?: throw IOException("Invalid forward PDF indirect object generation")
   index = skipPDFWhitespaceAndComments(bytes, generation.end, bytes.size)
-  if (!isPDFKeywordAt(bytes, index, "obj")) return null
+  if (!isPDFKeywordAt(bytes, index, "obj")) {
+    throw IOException("Invalid forward PDF indirect object header")
+  }
   index = skipPDFWhitespaceAndComments(bytes, index + "obj".length, bytes.size)
-  val length = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
-  index = skipPDFWhitespaceAndComments(bytes, length.end, bytes.size)
-  if (!isPDFKeywordAt(bytes, index, "endobj")) return null
-  return ParsedForwardIndirectLengthObject(
-    length = length.value,
+  val isLengthObject = objectNumber.value == lengthReference.objectNumber &&
+    generation.value == lengthReference.generation
+  if (isLengthObject) {
+    val length = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)
+      ?: throw IOException("Invalid forward PDF xref-stream length value")
+    index = skipPDFWhitespaceAndComments(bytes, length.end, bytes.size)
+    if (!isPDFKeywordAt(bytes, index, "endobj")) {
+      throw IOException("Invalid forward PDF xref-stream length object")
+    }
+    return ParsedForwardIndirectObject(
+      objectNumber = objectNumber.value,
+      generation = generation.value,
+      directLength = length.value,
+      end = index + "endobj".length,
+    )
+  }
+
+  val valueStart = index
+  val indirectReference = parsePDFIndirectReference(bytes, valueStart, bytes.size)
+  val value = skipPDFValue(bytes, valueStart, bytes.size)
+  val valueEnd = indirectReference?.end ?: value.end
+  if (
+    valueEnd <= valueStart ||
+    (indirectReference == null && !isCompletePDFIndirectObjectValue(bytes, valueStart, valueEnd))
+  ) {
+    throw IOException("Invalid forward PDF indirect object value")
+  }
+  index = skipPDFWhitespaceAndComments(bytes, valueEnd, bytes.size)
+  if (isPDFKeywordAt(bytes, index, "stream")) {
+    if (
+      valueStart + 1 >= bytes.size ||
+      bytes[valueStart] != '<'.code.toByte() ||
+      bytes[valueStart + 1] != '<'.code.toByte()
+    ) {
+      throw IOException("Forward PDF stream object is missing a dictionary")
+    }
+    val dictionary = parseTopLevelPDFDictionary(bytes, valueStart, valueEnd)
+      ?: throw IOException("Invalid forward PDF stream dictionary")
+    if (
+      !dictionary.complete ||
+      dictionary.endOffset != valueEnd ||
+      dictionary.duplicateKeys.contains("Length") ||
+      dictionary.invalidDirectIntegerKeys.contains("Length")
+    ) {
+      throw IOException("Invalid forward PDF stream dictionary")
+    }
+    val streamLength = dictionary.integerValues["Length"]
+      ?: throw IOException("Forward PDF stream length must be direct")
+    val streamStart = consumeRequiredPDFLineEnding(bytes, index + "stream".length)
+    val streamEnd = streamStart.toLong() + streamLength
+    if (streamEnd < streamStart || streamEnd > bytes.size.toLong()) {
+      throw IOException("Forward PDF stream bounds are invalid")
+    }
+    index = consumeOptionalPDFLineEnding(bytes, streamEnd.toInt())
+    if (!isPDFKeywordAt(bytes, index, "endstream")) {
+      throw IOException("Missing forward PDF endstream")
+    }
+    index = skipPDFWhitespaceAndComments(bytes, index + "endstream".length, bytes.size)
+  }
+  if (!isPDFKeywordAt(bytes, index, "endobj")) {
+    throw IOException("Missing forward PDF endobj")
+  }
+  return ParsedForwardIndirectObject(
+    objectNumber = objectNumber.value,
+    generation = generation.value,
+    directLength = null,
     end = index + "endobj".length,
   )
+}
+
+private fun isCompletePDFIndirectObjectValue(
+  bytes: ByteArray,
+  start: Int,
+  end: Int,
+): Boolean {
+  if (start !in bytes.indices || end <= start || end > bytes.size) return false
+  return when (bytes[start].toInt() and 0xff) {
+    '/'.code -> parsePDFName(bytes, start, end)?.end == end
+    '('.code -> bytes[end - 1] == ')'.code.toByte()
+    '<'.code -> if (start + 1 < end && bytes[start + 1] == '<'.code.toByte()) {
+      end - start >= 4 && bytes[end - 2] == '>'.code.toByte() &&
+        bytes[end - 1] == '>'.code.toByte()
+    } else {
+      bytes[end - 1] == '>'.code.toByte()
+    }
+    '['.code -> bytes[end - 1] == ']'.code.toByte()
+    else -> isPDFPrimitiveObjectToken(bytes, start, end)
+  }
+}
+
+private fun isPDFPrimitiveObjectToken(bytes: ByteArray, start: Int, end: Int): Boolean {
+  val token = bytes.copyOfRange(start, end).toString(Charsets.US_ASCII)
+  if (token == "true" || token == "false" || token == "null") return true
+  var index = 0
+  if (token.firstOrNull() == '+' || token.firstOrNull() == '-') index += 1
+  var digitCount = 0
+  var decimalCount = 0
+  while (index < token.length) {
+    when (token[index]) {
+      in '0'..'9' -> digitCount += 1
+      '.' -> decimalCount += 1
+      else -> return false
+    }
+    index += 1
+  }
+  return digitCount > 0 && decimalCount <= 1
 }
 
 private fun findIndirectLengthXrefStreamTerminator(

@@ -76,12 +76,38 @@ internal func reconcilePDFSparseEmbeddedText(
   embedded: String,
   recognized: String
 ) -> String {
+  reconcilePDFSparseEmbeddedTextWithinLimit(
+    embedded: embedded,
+    recognized: recognized,
+    maximumUTF16Length: Int.max
+  )!
+}
+
+internal func reconcilePDFSparseEmbeddedTextWithinLimit(
+  embedded: String,
+  recognized: String,
+  maximumUTF16Length: Int
+) -> String? {
+  guard maximumUTF16Length >= 0 else { return nil }
   let densitySafeEmbedded = pdfEmbeddedTextNonWhitespaceUTF16Count(embedded) == 0
     ? ""
     : embedded
-  guard !densitySafeEmbedded.isEmpty else { return recognized }
-  guard !recognized.isEmpty else { return embedded }
-  if densitySafeEmbedded.utf16.elementsEqual(recognized.utf16) { return densitySafeEmbedded }
+  guard !densitySafeEmbedded.isEmpty else {
+    return recognized.utf16.count <= maximumUTF16Length ? recognized : nil
+  }
+  guard !recognized.isEmpty else {
+    return embedded.utf16.count <= maximumUTF16Length ? embedded : nil
+  }
+  if densitySafeEmbedded.utf16.elementsEqual(recognized.utf16) {
+    return densitySafeEmbedded.utf16.count <= maximumUTF16Length ? densitySafeEmbedded : nil
+  }
+  let embeddedLength = densitySafeEmbedded.utf16.count
+  let recognizedLength = recognized.utf16.count
+  guard embeddedLength <= maximumUTF16Length,
+        recognizedLength < maximumUTF16Length,
+        embeddedLength <= maximumUTF16Length - recognizedLength - 1 else {
+    return nil
+  }
   return densitySafeEmbedded + "\n" + recognized
 }
 
@@ -238,10 +264,18 @@ final class ApplePDFProcessor: @unchecked Sendable {
         page: page,
         script: script
       )
-      let reconciledText = reconcilePDFSparseEmbeddedText(
+      guard let reconciledText = reconcilePDFSparseEmbeddedTextWithinLimit(
         embedded: embedded,
-        recognized: recognized.text
-      )
+        recognized: recognized.text,
+        maximumUTF16Length: PDFResourcePolicy.maximumPageTextLength
+      ) else {
+        warnings.append("PDF_PAGE_EXTRACTION_FAILED")
+        return failedResult(
+          pageIndex: pageIndex,
+          warnings: warnings,
+          started: started
+        )
+      }
       if reconciledText.isEmpty { warnings.append("PDF_PAGE_EMPTY") }
       return completeResult(
         pageIndex: pageIndex,
