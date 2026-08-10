@@ -26,6 +26,10 @@ class AndroidPDFProcessorTest {
     assertEquals("A\n4", reconcilePDFSparseEmbeddedText("A", "4"))
     assertEquals("OCR A result", reconcilePDFSparseEmbeddedText("A", "OCR A result"))
     assertEquals("é\ne\u0301", reconcilePDFSparseEmbeddedText("é", "e\u0301"))
+    assertEquals(
+      "Recovered by OCR",
+      reconcilePDFSparseEmbeddedText(" \n\u0085\u00A0\u3000", "Recovered by OCR"),
+    )
   }
 
   @Test
@@ -94,6 +98,13 @@ class AndroidPDFProcessorTest {
         "endstream\nendobj\n",
       xrefDictionary = "<< /Type /XRef /Size 3 /W [1 1 1] /Length 0 >>",
     )
+    val harmlessIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength()
+    val harmlessPositiveLengthXrefStream = xrefStreamPDF(
+      xrefDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length +0 >>",
+    )
+    val negativeLengthXrefStream = xrefStreamPDF(
+      xrefDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length -1 >>",
+    )
     val encryptedXrefStream = xrefStreamPDF(
       xrefDictionary = "<< /Type /XRef /Size 2 /W [1 1 1] /Length 0 /Encrypt 1 0 R >>",
     )
@@ -153,12 +164,20 @@ class AndroidPDFProcessorTest {
     val duplicatePreviousRevision = incrementalClassicXrefWithRawPrevPDF { previousOffset ->
       "/Size 3 /Prev $previousOffset /Prev $previousOffset"
     }
+    val positivePreviousRevision = incrementalClassicXrefWithRawPrevPDF { previousOffset ->
+      "/Size 3 /Prev +$previousOffset"
+    }
+    val negativePreviousRevision = incrementalClassicXrefWithRawPrevPDF { previousOffset ->
+      "/Size 3 /Prev -$previousOffset"
+    }
     try {
       assertTrue(hasPDFEncryptionMarker(encrypted))
       assertEquals(false, hasPDFEncryptionMarker(metadataOnly))
       assertEquals(false, hasPDFEncryptionMarker(harmlessContent))
       assertEquals(false, hasPDFEncryptionMarker(binaryStreamDelimiters))
       assertEquals(false, hasPDFEncryptionMarker(harmlessXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessIndirectLengthXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessPositiveLengthXrefStream))
       assertTrue(hasPDFEncryptionMarker(encryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(nestedClassic))
       assertEquals(false, hasPDFEncryptionMarker(nestedXrefStream))
@@ -171,6 +190,7 @@ class AndroidPDFProcessorTest {
       assertTrue(hasPDFEncryptionMarker(incrementallyEncryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(incrementallyUnencrypted))
       assertEquals(false, hasPDFEncryptionMarker(spoofedPreviousStartXref))
+      assertEquals(false, hasPDFEncryptionMarker(positivePreviousRevision))
       assertTrue(hasPDFEncryptionMarker(largeIncrementallyEncrypted))
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(cyclicPreviousRevision)
@@ -190,12 +210,21 @@ class AndroidPDFProcessorTest {
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(duplicatePreviousRevision)
       }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(negativeLengthXrefStream)
+      }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(negativePreviousRevision)
+      }
     } finally {
       encrypted.delete()
       metadataOnly.delete()
       harmlessContent.delete()
       binaryStreamDelimiters.delete()
       harmlessXrefStream.delete()
+      harmlessIndirectLengthXrefStream.delete()
+      harmlessPositiveLengthXrefStream.delete()
+      negativeLengthXrefStream.delete()
       encryptedXrefStream.delete()
       nestedClassic.delete()
       nestedXrefStream.delete()
@@ -215,6 +244,8 @@ class AndroidPDFProcessorTest {
       spoofedPreviousStartXref.delete()
       indirectPreviousRevision.delete()
       duplicatePreviousRevision.delete()
+      positivePreviousRevision.delete()
+      negativePreviousRevision.delete()
     }
   }
 
@@ -256,6 +287,17 @@ class AndroidPDFProcessorTest {
     return temporaryPDF(
       prefix +
         "2 0 obj\n$xrefDictionary\nstream\n\nendstream\nendobj\n" +
+        "startxref\n$xrefOffset\n%%EOF",
+    )
+  }
+
+  private fun xrefStreamPDFWithIndirectLength(): File {
+    val prefix = "%PDF-1.7\n1 0 obj\n0\nendobj\n"
+    val xrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix +
+        "2 0 obj\n<< /Type /XRef /Size 3 /W [1 1 1] /Length 1 0 R >>\n" +
+        "stream\n\nendstream\nendobj\n" +
         "startxref\n$xrefOffset\n%%EOF",
     )
   }

@@ -76,11 +76,14 @@ internal func reconcilePDFSparseEmbeddedText(
   embedded: String,
   recognized: String
 ) -> String {
-  guard !embedded.isEmpty else { return recognized }
+  let densitySafeEmbedded = pdfEmbeddedTextNonWhitespaceUTF16Count(embedded) == 0
+    ? ""
+    : embedded
+  guard !densitySafeEmbedded.isEmpty else { return recognized }
   guard !recognized.isEmpty else { return embedded }
-  if pdfRawUTF16Contains(recognized, embedded) { return recognized }
-  if pdfRawUTF16Contains(embedded, recognized) { return embedded }
-  return embedded + "\n" + recognized
+  if pdfRawUTF16Contains(recognized, densitySafeEmbedded) { return recognized }
+  if pdfRawUTF16Contains(densitySafeEmbedded, recognized) { return densitySafeEmbedded }
+  return densitySafeEmbedded + "\n" + recognized
 }
 
 private func pdfRawUTF16Contains(_ haystack: String, _ needle: String) -> Bool {

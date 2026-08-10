@@ -674,6 +674,13 @@ final class PDFExtractionTests: XCTestCase {
       reconcilePDFSparseEmbeddedText(embedded: "é", recognized: "e\u{301}"),
       "é\ne\u{301}"
     )
+    XCTAssertEqual(
+      reconcilePDFSparseEmbeddedText(
+        embedded: " \n\u{0085}\u{00A0}\u{3000}",
+        recognized: "Recovered by OCR"
+      ),
+      "Recovered by OCR"
+    )
   }
 
   func testPlainTextReaderIsStrictBoundedAndPreservesBytes() throws {
