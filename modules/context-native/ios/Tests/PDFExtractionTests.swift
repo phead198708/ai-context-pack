@@ -266,6 +266,74 @@ final class PDFExtractionTests: XCTestCase {
     replacement.finish(taskId: thirdTaskId)
   }
 
+  func testRecreatedModuleCannotAcknowledgeFinishUntilOriginalOwnerCleanupCompletes() throws {
+    let registry = OCRCancellationRegistry()
+    let first = ApplePDFProcessor(registry: registry)
+    let recreated = ApplePDFProcessor(registry: registry)
+    let replacement = ApplePDFProcessor(registry: registry)
+    let coordinator = PDFProcessorFinishCoordinator()
+    let cleanupStarted = DispatchSemaphore(value: 0)
+    let allowCleanup = DispatchSemaphore(value: 0)
+    let cleanupFinished = expectation(description: "original owner cleanup finished")
+    let acknowledgementLock = NSLock()
+    var acknowledgements = 0
+    let recordAcknowledgement = {
+      acknowledgementLock.lock()
+      acknowledgements += 1
+      acknowledgementLock.unlock()
+    }
+    let firstOwner = PDFProcessorFinishOwner { taskId in
+      cleanupStarted.signal()
+      XCTAssertEqual(allowCleanup.wait(timeout: .now() + 5), .success)
+      first.finish(taskId: taskId)
+    }
+    let recreatedOwner = PDFProcessorFinishOwner(finishProcessor: recreated.finish)
+    let replacementOwner = PDFProcessorFinishOwner(finishProcessor: replacement.finish)
+    let active = try coordinator.beginOperation(
+      owner: firstOwner,
+      taskId: firstTaskId
+    ) { try first.reserve(taskId: firstTaskId) }
+
+    XCTAssertFalse(coordinator.requestFinish(
+      fallbackOwner: recreatedOwner,
+      taskId: firstTaskId,
+      completion: recordAcknowledgement
+    ))
+    DispatchQueue.global(qos: .userInitiated).async {
+      _ = active.finish(keepSession: true)
+      cleanupFinished.fulfill()
+    }
+    XCTAssertEqual(cleanupStarted.wait(timeout: .now() + 5), .success)
+
+    XCTAssertFalse(coordinator.requestFinish(
+      fallbackOwner: recreatedOwner,
+      taskId: firstTaskId,
+      completion: recordAcknowledgement
+    ))
+    XCTAssertThrowsError(
+      try coordinator.beginOperation(
+        owner: replacementOwner,
+        taskId: secondTaskId
+      ) { try replacement.reserve(taskId: secondTaskId) }
+    ) {
+      XCTAssertEqual($0 as? PDFProcessingError, .resourceBusy)
+    }
+    acknowledgementLock.lock()
+    XCTAssertEqual(acknowledgements, 0)
+    acknowledgementLock.unlock()
+
+    allowCleanup.signal()
+    wait(for: [cleanupFinished], timeout: 5)
+    acknowledgementLock.lock()
+    XCTAssertEqual(acknowledgements, 2)
+    acknowledgementLock.unlock()
+    let replacementOperation = try coordinator.beginOperation(
+      owner: replacementOwner,
+      taskId: secondTaskId
+    ) { try replacement.reserve(taskId: secondTaskId) }
+    XCTAssertTrue(replacementOperation.finish(keepSession: false))
+  }
+
   func testConcurrentBeginFailureCannotStealActivePageDeliveryClaim() throws {
     let registry = OCRCancellationRegistry()
     let processor = ApplePDFProcessor(registry: registry)

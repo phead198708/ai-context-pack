@@ -6,6 +6,10 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class AndroidOCRProcessorTest {
   private val firstTaskId = "123e4567-e89b-42d3-a456-426614174000"
@@ -347,6 +351,113 @@ class AndroidOCRProcessorTest {
     assertEquals(1, acknowledged)
     replacement.reserve(secondTaskId)
     replacement.finish(secondTaskId)
+  }
+
+  @Test
+  fun recreatedModuleCannotAcknowledgeFinishUntilOriginalOwnerCleanupCompletes() {
+    val coordinator = PDFProcessorFinishCoordinator()
+    val registry = OcrTaskRegistry()
+    val first = AndroidPDFProcessor(registry)
+    val recreated = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    val cleanupStarted = CountDownLatch(1)
+    val allowCleanup = CountDownLatch(1)
+    val cleanupFinished = CountDownLatch(1)
+    val acknowledgements = AtomicInteger(0)
+    val firstOwner = PDFProcessorFinishOwner { taskId ->
+      cleanupStarted.countDown()
+      assertTrue(allowCleanup.await(5, TimeUnit.SECONDS))
+      first.finish(taskId)
+    }
+    val recreatedOwner = PDFProcessorFinishOwner(recreated::finish)
+    val replacementOwner = PDFProcessorFinishOwner(replacement::finish)
+    val operation = coordinator.beginOperation(firstOwner, firstTaskId) {
+      first.reserve(firstTaskId)
+    }
+
+    assertEquals(false, coordinator.requestFinish(recreatedOwner, firstTaskId, completion = {
+      acknowledgements.incrementAndGet()
+    }))
+    val cleanupThread = Thread {
+      operation.finish(keepSession = true)
+      cleanupFinished.countDown()
+    }
+    cleanupThread.start()
+    assertTrue(cleanupStarted.await(5, TimeUnit.SECONDS))
+
+    assertEquals(false, coordinator.requestFinish(recreatedOwner, firstTaskId, completion = {
+      acknowledgements.incrementAndGet()
+    }))
+    assertCode("PDF_RESOURCE_BUSY") {
+      coordinator.beginOperation(replacementOwner, secondTaskId) {
+        replacement.reserve(secondTaskId)
+      }
+    }
+    assertEquals(0, acknowledgements.get())
+
+    allowCleanup.countDown()
+    assertTrue(cleanupFinished.await(5, TimeUnit.SECONDS))
+    cleanupThread.join(5_000)
+    assertEquals(2, acknowledgements.get())
+    val replacementOperation = coordinator.beginOperation(replacementOwner, secondTaskId) {
+      replacement.reserve(secondTaskId)
+    }
+    replacementOperation.finish(keepSession = false)
+  }
+
+  @Test
+  fun failedPdfCleanupRejectsAcknowledgementAndRemainsRetryable() {
+    val coordinator = PDFProcessorFinishCoordinator()
+    val registry = OcrTaskRegistry()
+    val first = AndroidPDFProcessor(registry)
+    val replacement = AndroidPDFProcessor(registry)
+    val cleanupAttempts = AtomicInteger(0)
+    val acknowledgements = AtomicInteger(0)
+    val failures = AtomicInteger(0)
+    val firstOwner = PDFProcessorFinishOwner { taskId ->
+      if (cleanupAttempts.incrementAndGet() == 1) {
+        closePDFSourceAndReleaseRegistry(
+          closeSource = { throw IOException("synthetic descriptor close failure") },
+          releaseRegistry = { registry.finish(taskId) },
+        )
+      } else {
+        first.finish(taskId)
+      }
+    }
+    val replacementOwner = PDFProcessorFinishOwner(replacement::finish)
+    val operation = coordinator.beginOperation(firstOwner, firstTaskId) {
+      first.reserve(firstTaskId)
+    }
+    assertEquals(false, operation.finish(keepSession = true))
+
+    assertEquals(
+      false,
+      coordinator.requestFinish(
+        fallbackOwner = replacementOwner,
+        taskId = firstTaskId,
+        completion = { acknowledgements.incrementAndGet() },
+        failure = { failures.incrementAndGet() },
+      ),
+    )
+    assertEquals(0, acknowledgements.get())
+    assertEquals(1, failures.get())
+    replacement.reserve(secondTaskId)
+    replacement.finish(secondTaskId)
+    assertCode("PDF_RESOURCE_BUSY") {
+      coordinator.beginOperation(replacementOwner, secondTaskId) {
+        replacement.reserve(secondTaskId)
+      }
+    }
+
+    assertTrue(coordinator.requestFinish(replacementOwner, firstTaskId, completion = {
+      acknowledgements.incrementAndGet()
+    }))
+    assertEquals(1, acknowledgements.get())
+    assertEquals(1, failures.get())
+    val replacementOperation = coordinator.beginOperation(replacementOwner, secondTaskId) {
+      replacement.reserve(secondTaskId)
+    }
+    replacementOperation.finish(keepSession = false)
   }
 
   @Test

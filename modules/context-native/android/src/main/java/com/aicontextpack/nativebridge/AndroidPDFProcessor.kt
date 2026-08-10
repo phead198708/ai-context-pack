@@ -36,6 +36,7 @@ internal object AndroidPDFResourcePolicy {
   const val maximumPageTextLength = 1_000_000
   const val maximumXrefDictionaryBytes = 1_048_576
   const val maximumXrefRevisions = 64
+  const val maximumXrefTerminatorBytes = 65_536
 }
 
 private val CANONICAL_PDF_SHA256 = Regex("^[0-9a-f]{64}$")
@@ -186,13 +187,16 @@ internal class AndroidPDFProcessor(
   }
 
   fun finish(taskId: String) {
-    val descriptor = synchronized(sourceLock) {
-      val current = sourceSession
-      if (current?.taskId == taskId) sourceSession = null
-      current?.takeIf { it.taskId == taskId }?.descriptor
-    }
-    descriptor?.close()
-    registry.finish(taskId)
+    closePDFSourceAndReleaseRegistry(
+      closeSource = {
+        synchronized(sourceLock) {
+          val current = sourceSession?.takeIf { it.taskId == taskId }
+          current?.descriptor?.close()
+          if (sourceSession === current) sourceSession = null
+        }
+      },
+      releaseRegistry = { registry.finish(taskId) },
+    )
   }
 
   fun destroy(
@@ -617,6 +621,17 @@ internal class AndroidPDFProcessor(
   )
 }
 
+internal fun closePDFSourceAndReleaseRegistry(
+  closeSource: () -> Unit,
+  releaseRegistry: () -> Unit,
+) {
+  try {
+    closeSource()
+  } finally {
+    releaseRegistry()
+  }
+}
+
 internal fun normalizePDFText(input: String): String {
   val normalizedLines = input.replace("\r\n", "\n").replace('\r', '\n')
   val output = StringBuilder(normalizedLines.length)
@@ -736,128 +751,175 @@ private fun hasPDFEncryptionMarker(input: PDFRandomAccessReader): Boolean {
   val startXref = lastPDFKeyword(tail, "startxref", tail.size)
   if (startXref < 0) throw IOException("Missing PDF startxref")
   val tailStartOffset = input.length - tailLength
-  var startXrefOffset = tailStartOffset + startXref
+  val finalStartXrefOffset = tailStartOffset + startXref
+  var revisionUpperBound = input.length
+  var expectedStartXrefOffset: Long? = finalStartXrefOffset
   var xrefOffset = parseStartXrefOffset(tail, startXref)
     ?: throw IOException("Invalid PDF startxref")
   val visited = mutableSetOf<Long>()
   repeat(AndroidPDFResourcePolicy.maximumXrefRevisions) {
     if (
       xrefOffset < 0 ||
-      xrefOffset >= startXrefOffset ||
+      xrefOffset >= revisionUpperBound ||
       !visited.add(xrefOffset)
     ) {
       throw IOException("PDF xref chain is invalid")
     }
-    val dictionary = readXrefDictionary(input, xrefOffset, startXrefOffset)
+    val revision = readXrefRevision(input, xrefOffset, revisionUpperBound)
+    if (expectedStartXrefOffset != null && revision.startXrefOffset != expectedStartXrefOffset) {
+      throw IOException("PDF final startxref marker is inconsistent")
+    }
+    val dictionary = revision.dictionary
     if (dictionary.keys.contains("Encrypt")) return true
     if (!dictionary.keys.contains("Prev")) return false
+    if (
+      dictionary.duplicateKeys.contains("Prev") ||
+      dictionary.invalidDirectIntegerKeys.contains("Prev")
+    ) {
+      throw IOException("PDF Prev offset is invalid")
+    }
     val previous = dictionary.integerValues["Prev"]
       ?: throw IOException("PDF Prev offset is invalid")
     if (previous >= xrefOffset) throw IOException("PDF Prev offset does not point backward")
-    startXrefOffset = findMatchingStartXrefMarker(
-      input = input,
-      expectedXrefOffset = previous,
-      lowerBound = previous,
-      upperBound = xrefOffset,
-    )
+    revisionUpperBound = xrefOffset
+    expectedStartXrefOffset = null
     xrefOffset = previous
   }
   throw IOException("PDF xref chain exceeds its bounded parser policy")
 }
 
-private fun readXrefDictionary(
+private data class ParsedXrefDictionary(
+  val dictionary: TopLevelPDFDictionary,
+  val dictionaryEndOffset: Long,
+)
+
+private data class XrefRevision(
+  val dictionary: TopLevelPDFDictionary,
+  val startXrefOffset: Long,
+)
+
+private fun readXrefRevision(
   input: PDFRandomAccessReader,
   xrefOffset: Long,
-  startXrefOffset: Long,
-): TopLevelPDFDictionary {
+  revisionUpperBound: Long,
+): XrefRevision {
   val prefixLength = minOf(256L, input.length - xrefOffset).toInt()
   val prefix = input.read(xrefOffset, prefixLength)
   val dictionaryStart = skipPDFWhitespace(prefix, 0, prefix.size)
   if (isPDFKeywordAt(prefix, dictionaryStart, "xref")) {
-    return readCompleteClassicTrailerDictionary(input, xrefOffset, startXrefOffset)
+    val parsed = readCompleteClassicTrailerDictionary(input, xrefOffset, revisionUpperBound)
+    return XrefRevision(
+      dictionary = parsed.dictionary,
+      startXrefOffset = readClassicRevisionTerminator(
+        input = input,
+        dictionaryEndOffset = parsed.dictionaryEndOffset,
+        revisionUpperBound = revisionUpperBound,
+        expectedXrefOffset = xrefOffset,
+      ),
+    )
   }
 
-  val xrefDictionary = readCompleteXrefStreamDictionary(input, xrefOffset)
-  if (xrefDictionary.nameValues["Type"] != "XRef") {
+  val parsed = readCompleteXrefStreamDictionary(input, xrefOffset)
+  val xrefDictionary = parsed.dictionary
+  if (
+    xrefDictionary.nameValues["Type"] != "XRef" ||
+    xrefDictionary.duplicateKeys.contains("Type")
+  ) {
     throw IOException("Active PDF object is not an xref stream")
   }
-  return xrefDictionary
+  return XrefRevision(
+    dictionary = xrefDictionary,
+    startXrefOffset = readXrefStreamRevisionTerminator(
+      input = input,
+      dictionary = xrefDictionary,
+      dictionaryEndOffset = parsed.dictionaryEndOffset,
+      revisionUpperBound = revisionUpperBound,
+      expectedXrefOffset = xrefOffset,
+    ),
+  )
 }
 
 private fun readCompleteClassicTrailerDictionary(
   input: PDFRandomAccessReader,
   xrefOffset: Long,
-  startXrefOffset: Long,
-): TopLevelPDFDictionary {
-  if (startXrefOffset <= xrefOffset) throw IOException("PDF xref bounds are invalid")
+  revisionUpperBound: Long,
+): ParsedXrefDictionary {
+  if (revisionUpperBound <= xrefOffset) throw IOException("PDF xref bounds are invalid")
+  val trailerOffset = findClassicTrailerOffset(input, xrefOffset, revisionUpperBound)
+  val dictionaryOffset = trailerOffset + "trailer".length
   val windowLength = minOf(
-    startXrefOffset - xrefOffset,
+    revisionUpperBound - dictionaryOffset,
     AndroidPDFResourcePolicy.maximumXrefDictionaryBytes.toLong(),
   ).toInt()
-  val windowStart = startXrefOffset - windowLength
-  val bytes = input.read(windowStart, windowLength)
-  val trailer = lastLexicalPDFKeyword(bytes, "trailer", 0, bytes.size)
-  if (trailer < 0) {
-    throw IOException("PDF trailer dictionary exceeds its bounded parser policy")
-  }
+  if (windowLength <= 0) throw IOException("Missing PDF trailer dictionary")
+  val bytes = input.read(dictionaryOffset, windowLength)
   val parsed = parseTopLevelPDFDictionary(
     bytes,
-    trailer + "trailer".length,
+    0,
     bytes.size,
   ) ?: throw IOException("Missing PDF trailer dictionary")
   if (!parsed.complete) {
     throw IOException("PDF trailer dictionary exceeds its bounded parser policy")
   }
-  return parsed
+  return ParsedXrefDictionary(parsed, dictionaryOffset + parsed.endOffset)
 }
 
-private fun findMatchingStartXrefMarker(
+private fun findClassicTrailerOffset(
   input: PDFRandomAccessReader,
-  expectedXrefOffset: Long,
-  lowerBound: Long,
+  xrefOffset: Long,
   upperBound: Long,
 ): Long {
-  if (lowerBound < 0 || upperBound <= lowerBound || upperBound > input.length) {
+  if (xrefOffset < 0 || upperBound <= xrefOffset || upperBound > input.length) {
     throw IOException("PDF xref revision bounds are invalid")
   }
   val chunkBytes = 65_536
-  val overlapBytes = 128
-  var cursor = lowerBound
-  var carry = ByteArray(0)
-  var candidate: Long? = null
+  val keyword = "trailer"
+  var cursor = xrefOffset
+  var inComment = false
+  var tokenStart = xrefOffset
+  var tokenLength = 0
+  var tokenMatches = true
   while (cursor < upperBound) {
     val requested = minOf(chunkBytes.toLong(), upperBound - cursor).toInt()
     val chunk = input.read(cursor, requested)
     if (chunk.isEmpty()) break
-    val bytes = carry + chunk
-    val baseOffset = cursor - carry.size
-    var before = bytes.size
-    while (before > 0) {
-      val marker = lastPDFKeyword(bytes, "startxref", before)
-      if (marker < 0) break
-      val absoluteMarker = baseOffset + marker
-      if (
-        absoluteMarker >= lowerBound &&
-        absoluteMarker < upperBound &&
-        parseStartXrefOffset(bytes, marker) == expectedXrefOffset
-      ) {
-        if (candidate != null && candidate != absoluteMarker) {
-          throw IOException("PDF xref revision marker is ambiguous")
-        }
-        candidate = absoluteMarker
+    chunk.forEachIndexed { chunkIndex, byte ->
+      val absoluteOffset = cursor + chunkIndex
+      val value = byte.toInt() and 0xff
+      if (inComment) {
+        if (value == '\n'.code || value == '\r'.code) inComment = false
+        return@forEachIndexed
       }
-      before = marker
+      if (value == '%'.code) {
+        if (tokenLength == keyword.length && tokenMatches) return tokenStart
+        tokenLength = 0
+        tokenMatches = true
+        inComment = true
+        return@forEachIndexed
+      }
+      if (isPDFDelimiter(value)) {
+        if (tokenLength == keyword.length && tokenMatches) return tokenStart
+        tokenLength = 0
+        tokenMatches = true
+        if (!isPDFWhitespace(value)) {
+          throw IOException("Classic PDF xref table is malformed")
+        }
+        return@forEachIndexed
+      }
+      if (tokenLength == 0) tokenStart = absoluteOffset
+      if (tokenLength >= keyword.length || value != keyword[tokenLength].code) tokenMatches = false
+      tokenLength += 1
     }
-    carry = bytes.copyOfRange(maxOf(0, bytes.size - overlapBytes), bytes.size)
     cursor += chunk.size
   }
-  return candidate ?: throw IOException("Missing PDF xref revision marker")
+  if (tokenLength == keyword.length && tokenMatches) return tokenStart
+  throw IOException("Missing PDF trailer dictionary")
 }
 
 private fun readCompleteXrefStreamDictionary(
   input: PDFRandomAccessReader,
   xrefOffset: Long,
-): TopLevelPDFDictionary {
+): ParsedXrefDictionary {
   val available = input.length - xrefOffset
   val limit = minOf(
     available,
@@ -873,9 +935,117 @@ private fun readCompleteXrefStreamDictionary(
     consumed += chunk.size
     val bytes = output.toByteArray()
     val parsed = parseTopLevelPDFDictionary(bytes, 0, bytes.size)
-    if (parsed?.complete == true) return parsed
+    if (parsed?.complete == true) {
+      return ParsedXrefDictionary(parsed, xrefOffset + parsed.endOffset)
+    }
   }
   throw IOException("PDF xref-stream dictionary exceeds its bounded parser policy")
+}
+
+private fun readClassicRevisionTerminator(
+  input: PDFRandomAccessReader,
+  dictionaryEndOffset: Long,
+  revisionUpperBound: Long,
+  expectedXrefOffset: Long,
+): Long {
+  val suffix = readBoundedXrefSyntax(input, dictionaryEndOffset, revisionUpperBound)
+  val marker = parseStartXrefTerminator(suffix, 0, expectedXrefOffset)
+  return dictionaryEndOffset + marker
+}
+
+private fun readXrefStreamRevisionTerminator(
+  input: PDFRandomAccessReader,
+  dictionary: TopLevelPDFDictionary,
+  dictionaryEndOffset: Long,
+  revisionUpperBound: Long,
+  expectedXrefOffset: Long,
+): Long {
+  if (
+    dictionary.duplicateKeys.contains("Length") ||
+    dictionary.invalidDirectIntegerKeys.contains("Length")
+  ) {
+    throw IOException("PDF xref-stream length is invalid")
+  }
+  val streamLength = dictionary.integerValues["Length"]
+    ?: throw IOException("PDF xref-stream length is invalid")
+  val header = readBoundedXrefSyntax(input, dictionaryEndOffset, revisionUpperBound)
+  var index = skipPDFWhitespaceAndComments(header, 0, header.size)
+  if (!isPDFKeywordAt(header, index, "stream")) throw IOException("Missing PDF xref stream")
+  index += "stream".length
+  index = consumeRequiredPDFLineEnding(header, index)
+  val streamStartOffset = dictionaryEndOffset + index
+  val streamEndOffset = streamStartOffset + streamLength
+  if (streamEndOffset < streamStartOffset || streamEndOffset >= revisionUpperBound) {
+    throw IOException("PDF xref-stream bounds are invalid")
+  }
+  val suffix = readBoundedXrefSyntax(input, streamEndOffset, revisionUpperBound)
+  index = consumeOptionalPDFLineEnding(suffix, 0)
+  if (!isPDFKeywordAt(suffix, index, "endstream")) throw IOException("Missing PDF endstream")
+  index += "endstream".length
+  index = skipPDFWhitespaceAndComments(suffix, index, suffix.size)
+  if (!isPDFKeywordAt(suffix, index, "endobj")) throw IOException("Missing PDF endobj")
+  index += "endobj".length
+  val marker = parseStartXrefTerminator(suffix, index, expectedXrefOffset)
+  return streamEndOffset + marker
+}
+
+private fun readBoundedXrefSyntax(
+  input: PDFRandomAccessReader,
+  offset: Long,
+  upperBound: Long,
+): ByteArray {
+  if (offset < 0 || upperBound <= offset || upperBound > input.length) {
+    throw IOException("PDF xref syntax bounds are invalid")
+  }
+  val length = minOf(
+    upperBound - offset,
+    AndroidPDFResourcePolicy.maximumXrefTerminatorBytes.toLong(),
+  ).toInt()
+  return input.read(offset, length)
+}
+
+private fun parseStartXrefTerminator(
+  bytes: ByteArray,
+  start: Int,
+  expectedXrefOffset: Long,
+): Int {
+  var index = skipPDFWhitespaceAndComments(bytes, start, bytes.size)
+  val marker = index
+  if (!isPDFKeywordAt(bytes, index, "startxref")) throw IOException("Missing PDF startxref")
+  index += "startxref".length
+  index = skipPDFWhitespace(bytes, index, bytes.size)
+  val integerStart = index
+  while (index < bytes.size && bytes[index].toInt().toChar() in '0'..'9') index += 1
+  if (index == integerStart || !isPDFTokenBoundary(bytes, index)) {
+    throw IOException("Invalid PDF startxref")
+  }
+  val parsedOffset = bytes.copyOfRange(integerStart, index)
+    .toString(Charsets.US_ASCII)
+    .toLongOrNull()
+  if (parsedOffset != expectedXrefOffset) throw IOException("PDF startxref target is inconsistent")
+  index = skipPDFWhitespace(bytes, index, bytes.size)
+  if (!bytes.regionMatches(index, "%%EOF".toByteArray(Charsets.US_ASCII))) {
+    throw IOException("Missing PDF EOF marker")
+  }
+  return marker
+}
+
+private fun consumeRequiredPDFLineEnding(bytes: ByteArray, start: Int): Int {
+  if (start >= bytes.size) throw IOException("Missing PDF stream line ending")
+  return when (bytes[start].toInt() and 0xff) {
+    '\n'.code -> start + 1
+    '\r'.code -> if (start + 1 < bytes.size && bytes[start + 1] == '\n'.code.toByte()) start + 2 else start + 1
+    else -> throw IOException("Missing PDF stream line ending")
+  }
+}
+
+private fun consumeOptionalPDFLineEnding(bytes: ByteArray, start: Int): Int {
+  if (start >= bytes.size) return start
+  return when (bytes[start].toInt() and 0xff) {
+    '\n'.code -> start + 1
+    '\r'.code -> if (start + 1 < bytes.size && bytes[start + 1] == '\n'.code.toByte()) start + 2 else start + 1
+    else -> start
+  }
 }
 
 private fun sha256(
@@ -930,55 +1100,6 @@ private fun lastPDFKeyword(bytes: ByteArray, keyword: String, before: Int): Int 
   return -1
 }
 
-private fun lastLexicalPDFKeyword(
-  bytes: ByteArray,
-  keyword: String,
-  start: Int,
-  end: Int,
-): Int {
-  val limit = minOf(end, bytes.size)
-  var index = maxOf(0, start)
-  var dictionaryDepth = 0
-  var arrayDepth = 0
-  var found = -1
-  while (index < limit) {
-    val value = bytes[index].toInt() and 0xff
-    when {
-      value == '%'.code -> index = skipPDFComment(bytes, index, limit)
-      value == '('.code -> index = skipPDFLiteralString(bytes, index + 1, limit)
-      value == '<'.code && index + 1 < limit &&
-        bytes[index + 1] == '<'.code.toByte() -> {
-        dictionaryDepth += 1
-        index += 2
-      }
-      value == '>'.code && index + 1 < limit &&
-        bytes[index + 1] == '>'.code.toByte() -> {
-        dictionaryDepth = maxOf(0, dictionaryDepth - 1)
-        index += 2
-      }
-      value == '<'.code -> index = skipPDFHexString(bytes, index, limit)
-      value == '['.code -> {
-        arrayDepth += 1
-        index += 1
-      }
-      value == ']'.code -> {
-        arrayDepth = maxOf(0, arrayDepth - 1)
-        index += 1
-      }
-      value == '/'.code -> {
-        index = parsePDFName(bytes, index, limit)?.end ?: (index + 1)
-      }
-      dictionaryDepth == 0 && arrayDepth == 0 &&
-        isPDFKeywordAt(bytes, index, keyword) -> {
-        found = index
-        index += keyword.length
-      }
-      else -> index += 1
-    }
-  }
-  return found
-}
-
 private fun ByteArray.regionMatches(start: Int, token: ByteArray): Boolean {
   if (start < 0 || start > size - token.size) return false
   for (index in token.indices) if (this[start + index] != token[index]) return false
@@ -993,9 +1114,12 @@ private fun isPDFWhitespace(value: Int): Boolean =
 
 private data class TopLevelPDFDictionary(
   val keys: Set<String>,
+  val duplicateKeys: Set<String>,
   val nameValues: Map<String, String>,
   val integerValues: Map<String, Long>,
+  val invalidDirectIntegerKeys: Set<String>,
   val complete: Boolean,
+  val endOffset: Int,
 )
 
 private data class ParsedPDFName(val value: String, val end: Int)
@@ -1016,33 +1140,79 @@ private fun parseTopLevelPDFDictionary(
   if (index < 0) return null
   index += 2
   val keys = linkedSetOf<String>()
+  val duplicateKeys = linkedSetOf<String>()
   val nameValues = linkedMapOf<String, String>()
   val integerValues = linkedMapOf<String, Long>()
+  val invalidDirectIntegerKeys = linkedSetOf<String>()
   while (index < limit) {
     index = skipPDFWhitespaceAndComments(bytes, index, limit)
     if (index + 1 < limit && bytes[index] == '>'.code.toByte() &&
       bytes[index + 1] == '>'.code.toByte()
-    ) return TopLevelPDFDictionary(keys, nameValues, integerValues, complete = true)
+    ) return TopLevelPDFDictionary(
+      keys,
+      duplicateKeys,
+      nameValues,
+      integerValues,
+      invalidDirectIntegerKeys,
+      complete = true,
+      endOffset = index + 2,
+    )
     if (index >= limit) break
     if (bytes[index] != '/'.code.toByte()) {
       index = skipPDFValue(bytes, index, limit).end
       continue
     }
     val key = parsePDFName(bytes, index, limit) ?: return null
-    keys += key.value
+    if (!keys.add(key.value)) duplicateKeys += key.value
     index = skipPDFWhitespaceAndComments(bytes, key.end, limit)
     if (index + 1 < limit && bytes[index] == '>'.code.toByte() &&
       bytes[index + 1] == '>'.code.toByte()
-    ) return TopLevelPDFDictionary(keys, nameValues, integerValues, complete = true)
+    ) {
+      if (key.value == "Prev" || key.value == "Length") invalidDirectIntegerKeys += key.value
+      return TopLevelPDFDictionary(
+        keys,
+        duplicateKeys,
+        nameValues,
+        integerValues,
+        invalidDirectIntegerKeys,
+        complete = true,
+        endOffset = index + 2,
+      )
+    }
     if (index >= limit) {
-      return TopLevelPDFDictionary(keys, nameValues, integerValues, complete = false)
+      if (key.value == "Prev" || key.value == "Length") invalidDirectIntegerKeys += key.value
+      return TopLevelPDFDictionary(
+        keys,
+        duplicateKeys,
+        nameValues,
+        integerValues,
+        invalidDirectIntegerKeys,
+        complete = false,
+        endOffset = limit,
+      )
     }
     val value = skipPDFValue(bytes, index, limit)
     value.name?.let { nameValues[key.value] = it }
-    value.integer?.let { integerValues[key.value] = it }
+    val next = skipPDFWhitespaceAndComments(bytes, value.end, limit)
+    val directValueComplete = next >= limit ||
+      bytes[next] == '/'.code.toByte() ||
+      (next + 1 < limit && bytes[next] == '>'.code.toByte() && bytes[next + 1] == '>'.code.toByte())
+    if (value.integer != null && directValueComplete) {
+      integerValues[key.value] = value.integer
+    } else if (key.value == "Prev" || key.value == "Length") {
+      invalidDirectIntegerKeys += key.value
+    }
     index = value.end
   }
-  return TopLevelPDFDictionary(keys, nameValues, integerValues, complete = false)
+  return TopLevelPDFDictionary(
+    keys,
+    duplicateKeys,
+    nameValues,
+    integerValues,
+    invalidDirectIntegerKeys,
+    complete = false,
+    endOffset = limit,
+  )
 }
 
 private fun firstPDFDictionaryStart(bytes: ByteArray, start: Int, end: Int): Int {

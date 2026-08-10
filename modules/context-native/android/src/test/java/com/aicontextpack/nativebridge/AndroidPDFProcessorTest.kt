@@ -146,6 +146,13 @@ class AndroidPDFProcessorTest {
     )
     val largeIncrementallyEncrypted = largeIncrementalEncryptedPDF()
     val cyclicPreviousRevision = cyclicPreviousRevisionPDF()
+    val spoofedPreviousStartXref = incrementalClassicXrefWithStreamMarkerPDF()
+    val indirectPreviousRevision = incrementalClassicXrefWithRawPrevPDF { previousOffset ->
+      "/Size 3 /Prev $previousOffset 0 R"
+    }
+    val duplicatePreviousRevision = incrementalClassicXrefWithRawPrevPDF { previousOffset ->
+      "/Size 3 /Prev $previousOffset /Prev $previousOffset"
+    }
     try {
       assertTrue(hasPDFEncryptionMarker(encrypted))
       assertEquals(false, hasPDFEncryptionMarker(metadataOnly))
@@ -163,6 +170,7 @@ class AndroidPDFProcessorTest {
       assertTrue(hasPDFEncryptionMarker(incrementallyEncrypted))
       assertTrue(hasPDFEncryptionMarker(incrementallyEncryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(incrementallyUnencrypted))
+      assertEquals(false, hasPDFEncryptionMarker(spoofedPreviousStartXref))
       assertTrue(hasPDFEncryptionMarker(largeIncrementallyEncrypted))
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(cyclicPreviousRevision)
@@ -175,6 +183,12 @@ class AndroidPDFProcessorTest {
       }
       assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(incompleteClassicTrailer)
+      }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(indirectPreviousRevision)
+      }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(duplicatePreviousRevision)
       }
     } finally {
       encrypted.delete()
@@ -198,6 +212,9 @@ class AndroidPDFProcessorTest {
       incrementallyUnencrypted.delete()
       largeIncrementallyEncrypted.delete()
       cyclicPreviousRevision.delete()
+      spoofedPreviousStartXref.delete()
+      indirectPreviousRevision.delete()
+      duplicatePreviousRevision.delete()
     }
   }
 
@@ -292,6 +309,49 @@ class AndroidPDFProcessorTest {
       prefix + previousRevision +
         "xref\n0 1\n0000000000 65535 f \n" +
         "trailer\n<< /Size 3 /Prev $previousXrefOffset >>\n" +
+        "startxref\n$latestXrefOffset\n%%EOF",
+    )
+  }
+
+  private fun incrementalClassicXrefWithStreamMarkerPDF(): File {
+    val prefix = "%PDF-1.7\n%" + "a".repeat(240) + "\n"
+    val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    check(previousXrefOffset == 251)
+    val previousRevision =
+      "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< /Size 2 /Root 1 0 R >>\n" +
+        "startxref\n$previousXrefOffset\n%%EOF\n"
+    val streamPayload = "startxref\n$previousXrefOffset\n"
+    val appendedObject =
+      "2 0 obj\n<< /Length ${streamPayload.toByteArray(Charsets.US_ASCII).size} >>\n" +
+        "stream\n$streamPayload" +
+        "endstream\nendobj\n"
+    val latestXrefOffset = previousXrefOffset +
+      previousRevision.toByteArray(Charsets.US_ASCII).size +
+      appendedObject.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix + previousRevision + appendedObject +
+        "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< /Size 3 /Prev $previousXrefOffset >>\n" +
+        "startxref\n$latestXrefOffset\n%%EOF",
+    )
+  }
+
+  private fun incrementalClassicXrefWithRawPrevPDF(
+    latestTrailerEntries: (previousOffset: Int) -> String,
+  ): File {
+    val prefix = "%PDF-1.7\n%" + "a".repeat(240) + "\n"
+    val previousXrefOffset = prefix.toByteArray(Charsets.US_ASCII).size
+    check(previousXrefOffset == 251)
+    val previousRevision =
+      "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< /Size 2 /Root 1 0 R >>\n" +
+        "startxref\n$previousXrefOffset\n%%EOF\n"
+    val latestXrefOffset = previousXrefOffset + previousRevision.toByteArray(Charsets.US_ASCII).size
+    return temporaryPDF(
+      prefix + previousRevision +
+        "xref\n0 1\n0000000000 65535 f \n" +
+        "trailer\n<< ${latestTrailerEntries(previousXrefOffset)} >>\n" +
         "startxref\n$latestXrefOffset\n%%EOF",
     )
   }

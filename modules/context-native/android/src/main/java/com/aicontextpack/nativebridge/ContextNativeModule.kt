@@ -131,18 +131,25 @@ internal class PDFProcessorFinishOwner(
 )
 
 internal class PDFProcessorFinishCoordinator {
+  private data class FinishCompletion(
+    val success: () -> Unit,
+    val failure: (Throwable) -> Unit,
+  )
+
   private data class State(
     val taskId: String,
     val owner: PDFProcessorFinishOwner,
     var operationActive: Boolean,
     var finishRequested: Boolean = false,
-    val completions: MutableList<() -> Unit> = mutableListOf(),
+    var cleanupActive: Boolean = false,
+    val completions: MutableList<FinishCompletion> = mutableListOf(),
   )
 
   private data class Cleanup(
     val taskId: String,
     val finishProcessor: (String) -> Unit,
-    val completions: List<() -> Unit>,
+    val trackedState: State?,
+    val fallbackCompletions: List<FinishCompletion> = emptyList(),
   )
 
   private val lock = Any()
@@ -157,7 +164,13 @@ internal class PDFProcessorFinishCoordinator {
       val current = state
       if (
         current != null &&
-        (current.taskId != taskId || current.owner !== owner || current.operationActive)
+        (
+          current.taskId != taskId ||
+            current.owner !== owner ||
+            current.operationActive ||
+            current.finishRequested ||
+            current.cleanupActive
+        )
       ) {
         throw NativeException("PDF_RESOURCE_BUSY")
       }
@@ -174,6 +187,7 @@ internal class PDFProcessorFinishCoordinator {
   fun requestFinish(
     fallbackOwner: PDFProcessorFinishOwner,
     taskId: String,
+    failure: (Throwable) -> Unit = { _ -> },
     completion: () -> Unit,
   ): Boolean {
     var cleanup: Cleanup? = null
@@ -181,16 +195,20 @@ internal class PDFProcessorFinishCoordinator {
       val current = state
       if (current?.taskId == taskId) {
         current.finishRequested = true
-        current.completions += completion
-        if (current.operationActive) return false
-        state = null
-        cleanup = Cleanup(taskId, current.owner.finishProcessor, current.completions.toList())
+        current.completions += FinishCompletion(completion, failure)
+        if (current.operationActive || current.cleanupActive) return false
+        current.cleanupActive = true
+        cleanup = Cleanup(taskId, current.owner.finishProcessor, current)
       } else {
-        cleanup = Cleanup(taskId, fallbackOwner.finishProcessor, listOf(completion))
+        cleanup = Cleanup(
+          taskId = taskId,
+          finishProcessor = fallbackOwner.finishProcessor,
+          trackedState = null,
+          fallbackCompletions = listOf(FinishCompletion(completion, failure)),
+        )
       }
     }
-    runCleanup(checkNotNull(cleanup))
-    return true
+    return runCleanup(checkNotNull(cleanup))
   }
 
   fun destroyOwner(owner: PDFProcessorFinishOwner): Boolean {
@@ -199,12 +217,11 @@ internal class PDFProcessorFinishCoordinator {
       val current = state
       if (current?.owner !== owner) return false
       current.finishRequested = true
-      if (current.operationActive) return false
-      state = null
-      cleanup = Cleanup(current.taskId, current.owner.finishProcessor, current.completions.toList())
+      if (current.operationActive || current.cleanupActive) return false
+      current.cleanupActive = true
+      cleanup = Cleanup(current.taskId, current.owner.finishProcessor, current)
     }
-    runCleanup(checkNotNull(cleanup))
-    return true
+    return runCleanup(checkNotNull(cleanup))
   }
 
   internal fun finishOperation(
@@ -220,19 +237,36 @@ internal class PDFProcessorFinishCoordinator {
       }
       current.operationActive = false
       if (keepSession && !current.finishRequested) return false
-      state = null
-      cleanup = Cleanup(taskId, current.owner.finishProcessor, current.completions.toList())
+      if (current.cleanupActive) return false
+      current.cleanupActive = true
+      cleanup = Cleanup(taskId, current.owner.finishProcessor, current)
     }
-    runCleanup(checkNotNull(cleanup))
-    return true
+    return runCleanup(checkNotNull(cleanup))
   }
 
-  private fun runCleanup(cleanup: Cleanup) {
+  private fun runCleanup(cleanup: Cleanup): Boolean {
+    var cleanupFailure: Throwable? = null
     try {
       cleanup.finishProcessor(cleanup.taskId)
-    } finally {
-      cleanup.completions.forEach { it() }
+    } catch (error: Throwable) {
+      cleanupFailure = error
     }
+
+    val completions = cleanup.trackedState?.let { tracked ->
+      synchronized(lock) {
+        check(state === tracked && tracked.cleanupActive)
+        tracked.cleanupActive = false
+        val pending = tracked.completions.toList()
+        tracked.completions.clear()
+        if (cleanupFailure == null) state = null
+        pending
+      }
+    } ?: cleanup.fallbackCompletions
+
+    completions.forEach { callback ->
+      cleanupFailure?.let(callback.failure) ?: callback.success()
+    }
+    return cleanupFailure == null
   }
 }
 
@@ -782,9 +816,12 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
     }
 
     AsyncFunction("finishPdfExtraction") { taskId: String, promise: Promise ->
-      pdfFinishCoordinator.requestFinish(pdfFinishOwner, taskId) {
-        promise.resolve(true)
-      }
+      pdfFinishCoordinator.requestFinish(
+        fallbackOwner = pdfFinishOwner,
+        taskId = taskId,
+        completion = { promise.resolve(true) },
+        failure = { promise.reject(NativeException("PDF_RESULT_INVALID")) },
+      )
     }
 
     AsyncFunction("readPlainTextFile") { fileUri: String, promise: Promise ->

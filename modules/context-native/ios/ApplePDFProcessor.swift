@@ -589,6 +589,7 @@ final class PDFProcessorFinishCoordinator: @unchecked Sendable {
     let owner: PDFProcessorFinishOwner
     var operationActive: Bool
     var finishRequested = false
+    var cleanupActive = false
     var completions: [() -> Void] = []
 
     init(taskId: String, owner: PDFProcessorFinishOwner, operationActive: Bool) {
@@ -601,7 +602,8 @@ final class PDFProcessorFinishCoordinator: @unchecked Sendable {
   private struct Cleanup {
     let taskId: String
     let finishProcessor: (String) -> Void
-    let completions: [() -> Void]
+    let trackedState: State?
+    let fallbackCompletions: [() -> Void]
   }
 
   private let lock = NSLock()
@@ -615,7 +617,11 @@ final class PDFProcessorFinishCoordinator: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     if let state,
-       state.taskId != taskId || state.owner !== owner || state.operationActive {
+       state.taskId != taskId ||
+       state.owner !== owner ||
+       state.operationActive ||
+       state.finishRequested ||
+       state.cleanupActive {
       throw PDFProcessingError.resourceBusy
     }
     try prepare()
@@ -642,17 +648,23 @@ final class PDFProcessorFinishCoordinator: @unchecked Sendable {
         lock.unlock()
         return false
       }
-      self.state = nil
+      if state.cleanupActive {
+        lock.unlock()
+        return false
+      }
+      state.cleanupActive = true
       cleanup = Cleanup(
         taskId: taskId,
         finishProcessor: state.owner.finishProcessor,
-        completions: state.completions
+        trackedState: state,
+        fallbackCompletions: []
       )
     } else {
       cleanup = Cleanup(
         taskId: taskId,
         finishProcessor: fallbackOwner.finishProcessor,
-        completions: [completion]
+        trackedState: nil,
+        fallbackCompletions: [completion]
       )
     }
     lock.unlock()
@@ -673,11 +685,16 @@ final class PDFProcessorFinishCoordinator: @unchecked Sendable {
       lock.unlock()
       return false
     }
-    self.state = nil
+    if state.cleanupActive {
+      lock.unlock()
+      return false
+    }
+    state.cleanupActive = true
     cleanup = Cleanup(
       taskId: state.taskId,
       finishProcessor: state.owner.finishProcessor,
-      completions: state.completions
+      trackedState: state,
+      fallbackCompletions: []
     )
     lock.unlock()
     runCleanup(cleanup!)
@@ -703,11 +720,16 @@ final class PDFProcessorFinishCoordinator: @unchecked Sendable {
       lock.unlock()
       return false
     }
-    self.state = nil
+    if state.cleanupActive {
+      lock.unlock()
+      return false
+    }
+    state.cleanupActive = true
     cleanup = Cleanup(
       taskId: taskId,
       finishProcessor: state.owner.finishProcessor,
-      completions: state.completions
+      trackedState: state,
+      fallbackCompletions: []
     )
     lock.unlock()
     runCleanup(cleanup!)
@@ -716,7 +738,19 @@ final class PDFProcessorFinishCoordinator: @unchecked Sendable {
 
   private func runCleanup(_ cleanup: Cleanup) {
     cleanup.finishProcessor(cleanup.taskId)
-    cleanup.completions.forEach { $0() }
+    let completions: [() -> Void]
+    if let trackedState = cleanup.trackedState {
+      lock.lock()
+      precondition(state === trackedState && trackedState.cleanupActive)
+      trackedState.cleanupActive = false
+      completions = trackedState.completions
+      trackedState.completions.removeAll()
+      state = nil
+      lock.unlock()
+    } else {
+      completions = cleanup.fallbackCompletions
+    }
+    completions.forEach { $0() }
   }
 }
 
