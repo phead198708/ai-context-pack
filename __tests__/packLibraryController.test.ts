@@ -41,6 +41,7 @@ function fixture(): PersistedPackGraph {
     originalRelativePath: `Packs/${packId}/originals/${id}.bin`,
     artifactIds: [id],
     state: sortIndex === 1 ? 'failed' : 'imported',
+    ...(sortIndex === 1 ? { retryStage: 'extract' as const } : {}),
     riskFindingIds: [],
     inclusionMode: 'original',
     sortIndex,
@@ -173,6 +174,7 @@ test('rejects provider-less import retries instead of creating false progress', 
     mediaType: failedBase.mediaType,
     artifactIds: [],
     state: failedBase.state,
+    retryStage: 'import',
     riskFindingIds: failedBase.riskFindingIds,
     inclusionMode: failedBase.inclusionMode,
     sortIndex: failedBase.sortIndex,
@@ -241,6 +243,32 @@ test('Pack retry resumes item checkpoints while retaining immutable originals', 
   );
 });
 
+test('packaging retry restores reviewed without repeating analysis or review', async () => {
+  const graph = fixture();
+  const packagingFailure: PersistedPackGraph = {
+    ...graph,
+    items: graph.items.map(item =>
+      item.id === secondId
+        ? { ...item, state: 'failed', retryStage: 'package' }
+        : item,
+    ),
+  };
+  const repo = repository(packagingFailure);
+  const controller = new PackLibraryController(async () => repo.value);
+
+  await expect(controller.retryItem(packId, secondId)).resolves.toMatchObject({
+    stage: 'package',
+  });
+  expect(repo.saves[0]?.items.find(item => item.id === secondId)).toMatchObject(
+    {
+      state: 'reviewed',
+    },
+  );
+  expect(
+    repo.saves[0]?.items.find(item => item.id === secondId)?.retryStage,
+  ).toBeUndefined();
+});
+
 test('Pack retry fails closed when every failed item requires retained-source import', async () => {
   const graph = fixture();
   const providerlessItems: ContextItem[] = graph.items.map(item => ({
@@ -253,6 +281,7 @@ test('Pack retry fails closed when every failed item requires retained-source im
       : {}),
     artifactIds: [],
     state: 'failed',
+    retryStage: 'import',
     riskFindingIds: item.riskFindingIds,
     inclusionMode: item.inclusionMode,
     sortIndex: item.sortIndex,

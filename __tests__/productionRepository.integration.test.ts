@@ -272,6 +272,41 @@ describe('production repository against SQLite', () => {
     expect((await repository.findPackGraph(packId))?.revision).toBe(3);
   });
 
+  test('persists an exact terminal retry stage across repository restart', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const failedItems = initial!.items.map(item =>
+      item.id === firstItemId
+        ? { ...item, state: 'failed' as const, retryStage: 'package' as const }
+        : item,
+    );
+    await repository.savePackGraph({
+      pack: {
+        ...updatedPack(
+          initial!.pack,
+          failedItems,
+          initial!.pack.title,
+          '2026-08-05T00:00:01Z',
+        ),
+        state: 'failed',
+      },
+      items: failedItems,
+      expectedRevision: initial!.revision,
+    });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === firstItemId,
+      ),
+    ).toMatchObject({ state: 'failed', retryStage: 'package' });
+  });
+
   test('materializes photo, PDF, text, and URL main-app imports as ordered ContextItems', async () => {
     const items = [
       { id: mainAppImageId, mediaType: 'image/png', bytes: 4, hash: '1' },

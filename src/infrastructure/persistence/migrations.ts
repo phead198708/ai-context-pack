@@ -220,4 +220,23 @@ CREATE INDEX recovery_diagnostics_last_index ON recovery_diagnostics(last_occurr
 CREATE INDEX quarantine_records_retention_index ON quarantine_records(purge_after, purged_at);
 PRAGMA user_version = 3;
 `,
+  `
+ALTER TABLE context_items ADD COLUMN retry_stage TEXT;
+
+-- v3 terminal rows did not retain the prior state. Backfill the earliest safe
+-- executable stage from immutable evidence; all v4 writes persist the exact stage.
+UPDATE context_items
+SET retry_stage = CASE
+  WHEN original_relative_path IS NULL THEN 'import'
+  WHEN EXISTS (
+    SELECT 1 FROM artifacts artifact
+    WHERE artifact.item_id = context_items.id
+      AND artifact.kind IN ('ocr-text', 'pdf-page-text')
+  ) THEN 'analyze'
+  ELSE 'extract'
+END
+WHERE state IN ('recovering', 'failed', 'cancelled');
+
+PRAGMA user_version = 4;
+`,
 ] as const;

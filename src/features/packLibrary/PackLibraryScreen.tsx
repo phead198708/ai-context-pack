@@ -51,43 +51,56 @@ export function PackLibraryScreen({
   });
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const selectedPackIdRef = useRef(selectedPackId);
+  const selectedPackIdPropRef = useRef(selectedPackId);
+  if (selectedPackIdPropRef.current !== selectedPackId) {
+    selectedPackIdPropRef.current = selectedPackId;
+    selectedPackIdRef.current = selectedPackId;
+  }
   const loadGeneration = useRef(0);
   const load = useCallback(
-    async (packId = selectedPackId): Promise<void> => {
+    async (packId?: string): Promise<void> => {
       const generation = loadGeneration.current + 1;
       loadGeneration.current = generation;
       try {
         const snapshot = await controller.load(packId);
         if (generation !== loadGeneration.current) return;
         setLoadState({ kind: 'ready', snapshot });
-        if (snapshot.selected && snapshot.selected.pack.id !== selectedPackId)
+        if (
+          snapshot.selected &&
+          snapshot.selected.pack.id !== selectedPackIdRef.current
+        ) {
+          selectedPackIdRef.current = snapshot.selected.pack.id;
           onSelectPack(snapshot.selected.pack.id);
+        }
       } catch (error) {
         if (generation !== loadGeneration.current) return;
         setLoadState({ kind: 'error', code: errorCode(error) });
       }
     },
-    [controller, onSelectPack, selectedPackId],
+    [controller, onSelectPack],
   );
   useEffect(() => {
     setLoadState({ kind: 'loading' });
-    run(load());
+    run(load(selectedPackId));
     return () => {
       loadGeneration.current += 1;
     };
-  }, [load, refreshKey]);
+  }, [load, refreshKey, selectedPackId]);
 
   const mutate = useCallback(
     async (operation: () => Promise<unknown>): Promise<void> => {
       if (busyRef.current) return;
       busyRef.current = true;
+      const selectionAtStart = selectedPackIdRef.current;
       setBusy(true);
       try {
         await operation();
-        await load();
+        await load(selectedPackIdRef.current);
         await onChanged();
       } catch (error) {
-        setLoadState({ kind: 'error', code: errorCode(error) });
+        if (selectionAtStart === selectedPackIdRef.current)
+          setLoadState({ kind: 'error', code: errorCode(error) });
       } finally {
         busyRef.current = false;
         setBusy(false);
@@ -118,7 +131,7 @@ export function PackLibraryScreen({
         <Button
           disabled={busy}
           label={t(locale, 'retry')}
-          onPress={() => run(load())}
+          onPress={() => run(load(selectedPackIdRef.current))}
         />
       </View>
     );
@@ -136,6 +149,7 @@ export function PackLibraryScreen({
           rows={loadState.snapshot.sections[section]}
           section={section}
           select={packId => {
+            selectedPackIdRef.current = packId;
             onSelectPack(packId);
             run(load(packId));
           }}

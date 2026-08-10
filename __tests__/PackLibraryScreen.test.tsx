@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Alert, TextInput, View } from 'react-native';
 import TestRenderer, {
   act,
@@ -450,4 +450,77 @@ test('ignores a stale Pack load when rapid selection resolves out of order', asy
     ),
   ).toHaveLength(0);
   act(() => renderer.unmount());
+});
+
+test('does not restore a mutated Pack after the user selects a newer Pack', async () => {
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+  const row = snapshot.sections.processing[0]!;
+  const sections = {
+    ...snapshot.sections,
+    processing: [row, { ...row, id: otherPackId, title: 'Other Pack' }],
+  };
+  const otherSnapshot: PackLibrarySnapshot = {
+    ...snapshot,
+    sections,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        id: otherPackId,
+        title: 'Other Pack',
+      },
+    },
+  };
+  const originalSnapshot: PackLibrarySnapshot = { ...snapshot, sections };
+  let finishMutation: (() => void) | undefined;
+  const value = controller();
+  value.load.mockImplementation(async selected =>
+    selected === otherPackId ? otherSnapshot : originalSnapshot,
+  );
+  value.renamePack.mockReturnValue(
+    new Promise(resolve => {
+      finishMutation = resolve;
+    }),
+  );
+
+  function Harness(): React.JSX.Element {
+    const [selected, setSelected] = useState(packId);
+    return (
+      <PackLibraryScreen
+        controller={value}
+        locale="en"
+        onChanged={async () => undefined}
+        onSelectPack={setSelected}
+        refreshKey="mutation-selection"
+        selectedPackId={selected}
+      />
+    );
+  }
+
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = TestRenderer.create(<Harness />);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  await press(button(renderer!, 'Save Pack title'));
+  await press(button(renderer!, 'Open Other Pack'));
+  expect(
+    renderer!.root.findByProps({ testID: `pack-editor-${otherPackId}` }),
+  ).toBeDefined();
+
+  await act(async () => {
+    finishMutation?.();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(value.load.mock.calls.at(-1)?.[0]).toBe(otherPackId);
+  expect(
+    renderer!.root.findByProps({ testID: `pack-editor-${otherPackId}` }),
+  ).toBeDefined();
+  expect(
+    renderer!.root.findAllByProps({ testID: `pack-editor-${packId}` }),
+  ).toHaveLength(0);
+  act(() => renderer!.unmount());
 });

@@ -18,8 +18,9 @@ Issue #7 promotes the Phase 0 persistence decision in [ADR-0002](../adr/0002-sql
 | v1      | Packs, imports, ordered import items, artifacts, references, and recovery journal                                                                           |
 | v2      | Artifact verification timestamp and cleanup indexes                                                                                                         |
 | v3      | Production Pack graph/revision, ordered ContextItems, RiskFindings, ExportRecords, Pack-level artifacts, diagnostics, quarantine records, and cleanup lease |
+| v4      | Exact terminal-item retry stage, retained independently from the failed/cancelled/recovering state                                                          |
 
-Opening a database newer than v3 fails with `SCHEMA_VERSION_UNSUPPORTED`. Migration hooks emit version and phase only. The production repository exposes ContextPack, ContextItem, RiskFinding, ExportRecord, artifact, recovery, diagnostics, quarantine, lease, and development-reset boundaries. Pack graph writes use a monotonic revision; exactly one concurrent compare-and-swap succeeds. Persisted-row decoding is fail-closed: malformed values become retryable `STORAGE_DIVERGENCE_DETECTED`, while an unknown newer schema remains `SCHEMA_VERSION_UNSUPPORTED`.
+Opening a database newer than v4 fails with `SCHEMA_VERSION_UNSUPPORTED`. Migration hooks emit version and phase only. The production repository exposes ContextPack, ContextItem, RiskFinding, ExportRecord, artifact, recovery, diagnostics, quarantine, lease, and development-reset boundaries. Pack graph writes use a monotonic revision; exactly one concurrent compare-and-swap succeeds. Persisted-row decoding is fail-closed: malformed values become retryable `STORAGE_DIVERGENCE_DETECTED`, while an unknown newer schema remains `SCHEMA_VERSION_UNSUPPORTED`.
 
 ## Atomic artifact lifecycle
 

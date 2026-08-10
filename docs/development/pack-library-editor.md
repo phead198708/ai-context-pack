@@ -28,7 +28,13 @@ Ready/Exporting/Exported Pack back to Processing. Downstream packaging therefore
 the affected stage using the new durable order; immutable originals and extraction artifacts are
 not duplicated.
 
-Retry derives the last durable checkpoint from immutable artifacts:
+Active item states already identify their durable checkpoint. When work enters
+`failed`, `cancelled`, or `recovering`, schema v4 persists the exact next `retryStage`
+independently from that terminal state, so a packaging failure cannot erase a completed
+privacy review. Legacy v3 terminal rows are conservatively backfilled from immutable
+evidence. New terminal writes without a retry stage fail closed.
+
+The initial/import fallback is:
 
 - no owned original: import (handled by the existing retained-source import retry UI);
 - original only: extract;
@@ -36,9 +42,10 @@ Retry derives the last durable checkpoint from immutable artifacts:
 - recorded findings: review;
 - reviewed content: package.
 
-The item returns to the state immediately before that stage and retains the same item, original,
-hash, path, and artifact identities. This queues work without duplicating an original. An import
-failure without an owned original is not made to look executable by a state-only retry.
+The item returns to the state immediately before the persisted stage and clears the terminal-only
+retry marker while retaining the same item, original, hash, path, and artifact identities. This
+queues work without duplicating an original. An import failure without an owned original is not
+made to look executable by a state-only retry.
 
 Cancel uses the shared Pack state machine as the durable stop gate and deliberately leaves each
 item at its last committed checkpoint. This preserves both completed immutable artifacts and the

@@ -285,6 +285,7 @@ function retryStageForItem(
   item: ContextItem,
   artifacts: readonly PersistedArtifactRecord[],
 ): PipelineStage {
+  if (item.retryStage) return item.retryStage;
   if (!artifacts.some(artifact => artifact.kind === 'original'))
     return 'import';
   if (!artifacts.some(artifact => extractionKinds.has(artifact.kind)))

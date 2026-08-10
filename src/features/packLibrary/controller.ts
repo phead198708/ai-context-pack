@@ -120,7 +120,7 @@ export class PackLibraryController {
       if (plan.stage === 'import')
         throw new DomainError('DOMAIN_INVALID_TRANSITION');
       const items = replaceItem(graph.items, itemId, current => ({
-        ...current,
+        ...withoutRetryStage(current),
         state: restoreItemCheckpoint(
           current.state,
           stateAtRetryCheckpoint(plan!.stage),
@@ -158,7 +158,7 @@ export class PackLibraryController {
         if (plan.stage === 'import') return item;
         plans.push(plan);
         return {
-          ...item,
+          ...withoutRetryStage(item),
           state: restoreItemCheckpoint(
             item.state,
             stateAtRetryCheckpoint(plan.stage),
@@ -295,6 +295,12 @@ function replaceItem(
   });
   if (!found) throw new DomainError('PERSISTENCE_CONFLICT');
   return values;
+}
+
+function withoutRetryStage(item: ContextItem): ContextItem {
+  const { retryStage, ...checkpoint } = item;
+  if (!retryStage) throw new DomainError('DOMAIN_INVALID_TRANSITION');
+  return checkpoint;
 }
 
 function boundedUserText(

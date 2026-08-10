@@ -9,7 +9,7 @@ import type {
 } from '../../domain/models';
 import type { NativeHandoffResult } from '../../domain/nativeAdapter';
 
-export const PERSISTENCE_SCHEMA_VERSION = 3 as const;
+export const PERSISTENCE_SCHEMA_VERSION = 4 as const;
 export const DEVELOPMENT_RESET_CONFIRMATION =
   'RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA' as const;
 

@@ -10,6 +10,7 @@ import {
   retryPlanForItem,
   stateAtRetryCheckpoint,
 } from '../src/features/packLibrary/domain';
+import { assertContextItem } from '../src/infrastructure/persistence/modelCodec';
 
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const itemIds = [
@@ -57,6 +58,9 @@ function item(
     originalRelativePath: `Packs/${packId}/originals/${itemIds[index]}.bin`,
     artifactIds: [itemIds[index]!],
     state,
+    ...(['recovering', 'failed', 'cancelled'].includes(state)
+      ? { retryStage: 'extract' as const }
+      : {}),
     riskFindingIds:
       state === 'review-required'
         ? ['723e4567-e89b-42d3-a456-426614174000']
@@ -165,7 +169,7 @@ test('maps exporting/recovering into Processing and keeps every required library
     expect(packSection(state)).toBe(state);
 });
 
-test('reorders deterministically and derives retry from durable artifacts', () => {
+test('reorders deterministically and honors the persisted durable retry stage', () => {
   const items = [item(0, 'imported'), item(1, 'failed')];
   const reordered = reorderContextItems(items, itemIds[1], 0);
   expect(reordered.map(value => [value.id, value.sortIndex])).toEqual([
@@ -180,10 +184,46 @@ test('reorders deterministically and derives retry from durable artifacts', () =
   expect(plan).toEqual({
     packId,
     itemId: itemIds[1],
-    stage: 'analyze',
+    stage: 'extract',
     completedArtifactIds: [itemIds[1], extracted.id],
   });
-  expect(stateAtRetryCheckpoint(plan.stage)).toBe('extracted');
+  expect(stateAtRetryCheckpoint(plan.stage)).toBe('imported');
+});
+
+test('uses the persisted terminal retry stage after packaging failure', () => {
+  const failedPackaging: ContextItem = {
+    ...item(1, 'failed'),
+    retryStage: 'package',
+    riskFindingIds: [],
+  };
+
+  expect(
+    retryPlanForItem(packId, failedPackaging, [artifact(1)]),
+  ).toMatchObject({
+    packId,
+    itemId: itemIds[1],
+    stage: 'package',
+  });
+  expect(stateAtRetryCheckpoint('package')).toBe('reviewed');
+});
+
+test('fails closed when terminal retry metadata is missing, stale, or unknown', () => {
+  const terminal = item(1, 'failed');
+  expect(() => assertContextItem(terminal)).not.toThrow();
+  const { retryStage: _retryStage, ...missing } = terminal;
+  expect(_retryStage).toBe('extract');
+  expect(() => assertContextItem(missing)).toThrow(
+    expect.objectContaining({ code: 'SCHEMA_INVALID' }),
+  );
+  expect(() =>
+    assertContextItem({ ...item(1, 'imported'), retryStage: 'extract' }),
+  ).toThrow(expect.objectContaining({ code: 'SCHEMA_INVALID' }));
+  expect(() =>
+    assertContextItem({
+      ...terminal,
+      retryStage: 'unknown' as NonNullable<ContextItem['retryStage']>,
+    }),
+  ).toThrow(expect.objectContaining({ code: 'SCHEMA_INVALID' }));
 });
 
 test('does not fall back to a different Pack or expose a provider-less import retry', () => {
@@ -195,6 +235,7 @@ test('does not fall back to a different Pack or expose a provider-less import re
     mediaType: withOriginal.mediaType,
     artifactIds: [],
     state: withOriginal.state,
+    retryStage: 'import',
     riskFindingIds: withOriginal.riskFindingIds,
     inclusionMode: withOriginal.inclusionMode,
     sortIndex: withOriginal.sortIndex,

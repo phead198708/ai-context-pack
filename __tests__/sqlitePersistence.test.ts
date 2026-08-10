@@ -107,6 +107,7 @@ function existingImportConnection(persistedSha256: string): {
             media_type: 'image/png',
             original_sha256: persistedSha256,
             original_relative_path: `Packs/${packId}/originals/${itemId}.bin`,
+            retry_stage: null,
           } as T,
         ];
       return [];
@@ -140,9 +141,15 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
 
     await expect(repository.initialize()).resolves.toBe(undefined);
 
-    expect(events).toEqual(['2->3:starting', '2->3:applied']);
+    expect(events).toEqual([
+      '2->3:starting',
+      '2->3:applied',
+      '3->4:starting',
+      '3->4:applied',
+    ]);
     expect(executed[0]).toContain('PRAGMA foreign_keys = ON');
     expect(executed[1]).toContain('PRAGMA user_version = 3');
+    expect(executed[2]).toContain('PRAGMA user_version = 4');
   });
 
   test('rejects a different artifact hash before deleting the recovery journal', async () => {
