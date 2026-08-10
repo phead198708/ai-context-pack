@@ -90,6 +90,11 @@ export interface SavePackGraphInput {
   readonly items: readonly ContextItem[];
   /** Omit only when creating a Pack; updates must supply the loaded revision. */
   readonly expectedRevision?: number;
+  /**
+   * Removing an item normally retains its immutable original as a detached local-library
+   * artifact. Destructive release is opt-in and must be guarded by explicit UI confirmation.
+   */
+  readonly removedItemOriginalDisposition?: 'preserve' | 'release';
 }
 
 export interface DeletePackResult {

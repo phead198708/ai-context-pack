@@ -18,6 +18,7 @@ import {
   type InboxWorkflowState,
 } from './src/domain/inboxEventWorkflow';
 import type { ImportManifestV1 } from './src/domain/contracts';
+import { isCanonicalUuid } from './src/domain/canonicalUuid';
 import {
   createRetryMainAppImportDraft,
   MAIN_APP_IMPORT_MAX_ITEMS,
@@ -29,6 +30,8 @@ import {
   createEmptyDraftPack,
   persistenceInboxProcessor,
 } from './src/infrastructure/persistence/runtime';
+import { PackLibraryScreen } from './src/features/packLibrary/PackLibraryScreen';
+import { packLibraryController } from './src/features/packLibrary/runtime';
 import { NewPackFlow, type NewPackFlowHandle } from './src/ui/NewPackFlow';
 import { t, type AppLocale } from './src/ui/i18n';
 import { colors, spacing, typography } from './src/ui/tokens';
@@ -62,6 +65,14 @@ function App(): React.JSX.Element {
     if (value.kind === 'error' && screenRef.current !== 'new-pack')
       setScreen('inbox');
   }, []);
+  const selectDetailPack = useCallback((packId: string) => {
+    setSelectedDetailPackId(packId);
+    setRetryDraftError(undefined);
+  }, []);
+  const refreshAfterPackMutation = useCallback(
+    () => workflow.current?.appBecameActive() ?? Promise.resolve(),
+    [],
+  );
   if (!workflow.current)
     workflow.current = new InboxEventWorkflow(
       nativeAdapter,
@@ -92,6 +103,22 @@ function App(): React.JSX.Element {
         workflow.current?.receive(event);
       },
     );
+    const openPackSubscription = DeviceEventEmitter.addListener(
+      'AIContextPackOpenPack',
+      (event: unknown) => {
+        if (
+          screenRef.current === 'new-pack' ||
+          typeof event !== 'object' ||
+          event === null
+        )
+          return;
+        const packId = (event as { readonly packId?: unknown }).packId;
+        if (!isCanonicalUuid(packId)) return;
+        setSelectedDetailPackId(packId);
+        setRetryDraftError(undefined);
+        setScreen('detail');
+      },
+    );
     const backSubscription = BackHandler.addEventListener(
       'hardwareBackPress',
       () => {
@@ -104,6 +131,7 @@ function App(): React.JSX.Element {
       mounted = false;
       subscription.remove();
       inboxSubscription.remove();
+      openPackSubscription.remove();
       backSubscription.remove();
     };
   }, []);
@@ -235,30 +263,39 @@ function App(): React.JSX.Element {
             />
           )}
           {screen === 'detail' && (
-            <ImportDetail
-              {...(retryDraftError ? { retryError: retryDraftError } : {})}
-              creationReady={effectivePackCreationReady}
-              locale={locale}
-              onRetryFailed={(packId, sources) => {
-                if (!effectivePackCreationReady) return;
-                try {
-                  setSelectedDetailPackId(packId);
-                  setRetryDraft(createRetryMainAppImportDraft(sources));
-                  setRetryDraftError(undefined);
-                  setScreen('new-pack');
-                } catch (error) {
-                  setRetryDraftError(appErrorCode(error));
-                }
-              }}
-              onSelectPack={packId => {
-                setSelectedDetailPackId(packId);
-                setRetryDraftError(undefined);
-              }}
-              {...(selectedDetailPackId
-                ? { selectedPackId: selectedDetailPackId }
-                : {})}
-              state={state}
-            />
+            <View style={styles.detailStack}>
+              <PackLibraryScreen
+                controller={packLibraryController}
+                locale={locale}
+                onChanged={refreshAfterPackMutation}
+                onSelectPack={selectDetailPack}
+                refreshKey={packLibraryRefreshKey(state)}
+                {...(selectedDetailPackId
+                  ? { selectedPackId: selectedDetailPackId }
+                  : {})}
+              />
+              <ImportDetail
+                {...(retryDraftError ? { retryError: retryDraftError } : {})}
+                creationReady={effectivePackCreationReady}
+                locale={locale}
+                onRetryFailed={(packId, sources) => {
+                  if (!effectivePackCreationReady) return;
+                  try {
+                    setSelectedDetailPackId(packId);
+                    setRetryDraft(createRetryMainAppImportDraft(sources));
+                    setRetryDraftError(undefined);
+                    setScreen('new-pack');
+                  } catch (error) {
+                    setRetryDraftError(appErrorCode(error));
+                  }
+                }}
+                onSelectPack={selectDetailPack}
+                {...(selectedDetailPackId
+                  ? { selectedPackId: selectedDetailPackId }
+                  : {})}
+                state={state}
+              />
+            </View>
           )}
           {screen === 'diagnostics' && <Diagnostics locale={locale} />}
           {screen === 'new-pack' && (
@@ -397,7 +434,9 @@ function ImportDetail({
   locale: AppLocale;
 }): React.JSX.Element {
   const packs = state.kind === 'ready' ? state.packs ?? [] : [];
-  const pack = packs.find(value => value.id === selectedPackId) ?? packs[0];
+  const pack = selectedPackId
+    ? packs.find(value => value.id === selectedPackId)
+    : packs[0];
   const manifest = state.kind === 'ready' ? state.manifests[0] : undefined;
   const persistedImport = pack?.import;
   const retrySources =
@@ -690,6 +729,13 @@ function appErrorCode(error: unknown): string {
     : 'EMPTY_DRAFT_CREATE_FAILED';
 }
 
+function packLibraryRefreshKey(state: LoadState): string {
+  if (state.kind !== 'ready') return state.kind;
+  return (state.packs ?? [])
+    .map(pack => `${pack.id}:${pack.updatedAt}:${pack.state}:${pack.itemCount}`)
+    .join('|');
+}
+
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.background },
   header: { paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
@@ -724,6 +770,7 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: spacing.sm,
   },
+  detailStack: { gap: spacing.lg },
   card: {
     backgroundColor: colors.surface,
     borderRadius: 16,

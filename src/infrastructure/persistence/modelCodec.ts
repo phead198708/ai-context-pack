@@ -78,6 +78,12 @@ const ARTIFACT_KINDS = new Set([
 export function assertPackGraph(input: SavePackGraphInput): void {
   assertContextPack(input.pack);
   if (
+    input.removedItemOriginalDisposition !== undefined &&
+    input.removedItemOriginalDisposition !== 'preserve' &&
+    input.removedItemOriginalDisposition !== 'release'
+  )
+    invalid();
+  if (
     input.expectedRevision !== undefined &&
     (!Number.isSafeInteger(input.expectedRevision) ||
       input.expectedRevision < 1)

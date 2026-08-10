@@ -50,6 +50,14 @@ The first app-lifetime integrity audit hashes every database-known artifact. Mis
 
 Scheduled cleanup and derived/export publication are serialized by a five-minute database lifecycle lease. Cleanup applies a 24-hour unreferenced-artifact cutoff, rechecks references inside the delete transaction, protects Pack IDs with active recovery journals, quarantines unknown files, and purges quarantine after seven days. Native file mtime and SQLite quarantine `created_at` use the same retention cutoff before bytes and records are marked purged, so newly quarantined bytes remain visible in storage totals. Native quarantine and purge share a cross-caller lock. Cleanup diagnostics contain stable codes, phases, byte counts, counts, and irreversible internal IDs only.
 
+Removing an item through the Pack editor preserves its immutable original by default. The same
+exclusive graph transaction inserts a `library-item` artifact reference before releasing that
+item's Pack references; derived artifacts may then follow normal reference-aware retention.
+Explicit destructive removal instead releases the original reference after React Native obtains
+confirmation. Physical deletion remains owned by reference-aware cleanup so restart, recovery,
+and cleanup cannot race a UI transaction. See
+[Pack library and editor shell](pack-library-editor.md).
+
 ## Development reset
 
 Reset is not a recovery fallback. It requires a development build and the exact literal `RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA`. Production builds always return `DEVELOPMENT_RESET_FORBIDDEN`. The coordinator quarantines/removes owned files before resetting the development database so stale bytes cannot silently reappear.

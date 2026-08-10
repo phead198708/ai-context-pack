@@ -327,6 +327,78 @@ describe('production repository against SQLite', () => {
     ).toBe(true);
   });
 
+  test('removing an item preserves its original reference by default across restart', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'one item',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+    });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect(
+      (await repository.findPackGraph(packId))?.pack.orderedItemIds,
+    ).toEqual([secondItemId]);
+    const candidates = await repository.listCleanupCandidates(
+      '2026-08-06T00:00:00Z',
+    );
+    expect(candidates.map(candidate => candidate.artifactId)).not.toContain(
+      firstItemId,
+    );
+    expect(await repository.listArtifactRecords()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: firstItemId })]),
+    );
+  });
+
+  test('explicit destructive item removal releases only that original for reference-aware deletion', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'one item',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'release',
+    });
+
+    const candidates = await repository.listCleanupCandidates(
+      '2026-08-06T00:00:00Z',
+    );
+    expect(candidates.map(candidate => candidate.artifactId)).toContain(
+      firstItemId,
+    );
+    expect(candidates.map(candidate => candidate.artifactId)).not.toContain(
+      secondItemId,
+    );
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+    ).resolves.toBe(true);
+    expect(await repository.listArtifactRecords()).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ id: firstItemId }),
+      ]),
+    );
+    expect(
+      (await repository.findPackGraph(packId))?.pack.orderedItemIds,
+    ).toEqual([secondItemId]);
+  });
+
   test('round-trips risk/export records and releases only unreferenced artifacts on Pack deletion', async () => {
     const finding: RiskFinding = {
       id: findingId,

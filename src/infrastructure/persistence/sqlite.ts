@@ -723,6 +723,7 @@ export class ExpoSqlitePersistenceRepository
         input.items,
         input.pack.createdAt,
         input.pack.updatedAt,
+        input.removedItemOriginalDisposition ?? 'preserve',
       );
       return nextRevision;
     });
@@ -1521,6 +1522,7 @@ async function replaceContextItems(
   items: readonly ContextItem[],
   createdAt: string,
   updatedAt: string,
+  removedItemOriginalDisposition: 'preserve' | 'release',
 ): Promise<void> {
   const existing = await transaction.all<{ id: string }>(
     'SELECT id FROM context_items WHERE pack_id = ?',
@@ -1533,6 +1535,19 @@ async function replaceContextItems(
   const retained = new Set(items.map(item => item.id));
   for (const row of existing) {
     if (retained.has(row.id)) continue;
+    if (removedItemOriginalDisposition === 'preserve')
+      await transaction.run(
+        `INSERT OR IGNORE INTO artifact_references (owner_type, owner_id, artifact_id)
+         SELECT 'library-item', ?, id FROM artifacts
+         WHERE item_id = ? AND kind = 'original'`,
+        [row.id, row.id],
+      );
+    else
+      await transaction.run(
+        `DELETE FROM artifact_references
+         WHERE owner_type = 'library-item' AND owner_id = ?`,
+        [row.id],
+      );
     await transaction.run(
       `DELETE FROM artifact_references WHERE owner_type = 'pack' AND owner_id = ?
        AND artifact_id IN (SELECT id FROM artifacts WHERE item_id = ?)`,
