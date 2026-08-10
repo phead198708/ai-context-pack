@@ -6,7 +6,10 @@ import TestRenderer, {
   type ReactTestRenderer,
 } from 'react-test-renderer';
 import type { PackLibraryController } from '../src/features/packLibrary/controller';
-import { PackLibraryScreen } from '../src/features/packLibrary/PackLibraryScreen';
+import {
+  PackLibraryScreen,
+  synchronizeControlledPackSelection,
+} from '../src/features/packLibrary/PackLibraryScreen';
 import type { PackLibrarySnapshot } from '../src/features/packLibrary/domain';
 
 const packId = '123e4567-e89b-42d3-a456-426614174000';
@@ -132,6 +135,27 @@ const snapshot: PackLibrarySnapshot = {
     ],
   },
 };
+
+test('controlled selection synchronization invalidates a pending load synchronously', () => {
+  const state = {
+    controlledPackId: packId,
+    activePackId: packId,
+    loadGeneration: 7,
+  };
+  const pendingGeneration = state.loadGeneration;
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+
+  synchronizeControlledPackSelection(state, otherPackId);
+
+  expect(state).toEqual({
+    controlledPackId: otherPackId,
+    activePackId: otherPackId,
+    loadGeneration: 8,
+  });
+  expect(state.loadGeneration).not.toBe(pendingGeneration);
+  synchronizeControlledPackSelection(state, otherPackId);
+  expect(state.loadGeneration).toBe(8);
+});
 
 function controller(): jest.Mocked<PackLibraryController> {
   return {
@@ -521,6 +545,152 @@ test('does not restore a mutated Pack after the user selects a newer Pack', asyn
   ).toBeDefined();
   expect(
     renderer!.root.findAllByProps({ testID: `pack-editor-${packId}` }),
+  ).toHaveLength(0);
+  act(() => renderer!.unmount());
+});
+
+test('invalidates a pending Pack load during the render that receives a newer controlled selection', async () => {
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+  const row = snapshot.sections.processing[0]!;
+  const sections = {
+    ...snapshot.sections,
+    processing: [row, { ...row, id: otherPackId, title: 'Other Pack' }],
+  };
+  const originalSnapshot: PackLibrarySnapshot = { ...snapshot, sections };
+  const otherSnapshot: PackLibrarySnapshot = {
+    ...snapshot,
+    sections,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        id: otherPackId,
+        title: 'Other Pack',
+      },
+    },
+  };
+  let resolvePendingOriginal:
+    | ((value: PackLibrarySnapshot) => void)
+    | undefined;
+  const value = controller();
+  value.load
+    .mockResolvedValueOnce(originalSnapshot)
+    .mockReturnValueOnce(
+      new Promise(resolve => {
+        resolvePendingOriginal = resolve;
+      }),
+    )
+    .mockResolvedValueOnce(otherSnapshot);
+  const select = jest.fn();
+  const properties = (selectedPackId: string): React.JSX.Element => (
+    <PackLibraryScreen
+      controller={value}
+      locale="en"
+      onChanged={async () => undefined}
+      onSelectPack={select}
+      refreshKey="controlled-selection"
+      selectedPackId={selectedPackId}
+    />
+  );
+
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = TestRenderer.create(properties(packId));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  await press(button(renderer!, 'Save Pack title'));
+  expect(value.load).toHaveBeenCalledTimes(2);
+
+  await act(async () => {
+    renderer!.update(properties(otherPackId));
+    resolvePendingOriginal?.(originalSnapshot);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(select).not.toHaveBeenCalledWith(packId);
+  expect(
+    renderer!.root.findByProps({ testID: `pack-editor-${otherPackId}` }),
+  ).toBeDefined();
+  act(() => renderer!.unmount());
+});
+
+test('keeps the newer Pack selected while surfacing a late mutation failure', async () => {
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+  const row = snapshot.sections.processing[0]!;
+  const sections = {
+    ...snapshot.sections,
+    processing: [row, { ...row, id: otherPackId, title: 'Other Pack' }],
+  };
+  const originalSnapshot: PackLibrarySnapshot = { ...snapshot, sections };
+  const otherSnapshot: PackLibrarySnapshot = {
+    ...snapshot,
+    sections,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        id: otherPackId,
+        title: 'Other Pack',
+      },
+    },
+  };
+  let rejectMutation: ((reason: unknown) => void) | undefined;
+  const value = controller();
+  value.load.mockImplementation(async selected =>
+    selected === otherPackId ? otherSnapshot : originalSnapshot,
+  );
+  value.renamePack.mockReturnValue(
+    new Promise((_resolve, reject) => {
+      rejectMutation = reject;
+    }),
+  );
+
+  function Harness(): React.JSX.Element {
+    const [selected, setSelected] = useState(packId);
+    return (
+      <PackLibraryScreen
+        controller={value}
+        locale="en"
+        onChanged={async () => undefined}
+        onSelectPack={setSelected}
+        refreshKey="mutation-error"
+        selectedPackId={selected}
+      />
+    );
+  }
+
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = TestRenderer.create(<Harness />);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  await press(button(renderer!, 'Save Pack title'));
+  await press(button(renderer!, 'Open Other Pack'));
+  await act(async () => {
+    rejectMutation?.(
+      Object.assign(new Error('synthetic failure'), {
+        code: 'PERSISTENCE_CONFLICT',
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(
+    renderer!.root.findByProps({ testID: `pack-editor-${otherPackId}` }),
+  ).toBeDefined();
+  expect(
+    text(renderer!.root.findByProps({ testID: 'pack-library-mutation-error' })),
+  ).toContain('Pack action error · PERSISTENCE_CONFLICT');
+  await press(button(renderer!, 'Dismiss error'));
+  expect(
+    renderer!.root.findAllByProps({
+      testID: 'pack-library-mutation-error',
+    }),
   ).toHaveLength(0);
   act(() => renderer!.unmount());
 });

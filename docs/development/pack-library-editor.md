@@ -72,7 +72,11 @@ Completing a system-share import continues to open the newest durable Pack. Nati
 may emit `AIContextPackOpenPack` with `{ packId }`; React Native accepts only a canonical UUID,
 does not interrupt an in-progress New Pack selection, and never falls back to a different Pack
 when the requested ID is stale. Rapid selections use a latest-request gate so an older SQLite
-read cannot replace the newer selection.
+read cannot replace the newer selection. A controlled selection change invalidates the prior
+load token during render, before passive-effect cleanup, closing the native deep-link commit
+window. Mutation completion always reloads the current selection; if an earlier Pack mutation
+fails after the user moves elsewhere, the newer Pack stays selected and a global accessible
+error banner exposes the stable failure code until dismissed or another mutation begins.
 
 Pack and item status, stages, progress, warning counts, error codes, drag handles, move actions,
 and primary actions have accessibility labels or actions. English and Simplified Chinese use the

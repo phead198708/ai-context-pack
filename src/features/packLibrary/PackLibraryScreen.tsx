@@ -31,6 +31,23 @@ type ScreenLoadState =
   | { readonly kind: 'ready'; readonly snapshot: PackLibrarySnapshot }
   | { readonly kind: 'error'; readonly code: string };
 
+export interface PackSelectionLoadState {
+  controlledPackId: string | undefined;
+  activePackId: string | undefined;
+  loadGeneration: number;
+}
+
+/** Render-time synchronization closes the commit-to-passive-effect stale-load window. */
+export function synchronizeControlledPackSelection(
+  state: PackSelectionLoadState,
+  selectedPackId: string | undefined,
+): void {
+  if (state.controlledPackId === selectedPackId) return;
+  state.controlledPackId = selectedPackId;
+  state.activePackId = selectedPackId;
+  state.loadGeneration += 1;
+}
+
 export function PackLibraryScreen({
   controller,
   locale,
@@ -49,90 +66,104 @@ export function PackLibraryScreen({
   const [loadState, setLoadState] = useState<ScreenLoadState>({
     kind: 'loading',
   });
+  const [mutationErrorCode, setMutationErrorCode] = useState<string>();
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const selectedPackIdRef = useRef(selectedPackId);
-  const selectedPackIdPropRef = useRef(selectedPackId);
-  if (selectedPackIdPropRef.current !== selectedPackId) {
-    selectedPackIdPropRef.current = selectedPackId;
-    selectedPackIdRef.current = selectedPackId;
-  }
-  const loadGeneration = useRef(0);
+  const selectionLoadStateRef = useRef<PackSelectionLoadState>({
+    controlledPackId: selectedPackId,
+    activePackId: selectedPackId,
+    loadGeneration: 0,
+  });
+  const selectionLoadState = selectionLoadStateRef.current;
+  synchronizeControlledPackSelection(selectionLoadState, selectedPackId);
   const load = useCallback(
     async (packId?: string): Promise<void> => {
-      const generation = loadGeneration.current + 1;
-      loadGeneration.current = generation;
+      const generation = selectionLoadState.loadGeneration + 1;
+      selectionLoadState.loadGeneration = generation;
       try {
         const snapshot = await controller.load(packId);
-        if (generation !== loadGeneration.current) return;
+        if (generation !== selectionLoadState.loadGeneration) return;
         setLoadState({ kind: 'ready', snapshot });
         if (
           snapshot.selected &&
-          snapshot.selected.pack.id !== selectedPackIdRef.current
+          snapshot.selected.pack.id !== selectionLoadState.activePackId
         ) {
-          selectedPackIdRef.current = snapshot.selected.pack.id;
+          selectionLoadState.activePackId = snapshot.selected.pack.id;
           onSelectPack(snapshot.selected.pack.id);
         }
       } catch (error) {
-        if (generation !== loadGeneration.current) return;
+        if (generation !== selectionLoadState.loadGeneration) return;
         setLoadState({ kind: 'error', code: errorCode(error) });
       }
     },
-    [controller, onSelectPack],
+    [controller, onSelectPack, selectionLoadState],
   );
   useEffect(() => {
     setLoadState({ kind: 'loading' });
     run(load(selectedPackId));
     return () => {
-      loadGeneration.current += 1;
+      selectionLoadState.loadGeneration += 1;
     };
-  }, [load, refreshKey, selectedPackId]);
+  }, [load, refreshKey, selectedPackId, selectionLoadState]);
 
   const mutate = useCallback(
     async (operation: () => Promise<unknown>): Promise<void> => {
       if (busyRef.current) return;
       busyRef.current = true;
-      const selectionAtStart = selectedPackIdRef.current;
+      setMutationErrorCode(undefined);
       setBusy(true);
       try {
         await operation();
-        await load(selectedPackIdRef.current);
+        await load(selectionLoadState.activePackId);
         await onChanged();
       } catch (error) {
-        if (selectionAtStart === selectedPackIdRef.current)
-          setLoadState({ kind: 'error', code: errorCode(error) });
+        setMutationErrorCode(errorCode(error));
       } finally {
         busyRef.current = false;
         setBusy(false);
       }
     },
-    [load, onChanged],
+    [load, onChanged, selectionLoadState],
   );
+
+  const mutationError = mutationErrorCode ? (
+    <MutationErrorBanner
+      code={mutationErrorCode}
+      dismiss={() => setMutationErrorCode(undefined)}
+      locale={locale}
+    />
+  ) : null;
 
   if (loadState.kind === 'loading')
     return (
-      <View
-        accessibilityLabel={t(locale, 'packLibraryLoading')}
-        style={styles.card}
-        testID="pack-library-loading"
-      >
-        <Text accessibilityRole="header" style={styles.heading}>
-          {t(locale, 'packLibraryLoading')}
-        </Text>
-        <ActivityIndicator color={colors.accent} />
+      <View style={styles.container}>
+        {mutationError}
+        <View
+          accessibilityLabel={t(locale, 'packLibraryLoading')}
+          style={styles.card}
+          testID="pack-library-loading"
+        >
+          <Text accessibilityRole="header" style={styles.heading}>
+            {t(locale, 'packLibraryLoading')}
+          </Text>
+          <ActivityIndicator color={colors.accent} />
+        </View>
       </View>
     );
   if (loadState.kind === 'error')
     return (
-      <View style={styles.card} testID="pack-library-error">
-        <Text accessibilityRole="alert" style={styles.error}>
-          {`${t(locale, 'packLibraryUnavailable')} · ${loadState.code}`}
-        </Text>
-        <Button
-          disabled={busy}
-          label={t(locale, 'retry')}
-          onPress={() => run(load(selectedPackIdRef.current))}
-        />
+      <View style={styles.container}>
+        {mutationError}
+        <View style={styles.card} testID="pack-library-error">
+          <Text accessibilityRole="alert" style={styles.error}>
+            {`${t(locale, 'packLibraryUnavailable')} · ${loadState.code}`}
+          </Text>
+          <Button
+            disabled={busy}
+            label={t(locale, 'retry')}
+            onPress={() => run(load(selectionLoadState.activePackId))}
+          />
+        </View>
       </View>
     );
 
@@ -142,6 +173,7 @@ export function PackLibraryScreen({
       <Text accessibilityRole="header" style={styles.heading}>
         {t(locale, 'packLibrary')}
       </Text>
+      {mutationError}
       {PACK_LIBRARY_SECTIONS.map(section => (
         <LibrarySection
           key={section}
@@ -149,7 +181,7 @@ export function PackLibraryScreen({
           rows={loadState.snapshot.sections[section]}
           section={section}
           select={packId => {
-            selectedPackIdRef.current = packId;
+            selectionLoadState.activePackId = packId;
             onSelectPack(packId);
             run(load(packId));
           }}
@@ -168,6 +200,29 @@ export function PackLibraryScreen({
           {t(locale, 'packNotSelected')}
         </Text>
       )}
+    </View>
+  );
+}
+
+function MutationErrorBanner({
+  code,
+  dismiss,
+  locale,
+}: {
+  readonly code: string;
+  readonly dismiss: () => void;
+  readonly locale: AppLocale;
+}): React.JSX.Element {
+  return (
+    <View style={styles.card} testID="pack-library-mutation-error">
+      <Text accessibilityRole="alert" style={styles.error}>
+        {`${t(locale, 'packActionError')} · ${code}`}
+      </Text>
+      <Button
+        disabled={false}
+        label={t(locale, 'dismissError')}
+        onPress={dismiss}
+      />
     </View>
   );
 }
