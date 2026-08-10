@@ -18,6 +18,7 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
@@ -61,11 +62,14 @@ private data class AndroidPDFSourceSession(
   val fileUri: String,
   val sourceSha256: String,
   val byteCount: Long,
-  val device: Long,
-  val inode: Long,
-  val modifiedSeconds: Long,
   val pageCount: Int,
   val descriptor: ParcelFileDescriptor,
+)
+
+private data class ImmutablePDFSnapshot(
+  val descriptor: ParcelFileDescriptor,
+  val byteCount: Long,
+  val sourceSha256: String,
 )
 
 internal class AndroidPDFProcessor(
@@ -471,32 +475,19 @@ internal class AndroidPDFProcessor(
     taskId: String?,
   ): AndroidPDFSourceSession {
     val file = controlledSandboxFile(context, fileUri)
-    val descriptor = try {
-      ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-    } catch (_: Exception) {
-      throw NativeException("PDF_CORRUPT")
-    }
+    val snapshot = createImmutablePDFSnapshot(context, file, taskId)
+    val descriptor = snapshot.descriptor
     try {
-      val initial = try { Os.fstat(descriptor.fileDescriptor) }
-      catch (_: Exception) { throw NativeException("PDF_CORRUPT") }
-      if (!OsConstants.S_ISREG(initial.st_mode) || initial.st_size < 0) {
-        throw NativeException("PDF_CORRUPT")
-      }
       val reader = DescriptorPDFReader(descriptor)
       reader.use {
-        if (reader.length != initial.st_size) throw NativeException("PDF_RESULT_INVALID")
+        if (reader.length != snapshot.byteCount) throw NativeException("PDF_RESULT_INVALID")
         if (reader.length > AndroidPDFResourcePolicy.maximumFileBytes) {
           throw NativeException("PDF_TOO_LARGE")
         }
-        val sourceSha256 = try {
-          sha256(reader) { taskId?.let(::checkCancellation) }
-        } catch (error: NativeException) {
-          throw error
-        } catch (_: IOException) {
-          throw NativeException("PDF_CORRUPT")
-        }
         val preflight = try {
-          hasValidPDFEnvelope(reader) to hasPDFEncryptionMarker(reader)
+          hasValidPDFEnvelope(reader) to hasPDFEncryptionMarker(reader) {
+            taskId?.let(::checkCancellation)
+          }
         } catch (_: IOException) {
           throw NativeException("PDF_CORRUPT")
         }
@@ -510,11 +501,8 @@ internal class AndroidPDFProcessor(
         val source = AndroidPDFSourceSession(
           taskId = taskId.orEmpty(),
           fileUri = fileUri,
-          sourceSha256 = sourceSha256,
+          sourceSha256 = snapshot.sourceSha256,
           byteCount = reader.length,
-          device = initial.st_dev,
-          inode = initial.st_ino,
-          modifiedSeconds = initial.st_mtime,
           pageCount = pageCount,
           descriptor = descriptor,
         )
@@ -524,6 +512,103 @@ internal class AndroidPDFProcessor(
     } catch (error: Throwable) {
       descriptor.close()
       throw error
+    }
+  }
+
+  private fun createImmutablePDFSnapshot(
+    context: Context,
+    file: File,
+    taskId: String?,
+  ): ImmutablePDFSnapshot {
+    val source = try {
+      ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+    } catch (_: Exception) {
+      throw NativeException("PDF_CORRUPT")
+    }
+    var snapshotFile: File? = null
+    try {
+      val initial = try { Os.fstat(source.fileDescriptor) }
+      catch (_: Exception) { throw NativeException("PDF_CORRUPT") }
+      if (!OsConstants.S_ISREG(initial.st_mode) || initial.st_size < 0) {
+        throw NativeException("PDF_CORRUPT")
+      }
+      if (initial.st_size > AndroidPDFResourcePolicy.maximumFileBytes) {
+        throw NativeException("PDF_TOO_LARGE")
+      }
+      snapshotFile = try {
+        File.createTempFile("pdf-source-", ".bin", context.cacheDir)
+      } catch (_: IOException) {
+        throw NativeException("PDF_CORRUPT")
+      }
+      val digest = MessageDigest.getInstance("SHA-256")
+      var copied = 0L
+      try {
+        ParcelFileDescriptor.AutoCloseInputStream(
+          ParcelFileDescriptor.dup(source.fileDescriptor),
+        ).use { input ->
+          FileOutputStream(snapshotFile).use { output ->
+            val buffer = ByteArray(64 * 1_024)
+            while (copied < initial.st_size) {
+              taskId?.let(::checkCancellation)
+              val requested = minOf(buffer.size.toLong(), initial.st_size - copied).toInt()
+              val count = input.read(buffer, 0, requested)
+              if (count <= 0) throw IOException("Unexpected PDF EOF")
+              output.write(buffer, 0, count)
+              digest.update(buffer, 0, count)
+              copied += count
+            }
+            if (input.read() != -1) throw IOException("PDF source grew during snapshot")
+            output.fd.sync()
+          }
+        }
+      } catch (error: NativeException) {
+        throw error
+      } catch (_: IOException) {
+        throw NativeException("PDF_CORRUPT")
+      }
+      taskId?.let(::checkCancellation)
+      val finalSource = try { Os.fstat(source.fileDescriptor) }
+      catch (_: Exception) { throw NativeException("PDF_CORRUPT") }
+      if (
+        !OsConstants.S_ISREG(finalSource.st_mode) ||
+        finalSource.st_size != initial.st_size ||
+        finalSource.st_dev != initial.st_dev ||
+        finalSource.st_ino != initial.st_ino
+      ) throw NativeException("PDF_RESULT_INVALID")
+      if (copied != initial.st_size) throw NativeException("PDF_RESULT_INVALID")
+
+      val snapshotDescriptor = try {
+        ParcelFileDescriptor.open(snapshotFile, ParcelFileDescriptor.MODE_READ_ONLY)
+      } catch (_: Exception) {
+        throw NativeException("PDF_CORRUPT")
+      }
+      // Unlink immediately so no pathname can mutate the retained descriptor.
+      if (!snapshotFile.delete()) {
+        snapshotDescriptor.close()
+        throw NativeException("PDF_RESULT_INVALID")
+      }
+      snapshotFile = null
+      val snapshotStat = try { Os.fstat(snapshotDescriptor.fileDescriptor) }
+      catch (_: Exception) {
+        snapshotDescriptor.close()
+        throw NativeException("PDF_RESULT_INVALID")
+      }
+      if (
+        !OsConstants.S_ISREG(snapshotStat.st_mode) ||
+        snapshotStat.st_size != copied ||
+        snapshotStat.st_nlink != 0L
+      ) {
+        snapshotDescriptor.close()
+        throw NativeException("PDF_RESULT_INVALID")
+      }
+      return ImmutablePDFSnapshot(
+        descriptor = snapshotDescriptor,
+        byteCount = copied,
+        sourceSha256 = digest.digest().joinToString("") { "%02x".format(it) },
+      )
+    } finally {
+      source.close()
+      snapshotFile?.delete()
     }
   }
 
@@ -546,9 +631,7 @@ internal class AndroidPDFProcessor(
       !OsConstants.S_ISREG(current.st_mode) ||
       current.st_size != source.byteCount ||
       current.st_size > AndroidPDFResourcePolicy.maximumFileBytes ||
-      current.st_dev != source.device ||
-      current.st_ino != source.inode ||
-      current.st_mtime != source.modifiedSeconds
+      current.st_nlink != 0L
     ) throw NativeException("PDF_RESULT_INVALID")
   }
 
@@ -768,10 +851,15 @@ private fun isUnsafePDFControl(value: Int): Boolean =
     value in 0x000E..0x001F || value in 0x007F..0x009F ||
     value in 0x202A..0x202E || value in 0x2066..0x2069
 
-internal fun hasPDFEncryptionMarker(file: File): Boolean =
-  FilePDFReader(file).use(::hasPDFEncryptionMarker)
+internal fun hasPDFEncryptionMarker(
+  file: File,
+  onWork: () -> Unit = {},
+): Boolean = FilePDFReader(file).use { hasPDFEncryptionMarker(it, onWork) }
 
-private fun hasPDFEncryptionMarker(input: PDFRandomAccessReader): Boolean {
+private fun hasPDFEncryptionMarker(
+  input: PDFRandomAccessReader,
+  onWork: () -> Unit = {},
+): Boolean {
   val trailerWindow = AndroidPDFResourcePolicy.maximumXrefDictionaryBytes + 65_536L
   val tailLength = minOf(trailerWindow, input.length).toInt()
   if (tailLength == 0) throw IOException("Missing PDF trailer")
@@ -786,6 +874,7 @@ private fun hasPDFEncryptionMarker(input: PDFRandomAccessReader): Boolean {
     ?: throw IOException("Invalid PDF startxref")
   val visited = mutableSetOf<Long>()
   repeat(AndroidPDFResourcePolicy.maximumXrefRevisions) {
+    onWork()
     if (
       xrefOffset < 0 ||
       xrefOffset >= revisionUpperBound ||
@@ -793,7 +882,7 @@ private fun hasPDFEncryptionMarker(input: PDFRandomAccessReader): Boolean {
     ) {
       throw IOException("PDF xref chain is invalid")
     }
-    val revision = readXrefRevision(input, xrefOffset, revisionUpperBound)
+    val revision = readXrefRevision(input, xrefOffset, revisionUpperBound, onWork)
     if (expectedStartXrefOffset != null && revision.startXrefOffset != expectedStartXrefOffset) {
       throw IOException("PDF final startxref marker is inconsistent")
     }
@@ -830,7 +919,9 @@ private fun readXrefRevision(
   input: PDFRandomAccessReader,
   xrefOffset: Long,
   revisionUpperBound: Long,
+  onWork: () -> Unit,
 ): XrefRevision {
+  onWork()
   val prefixLength = minOf(256L, input.length - xrefOffset).toInt()
   val prefix = input.read(xrefOffset, prefixLength)
   val dictionaryStart = skipPDFWhitespace(prefix, 0, prefix.size)
@@ -863,6 +954,7 @@ private fun readXrefRevision(
       dictionaryEndOffset = parsed.dictionaryEndOffset,
       revisionUpperBound = revisionUpperBound,
       expectedXrefOffset = xrefOffset,
+      onWork = onWork,
     ),
   )
 }
@@ -987,6 +1079,7 @@ private fun readXrefStreamRevisionTerminator(
   dictionaryEndOffset: Long,
   revisionUpperBound: Long,
   expectedXrefOffset: Long,
+  onWork: () -> Unit,
 ): Long {
   if (
     dictionary.duplicateKeys.contains("Length") ||
@@ -1001,7 +1094,7 @@ private fun readXrefStreamRevisionTerminator(
   index = consumeRequiredPDFLineEnding(header, index)
   val streamStartOffset = dictionaryEndOffset + index
   val streamLength = dictionary.integerValues["Length"]
-  val backwardIntegers = BackwardPDFIntegerResolver(input, expectedXrefOffset)
+  val backwardIntegers = BackwardPDFIntegerResolver(input, expectedXrefOffset, onWork)
   if (streamLength == null) {
     val lengthReference = dictionary.indirectReferences["Length"]
       ?: throw IOException("PDF xref-stream length is invalid")
@@ -1426,14 +1519,29 @@ private fun isPDFPrimitiveObjectToken(bytes: ByteArray, start: Int, end: Int): B
   return digitCount > 0 && decimalCount <= 1
 }
 
-private data class ParsedBackwardPDFIntegerObjectHeader(
+private data class ParsedBackwardPDFObjectHeader(
   val objectKey: ForwardPDFObjectKey,
   val valueStart: Int,
+)
+
+private data class IndexedBackwardPDFObjectHeader(
+  val start: Int,
+  val header: ParsedBackwardPDFObjectHeader,
+)
+
+private data class BackwardPDFObjectIndex(
+  val headers: List<IndexedBackwardPDFObjectHeader>,
+  val endObjectStarts: List<Int>,
+)
+
+private class BackwardPDFParseBudget(
+  var candidateAttempts: Int = 0,
 )
 
 private class BackwardPDFIntegerResolver(
   private val input: PDFRandomAccessReader,
   private val upperBound: Long,
+  private val onWork: () -> Unit,
 ) {
   private var scanned = false
   private val values = mutableMapOf<ForwardPDFObjectKey, Long>()
@@ -1451,15 +1559,29 @@ private class BackwardPDFIntegerResolver(
     val maximumObjectBytes = AndroidPDFResourcePolicy.maximumXrefTerminatorBytes
     val windowStart = maxOf(0L, upperBound - maximumObjectBytes)
     val bytes = input.read(windowStart, (upperBound - windowStart).toInt())
+    val objectIndex = indexBackwardPDFObjects(bytes, onWork)
+    val budget = BackwardPDFParseBudget()
     var end = skipPDFWhitespaceAndCommentsBackward(bytes, bytes.size)
     var objectCount = 0
+    val seenObjects = mutableSetOf<ForwardPDFObjectKey>()
     while (end > 0) {
-      val parsed = parseBackwardPDFIntegerObjectEndingAt(bytes, end) ?: break
+      onWork()
+      val parsed = parseBackwardPDFObjectEndingAt(
+        bytes = bytes,
+        end = end,
+        knownIntegers = values,
+        objectIndex = objectIndex,
+        budget = budget,
+        onWork = onWork,
+      ) ?: break
       if (objectCount >= 256) {
-        throw IOException("Too many backward PDF integer objects")
+        throw IOException("Too many backward PDF objects")
       }
-      if (values.put(parsed.header.objectKey, parsed.value) != null) {
-        throw IOException("Backward PDF integer object is ambiguous")
+      if (!seenObjects.add(parsed.header.objectKey)) {
+        throw IOException("Duplicate backward PDF indirect object")
+      }
+      parsed.directInteger?.let { value ->
+        values[parsed.header.objectKey] = value
       }
       objectCount += 1
       end = skipPDFWhitespaceAndCommentsBackward(bytes, parsed.start)
@@ -1468,31 +1590,187 @@ private class BackwardPDFIntegerResolver(
   }
 }
 
-private data class ParsedBackwardPDFIntegerObject(
-  val header: ParsedBackwardPDFIntegerObjectHeader,
+private data class ParsedBackwardPDFObject(
+  val header: ParsedBackwardPDFObjectHeader,
   val start: Int,
-  val value: Long,
+  val directInteger: Long?,
 )
 
-private fun parseBackwardPDFIntegerObjectEndingAt(
+private fun indexBackwardPDFObjects(
+  bytes: ByteArray,
+  onWork: () -> Unit,
+): BackwardPDFObjectIndex {
+  val headers = mutableListOf<IndexedBackwardPDFObjectHeader>()
+  val endObjectStarts = mutableListOf<Int>()
+  var start = 0
+  while (start < bytes.size) {
+    if (start % 1_024 == 0) onWork()
+    if (isPDFKeywordAt(bytes, start, "endobj")) {
+      endObjectStarts += start
+      if (endObjectStarts.size > 512) {
+        throw IOException("Too many backward PDF object terminators")
+      }
+    }
+    val header = parseBackwardPDFObjectHeader(bytes, start)
+    if (header != null) {
+      headers += IndexedBackwardPDFObjectHeader(start, header)
+      if (headers.size > 384) {
+        throw IOException("Too many backward PDF object headers")
+      }
+    }
+    start += 1
+  }
+  onWork()
+  return BackwardPDFObjectIndex(headers, endObjectStarts)
+}
+
+private fun lowerBoundBackwardHeader(
+  headers: List<IndexedBackwardPDFObjectHeader>,
+  start: Int,
+): Int {
+  var lower = 0
+  var upper = headers.size
+  while (lower < upper) {
+    val middle = (lower + upper) ushr 1
+    if (headers[middle].start < start) lower = middle + 1 else upper = middle
+  }
+  return lower
+}
+
+private fun lowerBoundBackwardTerminator(
+  terminators: List<Int>,
+  start: Int,
+): Int {
+  var lower = 0
+  var upper = terminators.size
+  while (lower < upper) {
+    val middle = (lower + upper) ushr 1
+    if (terminators[middle] < start) lower = middle + 1 else upper = middle
+  }
+  return lower
+}
+
+private fun parseBackwardPDFObjectEndingAt(
   bytes: ByteArray,
   end: Int,
-): ParsedBackwardPDFIntegerObject? {
+  knownIntegers: Map<ForwardPDFObjectKey, Long>,
+  objectIndex: BackwardPDFObjectIndex,
+  budget: BackwardPDFParseBudget,
+  onWork: () -> Unit,
+): ParsedBackwardPDFObject? {
   val keyword = "endobj"
   val keywordStart = end - keyword.length
   if (keywordStart < 0 || !isPDFKeywordAt(bytes, keywordStart, keyword)) return null
   val minimumStart = maxOf(0, end - AndroidPDFResourcePolicy.maximumXrefTerminatorBytes)
-  var result: ParsedBackwardPDFIntegerObject? = null
-  for (start in minimumStart until keywordStart) {
-    val header = parseBackwardPDFIntegerObjectHeader(bytes, start) ?: continue
-    val integer = parsePDFNonNegativeIntegerToken(bytes, header.valueStart, bytes.size)
-      ?: continue
-    val objectEnd = skipPDFWhitespaceAndComments(bytes, integer.end, bytes.size)
-    if (objectEnd != keywordStart) continue
-    if (result != null) throw IOException("Backward PDF integer object is ambiguous")
-    result = ParsedBackwardPDFIntegerObject(header, start, integer.value)
+  var headerUpper = lowerBoundBackwardHeader(objectIndex.headers, keywordStart)
+  var terminatorIndex = lowerBoundBackwardTerminator(
+    objectIndex.endObjectStarts,
+    keywordStart,
+  ) - 1
+  while (headerUpper > 0) {
+    onWork()
+    val previousTerminator = objectIndex.endObjectStarts
+      .getOrNull(terminatorIndex)
+      ?.takeIf { it >= minimumStart }
+    val segmentStart = previousTerminator?.plus(keyword.length) ?: minimumStart
+    val headerLower = lowerBoundBackwardHeader(objectIndex.headers, segmentStart)
+    var result: ParsedBackwardPDFObject? = null
+    var lexicalCursor = segmentStart
+    var inComment = false
+    for (headerIndex in headerLower until headerUpper) {
+      val candidate = objectIndex.headers[headerIndex]
+      while (lexicalCursor < candidate.start) {
+        if (lexicalCursor % 1_024 == 0) onWork()
+        val value = bytes[lexicalCursor].toInt() and 0xff
+        if (inComment) {
+          if (value == '\n'.code || value == '\r'.code) inComment = false
+        } else if (value == '%'.code) {
+          inComment = true
+        }
+        lexicalCursor += 1
+      }
+      if (inComment) continue
+      budget.candidateAttempts += 1
+      if (budget.candidateAttempts > 384) {
+        throw IOException("Too many backward PDF object candidates")
+      }
+      onWork()
+      val parsed = parseBackwardPDFObjectCandidate(
+        bytes = bytes,
+        start = candidate.start,
+        end = end,
+        keywordStart = keywordStart,
+        header = candidate.header,
+        knownIntegers = knownIntegers,
+      ) ?: continue
+      if (result != null) throw IOException("Backward PDF object is ambiguous")
+      result = parsed
+    }
+    if (result != null) return result
+    if (previousTerminator == null) return null
+    headerUpper = headerLower
+    terminatorIndex -= 1
   }
-  return result
+  return null
+}
+
+private fun parseBackwardPDFObjectCandidate(
+  bytes: ByteArray,
+  start: Int,
+  end: Int,
+  keywordStart: Int,
+  header: ParsedBackwardPDFObjectHeader,
+  knownIntegers: Map<ForwardPDFObjectKey, Long>,
+): ParsedBackwardPDFObject? {
+  val directInteger = parsePDFNonNegativeIntegerToken(bytes, header.valueStart, bytes.size)
+  if (directInteger != null) {
+    val afterInteger = skipPDFWhitespaceAndComments(bytes, directInteger.end, bytes.size)
+    if (afterInteger == keywordStart) {
+      return ParsedBackwardPDFObject(header, start, directInteger.value)
+    }
+  }
+
+  val valueStart = header.valueStart
+  val indirectReference = parsePDFIndirectReference(bytes, valueStart, bytes.size)
+  val value = skipPDFValue(bytes, valueStart, bytes.size)
+  val valueEnd = indirectReference?.end ?: value.end
+  if (
+    valueEnd <= valueStart ||
+    (indirectReference == null && !isCompletePDFIndirectObjectValue(bytes, valueStart, valueEnd))
+  ) return null
+  var index = skipPDFWhitespaceAndComments(bytes, valueEnd, bytes.size)
+  if (index == keywordStart) {
+    return ParsedBackwardPDFObject(header, start, null)
+  }
+  if (!isPDFKeywordAt(bytes, index, "stream")) return null
+  if (
+    valueStart + 1 >= bytes.size ||
+    bytes[valueStart] != '<'.code.toByte() ||
+    bytes[valueStart + 1] != '<'.code.toByte()
+  ) return null
+  val dictionary = parseTopLevelPDFDictionary(bytes, valueStart, valueEnd) ?: return null
+  if (
+    !dictionary.complete ||
+    dictionary.endOffset != valueEnd ||
+    dictionary.duplicateKeys.contains("Length") ||
+    dictionary.invalidDirectIntegerKeys.contains("Length")
+  ) return null
+  val streamStart = try {
+    consumeRequiredPDFLineEnding(bytes, index + "stream".length)
+  } catch (_: IOException) {
+    return null
+  }
+  val directLength = dictionary.integerValues["Length"]
+  val indirectLength = dictionary.indirectReferences["Length"]?.asForwardObjectKey()
+  if ((directLength == null) == (indirectLength == null)) return null
+  val streamLength = directLength ?: indirectLength?.let(knownIntegers::get) ?: return null
+  val objectEnd = try {
+    parseForwardPDFStreamObjectEnd(bytes, streamStart, streamLength)
+  } catch (_: IOException) {
+    return null
+  }
+  if (objectEnd != end) return null
+  return ParsedBackwardPDFObject(header, start, null)
 }
 
 private fun skipPDFWhitespaceAndCommentsBackward(bytes: ByteArray, start: Int): Int {
@@ -1518,10 +1796,10 @@ private fun skipPDFWhitespaceAndCommentsBackward(bytes: ByteArray, start: Int): 
   return index
 }
 
-private fun parseBackwardPDFIntegerObjectHeader(
+private fun parseBackwardPDFObjectHeader(
   bytes: ByteArray,
   start: Int,
-): ParsedBackwardPDFIntegerObjectHeader? {
+): ParsedBackwardPDFObjectHeader? {
   if (!isPDFTokenBoundary(bytes, start - 1)) return null
   var index = start
   val objectNumber = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
@@ -1529,7 +1807,7 @@ private fun parseBackwardPDFIntegerObjectHeader(
   val generation = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size) ?: return null
   index = skipPDFWhitespaceAndComments(bytes, generation.end, bytes.size)
   if (!isPDFKeywordAt(bytes, index, "obj")) return null
-  return ParsedBackwardPDFIntegerObjectHeader(
+  return ParsedBackwardPDFObjectHeader(
     objectKey = ForwardPDFObjectKey(objectNumber.value, generation.value),
     valueStart = skipPDFWhitespaceAndComments(bytes, index + "obj".length, bytes.size),
   )
@@ -1682,23 +1960,6 @@ private fun consumeOptionalPDFLineEnding(bytes: ByteArray, start: Int): Int {
     '\r'.code -> if (start + 1 < bytes.size && bytes[start + 1] == '\n'.code.toByte()) start + 2 else start + 1
     else -> start
   }
-}
-
-private fun sha256(
-  input: PDFRandomAccessReader,
-  onChunk: () -> Unit = {},
-): String {
-  val digest = MessageDigest.getInstance("SHA-256")
-  var offset = 0L
-  while (offset < input.length) {
-    onChunk()
-    val chunk = input.read(offset, minOf(64 * 1_024L, input.length - offset).toInt())
-    if (chunk.isEmpty()) throw IOException("Unexpected PDF EOF")
-    digest.update(chunk)
-    offset += chunk.size
-  }
-  onChunk()
-  return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 private fun parseStartXrefOffset(bytes: ByteArray, keyword: Int): Long? {

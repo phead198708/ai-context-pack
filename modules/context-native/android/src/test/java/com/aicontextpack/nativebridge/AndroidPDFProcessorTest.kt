@@ -133,7 +133,9 @@ class AndroidPDFProcessorTest {
     val harmlessDirectLengthWithInterveningBackwardLengthStream =
       xrefStreamPDFWithDirectLength(
         streamPayload = "x".repeat(56),
-        objectsBeforeXrefStream = "4 0 obj\n3\nendobj\n",
+        objectsBeforeXrefStream =
+          "4 0 obj\n% 99 0 obj\n3\nendobj\n" +
+          "5 0 obj\n<< /Type /Catalog >>\nendobj\n",
         interveningObjectsAfterXrefStream =
           "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n",
       )
@@ -141,7 +143,9 @@ class AndroidPDFProcessorTest {
       xrefStreamPDFWithIndirectLength(
         streamPayload = "abc",
         forwardLengthObject = true,
-        objectsBeforeXrefStream = "4 0 obj\n3\nendobj\n",
+        objectsBeforeXrefStream =
+          "4 0 obj\n3 % exact stream length\nendobj\n" +
+          "5 0 obj\n<< /Type /Catalog >>\nendobj\n",
         forwardObjectsBeforeLength =
           "3 0 obj\n<< /Length 4 0 R >>\nstream\nxyzendstream\nendobj\n",
       )
@@ -445,6 +449,27 @@ class AndroidPDFProcessorTest {
       positivePreviousRevision.delete()
       positiveStartXrefRevision.delete()
       negativePreviousRevision.delete()
+    }
+  }
+
+  @Test
+  fun backwardObjectIndexIsCancellableWithinItsBoundedSinglePassScan() {
+    val file = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      objectsBeforeXrefStream = " ".repeat(60_000),
+    )
+    try {
+      var workChecks = 0
+      val cancelled = assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(file) {
+          workChecks += 1
+          if (workChecks == 3) throw IOException("cancelled")
+        }
+      }
+      assertEquals("cancelled", cancelled.message)
+      assertEquals(3, workChecks)
+    } finally {
+      file.delete()
     }
   }
 

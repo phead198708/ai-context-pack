@@ -322,6 +322,44 @@ class PDFExtractionInstrumentedTest {
   }
 
   @Test
+  fun pageExtractionRemainsBoundToAnUnlinkedSnapshotAfterInPlaceMutation() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val file = File(context.cacheDir, "same-size-source-mutation.pdf")
+    file.writeBytes(unencryptedTextPDF("ORIGINAL"))
+    val processor = AndroidPDFProcessor()
+    val sourceSha256 = beginSession(processor, context, firstTaskId, file)
+    val originalModified = file.lastModified()
+    val originalBytes = file.readBytes()
+    val markerOffset = originalBytes.toString(Charsets.US_ASCII).indexOf("ORIGINAL")
+    assertTrue(markerOffset >= 0)
+    RandomAccessFile(file, "rw").use { source ->
+      source.seek(markerOffset.toLong())
+      source.write("MUTATED!".toByteArray(Charsets.US_ASCII))
+      source.fd.sync()
+    }
+    assertEquals(originalBytes.size.toLong(), file.length())
+    assertTrue(file.setLastModified(originalModified))
+
+    try {
+      val result = processor.extractPage(
+        context,
+        firstTaskId,
+        file.toURI().toString(),
+        sourceSha256,
+        0,
+        "latin",
+        reserved = true,
+      )
+      assertEquals("complete", result["status"])
+      assertTrue((result["text"] as String).contains("ORIGINAL"))
+      assertEquals(false, (result["text"] as String).contains("MUTATED!"))
+    } finally {
+      processor.finish(firstTaskId)
+      file.delete()
+    }
+  }
+
+  @Test
   fun overLimitFixtureHasStableError() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val processor = AndroidPDFProcessor()
@@ -463,17 +501,23 @@ class PDFExtractionInstrumentedTest {
   }
 
   private fun unencryptedEncryptTextPDF(): ByteArray {
+    return unencryptedTextPDF("/Encrypt")
+  }
+
+  private fun unencryptedTextPDF(text: String): ByteArray {
     val output = ByteArrayOutputStream()
     val offsets = mutableListOf<Int>()
     fun append(value: String) = output.write(value.toByteArray(Charsets.US_ASCII))
     append("%PDF-1.4\n")
+    val content = "BT /F1 18 Tf 72 720 Td ($text) Tj ET"
     val objects = listOf(
       "<< /Type /Catalog /Pages 2 0 R >>",
       "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
       "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
         "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
       "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-      "<< /Length 40 >>\nstream\nBT /F1 18 Tf 72 720 Td (/Encrypt) Tj ET\nendstream",
+      "<< /Length ${content.toByteArray(Charsets.US_ASCII).size} >>\n" +
+        "stream\n$content\nendstream",
     )
     objects.forEachIndexed { index, body ->
       offsets += output.size()
