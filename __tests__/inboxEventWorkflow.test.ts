@@ -54,6 +54,11 @@ function harness(
     getOCRCapabilities: jest.fn(),
     recognizeText: jest.fn(),
     cancelTextRecognition: jest.fn(),
+    inspectPdf: jest.fn(),
+    extractPdfPage: jest.fn(),
+    cancelPdfExtraction: jest.fn(),
+    finishPdfExtraction: jest.fn(),
+    readPlainTextFile: jest.fn(),
     probePdf: jest.fn(),
     ...overrides,
   };

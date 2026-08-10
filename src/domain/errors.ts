@@ -52,6 +52,70 @@ export const DOMAIN_ERROR_CATALOG = {
     disposition: 'user-action-required',
     category: 'input',
   },
+  PDF_CANCELLED: {
+    disposition: 'retryable',
+    category: 'state',
+  },
+  PDF_CORRUPT: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  PDF_ENCRYPTED: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  PDF_EMPTY: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  PDF_TOO_LARGE: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  PDF_TOO_MANY_PAGES: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  PDF_PAGE_OUT_OF_RANGE: {
+    disposition: 'terminal',
+    category: 'integrity',
+  },
+  PDF_PAGE_EXTRACTION_FAILED: {
+    disposition: 'retryable',
+    category: 'platform',
+  },
+  PDF_RESOURCE_BUSY: {
+    disposition: 'retryable',
+    category: 'resource',
+  },
+  PDF_RESULT_INVALID: {
+    disposition: 'terminal',
+    category: 'integrity',
+  },
+  TEXT_INVALID_UTF8: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  TEXT_TOO_LARGE: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  TEXT_RESOURCE_BUSY: {
+    disposition: 'retryable',
+    category: 'resource',
+  },
+  TEXT_RESULT_INVALID: {
+    disposition: 'terminal',
+    category: 'integrity',
+  },
+  URL_INVALID: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
+  URL_TOO_LONG: {
+    disposition: 'user-action-required',
+    category: 'input',
+  },
   PIPELINE_STAGE_FAILED: {
     disposition: 'retryable',
     category: 'state',

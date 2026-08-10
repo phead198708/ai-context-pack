@@ -18,8 +18,11 @@ import { newestManifestsFirst } from '../domain/importOrdering';
 import {
   areOCRBlocksInReadingOrder,
   isImportManifestV1,
+  isNativePlainTextFileV1,
   isOCRCapabilitiesV1,
   isOCRResultV1,
+  isPDFDocumentInfoV1,
+  isPDFPageExtractionV1,
   isPDFProbeResultV1,
   ocrBlocksMatchText,
 } from '../domain/validation';
@@ -28,6 +31,12 @@ import {
   isOCRRequestV1,
   type OCRErrorCode,
 } from '../domain/ocr';
+import {
+  isPDFErrorCode,
+  type PDFErrorCode,
+  type PDFInspectionRequestV1,
+  type PDFPageExtractionRequestV1,
+} from '../domain/pdfExtraction';
 import {
   isPendingShareEvent,
   isRecoveryEvent,
@@ -84,6 +93,21 @@ export interface NativeMethods {
     recognitionLevel: 'accurate' | 'fast',
   ): Promise<unknown>;
   cancelTextRecognition?(taskId: string): Promise<unknown>;
+  inspectPdf?(
+    taskId: string,
+    uri: string,
+    sourceSha256: string,
+  ): Promise<unknown>;
+  extractPdfPage?(
+    taskId: string,
+    uri: string,
+    sourceSha256: string,
+    pageIndex: number,
+    script: 'latin' | 'chinese',
+  ): Promise<unknown>;
+  cancelPdfExtraction?(taskId: string): Promise<unknown>;
+  finishPdfExtraction?(taskId: string): Promise<unknown>;
+  readPlainTextFile?(uri: string): Promise<unknown>;
   probePdf(uri: string): Promise<unknown>;
 }
 
@@ -373,6 +397,100 @@ export const createNativeAdapter = (
           if (acknowledged !== true)
             throw new NativeBoundaryError('OCR_RESULT_INVALID');
         },
+        inspectPdf: async request => {
+          if (!nativeModule.inspectPdf)
+            throw new NativeBoundaryError('PDF_PAGE_EXTRACTION_FAILED');
+          requirePDFInspectionRequest(request);
+          let value: unknown;
+          try {
+            value = await nativeModule.inspectPdf(
+              request.taskId,
+              request.fileUri,
+              request.sourceSha256,
+            );
+          } catch (error) {
+            throw nativePDFBoundaryError(error);
+          }
+          if (!isPDFDocumentInfoV1(value))
+            throw new NativeBoundaryError('PDF_RESULT_INVALID');
+          return value;
+        },
+        extractPdfPage: async request => {
+          if (!nativeModule.extractPdfPage)
+            throw new NativeBoundaryError('PDF_PAGE_EXTRACTION_FAILED');
+          requirePDFPageRequest(request);
+          let value: unknown;
+          try {
+            value = await nativeModule.extractPdfPage(
+              request.taskId,
+              request.fileUri,
+              request.sourceSha256,
+              request.pageIndex,
+              request.script,
+            );
+          } catch (error) {
+            throw nativePDFBoundaryError(error);
+          }
+          if (
+            !isPDFPageExtractionV1(value) ||
+            value.pageIndex !== request.pageIndex ||
+            typeof value.characterCount !== 'number' ||
+            !Array.isArray(value.warnings)
+          )
+            throw new NativeBoundaryError('PDF_RESULT_INVALID');
+          return value;
+        },
+        cancelPdfExtraction: async taskId => {
+          if (!isCanonicalUuid(taskId))
+            throw new NativeBoundaryError('PDF_RESULT_INVALID');
+          if (!nativeModule.cancelPdfExtraction)
+            throw new NativeBoundaryError('PDF_PAGE_EXTRACTION_FAILED');
+          let acknowledged: unknown;
+          try {
+            acknowledged = await nativeModule.cancelPdfExtraction(taskId);
+          } catch (error) {
+            throw nativePDFBoundaryError(error);
+          }
+          if (acknowledged !== true)
+            throw new NativeBoundaryError('PDF_RESULT_INVALID');
+        },
+        finishPdfExtraction: async taskId => {
+          if (!isCanonicalUuid(taskId))
+            throw new NativeBoundaryError('PDF_RESULT_INVALID');
+          if (!nativeModule.finishPdfExtraction)
+            throw new NativeBoundaryError('PDF_PAGE_EXTRACTION_FAILED');
+          let acknowledged: unknown;
+          try {
+            acknowledged = await nativeModule.finishPdfExtraction(taskId);
+          } catch (error) {
+            throw nativePDFBoundaryError(error);
+          }
+          if (acknowledged !== true)
+            throw new NativeBoundaryError('PDF_RESULT_INVALID');
+        },
+        readPlainTextFile: async fileUri => {
+          if (!nativeModule.readPlainTextFile)
+            throw new NativeBoundaryError('TEXT_RESULT_INVALID');
+          requireControlledFileUri(fileUri, 'TEXT_RESULT_INVALID');
+          let value: unknown;
+          try {
+            value = await nativeModule.readPlainTextFile(fileUri);
+          } catch (error) {
+            const code = nativeErrorCode(error);
+            throw new NativeBoundaryError(
+              code === 'TEXT_INVALID_UTF8' ||
+              code === 'TEXT_TOO_LARGE' ||
+              code === 'TEXT_RESOURCE_BUSY' ||
+              code === 'RESOURCE_MEMORY_PRESSURE' ||
+              code === 'INVALID_LOCAL_FILE_URI'
+                ? code
+                : 'TEXT_RESULT_INVALID',
+            );
+          }
+          if (!isNativePlainTextFileV1(value))
+            throw new NativeBoundaryError('TEXT_RESULT_INVALID');
+          return value;
+        },
         probePdf: async uri => {
           const value = await nativeModule.probePdf(uri);
           if (!isPDFProbeResultV1(value))
@@ -437,6 +555,21 @@ export const createNativeAdapter = (
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         cancelTextRecognition: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        inspectPdf: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        extractPdfPage: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        cancelPdfExtraction: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        finishPdfExtraction: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        readPlainTextFile: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         probePdf: async () => {
@@ -537,6 +670,44 @@ function nativeOCRBoundaryError(error: unknown): NativeBoundaryError {
   return new NativeBoundaryError(
     isOCRErrorCode(code) ? (code as OCRErrorCode) : 'OCR_RECOGNITION_FAILED',
   );
+}
+
+function nativePDFBoundaryError(error: unknown): NativeBoundaryError {
+  const code = nativeErrorCode(error);
+  return new NativeBoundaryError(
+    isPDFErrorCode(code)
+      ? (code as PDFErrorCode)
+      : 'PDF_PAGE_EXTRACTION_FAILED',
+  );
+}
+
+function requirePDFPageRequest(request: PDFPageExtractionRequestV1): void {
+  if (
+    !isCanonicalUuid(request.taskId) ||
+    typeof request.sourceSha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(request.sourceSha256) ||
+    !Number.isSafeInteger(request.pageIndex) ||
+    request.pageIndex < 0 ||
+    request.pageIndex >= 25 ||
+    (request.script !== 'latin' && request.script !== 'chinese')
+  )
+    throw new NativeBoundaryError('PDF_RESULT_INVALID');
+  requireControlledFileUri(request.fileUri, 'PDF_RESULT_INVALID');
+}
+
+function requirePDFInspectionRequest(request: PDFInspectionRequestV1): void {
+  if (
+    !isCanonicalUuid(request.taskId) ||
+    typeof request.sourceSha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(request.sourceSha256)
+  )
+    throw new NativeBoundaryError('PDF_RESULT_INVALID');
+  requireControlledFileUri(request.fileUri, 'PDF_RESULT_INVALID');
+}
+
+function requireControlledFileUri(fileUri: string, code: string): void {
+  if (typeof fileUri !== 'string' || !fileUri.startsWith('file://'))
+    throw new NativeBoundaryError(code);
 }
 
 function requireFileUris(fileUris: readonly string[]): void {

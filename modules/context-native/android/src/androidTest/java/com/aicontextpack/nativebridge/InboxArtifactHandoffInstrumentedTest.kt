@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.system.Os
 import java.io.File
+import java.io.RandomAccessFile
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -563,10 +564,7 @@ class InboxArtifactHandoffInstrumentedTest {
 
     val pdfIngestion = uuid()
     val pdfPack = uuid()
-    writeManifest(
-      pdfIngestion,
-      listOf(Item(uuid(), "application/pdf", ByteArray(49 * 1024 * 1024) { 2 })),
-    )
+    writeLargeManifest(pdfIngestion, uuid(), "application/pdf", 49L * 1024 * 1024)
     val pdfStarted = System.nanoTime()
     assertEquals(
       1,
@@ -612,6 +610,39 @@ class InboxArtifactHandoffInstrumentedTest {
         .put("source", "android-share-intent")
         .put("status", "complete")
         .put("items", payloadItems)
+        .toString(),
+    )
+  }
+
+  private fun writeLargeManifest(
+    ingestionId: String,
+    itemId: String,
+    mediaType: String,
+    byteCount: Long,
+  ) {
+    val directory = File(root, "Inbox/$ingestionId")
+    assertTrue(directory.mkdirs())
+    val payload = File(directory, "$itemId.bin")
+    RandomAccessFile(payload, "rw").use { it.setLength(byteCount) }
+    File(directory, "manifest.json").writeText(
+      JSONObject()
+        .put("schemaVersion", 1)
+        .put("ingestionId", ingestionId)
+        .put("createdAt", "2026-08-03T00:00:00Z")
+        .put("source", "android-share-intent")
+        .put("status", "complete")
+        .put(
+          "items",
+          JSONArray().put(
+            JSONObject()
+              .put("id", itemId)
+              .put("order", 0)
+              .put("mediaType", mediaType)
+              .put("status", "copied")
+              .put("byteCount", byteCount)
+              .put("relativePath", "$itemId.bin"),
+          ),
+        )
         .toString(),
     )
   }

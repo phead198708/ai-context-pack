@@ -20,8 +20,10 @@ let package = Package(
         "InboxRecoverySupport.swift",
         "InboxWriterOwnership.swift",
         "AppleVisionOCRProcessor.swift",
+        "ApplePDFProcessor.swift",
         "MainAppImportPublisher.swift",
         "OwnedArtifactStore.swift",
+        "PlainTextFileReader.swift",
         "PrivacySafeLogger.swift",
         "ShareIngestion.swift",
       ]

@@ -5,6 +5,9 @@ import type {
   OCRRecognitionLevelV1,
   OCRResultV1,
   OCRScriptV1,
+  NativePlainTextFileV1,
+  PDFDocumentInfoV1,
+  PDFPageExtractionV1,
   PDFProbeResultV1,
 } from '../../../src/domain/contracts';
 import type { MainAppImportInput } from '../../../src/domain/mainAppImport';
@@ -72,6 +75,21 @@ declare class ContextNativeModule extends NativeModule {
     recognitionLevel: OCRRecognitionLevelV1,
   ): Promise<OCRResultV1>;
   cancelTextRecognition(taskId: string): Promise<boolean>;
+  inspectPdf(
+    taskId: string,
+    fileUri: string,
+    sourceSha256: string,
+  ): Promise<PDFDocumentInfoV1>;
+  extractPdfPage(
+    taskId: string,
+    fileUri: string,
+    sourceSha256: string,
+    pageIndex: number,
+    script: OCRScriptV1,
+  ): Promise<PDFPageExtractionV1>;
+  cancelPdfExtraction(taskId: string): Promise<boolean>;
+  finishPdfExtraction(taskId: string): Promise<boolean>;
+  readPlainTextFile(fileUri: string): Promise<NativePlainTextFileV1>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }
 export default requireNativeModule<ContextNativeModule>('ContextNative');

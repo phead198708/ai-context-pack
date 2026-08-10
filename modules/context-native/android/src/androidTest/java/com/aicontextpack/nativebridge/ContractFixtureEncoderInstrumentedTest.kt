@@ -99,6 +99,8 @@ private object ContractFixtureEncoder {
     .put("engine", "pdfkit")
     .put("revision", "1")
     .put("durationMs", 2)
+    .put("characterCount", 13)
+    .put("warnings", JSONArray())
     .put("status", "complete")
     .put("text", "中文 👩🏽‍💻 e\u0301")
     .put("blocks", JSONArray())

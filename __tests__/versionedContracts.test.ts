@@ -258,10 +258,25 @@ const negativeContractCorpus: readonly {
     },
   },
   {
-    name: 'legacy PDF characterCount field',
+    name: 'PDF character count inconsistent with text',
+    fixture: 'pdf-page-extraction-v1.json',
+    authority: 'semantic-runtime',
+    mutate: fixture => ({ ...fixture, characterCount: 8 }),
+  },
+  {
+    name: 'PDF embedded-text method paired with an OCR engine',
+    fixture: 'pdf-page-extraction-v1.json',
+    authority: 'semantic-runtime',
+    mutate: fixture => ({ ...fixture, engine: 'apple-vision' }),
+  },
+  {
+    name: 'PDF warning list containing duplicates',
     fixture: 'pdf-page-extraction-v1.json',
     authority: 'structural-schema',
-    mutate: fixture => ({ ...fixture, characterCount: 8 }),
+    mutate: fixture => ({
+      ...fixture,
+      warnings: ['PDF_PAGE_EMPTY', 'PDF_PAGE_EMPTY'],
+    }),
   },
   {
     name: 'PDF block extending beyond the normalized page',
@@ -418,6 +433,86 @@ describe('V1 contract fixtures and machine-readable schemas', () => {
         .filter(name => name.endsWith('-v1.json'))
         .sort(),
     ).toEqual(compiledContracts.map(contract => contract.fixture).sort());
+  });
+
+  test('PDFPageExtractionV1 keeps Issue #4 payloads valid when Issue #11 metadata is absent', () => {
+    const contract = contractForFixture('pdf-page-extraction-v1.json');
+    const fixture = objectValue(
+      loadJson(fixtureDirectory, 'pdf-page-extraction-v1.json'),
+    );
+    const legacy = { ...fixture };
+    delete legacy.characterCount;
+    delete legacy.warnings;
+
+    expect(contract.validateSchema(legacy)).toBe(true);
+    expect(contract.validate(legacy)).toBe(true);
+    expect(contract.decode(legacy)).toEqual({ ok: true, value: legacy });
+  });
+
+  test('PDFPageExtractionV1 validates sparse embedded text against OCR blocks', () => {
+    const contract = contractForFixture('pdf-page-extraction-v1.json');
+    const sparse = {
+      schemaVersion: 1,
+      pageIndex: 0,
+      method: 'rendered-ocr',
+      engine: 'apple-vision',
+      revision: '3',
+      durationMs: 1,
+      characterCount: 3,
+      warnings: ['PDF_EMBEDDED_TEXT_SPARSE', 'PDF_PAGE_OCR_FALLBACK'],
+      status: 'complete',
+      text: 'A\n4',
+      embeddedText: 'A',
+      blocks: [{ text: '4', bounds: { x: 0, y: 0, width: 0.1, height: 0.1 } }],
+    };
+
+    expect(contract.validateSchema(sparse)).toBe(true);
+    expect(contract.validate(sparse)).toBe(true);
+    expect(contract.validate({ ...sparse, embeddedText: 'B' })).toBe(false);
+    expect(contract.validate({ ...sparse, embeddedText: 'A'.repeat(16) })).toBe(
+      false,
+    );
+
+    const canonicallyEquivalentButRawDistinct = {
+      ...sparse,
+      characterCount: 4,
+      text: 'é\ne\u0301',
+      embeddedText: 'é',
+      blocks: [
+        {
+          text: 'e\u0301',
+          bounds: { x: 0, y: 0, width: 0.1, height: 0.1 },
+        },
+      ],
+    };
+    expect(contract.validate(canonicallyEquivalentButRawDistinct)).toBe(true);
+    expect(
+      contract.validate({
+        ...canonicallyEquivalentButRawDistinct,
+        characterCount: 2,
+        text: 'e\u0301',
+      }),
+    ).toBe(false);
+
+    const incidentalSubstring = {
+      ...sparse,
+      characterCount: 5,
+      text: 'A\nCAT',
+      blocks: [
+        {
+          text: 'CAT',
+          bounds: { x: 0, y: 0, width: 0.1, height: 0.1 },
+        },
+      ],
+    };
+    expect(contract.validate(incidentalSubstring)).toBe(true);
+    expect(
+      contract.validate({
+        ...incidentalSubstring,
+        characterCount: 3,
+        text: 'CAT',
+      }),
+    ).toBe(false);
   });
 
   test.each([

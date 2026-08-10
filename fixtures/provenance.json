@@ -28,7 +28,7 @@
     },
     {
       "path": "contracts/pdf-page-extraction-v1.json",
-      "sha256": "ce0c7dd445830ef7fa94954adf348224c8f40a635a425a688c7f46df0697a390",
+      "sha256": "805079ef8f2024000100b23bf87058612ec5bac2fa062ce6e1b7f8133c93290d",
       "kind": "contract",
       "purpose": "canonical PDFPageExtractionV1 parity payload",
       "source": "project-authored synthetic text payload",
@@ -131,10 +131,42 @@
       "license": "MIT"
     },
     {
+      "path": "media/empty-one-page.pdf",
+      "sha256": "ece88a0275c0e043bcbaa4ffd9319175bac2b094889c6a79343d285627f38b0c",
+      "kind": "pdf",
+      "purpose": "blank PDF produces a visible per-page empty result",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/encrypted-one-page.pdf",
+      "sha256": "658deaf88c15b2ac0357440718bf6490d112785e216b7d18bbae6ee59dee356b",
+      "kind": "pdf",
+      "purpose": "password-protected PDF rejection",
+      "source": "scripts/generate_fixtures.swift with synthetic-only passwords",
+      "license": "MIT"
+    },
+    {
+      "path": "media/mixed-twenty-page.pdf",
+      "sha256": "c376bbb8db3203d4c140cb68bfbb4b6ccce8f3bbbfc8c7f6fbf609526c176b58",
+      "kind": "pdf",
+      "purpose": "20-page mixed embedded/scanned extraction benchmark",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
       "path": "media/mixed-two-page.pdf",
       "sha256": "15d74c794ac17bf1738a883056a8bd9866b97624ba02bcd1eb976d4bfa46c3dc",
       "kind": "pdf",
       "purpose": "mixed embedded-text and scanned-page extraction",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/over-limit-26-pages.pdf",
+      "sha256": "08b51caf989b11d45ff385a3587f6207419ef42689d46daafff40fc0ac8dfb18",
+      "kind": "pdf",
+      "purpose": "PDF page-limit rejection at the first over-limit page count",
       "source": "scripts/generate_fixtures.swift",
       "license": "MIT"
     },
@@ -175,6 +207,14 @@
       "sha256": "1b1882c4139f2f1e3fa7123634c25a825843e9902a34dcdeb3c3d2bcddf8d288",
       "kind": "pdf",
       "purpose": "scanned PDF fallback extraction",
+      "source": "scripts/generate_fixtures.swift",
+      "license": "MIT"
+    },
+    {
+      "path": "media/sparse-one-page.pdf",
+      "sha256": "bf8f593dbabe32824df9d4c268c43b72d9638ba50ebfd1dba6d22a9110ebeadb",
+      "kind": "pdf",
+      "purpose": "sparse embedded text triggers rendered OCR fallback",
       "source": "scripts/generate_fixtures.swift",
       "license": "MIT"
     },
