@@ -665,8 +665,8 @@ describe('persistence path and migration decisions', () => {
       expect(isOwnedArtifactPath(invalid)).toBe(false);
   });
 
-  test('schema migrates through v1, v2, and production v3 without BLOB content columns', () => {
-    expect(PERSISTENCE_MIGRATIONS).toHaveLength(3);
+  test('schema migrates through v1-v4 without BLOB content columns', () => {
+    expect(PERSISTENCE_MIGRATIONS).toHaveLength(4);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
       'relative_path TEXT NOT NULL UNIQUE',
@@ -681,6 +681,10 @@ describe('persistence path and migration decisions', () => {
     expect(PERSISTENCE_MIGRATIONS[2]).toContain('CREATE TABLE context_items');
     expect(PERSISTENCE_MIGRATIONS[2]).toContain('CREATE TABLE risk_findings');
     expect(PERSISTENCE_MIGRATIONS[2]).toContain('CREATE TABLE export_records');
+    expect(PERSISTENCE_MIGRATIONS[3]).toContain('PRAGMA user_version = 4');
+    expect(PERSISTENCE_MIGRATIONS[3]).toContain(
+      'ALTER TABLE context_items ADD COLUMN retry_stage TEXT',
+    );
     for (const migration of PERSISTENCE_MIGRATIONS)
       expect(migration).not.toMatch(/\bBLOB\b/);
   });

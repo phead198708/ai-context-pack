@@ -419,12 +419,13 @@ export class ExpoSqlitePersistenceRepository
           media_type: string;
           original_sha256: string | null;
           original_relative_path: string | null;
+          retry_stage: string | null;
         }>(
           `SELECT imported_item.id, imported_item.sort_index AS import_order,
              imported_item.status AS import_status,
              imported_item.error_code AS import_error_code,
              item.pack_id, item.source_type, item.media_type,
-             item.original_sha256, item.original_relative_path
+             item.original_sha256, item.original_relative_path, item.retry_stage
            FROM import_items imported_item
            JOIN context_items item ON item.id = imported_item.id
            WHERE imported_item.ingestion_id = ?`,
@@ -451,7 +452,8 @@ export class ExpoSqlitePersistenceRepository
               row.source_type !== sourceTypeForMediaType(item.mediaType) ||
               row.media_type !== item.mediaType ||
               row.original_sha256 !== (artifact?.sha256 ?? null) ||
-              row.original_relative_path !== (artifact?.relativePath ?? null)
+              row.original_relative_path !== (artifact?.relativePath ?? null) ||
+              row.retry_stage !== (item.status === 'failed' ? 'import' : null)
             );
           })
         )
@@ -525,9 +527,9 @@ export class ExpoSqlitePersistenceRepository
         await transaction.run(
           `INSERT INTO context_items
             (id, pack_id, source_type, media_type, original_sha256,
-             original_relative_path, state, inclusion_mode, sort_index,
+             original_relative_path, state, retry_stage, inclusion_mode, sort_index,
              created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'both', ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'both', ?, ?, ?)`,
           [
             item.id,
             input.packId,
@@ -536,6 +538,7 @@ export class ExpoSqlitePersistenceRepository
             artifact?.sha256 ?? null,
             artifact?.relativePath ?? null,
             item.status === 'copied' ? 'imported' : 'failed',
+            item.status === 'failed' ? 'import' : null,
             orderStart + item.order,
             input.manifest.createdAt,
             input.manifest.createdAt,
@@ -723,6 +726,7 @@ export class ExpoSqlitePersistenceRepository
         input.items,
         input.pack.createdAt,
         input.pack.updatedAt,
+        input.removedItemOriginalDisposition ?? 'preserve',
       );
       return nextRevision;
     });
@@ -1376,6 +1380,7 @@ interface ContextItemRow {
   readonly original_sha256: string | null;
   readonly original_relative_path: string | null;
   readonly state: string;
+  readonly retry_stage: string | null;
   readonly inclusion_mode: string;
   readonly sort_index: number;
 }
@@ -1471,7 +1476,8 @@ async function loadContextItems(
 ): Promise<readonly ContextItem[]> {
   const rows = await connection.all<ContextItemRow>(
     `SELECT id, pack_id, source_type, media_type, original_display_name,
-       original_sha256, original_relative_path, state, inclusion_mode, sort_index
+       original_sha256, original_relative_path, state, retry_stage,
+       inclusion_mode, sort_index
      FROM context_items WHERE pack_id = ? ORDER BY sort_index, id`,
     [packId],
   );
@@ -1499,6 +1505,9 @@ async function loadContextItems(
         : {}),
       artifactIds: artifacts.map(value => value.id),
       state: itemState(row.state),
+      ...(row.retry_stage
+        ? { retryStage: pipelineStage(row.retry_stage) }
+        : {}),
       riskFindingIds: findings.map(value => value.id),
       inclusionMode: inclusionMode(row.inclusion_mode),
       sortIndex: row.sort_index,
@@ -1521,6 +1530,7 @@ async function replaceContextItems(
   items: readonly ContextItem[],
   createdAt: string,
   updatedAt: string,
+  removedItemOriginalDisposition: 'preserve' | 'release',
 ): Promise<void> {
   const existing = await transaction.all<{ id: string }>(
     'SELECT id FROM context_items WHERE pack_id = ?',
@@ -1533,6 +1543,19 @@ async function replaceContextItems(
   const retained = new Set(items.map(item => item.id));
   for (const row of existing) {
     if (retained.has(row.id)) continue;
+    if (removedItemOriginalDisposition === 'preserve')
+      await transaction.run(
+        `INSERT OR IGNORE INTO artifact_references (owner_type, owner_id, artifact_id)
+         SELECT 'library-item', ?, id FROM artifacts
+         WHERE item_id = ? AND kind = 'original'`,
+        [row.id, row.id],
+      );
+    else
+      await transaction.run(
+        `DELETE FROM artifact_references
+         WHERE owner_type = 'library-item' AND owner_id = ?`,
+        [row.id],
+      );
     await transaction.run(
       `DELETE FROM artifact_references WHERE owner_type = 'pack' AND owner_id = ?
        AND artifact_id IN (SELECT id FROM artifacts WHERE item_id = ?)`,
@@ -1573,9 +1596,9 @@ async function replaceContextItems(
     await transaction.run(
       `INSERT INTO context_items
         (id, pack_id, source_type, media_type, original_display_name,
-         original_sha256, original_relative_path, state, inclusion_mode,
+         original_sha256, original_relative_path, state, retry_stage, inclusion_mode,
          sort_index, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          source_type = excluded.source_type,
          media_type = excluded.media_type,
@@ -1583,6 +1606,7 @@ async function replaceContextItems(
          original_sha256 = excluded.original_sha256,
          original_relative_path = excluded.original_relative_path,
          state = excluded.state,
+         retry_stage = excluded.retry_stage,
          inclusion_mode = excluded.inclusion_mode,
          sort_index = excluded.sort_index,
          updated_at = excluded.updated_at`,
@@ -1595,6 +1619,7 @@ async function replaceContextItems(
         item.originalSha256 ?? null,
         item.originalRelativePath ?? null,
         item.state,
+        item.retryStage ?? null,
         item.inclusionMode,
         item.sortIndex,
         createdAt,
@@ -2007,6 +2032,19 @@ function itemState(value: string): ContextItem['state'] {
     case 'recovering':
     case 'failed':
     case 'cancelled':
+      return value;
+    default:
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  }
+}
+
+function pipelineStage(value: string): NonNullable<ContextItem['retryStage']> {
+  switch (value) {
+    case 'import':
+    case 'extract':
+    case 'analyze':
+    case 'review':
+    case 'package':
       return value;
     default:
       throw new DomainError('STORAGE_DIVERGENCE_DETECTED');

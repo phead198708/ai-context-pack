@@ -12,6 +12,7 @@ import {
   PACK_COMMANDS,
   PACK_STATES,
   PACK_TRANSITIONS,
+  restoreItemCheckpoint,
   transitionItem,
   transitionPack,
 } from '../src/domain/stateMachines';
@@ -79,6 +80,7 @@ describe('immutable domain state machines', () => {
       expect.arrayContaining([
         'cancel',
         'retry',
+        'restart-packaging',
         'record-partial-failure',
         'require-review',
         'start-recovery',
@@ -89,10 +91,23 @@ describe('immutable domain state machines', () => {
       expect.arrayContaining([
         'cancel',
         'retry',
+        'invalidate-package',
         'require-review',
         'start-recovery',
         'resume-recovery',
       ]),
+    );
+  });
+
+  test('restores only recoverable items to a durable completed checkpoint', () => {
+    expect(restoreItemCheckpoint('failed', 'extracted')).toBe('extracted');
+    expect(restoreItemCheckpoint('cancelled', 'imported')).toBe('imported');
+    expect(restoreItemCheckpoint('recovering', 'reviewed')).toBe('reviewed');
+    expect(() => restoreItemCheckpoint('imported', 'extracted')).toThrow(
+      expect.objectContaining({ code: 'DOMAIN_INVALID_TRANSITION' }),
+    );
+    expect(() => restoreItemCheckpoint('failed', 'failed')).toThrow(
+      expect.objectContaining({ code: 'DOMAIN_INVALID_TRANSITION' }),
     );
   });
 });

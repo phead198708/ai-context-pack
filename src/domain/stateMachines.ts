@@ -24,6 +24,7 @@ export const PACK_COMMANDS = [
   'fail',
   'cancel',
   'retry',
+  'restart-packaging',
   'start-recovery',
   'resume-recovery',
 ] as const;
@@ -46,6 +47,7 @@ export const PACK_TRANSITIONS: readonly PackTransition[] = [
   },
   { from: 'processing', command: 'mark-ready', to: 'ready' },
   { from: 'review-required', command: 'resolve-review', to: 'ready' },
+  { from: 'review-required', command: 'retry', to: 'processing' },
   { from: 'ready', command: 'start-export', to: 'exporting' },
   { from: 'exporting', command: 'complete-export', to: 'exported' },
   { from: 'processing', command: 'fail', to: 'failed' },
@@ -59,6 +61,9 @@ export const PACK_TRANSITIONS: readonly PackTransition[] = [
   { from: 'recovering', command: 'cancel', to: 'cancelled' },
   { from: 'failed', command: 'retry', to: 'processing' },
   { from: 'cancelled', command: 'retry', to: 'processing' },
+  { from: 'ready', command: 'restart-packaging', to: 'processing' },
+  { from: 'exporting', command: 'restart-packaging', to: 'processing' },
+  { from: 'exported', command: 'restart-packaging', to: 'processing' },
   { from: 'processing', command: 'start-recovery', to: 'recovering' },
   { from: 'exporting', command: 'start-recovery', to: 'recovering' },
   { from: 'failed', command: 'start-recovery', to: 'recovering' },
@@ -100,6 +105,7 @@ export const ITEM_COMMANDS = [
   'fail',
   'cancel',
   'retry',
+  'invalidate-package',
   'start-recovery',
   'resume-recovery',
 ] as const;
@@ -152,6 +158,7 @@ export const ITEM_TRANSITIONS: readonly ItemTransition[] = [
   })),
   { from: 'failed', command: 'retry', to: 'received' },
   { from: 'cancelled', command: 'retry', to: 'received' },
+  { from: 'packaged', command: 'invalidate-package', to: 'reviewed' },
   ...itemRecoverableStates.map(from => ({
     from,
     command: 'start-recovery' as const,
@@ -169,4 +176,25 @@ export function transitionItem(
   );
   if (!transition) throw new DomainError('DOMAIN_INVALID_TRANSITION');
   return transition.to;
+}
+
+const ITEM_CHECKPOINT_STATES = new Set<ItemState>([
+  'received',
+  'imported',
+  'extracted',
+  'analyzed',
+  'reviewed',
+]);
+
+/** Restores a failed/cancelled recovery to its last durable completed stage. */
+export function restoreItemCheckpoint(
+  from: ItemState,
+  checkpoint: ItemState,
+): ItemState {
+  if (
+    !['failed', 'cancelled', 'recovering'].includes(from) ||
+    !ITEM_CHECKPOINT_STATES.has(checkpoint)
+  )
+    throw new DomainError('DOMAIN_INVALID_TRANSITION');
+  return checkpoint;
 }

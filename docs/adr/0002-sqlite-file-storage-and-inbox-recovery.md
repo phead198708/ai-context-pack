@@ -20,12 +20,12 @@ The database uses:
 
 - `foreign_keys=ON`, WAL journal mode, `synchronous=FULL`, and a 5-second busy timeout;
 - exclusive async transactions for migrations, import commits, and reference-aware deletes;
-- immutable `PRAGMA user_version` migrations from empty → v1 → v2 → v3;
+- immutable `PRAGMA user_version` migrations from empty → v1 → v2 → v3 → v4;
 - a unique `imports.ingestion_id` idempotency key plus exact-byte manifest SHA-256 and complete persisted-artifact-set replay checks;
 - `artifact_references` rather than inferred liveness;
 - no `BLOB` content columns.
 
-The v1 schema creates packs, imports, ordered import items, artifacts, references, and recovery journal rows. The v2 migration adds `last_verified_at` and cleanup indexes. The v3 migration adds the production Pack graph and optimistic revision, nullable item ownership for Pack-level export/preview artifacts, a one-original-per-item index, ordered ContextItems, RiskFindings, ExportRecords, recovery diagnostics, quarantine metadata, and a cleanup lease. The v3 artifact-table rebuild preserves v1/v2 rows, references, processor metadata, and foreign-key integrity. Unknown newer `user_version` values fail with `SCHEMA_VERSION_UNSUPPORTED`; migration hooks expose only version/phase metadata.
+The v1 schema creates packs, imports, ordered import items, artifacts, references, and recovery journal rows. The v2 migration adds `last_verified_at` and cleanup indexes. The v3 migration adds the production Pack graph and optimistic revision, nullable item ownership for Pack-level export/preview artifacts, a one-original-per-item index, ordered ContextItems, RiskFindings, ExportRecords, recovery diagnostics, quarantine metadata, and a cleanup lease. The v3 artifact-table rebuild preserves v1/v2 rows, references, processor metadata, and foreign-key integrity. The v4 migration persists the exact retry stage independently from terminal item state; legacy rows receive the earliest safe stage derivable from immutable evidence. Unknown newer `user_version` values fail with `SCHEMA_VERSION_UNSUPPORTED`; migration hooks expose only version/phase metadata.
 
 One app-lifetime `ExpoSqlitePersistenceRepository` instance owns the connection. It implements the `ContextPack`, `ContextItem`, `RiskFinding`, `ExportRecord`, artifact-record, recovery, diagnostic, quarantine, cleanup-lease, and development-reset repository boundaries. Pack graphs use monotonic optimistic revisions; a stale writer fails with `PERSISTENCE_CONFLICT`, and ordered items are replaced atomically within the winning revision transaction.
 
@@ -86,8 +86,8 @@ Keep the existing stable registry file plus per-ingestion POSIX advisory locks f
 | Corrupt/unknown manifest            | Fail closed with stable schema code; no content log                         | native manifest suites                                        |
 | Expired Android provider permission | Successful files remain; failed item is explicit; no commit of a half-state | shared injected failure and Android importer tests            |
 | Low disk                            | `RESOURCE_LOW_DISK` before destination creation; Inbox retained             | shared, Swift, and Kotlin tests                               |
-| v1/v2 app database update           | v3 applied with rows, references, processor metadata, and order preserved   | `npm run test:persistence-migrations`                         |
-| Empty/legacy/restart/concurrent DB  | 0→1→2→3, ordered restart, one-of-two CAS, rollback, backup/restore pass     | `npm run test:persistence-production`                         |
+| v1/v2/v3 app database update        | v4 applied with rows, references, order, and safe retry backfill preserved  | `npm run test:persistence-migrations`                         |
+| Empty/legacy/restart/concurrent DB  | 0→1→2→3→4, ordered restart, one-of-two CAS, rollback, backup/restore pass   | `npm run test:persistence-production`                         |
 | Cleanup races recovery              | Transactional reference recheck wins; file retained                         | shared cleanup race test                                      |
 | Replay with low free space          | Existing artifacts require only fixed headroom and remain replayable        | Swift/Kotlin published-destination budget tests               |
 | New destination hierarchy           | Every new directory and parent is synchronized before handoff returns       | Swift/Kotlin injected directory-sync tests                    |
@@ -139,6 +139,10 @@ Issue #7 completes the production work owned by this ADR:
 6. Deterministic development reset requires both a development build and the literal `RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA`; it is never an automatic production recovery path.
 7. Real SQLite verification covers upgrade, repository restart, immutable-source rollback, concurrent compare-and-swap, Pack-append revisioning, risk/export round trips, corrupted-row mapping, interrupted transaction rollback, backup/restore, reference cleanup, and absence of BLOB/provider/absolute-path persistence. The release-size results and license review are recorded above.
 8. Bootstrap, AppState refresh, and cold restart hydrate the persisted Pack projection after recovery, so the transient Inbox scan never replaces committed product state with an empty view.
+
+Issue #12 extends the schema to v4: terminal item rows require a durable retry stage, packaging
+failures can resume from `reviewed`, and retry clears the terminal-only marker in the same graph
+transaction. The migration backfills only the earliest safe stage provable from v3 artifacts.
 
 Cancellation/background pipeline checkpoints beyond Inbox recovery remain owned by their later processing issues. User-facing storage-management UI remains explicitly out of scope for Issue #7.
 

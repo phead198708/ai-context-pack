@@ -272,6 +272,41 @@ describe('production repository against SQLite', () => {
     expect((await repository.findPackGraph(packId))?.revision).toBe(3);
   });
 
+  test('persists an exact terminal retry stage across repository restart', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const failedItems = initial!.items.map(item =>
+      item.id === firstItemId
+        ? { ...item, state: 'failed' as const, retryStage: 'package' as const }
+        : item,
+    );
+    await repository.savePackGraph({
+      pack: {
+        ...updatedPack(
+          initial!.pack,
+          failedItems,
+          initial!.pack.title,
+          '2026-08-05T00:00:01Z',
+        ),
+        state: 'failed',
+      },
+      items: failedItems,
+      expectedRevision: initial!.revision,
+    });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === firstItemId,
+      ),
+    ).toMatchObject({ state: 'failed', retryStage: 'package' });
+  });
+
   test('materializes photo, PDF, text, and URL main-app imports as ordered ContextItems', async () => {
     const items = [
       { id: mainAppImageId, mediaType: 'image/png', bytes: 4, hash: '1' },
@@ -325,6 +360,78 @@ describe('production repository against SQLite', () => {
     expect(
       graph?.items.every(item => item.originalDisplayName === undefined),
     ).toBe(true);
+  });
+
+  test('removing an item preserves its original reference by default across restart', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'one item',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+    });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect(
+      (await repository.findPackGraph(packId))?.pack.orderedItemIds,
+    ).toEqual([secondItemId]);
+    const candidates = await repository.listCleanupCandidates(
+      '2026-08-06T00:00:00Z',
+    );
+    expect(candidates.map(candidate => candidate.artifactId)).not.toContain(
+      firstItemId,
+    );
+    expect(await repository.listArtifactRecords()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: firstItemId })]),
+    );
+  });
+
+  test('explicit destructive item removal releases only that original for reference-aware deletion', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'one item',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'release',
+    });
+
+    const candidates = await repository.listCleanupCandidates(
+      '2026-08-06T00:00:00Z',
+    );
+    expect(candidates.map(candidate => candidate.artifactId)).toContain(
+      firstItemId,
+    );
+    expect(candidates.map(candidate => candidate.artifactId)).not.toContain(
+      secondItemId,
+    );
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+    ).resolves.toBe(true);
+    expect(await repository.listArtifactRecords()).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ id: firstItemId }),
+      ]),
+    );
+    expect(
+      (await repository.findPackGraph(packId))?.pack.orderedItemIds,
+    ).toEqual([secondItemId]);
   });
 
   test('round-trips risk/export records and releases only unreferenced artifacts on Pack deletion', async () => {

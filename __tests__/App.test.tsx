@@ -68,6 +68,28 @@ jest.mock('../src/infrastructure/mainAppPickers', () => ({
     pickFiles: jest.fn(),
   },
 }));
+jest.mock('../src/features/packLibrary/runtime', () => ({
+  packLibraryController: {
+    load: jest.fn().mockResolvedValue({
+      sections: {
+        draft: [],
+        processing: [],
+        'review-required': [],
+        ready: [],
+        exported: [],
+        failed: [],
+        cancelled: [],
+      },
+    }),
+    renamePack: jest.fn(),
+    editInstruction: jest.fn(),
+    renameItem: jest.fn(),
+    reorderItem: jest.fn(),
+    removeItem: jest.fn(),
+    retryItem: jest.fn(),
+    cancelProcessing: jest.fn(),
+  },
+}));
 
 const mockNative = nativeAdapter as jest.Mocked<NativeAdapter>;
 const mockMainAppPicker = mainAppPicker as jest.Mocked<MainAppPicker>;
@@ -132,8 +154,10 @@ const persistedPack: InboxPackSummary = {
 
 let appStateListener: ((state: AppStateStatus) => void) | undefined;
 let inboxListener: ((event: unknown) => void) | undefined;
+let openPackListener: ((event: unknown) => void) | undefined;
 let appStateRemove: jest.Mock;
 let inboxRemove: jest.Mock;
+let openPackRemove: jest.Mock;
 let backRemove: jest.Mock;
 let hardwareBack:
   | Parameters<typeof BackHandler.addEventListener>[1]
@@ -188,9 +212,11 @@ describe('App interactions', () => {
     mockPersistenceInboxProcessor.listPersistedPacks.mockReset();
     appStateListener = undefined;
     inboxListener = undefined;
+    openPackListener = undefined;
     hardwareBack = undefined;
     appStateRemove = jest.fn();
     inboxRemove = jest.fn();
+    openPackRemove = jest.fn();
     backRemove = jest.fn();
     jest.spyOn(AppState, 'addEventListener').mockImplementation(((
       _type: string,
@@ -200,11 +226,15 @@ describe('App interactions', () => {
       return { remove: appStateRemove };
     }) as typeof AppState.addEventListener);
     jest.spyOn(DeviceEventEmitter, 'addListener').mockImplementation(((
-      _name: string,
+      name: string,
       listener: (event: unknown) => void,
     ) => {
-      inboxListener = listener;
-      return { remove: inboxRemove };
+      if (name === 'AIContextPackInboxChanged') {
+        inboxListener = listener;
+        return { remove: inboxRemove };
+      }
+      openPackListener = listener;
+      return { remove: openPackRemove };
     }) as unknown as typeof DeviceEventEmitter.addListener);
     jest
       .spyOn(BackHandler, 'addEventListener')
@@ -252,6 +282,10 @@ describe('App interactions', () => {
       'AIContextPackInboxChanged',
       expect.any(Function),
     );
+    expect(DeviceEventEmitter.addListener).toHaveBeenCalledWith(
+      'AIContextPackOpenPack',
+      expect.any(Function),
+    );
     expect(BackHandler.addEventListener).toHaveBeenCalledWith(
       'hardwareBackPress',
       expect.any(Function),
@@ -260,6 +294,7 @@ describe('App interactions', () => {
     act(() => renderer.unmount());
     expect(appStateRemove).toHaveBeenCalledTimes(1);
     expect(inboxRemove).toHaveBeenCalledTimes(1);
+    expect(openPackRemove).toHaveBeenCalledTimes(1);
     expect(backRemove).toHaveBeenCalledTimes(1);
   }, 15_000);
 
@@ -356,6 +391,30 @@ describe('App interactions', () => {
     );
     expect(renderedText(renderer)).toContain('image/png × 1');
     expect(renderedText(renderer)).toContain('application/zip × 1');
+    act(() => renderer.unmount());
+  });
+
+  test('opens an exact Pack from a validated platform deep link and ignores malformed IDs', async () => {
+    mockPersistenceInboxProcessor.listPersistedPacks.mockResolvedValue([
+      { ...persistedPack, id: newerPackId },
+      persistedPack,
+    ]);
+    const renderer = await renderApp();
+
+    await act(async () => {
+      openPackListener?.({ packId: '../not-a-pack' });
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer)).toContain('inbox');
+    expect(renderedText(renderer)).not.toContain('Import detail');
+
+    await act(async () => {
+      openPackListener?.({ packId: ingestionId });
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer)).toContain('Import detail');
+    expect(renderedText(renderer)).toContain(`ID ${ingestionId}`);
+    expect(renderedText(renderer)).not.toContain(`ID ${newerPackId}`);
     act(() => renderer.unmount());
   });
 

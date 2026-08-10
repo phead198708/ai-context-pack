@@ -44,6 +44,14 @@ const ITEM_STATES = new Set([
   'failed',
   'cancelled',
 ]);
+const TERMINAL_ITEM_STATES = new Set(['recovering', 'failed', 'cancelled']);
+const PIPELINE_STAGES = new Set([
+  'import',
+  'extract',
+  'analyze',
+  'review',
+  'package',
+]);
 const SOURCE_TYPES = new Set(['image', 'pdf', 'text', 'url']);
 const INCLUSION_MODES = new Set(['original', 'extracted', 'both', 'excluded']);
 const BUDGET_PRESETS = new Set(['quality', 'balanced', 'compact', 'custom']);
@@ -77,6 +85,12 @@ const ARTIFACT_KINDS = new Set([
 
 export function assertPackGraph(input: SavePackGraphInput): void {
   assertContextPack(input.pack);
+  if (
+    input.removedItemOriginalDisposition !== undefined &&
+    input.removedItemOriginalDisposition !== 'preserve' &&
+    input.removedItemOriginalDisposition !== 'release'
+  )
+    invalid();
   if (
     input.expectedRevision !== undefined &&
     (!Number.isSafeInteger(input.expectedRevision) ||
@@ -141,6 +155,8 @@ export function assertContextItem(item: ContextItem): void {
       !isOwnedArtifactPath(item.originalRelativePath)) ||
     !isUniqueCanonicalIdArray(item.artifactIds) ||
     !ITEM_STATES.has(item.state) ||
+    (item.retryStage !== undefined && !PIPELINE_STAGES.has(item.retryStage)) ||
+    TERMINAL_ITEM_STATES.has(item.state) !== (item.retryStage !== undefined) ||
     !isUniqueCanonicalIdArray(item.riskFindingIds) ||
     !INCLUSION_MODES.has(item.inclusionMode) ||
     !Number.isSafeInteger(item.sortIndex) ||

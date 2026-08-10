@@ -10,7 +10,7 @@ const source = readFileSync(
 const migrations = [...source.matchAll(/\n\s*`([\s\S]*?)`,/g)].map(
   match => match[1],
 );
-if (migrations.length !== 3)
+if (migrations.length !== 4)
   throw new Error('PRODUCTION_PERSISTENCE_MIGRATION_FIXTURE_INVALID');
 
 const temporary = mkdtempSync(join(tmpdir(), 'ai-context-pack-production-'));
@@ -59,8 +59,9 @@ INSERT INTO artifact_references (owner_type, owner_id, artifact_id) VALUES
 `);
   execute(migrations[1]);
   execute(migrations[2]);
+  execute(migrations[3]);
 
-  assertQuery('PRAGMA user_version;', '3');
+  assertQuery('PRAGMA user_version;', '4');
   assertQuery('SELECT COUNT(*) FROM imports;', '2');
   assertQuery('SELECT COUNT(*) FROM artifacts;', '2');
   assertQuery('SELECT COUNT(*) FROM artifact_references;', '2');
@@ -190,7 +191,7 @@ COMMIT;
   assertQuery('PRAGMA foreign_key_check;', '');
 
   process.stdout.write(
-    `PRODUCTION_PERSISTENCE versions=0->1->2->3 rowsPreserved=2 ` +
+    `PRODUCTION_PERSISTENCE versions=0->1->2->3->4 rowsPreserved=2 ` +
       `orderedRestart=pass concurrentCas=1-of-2 rollback=pass ` +
       `backupRestore=pass referenceCleanup=pass databaseBytes=${
         statSync(database).size

@@ -79,6 +79,8 @@ export interface ContextItem {
   readonly originalRelativePath?: string;
   readonly artifactIds: readonly ArtifactId[];
   readonly state: ItemState;
+  /** Required for terminal/recovery states so retry survives loss of the prior state. */
+  readonly retryStage?: PipelineStage;
   readonly riskFindingIds: readonly RiskFindingId[];
   readonly inclusionMode: InclusionMode;
   readonly sortIndex: number;

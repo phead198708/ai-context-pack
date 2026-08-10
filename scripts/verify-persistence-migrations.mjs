@@ -10,7 +10,7 @@ const source = readFileSync(
 const migrations = [...source.matchAll(/\n\s*`([\s\S]*?)`,/g)].map(
   match => match[1],
 );
-if (migrations.length !== 3)
+if (migrations.length !== 4)
   throw new Error('PERSISTENCE_MIGRATION_FIXTURE_INVALID');
 
 const temporary = mkdtempSync(join(tmpdir(), 'ai-context-pack-migrations-'));
@@ -82,6 +82,26 @@ INSERT INTO artifacts (
     "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('risk_findings', 'export_records', 'recovery_diagnostics', 'cleanup_leases');",
     '4',
   );
+  execute(`
+UPDATE context_items SET state = 'failed';
+INSERT INTO artifacts (
+  id, item_id, relative_path, media_type, byte_count, sha256, created_at,
+  kind, processor_version_json
+) VALUES (
+  '523e4567-e89b-42d3-a456-426614174000',
+  '323e4567-e89b-42d3-a456-426614174000',
+  'Packs/223e4567-e89b-42d3-a456-426614174000/derived/523e4567-e89b-42d3-a456-426614174000.txt',
+  'text/plain', 3, '${'c'.repeat(64)}', '2026-08-03T00:00:01Z',
+  'ocr-text', '{"processor":"fixture","version":"1","contractVersion":1}'
+);
+`);
+  execute(migrations[3]);
+  assertQuery('PRAGMA user_version;', '4');
+  assertQuery(
+    "SELECT COUNT(*) FROM pragma_table_info('context_items') WHERE name = 'retry_stage';",
+    '1',
+  );
+  assertQuery('SELECT retry_stage FROM context_items;', 'analyze');
   const binaryColumns = query(
     `SELECT COUNT(*)
      FROM sqlite_schema AS schema
@@ -94,7 +114,7 @@ INSERT INTO artifacts (
     throw new Error('PERSISTENCE_BINARY_COLUMN_ASSERTION_FAILED');
   assertQuery('PRAGMA foreign_key_check;', '');
   process.stdout.write(
-    `PERSISTENCE_MIGRATIONS versions=0->1->2->3 rowsPreserved=1 materializedItems=1 binaryColumns=${binaryColumns} result=pass\n`,
+    `PERSISTENCE_MIGRATIONS versions=0->1->2->3->4 rowsPreserved=1 materializedItems=1 binaryColumns=${binaryColumns} result=pass\n`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true });

@@ -18,8 +18,9 @@ Issue #7 promotes the Phase 0 persistence decision in [ADR-0002](../adr/0002-sql
 | v1      | Packs, imports, ordered import items, artifacts, references, and recovery journal                                                                           |
 | v2      | Artifact verification timestamp and cleanup indexes                                                                                                         |
 | v3      | Production Pack graph/revision, ordered ContextItems, RiskFindings, ExportRecords, Pack-level artifacts, diagnostics, quarantine records, and cleanup lease |
+| v4      | Exact terminal-item retry stage, retained independently from the failed/cancelled/recovering state                                                          |
 
-Opening a database newer than v3 fails with `SCHEMA_VERSION_UNSUPPORTED`. Migration hooks emit version and phase only. The production repository exposes ContextPack, ContextItem, RiskFinding, ExportRecord, artifact, recovery, diagnostics, quarantine, lease, and development-reset boundaries. Pack graph writes use a monotonic revision; exactly one concurrent compare-and-swap succeeds. Persisted-row decoding is fail-closed: malformed values become retryable `STORAGE_DIVERGENCE_DETECTED`, while an unknown newer schema remains `SCHEMA_VERSION_UNSUPPORTED`.
+Opening a database newer than v4 fails with `SCHEMA_VERSION_UNSUPPORTED`. Migration hooks emit version and phase only. The production repository exposes ContextPack, ContextItem, RiskFinding, ExportRecord, artifact, recovery, diagnostics, quarantine, lease, and development-reset boundaries. Pack graph writes use a monotonic revision; exactly one concurrent compare-and-swap succeeds. Persisted-row decoding is fail-closed: malformed values become retryable `STORAGE_DIVERGENCE_DETECTED`, while an unknown newer schema remains `SCHEMA_VERSION_UNSUPPORTED`.
 
 ## Atomic artifact lifecycle
 
@@ -49,6 +50,14 @@ Malformed, corrupt, identity-mismatched, or unsupported published Inbox entries 
 The first app-lifetime integrity audit hashes every database-known artifact. Missing or mismatched files produce `STORAGE_DIVERGENCE_DETECTED` and metadata-only diagnostics instead of a crash. Native owned-file enumeration includes strictly named `<artifact>.<ext>.partial` files, so interrupted publications contribute to storage usage and are quarantined by scheduled cleanup or removed by the explicit development reset. Storage usage exposes database and native totals plus an explicit `divergent` flag.
 
 Scheduled cleanup and derived/export publication are serialized by a five-minute database lifecycle lease. Cleanup applies a 24-hour unreferenced-artifact cutoff, rechecks references inside the delete transaction, protects Pack IDs with active recovery journals, quarantines unknown files, and purges quarantine after seven days. Native file mtime and SQLite quarantine `created_at` use the same retention cutoff before bytes and records are marked purged, so newly quarantined bytes remain visible in storage totals. Native quarantine and purge share a cross-caller lock. Cleanup diagnostics contain stable codes, phases, byte counts, counts, and irreversible internal IDs only.
+
+Removing an item through the Pack editor preserves its immutable original by default. The same
+exclusive graph transaction inserts a `library-item` artifact reference before releasing that
+item's Pack references; derived artifacts may then follow normal reference-aware retention.
+Explicit destructive removal instead releases the original reference after React Native obtains
+confirmation. Physical deletion remains owned by reference-aware cleanup so restart, recovery,
+and cleanup cannot race a UI transaction. See
+[Pack library and editor shell](pack-library-editor.md).
 
 ## Development reset
 
