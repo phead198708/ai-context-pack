@@ -1031,11 +1031,24 @@ private data class ParsedForwardIndirectLengthObjects(
   val end: Int,
 )
 
-private data class ParsedForwardIndirectObject(
+private data class ForwardPDFObjectKey(
   val objectNumber: Long,
   val generation: Long,
-  val directLength: Long?,
+)
+
+private data class PendingForwardPDFStream(
+  val lengthReference: ForwardPDFObjectKey,
+  val streamStart: Int,
+  val endstreamStart: Int,
+)
+
+private data class ParsedForwardPDFObjectSequence(
+  val directIntegers: Map<ForwardPDFObjectKey, Long>,
   val end: Int,
+)
+
+private class ForwardPDFObjectParseBudget(
+  var structuralCandidates: Int = 0,
 )
 
 private fun parseXrefStreamSuffix(
@@ -1074,39 +1087,56 @@ private fun parseForwardIndirectLengthObjects(
   start: Int,
   reference: PDFIndirectReference,
 ): ParsedForwardIndirectLengthObjects {
-  var index = skipPDFWhitespaceAndComments(bytes, start, bytes.size)
-  var declaredLength: Long? = null
-  var objectCount = 0
-  while (!isPDFKeywordAt(bytes, index, "startxref")) {
-    objectCount += 1
-    if (objectCount > 256) {
-      throw IOException("Too many forward PDF xref-stream objects")
-    }
-    val parsed = parseForwardIndirectObject(bytes, index, reference)
-    if (
-      parsed.objectNumber == reference.objectNumber &&
-      parsed.generation == reference.generation
-    ) {
-      if (declaredLength != null || parsed.directLength == null) {
-        throw IOException("Ambiguous forward PDF xref-stream length object")
-      }
-      declaredLength = parsed.directLength
-    }
-    index = skipPDFWhitespaceAndComments(bytes, parsed.end, bytes.size)
+  val parsed = parseForwardPDFObjectSequence(
+    bytes = bytes,
+    start = start,
+    directIntegers = emptyMap(),
+    seenObjects = emptySet(),
+    pendingStreams = emptyList(),
+    objectCount = 0,
+    budget = ForwardPDFObjectParseBudget(),
+  )
+  if (parsed.size != 1) {
+    throw IOException("Forward PDF xref-stream object sequence is ambiguous")
   }
+  val result = parsed.single()
+  val lengthKey = ForwardPDFObjectKey(reference.objectNumber, reference.generation)
   return ParsedForwardIndirectLengthObjects(
-    length = declaredLength
+    length = result.directIntegers[lengthKey]
       ?: throw IOException("Missing forward PDF xref-stream length object"),
-    end = index,
+    end = result.end,
   )
 }
 
-private fun parseForwardIndirectObject(
+private fun parseForwardPDFObjectSequence(
   bytes: ByteArray,
   start: Int,
-  lengthReference: PDFIndirectReference,
-): ParsedForwardIndirectObject {
+  directIntegers: Map<ForwardPDFObjectKey, Long>,
+  seenObjects: Set<ForwardPDFObjectKey>,
+  pendingStreams: List<PendingForwardPDFStream>,
+  objectCount: Int,
+  budget: ForwardPDFObjectParseBudget,
+): List<ParsedForwardPDFObjectSequence> {
   var index = skipPDFWhitespaceAndComments(bytes, start, bytes.size)
+  if (isPDFKeywordAt(bytes, index, "startxref")) {
+    val pendingValid = pendingStreams.all { pending ->
+      val length = directIntegers[pending.lengthReference] ?: return@all false
+      matchesDeclaredForwardPDFStreamLength(
+        bytes = bytes,
+        streamStart = pending.streamStart,
+        endstreamStart = pending.endstreamStart,
+        declaredLength = length,
+      )
+    }
+    return if (pendingValid) {
+      listOf(ParsedForwardPDFObjectSequence(directIntegers, index))
+    } else {
+      emptyList()
+    }
+  }
+  if (objectCount >= 256) {
+    throw IOException("Too many forward PDF xref-stream objects")
+  }
   val objectNumber = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)
     ?: throw IOException("Invalid forward PDF indirect object number")
   index = skipPDFWhitespaceAndComments(bytes, objectNumber.end, bytes.size)
@@ -1116,22 +1146,27 @@ private fun parseForwardIndirectObject(
   if (!isPDFKeywordAt(bytes, index, "obj")) {
     throw IOException("Invalid forward PDF indirect object header")
   }
+  val objectKey = ForwardPDFObjectKey(objectNumber.value, generation.value)
+  if (seenObjects.contains(objectKey)) {
+    throw IOException("Duplicate forward PDF indirect object")
+  }
+  val updatedSeenObjects = seenObjects + objectKey
   index = skipPDFWhitespaceAndComments(bytes, index + "obj".length, bytes.size)
-  val isLengthObject = objectNumber.value == lengthReference.objectNumber &&
-    generation.value == lengthReference.generation
-  if (isLengthObject) {
-    val length = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)
-      ?: throw IOException("Invalid forward PDF xref-stream length value")
-    index = skipPDFWhitespaceAndComments(bytes, length.end, bytes.size)
-    if (!isPDFKeywordAt(bytes, index, "endobj")) {
-      throw IOException("Invalid forward PDF xref-stream length object")
+  val directInteger = parsePDFNonNegativeIntegerToken(bytes, index, bytes.size)
+  if (directInteger != null) {
+    val afterInteger = skipPDFWhitespaceAndComments(bytes, directInteger.end, bytes.size)
+    if (isPDFKeywordAt(bytes, afterInteger, "endobj")) {
+      val updatedIntegers = directIntegers + (objectKey to directInteger.value)
+      return parseForwardPDFObjectSequence(
+        bytes = bytes,
+        start = afterInteger + "endobj".length,
+        directIntegers = updatedIntegers,
+        seenObjects = updatedSeenObjects,
+        pendingStreams = pendingStreams,
+        objectCount = objectCount + 1,
+        budget = budget,
+      )
     }
-    return ParsedForwardIndirectObject(
-      objectNumber = objectNumber.value,
-      generation = generation.value,
-      directLength = length.value,
-      end = index + "endobj".length,
-    )
   }
 
   val valueStart = index
@@ -1163,28 +1198,156 @@ private fun parseForwardIndirectObject(
     ) {
       throw IOException("Invalid forward PDF stream dictionary")
     }
-    val streamLength = dictionary.integerValues["Length"]
-      ?: throw IOException("Forward PDF stream length must be direct")
     val streamStart = consumeRequiredPDFLineEnding(bytes, index + "stream".length)
-    val streamEnd = streamStart.toLong() + streamLength
-    if (streamEnd < streamStart || streamEnd > bytes.size.toLong()) {
-      throw IOException("Forward PDF stream bounds are invalid")
+    val directLength = dictionary.integerValues["Length"]
+    val indirectLength = dictionary.indirectReferences["Length"]?.let {
+      ForwardPDFObjectKey(it.objectNumber, it.generation)
     }
-    index = consumeOptionalPDFLineEnding(bytes, streamEnd.toInt())
-    if (!isPDFKeywordAt(bytes, index, "endstream")) {
-      throw IOException("Missing forward PDF endstream")
+    if ((directLength == null) == (indirectLength == null)) {
+      throw IOException("Invalid forward PDF stream length")
     }
-    index = skipPDFWhitespaceAndComments(bytes, index + "endstream".length, bytes.size)
+    if (directLength != null) {
+      val objectEnd = parseForwardPDFStreamObjectEnd(
+        bytes = bytes,
+        streamStart = streamStart,
+        streamLength = directLength,
+      )
+      return parseForwardPDFObjectSequence(
+        bytes = bytes,
+        start = objectEnd,
+        directIntegers = directIntegers,
+        seenObjects = updatedSeenObjects,
+        pendingStreams = pendingStreams,
+        objectCount = objectCount + 1,
+        budget = budget,
+      )
+    }
+    val reference = checkNotNull(indirectLength)
+    val resolvedLength = directIntegers[reference]
+    if (resolvedLength != null) {
+      val objectEnd = parseForwardPDFStreamObjectEnd(
+        bytes = bytes,
+        streamStart = streamStart,
+        streamLength = resolvedLength,
+      )
+      return parseForwardPDFObjectSequence(
+        bytes = bytes,
+        start = objectEnd,
+        directIntegers = directIntegers,
+        seenObjects = updatedSeenObjects,
+        pendingStreams = pendingStreams,
+        objectCount = objectCount + 1,
+        budget = budget,
+      )
+    }
+    val results = mutableListOf<ParsedForwardPDFObjectSequence>()
+    val keyword = "endstream".toByteArray(Charsets.US_ASCII)
+    for (candidate in streamStart..bytes.size - keyword.size) {
+      if (!isForwardPDFEndstreamAt(bytes, candidate)) continue
+      budget.structuralCandidates += 1
+      if (budget.structuralCandidates > 128) {
+        throw IOException("Too many forward PDF stream candidates")
+      }
+      val objectEnd = try {
+        parseForwardPDFStreamObjectEndAt(bytes, candidate)
+      } catch (_: IOException) {
+        continue
+      }
+      val branch = try {
+        parseForwardPDFObjectSequence(
+          bytes = bytes,
+          start = objectEnd,
+          directIntegers = directIntegers,
+          seenObjects = updatedSeenObjects,
+          pendingStreams = pendingStreams + PendingForwardPDFStream(
+            lengthReference = reference,
+            streamStart = streamStart,
+            endstreamStart = candidate,
+          ),
+          objectCount = objectCount + 1,
+          budget = budget,
+        )
+      } catch (_: IOException) {
+        emptyList()
+      }
+      results += branch
+      if (results.size > 1) return results.take(2)
+    }
+    return results
   }
   if (!isPDFKeywordAt(bytes, index, "endobj")) {
     throw IOException("Missing forward PDF endobj")
   }
-  return ParsedForwardIndirectObject(
-    objectNumber = objectNumber.value,
-    generation = generation.value,
-    directLength = null,
-    end = index + "endobj".length,
+  return parseForwardPDFObjectSequence(
+    bytes = bytes,
+    start = index + "endobj".length,
+    directIntegers = directIntegers,
+    seenObjects = updatedSeenObjects,
+    pendingStreams = pendingStreams,
+    objectCount = objectCount + 1,
+    budget = budget,
   )
+}
+
+private fun parseForwardPDFStreamObjectEnd(
+  bytes: ByteArray,
+  streamStart: Int,
+  streamLength: Long,
+): Int {
+  val declaredEnd = streamStart.toLong() + streamLength
+  if (
+    streamLength < 0 ||
+    declaredEnd < streamStart ||
+    declaredEnd > bytes.size.toLong()
+  ) {
+    throw IOException("Forward PDF stream bounds are invalid")
+  }
+  val endstreamStart = consumeOptionalPDFLineEnding(bytes, declaredEnd.toInt())
+  return parseForwardPDFStreamObjectEndAt(bytes, endstreamStart)
+}
+
+private fun parseForwardPDFStreamObjectEndAt(bytes: ByteArray, endstreamStart: Int): Int {
+  if (!isForwardPDFEndstreamAt(bytes, endstreamStart)) {
+    throw IOException("Missing forward PDF endstream")
+  }
+  val index = skipPDFWhitespaceAndComments(
+    bytes,
+    endstreamStart + "endstream".length,
+    bytes.size,
+  )
+  if (!isPDFKeywordAt(bytes, index, "endobj")) {
+    throw IOException("Missing forward PDF endobj")
+  }
+  return index + "endobj".length
+}
+
+private fun isForwardPDFEndstreamAt(bytes: ByteArray, index: Int): Boolean {
+  val keyword = "endstream".toByteArray(Charsets.US_ASCII)
+  return bytes.regionMatches(index, keyword) && isPDFTokenBoundary(bytes, index + keyword.size)
+}
+
+private fun matchesDeclaredForwardPDFStreamLength(
+  bytes: ByteArray,
+  streamStart: Int,
+  endstreamStart: Int,
+  declaredLength: Long,
+): Boolean {
+  val declaredEnd = streamStart.toLong() + declaredLength
+  if (
+    declaredLength < 0 ||
+    declaredEnd < streamStart ||
+    declaredEnd > endstreamStart
+  ) return false
+  return when (endstreamStart - declaredEnd) {
+    0L -> true
+    1L -> {
+      val separator = bytes[declaredEnd.toInt()].toInt() and 0xff
+      separator == '\n'.code || separator == '\r'.code
+    }
+    2L -> bytes[declaredEnd.toInt()] == '\r'.code.toByte() &&
+      bytes[declaredEnd.toInt() + 1] == '\n'.code.toByte()
+    else -> false
+  }
 }
 
 private fun isCompletePDFIndirectObjectValue(

@@ -138,6 +138,37 @@ class AndroidPDFProcessorTest {
       forwardObjectsAfterLength =
         "4 0 obj\n<< /Length 3 >>\nstream\nabc\nendstream\nendobj\n",
     )
+    val harmlessInterveningIndirectLengthStreamsXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+      forwardObjectsBeforeLength =
+        "3 0 obj\n<< /Length 4 0 R >>\nstream\nabc\nendstream\nendobj\n" +
+        "4 0 obj\n3\nendobj\n",
+      forwardObjectsAfterLength =
+        "5 0 obj\n<< /Length 6 0 R >>\nstream\nxyz\nendstream\nendobj\n" +
+        "6 0 obj\n3\nendobj\n",
+    )
+    val harmlessResolvedInterveningIndirectLengthStreamXrefStream =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        forwardLengthObject = true,
+        forwardObjectsBeforeLength =
+          "4 0 obj\n3\nendobj\n" +
+          "3 0 obj\n<< /Length 4 0 R >>\nstream\nabcendstream\nendobj\n",
+      )
+    val mismatchedInterveningIndirectLengthStreamXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+      forwardObjectsBeforeLength =
+        "3 0 obj\n<< /Length 4 0 R >>\nstream\nabc\nendstream\nendobj\n" +
+        "4 0 obj\n2\nendobj\n",
+    )
+    val missingInterveningIndirectLengthStreamXrefStream = xrefStreamPDFWithIndirectLength(
+      streamPayload = "abc",
+      forwardLengthObject = true,
+      forwardObjectsBeforeLength =
+        "3 0 obj\n<< /Length 4 0 R >>\nstream\nabcendstream\nendobj\n",
+    )
     val duplicateForwardIndirectLengthXrefStream = xrefStreamPDFWithIndirectLength(
       streamPayload = "abc",
       forwardLengthObject = true,
@@ -240,6 +271,11 @@ class AndroidPDFProcessorTest {
       assertEquals(false, hasPDFEncryptionMarker(harmlessZeroLengthNoEolXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessForwardIndirectLengthXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(harmlessInterveningForwardObjectsXrefStream))
+      assertEquals(false, hasPDFEncryptionMarker(harmlessInterveningIndirectLengthStreamsXrefStream))
+      assertEquals(
+        false,
+        hasPDFEncryptionMarker(harmlessResolvedInterveningIndirectLengthStreamXrefStream),
+      )
       assertEquals(false, hasPDFEncryptionMarker(harmlessPositiveLengthXrefStream))
       assertTrue(hasPDFEncryptionMarker(encryptedXrefStream))
       assertEquals(false, hasPDFEncryptionMarker(nestedClassic))
@@ -287,6 +323,12 @@ class AndroidPDFProcessorTest {
         hasPDFEncryptionMarker(malformedInterveningForwardObjectXrefStream)
       }
       assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(mismatchedInterveningIndirectLengthStreamXrefStream)
+      }
+      assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(missingInterveningIndirectLengthStreamXrefStream)
+      }
+      assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(negativePreviousRevision)
       }
     } finally {
@@ -300,6 +342,10 @@ class AndroidPDFProcessorTest {
       harmlessZeroLengthNoEolXrefStream.delete()
       harmlessForwardIndirectLengthXrefStream.delete()
       harmlessInterveningForwardObjectsXrefStream.delete()
+      harmlessInterveningIndirectLengthStreamsXrefStream.delete()
+      harmlessResolvedInterveningIndirectLengthStreamXrefStream.delete()
+      mismatchedInterveningIndirectLengthStreamXrefStream.delete()
+      missingInterveningIndirectLengthStreamXrefStream.delete()
       duplicateForwardIndirectLengthXrefStream.delete()
       malformedInterveningForwardObjectXrefStream.delete()
       mismatchedForwardIndirectLengthXrefStream.delete()
