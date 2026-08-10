@@ -8,6 +8,7 @@ private let appGroupIdentifier = "group.com.example.aicontextpack"
 private enum AppleVisionOCRProcessScope {
   static let registry = OCRCancellationRegistry()
   static let pdfFinishCoordinator = PDFProcessorFinishCoordinator()
+  static let plainTextReadCoordinator = PlainTextReadCoordinator()
 }
 
 public final class ContextNativeModule: Module {
@@ -21,6 +22,7 @@ public final class ContextNativeModule: Module {
     finishProcessor: pdfProcessor.finish
   )
   private let pdfFinishCoordinator = AppleVisionOCRProcessScope.pdfFinishCoordinator
+  private let plainTextReadCoordinator = AppleVisionOCRProcessScope.plainTextReadCoordinator
   private let ocrLifetime = OCRModuleLifetime()
   private let pdfLifetime = OCRModuleLifetime()
   private var memoryWarningObserver: NSObjectProtocol?
@@ -532,9 +534,7 @@ public final class ContextNativeModule: Module {
     AsyncFunction("readPlainTextFile") { (fileUri: String) async throws -> [String: Any] in
       let url = try controlledArtifactSourceURL(fileUri)
       do {
-        return try await Task.detached(priority: .userInitiated) {
-          try PlainTextFileReader.read(fileURL: url)
-        }.value
+        return try await self.plainTextReadCoordinator.read(fileURL: url)
       } catch let error as PlainTextFileReaderError {
         throw NativeError(error.stableCode)
       } catch {

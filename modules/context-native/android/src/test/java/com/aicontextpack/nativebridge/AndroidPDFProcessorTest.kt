@@ -153,6 +153,35 @@ class AndroidPDFProcessorTest {
         objectsAfterBackwardLengthBeforeXrefStream =
           "7 0 obj (abc%def) endobj\n",
       )
+    val harmlessBackwardLengthWithCommentInsideDictionary =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        objectsAfterBackwardLengthBeforeXrefStream =
+          "7 0 obj\n<< /Note 1 % endobj 99 0 obj\n/Value 2 >>\nendobj\n",
+      )
+    val harmlessBackwardLengthAfterPoisonedDirectStream =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        objectsAfterBackwardLengthBeforeXrefStream =
+          "7 0 obj\n<< /Length 2 >>\nstream\n(<\nendstream\nendobj\n" +
+            "% endobj 99 0 obj (comment syntax must remain opaque)\n",
+      )
+    val harmlessBackwardLengthAfterPoisonedIndirectStream =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        objectsAfterBackwardLengthBeforeXrefStream =
+          "8 0 obj\n2\nendobj\n" +
+            "7 0 obj\n<< /Length 8 0 R >>\nstream\n(<\nendstream\nendobj\n" +
+            "% endobj 99 0 obj <comment syntax must remain opaque>\n",
+      )
+    val mismatchedBackwardLengthAfterPoisonedIndirectStream =
+      xrefStreamPDFWithIndirectLength(
+        streamPayload = "abc",
+        objectsAfterBackwardLengthBeforeXrefStream =
+          "8 0 obj\n1\nendobj\n" +
+            "7 0 obj\n<< /Length 8 0 R >>\nstream\n(<\nendstream\nendobj\n" +
+            "% endobj 99 0 obj <comment syntax must remain opaque>\n",
+      )
     val harmlessDirectLengthWithBidirectionalBackwardDependencies =
       xrefStreamPDFWithDirectLength(
         streamPayload = "x".repeat(70),
@@ -381,6 +410,18 @@ class AndroidPDFProcessorTest {
       )
       assertEquals(
         false,
+        hasPDFEncryptionMarker(harmlessBackwardLengthWithCommentInsideDictionary),
+      )
+      assertEquals(
+        false,
+        hasPDFEncryptionMarker(harmlessBackwardLengthAfterPoisonedDirectStream),
+      )
+      assertEquals(
+        false,
+        hasPDFEncryptionMarker(harmlessBackwardLengthAfterPoisonedIndirectStream),
+      )
+      assertEquals(
+        false,
         hasPDFEncryptionMarker(harmlessDirectLengthWithBidirectionalBackwardDependencies),
       )
       assertEquals(
@@ -445,6 +486,9 @@ class AndroidPDFProcessorTest {
         hasPDFEncryptionMarker(mismatchedBackwardIndirectLengthXrefStream)
       }
       assertThrows(IOException::class.java) {
+        hasPDFEncryptionMarker(mismatchedBackwardLengthAfterPoisonedIndirectStream)
+      }
+      assertThrows(IOException::class.java) {
         hasPDFEncryptionMarker(mismatchedDirectLengthWithBidirectionalBackwardDependencies)
       }
       assertThrows(IOException::class.java) {
@@ -488,6 +532,10 @@ class AndroidPDFProcessorTest {
       harmlessDirectLengthWithInterveningBackwardLengthStream.delete()
       harmlessDirectLengthWithCommentedTerminatorAndHeader.delete()
       harmlessBackwardLengthWithPercentInsideLiteral.delete()
+      harmlessBackwardLengthWithCommentInsideDictionary.delete()
+      harmlessBackwardLengthAfterPoisonedDirectStream.delete()
+      harmlessBackwardLengthAfterPoisonedIndirectStream.delete()
+      mismatchedBackwardLengthAfterPoisonedIndirectStream.delete()
       harmlessDirectLengthWithBidirectionalBackwardDependencies.delete()
       mismatchedDirectLengthWithBidirectionalBackwardDependencies.delete()
       harmlessForwardIndirectLengthWithBackwardOrdinaryLength.delete()
@@ -533,7 +581,7 @@ class AndroidPDFProcessorTest {
   }
 
   @Test
-  fun backwardObjectIndexIsCancellableWithinItsBoundedSinglePassScan() {
+  fun backwardObjectSequenceDiscoveryIsCancellableWithinItsBoundedScan() {
     val file = xrefStreamPDFWithIndirectLength(
       streamPayload = "abc",
       objectsBeforeXrefStream = " ".repeat(2 * 1_024 * 1_024),

@@ -704,6 +704,7 @@ final class PDFExtractionTests: XCTestCase {
 
   func testPlainTextReaderIsStrictBoundedAndPreservesBytes() throws {
     XCTAssertEqual(PlainTextFileReaderError.resultInvalid.stableCode, "TEXT_RESULT_INVALID")
+    XCTAssertEqual(PlainTextFileReaderError.resourceBusy.stableCode, "TEXT_RESOURCE_BUSY")
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -733,6 +734,97 @@ final class PDFExtractionTests: XCTestCase {
     XCTAssertThrowsError(try PlainTextFileReader.read(fileURL: link)) {
       XCTAssertEqual($0 as? PlainTextFileReaderError, .invalidLocalFile)
     }
+  }
+
+  func testPlainTextCoordinatorSerializesBoundsAndReleasesEverySlot() throws {
+    let coordinator = PlainTextReadCoordinator(
+      maximumOutstanding: 3,
+      queue: DispatchQueue(label: "PlainTextReadCoordinatorTests")
+    )
+    let firstStarted = DispatchSemaphore(value: 0)
+    let releaseFirst = DispatchSemaphore(value: 0)
+    let completions = DispatchGroup()
+    let stateLock = NSLock()
+    var active = 0
+    var maximumActive = 0
+    var completed = 0
+    var completionFailures: [String] = []
+
+    for index in 0..<3 {
+      completions.enter()
+      try coordinator.submit(
+        operation: {
+          stateLock.lock()
+          active += 1
+          maximumActive = max(maximumActive, active)
+          stateLock.unlock()
+          if index == 0 {
+            firstStarted.signal()
+            XCTAssertEqual(releaseFirst.wait(timeout: .now() + 2), .success)
+          }
+          stateLock.lock()
+          active -= 1
+          stateLock.unlock()
+          return ["index": index]
+        },
+        completion: { result in
+          switch result {
+          case .success:
+            stateLock.lock()
+            completed += 1
+            stateLock.unlock()
+          case let .failure(error):
+            stateLock.lock()
+            completionFailures.append(String(describing: error))
+            stateLock.unlock()
+          }
+          completions.leave()
+        }
+      )
+    }
+
+    XCTAssertEqual(firstStarted.wait(timeout: .now() + 2), .success)
+    XCTAssertThrowsError(
+      try coordinator.submit(operation: { [:] }, completion: { _ in })
+    ) {
+      XCTAssertEqual($0 as? PlainTextFileReaderError, .resourceBusy)
+    }
+    releaseFirst.signal()
+    XCTAssertEqual(completions.wait(timeout: .now() + 2), .success)
+    stateLock.lock()
+    XCTAssertEqual(maximumActive, 1)
+    XCTAssertEqual(completed, 3)
+    XCTAssertEqual(completionFailures, [])
+    stateLock.unlock()
+
+    let failedCompletion = DispatchSemaphore(value: 0)
+    try coordinator.submit(
+      operation: { throw PlainTextFileReaderError.resultInvalid },
+      completion: { result in
+        if case let .failure(error) = result {
+          XCTAssertEqual(error as? PlainTextFileReaderError, .resultInvalid)
+        } else {
+          XCTFail("Expected the synthetic read to fail")
+        }
+        failedCompletion.signal()
+      }
+    )
+    XCTAssertEqual(failedCompletion.wait(timeout: .now() + 2), .success)
+
+    let replacementCompletion = DispatchSemaphore(value: 0)
+    try coordinator.submit(
+      operation: { ["replacement": true] },
+      completion: { result in
+        guard case let .success(value) = result else {
+          XCTFail("Expected a released slot to accept replacement work")
+          replacementCompletion.signal()
+          return
+        }
+        XCTAssertEqual(value["replacement"] as? Bool, true)
+        replacementCompletion.signal()
+      }
+    )
+    XCTAssertEqual(replacementCompletion.wait(timeout: .now() + 2), .success)
   }
 
   private func fixtureURL(_ name: String) -> URL {

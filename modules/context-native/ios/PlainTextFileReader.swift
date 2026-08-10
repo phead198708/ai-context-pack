@@ -4,6 +4,7 @@ enum PlainTextFileReaderError: Error, Equatable {
   case invalidLocalFile
   case invalidUTF8
   case tooLarge
+  case resourceBusy
   case resultInvalid
 
   var stableCode: String {
@@ -11,8 +12,79 @@ enum PlainTextFileReaderError: Error, Equatable {
     case .invalidLocalFile: return "INVALID_LOCAL_FILE_URI"
     case .invalidUTF8: return "TEXT_INVALID_UTF8"
     case .tooLarge: return "TEXT_TOO_LARGE"
+    case .resourceBusy: return "TEXT_RESOURCE_BUSY"
     case .resultInvalid: return "TEXT_RESULT_INVALID"
     }
+  }
+}
+
+final class PlainTextReadCoordinator: @unchecked Sendable {
+  typealias ReadOperation = () throws -> [String: Any]
+  typealias Completion = (Result<[String: Any], Error>) -> Void
+
+  static let defaultMaximumOutstanding = 3
+
+  private let lock = NSLock()
+  private let queue: DispatchQueue
+  private let maximumOutstanding: Int
+  private var outstanding = 0
+
+  init(
+    maximumOutstanding: Int = defaultMaximumOutstanding,
+    queue: DispatchQueue = DispatchQueue(
+      label: "com.example.aicontextpack.plain-text",
+      qos: .userInitiated
+    )
+  ) {
+    precondition(maximumOutstanding > 0)
+    self.maximumOutstanding = maximumOutstanding
+    self.queue = queue
+  }
+
+  func read(fileURL: URL) async throws -> [String: Any] {
+    try await withCheckedThrowingContinuation { continuation in
+      do {
+        try submit(
+          operation: { try PlainTextFileReader.read(fileURL: fileURL) },
+          completion: { continuation.resume(with: $0) }
+        )
+      } catch {
+        continuation.resume(throwing: error)
+      }
+    }
+  }
+
+  func submit(
+    operation: @escaping ReadOperation,
+    completion: @escaping Completion
+  ) throws {
+    try reserve()
+    queue.async { [self] in
+      let result: Result<[String: Any], Error>
+      do {
+        result = .success(try operation())
+      } catch {
+        result = .failure(error)
+      }
+      release()
+      completion(result)
+    }
+  }
+
+  private func reserve() throws {
+    lock.lock()
+    defer { lock.unlock() }
+    guard outstanding < maximumOutstanding else {
+      throw PlainTextFileReaderError.resourceBusy
+    }
+    outstanding += 1
+  }
+
+  private func release() {
+    lock.lock()
+    precondition(outstanding > 0)
+    outstanding -= 1
+    lock.unlock()
   }
 }
 
