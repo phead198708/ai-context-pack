@@ -307,4 +307,8 @@ CREATE UNIQUE INDEX pipeline_runs_one_active_item
 
 PRAGMA user_version = 5;
 `,
+  `
+ALTER TABLE pipeline_runs ADD COLUMN published_artifact_json TEXT;
+PRAGMA user_version = 6;
+`,
 ] as const;

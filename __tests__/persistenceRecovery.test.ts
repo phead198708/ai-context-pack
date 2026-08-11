@@ -669,8 +669,8 @@ describe('persistence path and migration decisions', () => {
       expect(isOwnedArtifactPath(invalid)).toBe(false);
   });
 
-  test('schema migrates through v1-v5 without BLOB content columns', () => {
-    expect(PERSISTENCE_MIGRATIONS).toHaveLength(5);
+  test('schema migrates through v1-v6 without BLOB content columns', () => {
+    expect(PERSISTENCE_MIGRATIONS).toHaveLength(6);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
       'relative_path TEXT NOT NULL UNIQUE',
@@ -698,6 +698,10 @@ describe('persistence path and migration decisions', () => {
     );
     expect(PERSISTENCE_MIGRATIONS[4]).toContain(
       'CREATE UNIQUE INDEX pipeline_runs_one_active_item',
+    );
+    expect(PERSISTENCE_MIGRATIONS[5]).toContain('PRAGMA user_version = 6');
+    expect(PERSISTENCE_MIGRATIONS[5]).toContain(
+      'ALTER TABLE pipeline_runs ADD COLUMN published_artifact_json TEXT',
     );
     for (const migration of PERSISTENCE_MIGRATIONS)
       expect(migration).not.toMatch(/\bBLOB\b/);

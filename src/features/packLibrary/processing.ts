@@ -192,6 +192,30 @@ export class DurablePackProcessingCoordinator
           }
           return;
         }
+        if (artifact) {
+          try {
+            const checkpointed = await repository.checkpointPipelineRunArtifact(
+              {
+                runId: run.id,
+                claimVersion,
+                updatedAt: this.timestamp(packCreatedAt),
+                artifact,
+              },
+            );
+            if (!checkpointed) throw new DomainError('PERSISTENCE_CONFLICT');
+          } catch (checkpointError) {
+            await heartbeat.stop();
+            await this.reportUnexpectedFailure(
+              run,
+              checkpointError,
+              repository,
+              claimVersion,
+              packCreatedAt,
+              false,
+            );
+            return;
+          }
+        }
         const heartbeatFailure = await heartbeat.stop();
         if (heartbeatFailure !== undefined) {
           await Promise.allSettled([handle.cancel()]);
@@ -386,6 +410,22 @@ export class NativeExtractionStageWorker implements PackStageWorker {
       publicationLeaseHeld = false;
       await repository.releaseCleanupLease(publicationOwnerId);
     };
+    const acquirePublicationLease = async (
+      graphCreatedAt: string,
+    ): Promise<void> => {
+      if (!repository) throw new DomainError('PERSISTENCE_CONFLICT');
+      const acquiredAt = validatedTimestamp(this.now(), graphCreatedAt);
+      publicationLeaseHeld = await repository.acquireCleanupLeaseForPipelineRun(
+        run.id,
+        run.claimVersion,
+        publicationOwnerId,
+        acquiredAt,
+        new Date(
+          Date.parse(acquiredAt) + this.publicationLeaseMs,
+        ).toISOString(),
+      );
+      if (!publicationLeaseHeld) throw new DomainError('PERSISTENCE_CONFLICT');
+    };
     const result = (async (): Promise<Artifact | undefined> => {
       try {
         if (run.stage !== 'extract')
@@ -393,12 +433,30 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         repository = await this.getRepository();
         const graph = await repository.findPackGraph(run.packId);
         const item = graph?.items.find(value => value.id === run.itemId);
+        if (!graph || !item)
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        if (run.publishedArtifact) {
+          await acquirePublicationLease(graph.pack.createdAt);
+          const checkpoint = run.publishedArtifact;
+          const verification = await this.native.verifyArtifact(
+            checkpoint.relativePath,
+            checkpoint.byteCount,
+            checkpoint.sha256,
+          );
+          if (
+            verification.status !== 'verified' ||
+            verification.relativePath !== checkpoint.relativePath ||
+            verification.byteCount !== checkpoint.byteCount ||
+            verification.sha256 !== checkpoint.sha256
+          )
+            throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
+          return checkpoint;
+        }
         const artifacts = await repository.listArtifactRecords();
         const original = artifacts.find(
           value => value.itemId === run.itemId && value.kind === 'original',
         );
-        if (!graph || !item || !original)
-          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        if (!original) throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
         const verification = await this.native.verifyArtifact(
           original.relativePath,
           original.byteCount,
@@ -462,24 +520,42 @@ export class NativeExtractionStageWorker implements PackStageWorker {
           processorVersion = value.revision;
         }
         if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
-        const acquiredAt = validatedTimestamp(this.now(), graph.pack.createdAt);
-        publicationLeaseHeld =
-          await repository.acquireCleanupLeaseForPipelineRun(
-            run.id,
-            run.claimVersion,
-            publicationOwnerId,
-            acquiredAt,
-            new Date(
-              Date.parse(acquiredAt) + this.publicationLeaseMs,
-            ).toISOString(),
-          );
-        if (!publicationLeaseHeld)
-          throw new DomainError('PERSISTENCE_CONFLICT');
+        await acquirePublicationLease(graph.pack.createdAt);
         const relativePath = ownedDerivedPath(run.packId, run.id, 'txt');
-        const published = await this.native.writeTextArtifact(
-          relativePath,
-          text,
-        );
+        if (artifacts.some(artifact => artifact.relativePath === relativePath))
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        let published: Awaited<ReturnType<NativeAdapter['writeTextArtifact']>>;
+        try {
+          published = await this.native.writeTextArtifact(relativePath, text);
+        } catch (error) {
+          if (processingErrorCode(error) !== 'STORAGE_ARTIFACT_IMMUTABLE')
+            throw error;
+          const quarantined = await this.native.quarantineOwnedArtifact(
+            relativePath,
+          );
+          if (
+            !quarantined.quarantined ||
+            quarantined.quarantineId === undefined ||
+            quarantined.anonymousId === undefined ||
+            quarantined.byteCount === undefined
+          )
+            throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+          const quarantinedAt = validatedTimestamp(
+            this.now(),
+            graph.pack.createdAt,
+          );
+          await repository.recordQuarantine({
+            id: quarantined.quarantineId,
+            anonymousId: quarantined.anonymousId,
+            reasonCode: 'STORAGE_ARTIFACT_IMMUTABLE',
+            byteCount: quarantined.byteCount,
+            createdAt: quarantinedAt,
+            purgeAfter: new Date(
+              Date.parse(quarantinedAt) + 7 * 24 * 60 * 60 * 1_000,
+            ).toISOString(),
+          });
+          published = await this.native.writeTextArtifact(relativePath, text);
+        }
         if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
         return {
           id: run.id,
@@ -512,7 +588,13 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         cancelled = true;
         await cancelActive?.();
       },
-      finalize: releasePublicationLease,
+      finalize: async () => {
+        // Cancellation cannot interrupt an in-flight atomic publication. Keep
+        // its global lease until the worker promise observes the native result
+        // so cleanup never races bytes that are still being renamed/fsynced.
+        await result.catch(() => undefined);
+        await releasePublicationLease();
+      },
     };
   }
 }

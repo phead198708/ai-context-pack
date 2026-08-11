@@ -22,7 +22,10 @@ import { NativeBoundaryError } from '../src/infrastructure/createNativeAdapter';
 import { nativeAdapter } from '../src/infrastructure/nativeAdapter';
 import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
 import { mainAppPicker } from '../src/infrastructure/mainAppPickers';
-import { packLibraryController } from '../src/features/packLibrary/runtime';
+import {
+  packLibraryController,
+  subscribePackProcessingFailures,
+} from '../src/features/packLibrary/runtime';
 import {
   createEmptyDraftPack,
   persistenceInboxProcessor,
@@ -79,6 +82,7 @@ jest.mock('../src/infrastructure/mainAppPickers', () => ({
   },
 }));
 jest.mock('../src/features/packLibrary/runtime', () => ({
+  subscribePackProcessingFailures: jest.fn(),
   packLibraryController: {
     load: jest.fn().mockResolvedValue({
       sections: {
@@ -115,6 +119,10 @@ const mockCreateEmptyDraftPack = createEmptyDraftPack as jest.MockedFunction<
 const mockPackLibraryController = packLibraryController as jest.Mocked<
   typeof packLibraryController
 >;
+const mockSubscribePackProcessingFailures =
+  subscribePackProcessingFailures as jest.MockedFunction<
+    typeof subscribePackProcessingFailures
+  >;
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const eventId = '223e4567-e89b-42d3-a456-426614174000';
 const newerPackId = '623e4567-e89b-42d3-a456-426614174000';
@@ -173,6 +181,10 @@ let appStateRemove: jest.Mock;
 let inboxRemove: jest.Mock;
 let openPackRemove: jest.Mock;
 let backRemove: jest.Mock;
+let processingFailureListener:
+  | Parameters<typeof subscribePackProcessingFailures>[0]
+  | undefined;
+let processingFailureUnsubscribe: jest.Mock;
 let hardwareBack:
   | Parameters<typeof BackHandler.addEventListener>[1]
   | undefined;
@@ -228,6 +240,8 @@ describe('App interactions', () => {
     inboxListener = undefined;
     openPackListener = undefined;
     hardwareBack = undefined;
+    processingFailureListener = undefined;
+    processingFailureUnsubscribe = jest.fn();
     appStateRemove = jest.fn();
     inboxRemove = jest.fn();
     openPackRemove = jest.fn();
@@ -280,6 +294,10 @@ describe('App interactions', () => {
     mockPackLibraryController.recoverProcessing
       .mockReset()
       .mockResolvedValue(undefined);
+    mockSubscribePackProcessingFailures.mockImplementation(listener => {
+      processingFailureListener = listener;
+      return processingFailureUnsubscribe;
+    });
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -313,6 +331,7 @@ describe('App interactions', () => {
     expect(inboxRemove).toHaveBeenCalledTimes(1);
     expect(openPackRemove).toHaveBeenCalledTimes(1);
     expect(backRemove).toHaveBeenCalledTimes(1);
+    expect(processingFailureUnsubscribe).toHaveBeenCalledTimes(1);
   }, 15_000);
 
   test('shows a metadata integrity error and Retry terminates after quarantine', async () => {
@@ -390,6 +409,31 @@ describe('App interactions', () => {
       'Processing recovery unavailable',
     );
     act(() => renderer.unmount());
+  });
+
+  test('keeps asynchronous coordinator failures visible until explicit Retry succeeds', async () => {
+    const renderer = await renderApp();
+
+    await act(async () => {
+      processingFailureListener?.('PIPELINE_STAGE_FAILED');
+      await flushWorkflow();
+    });
+
+    expect(renderedText(renderer)).toContain('Processing recovery unavailable');
+    expect(renderedText(renderer)).toContain('PIPELINE_STAGE_FAILED');
+
+    await act(async () => {
+      appStateListener?.('active');
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer)).toContain('Processing recovery unavailable');
+
+    await press(control(renderer, 'button', 'Retry'));
+    expect(renderedText(renderer)).not.toContain(
+      'Processing recovery unavailable',
+    );
+    act(() => renderer.unmount());
+    expect(processingFailureUnsubscribe).toHaveBeenCalledTimes(1);
   });
 
   test('polls processing recovery while open and removes the timer on unmount', async () => {

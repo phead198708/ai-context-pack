@@ -31,7 +31,10 @@ import {
   persistenceInboxProcessor,
 } from './src/infrastructure/persistence/runtime';
 import { PackLibraryScreen } from './src/features/packLibrary/PackLibraryScreen';
-import { packLibraryController } from './src/features/packLibrary/runtime';
+import {
+  packLibraryController,
+  subscribePackProcessingFailures,
+} from './src/features/packLibrary/runtime';
 import { NewPackFlow, type NewPackFlowHandle } from './src/ui/NewPackFlow';
 import { t, type AppLocale } from './src/ui/i18n';
 import { colors, spacing, typography } from './src/ui/tokens';
@@ -84,10 +87,7 @@ function App(): React.JSX.Element {
     let attempt: Promise<boolean>;
     attempt = packLibraryController
       .recoverProcessing()
-      .then(() => {
-        if (appMounted.current) setPipelineRecoveryError(undefined);
-        return true;
-      })
+      .then(() => true)
       .catch(error => {
         if (appMounted.current) setPipelineRecoveryError(appErrorCode(error));
         return false;
@@ -126,6 +126,11 @@ function App(): React.JSX.Element {
           if (mounted) recoverProcessing().catch(() => undefined);
         }, PIPELINE_RECOVERY_RETRY_MS);
     };
+    const unsubscribeProcessingFailures = subscribePackProcessingFailures(
+      code => {
+        if (mounted) setPipelineRecoveryError(code);
+      },
+    );
     recoverWithBoundedRetry().catch(() => undefined);
     const recoveryPoll = setInterval(
       () => recoverWithBoundedRetry().catch(() => undefined),
@@ -180,6 +185,7 @@ function App(): React.JSX.Element {
       inboxSubscription.remove();
       openPackSubscription.remove();
       backSubscription.remove();
+      unsubscribeProcessingFailures();
     };
   }, [recoverProcessing]);
   useEffect(() => {
@@ -284,7 +290,12 @@ function App(): React.JSX.Element {
             <Action
               label={t(locale, 'retry')}
               onPress={() => {
-                recoverProcessing().catch(() => undefined);
+                recoverProcessing()
+                  .then(recovered => {
+                    if (recovered && appMounted.current)
+                      setPipelineRecoveryError(undefined);
+                  })
+                  .catch(() => undefined);
               }}
             />
           </StateCard>

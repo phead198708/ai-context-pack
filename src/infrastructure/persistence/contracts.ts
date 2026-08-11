@@ -10,7 +10,7 @@ import type {
 } from '../../domain/models';
 import type { NativeHandoffResult } from '../../domain/nativeAdapter';
 
-export const PERSISTENCE_SCHEMA_VERSION = 5 as const;
+export const PERSISTENCE_SCHEMA_VERSION = 6 as const;
 export const DEVELOPMENT_RESET_CONFIRMATION =
   'RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA' as const;
 
@@ -117,6 +117,19 @@ export interface PersistedPipelineRun extends StartPipelineRunInput {
   readonly updatedAt: string;
   /** Monotonic claim token; only its current owner may settle the run. */
   readonly claimVersion: number;
+  /**
+   * Immutable derivative published by this run but not yet registered in the
+   * Pack graph. Recovery must verify and settle this exact descriptor instead
+   * of rerunning extraction.
+   */
+  readonly publishedArtifact?: Artifact;
+}
+
+export interface CheckpointPipelineRunArtifactInput {
+  readonly runId: string;
+  readonly claimVersion: number;
+  readonly updatedAt: string;
+  readonly artifact: Artifact;
 }
 
 export interface CompletePipelineRunInput {
@@ -203,6 +216,9 @@ export interface ContextPackRepository {
     runId: string,
     claimVersion: number,
     updatedAt: string,
+  ): Promise<boolean>;
+  checkpointPipelineRunArtifact(
+    input: CheckpointPipelineRunArtifactInput,
   ): Promise<boolean>;
   completePipelineRun(input: CompletePipelineRunInput): Promise<boolean>;
   failPipelineRun(input: FailPipelineRunInput): Promise<boolean>;

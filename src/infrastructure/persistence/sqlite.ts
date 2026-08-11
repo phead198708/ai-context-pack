@@ -22,6 +22,7 @@ import {
   DEVELOPMENT_RESET_CONFIRMATION,
   PERSISTENCE_SCHEMA_VERSION,
   type CleanupCandidate,
+  type CheckpointPipelineRunArtifactInput,
   type CommitImportInput,
   type CompletePipelineRunInput,
   type DeletePackResult,
@@ -787,9 +788,10 @@ export class ExpoSqlitePersistenceRepository
       started_at: string;
       updated_at: string;
       claim_version: number;
+      published_artifact_json: string | null;
     }>(
       `SELECT id, pack_id, item_id, stage, status, started_at, updated_at,
-         claim_version
+         claim_version, published_artifact_json
        FROM pipeline_runs
        WHERE status IN ('queued', 'recovering')
           OR (status = 'running' AND updated_at <= ?)
@@ -816,6 +818,16 @@ export class ExpoSqlitePersistenceRepository
           startedAt: row.started_at,
           updatedAt: row.updated_at,
           claimVersion: row.claim_version,
+          ...(row.published_artifact_json
+            ? {
+                publishedArtifact: decodePipelinePublishedArtifact(
+                  row.published_artifact_json,
+                  row.pack_id,
+                  row.id,
+                  row.item_id,
+                ),
+              }
+            : {}),
         };
       }),
     );
@@ -837,12 +849,13 @@ export class ExpoSqlitePersistenceRepository
     requireIsoDateTime(updatedAt);
     requireIsoDateTime(staleRunningBefore);
     const result = await this.connection.run(
-      `UPDATE pipeline_runs SET status = 'running', updated_at = ?,
+      `UPDATE pipeline_runs SET status = 'running',
+         updated_at = CASE WHEN updated_at < ? THEN ? ELSE updated_at END,
          claim_version = claim_version + 1
        WHERE id = ? AND claim_version = ?
          AND (status IN ('queued', 'recovering')
            OR (status = 'running' AND updated_at <= ?))`,
-      [updatedAt, runId, expectedClaimVersion, staleRunningBefore],
+      [updatedAt, updatedAt, runId, expectedClaimVersion, staleRunningBefore],
     );
     return result.changes === 1 ? expectedClaimVersion + 1 : null;
   }
@@ -862,6 +875,53 @@ export class ExpoSqlitePersistenceRepository
       [updatedAt, updatedAt, runId, claimVersion],
     );
     return result.changes === 1;
+  }
+
+  async checkpointPipelineRunArtifact(
+    input: CheckpointPipelineRunArtifactInput,
+  ): Promise<boolean> {
+    requireCanonicalId(input.runId);
+    requirePipelineClaimVersion(input.claimVersion);
+    requireIsoDateTime(input.updatedAt);
+    assertArtifact(input.artifact);
+    return this.connection.exclusive(async transaction => {
+      const run = await loadPipelineRunForSettlement(
+        transaction,
+        input.runId,
+        input.claimVersion,
+      );
+      if (!run || run.status !== 'running') return false;
+      const stage = pipelineStage(run.stage);
+      if (
+        stage !== 'extract' ||
+        !['processing', 'recovering'].includes(run.pack_state) ||
+        run.item_state !== pipelineCheckpointState(stage) ||
+        input.artifact.id !== input.runId ||
+        input.artifact.itemId !== run.item_id ||
+        input.artifact.kind !==
+          (run.source_type === 'pdf' ? 'pdf-page-text' : 'ocr-text')
+      )
+        throw new DomainError('SCHEMA_INVALID');
+      validatePublishedArtifact({
+        packId: run.pack_id,
+        artifact: input.artifact,
+      });
+      const encoded = encodePipelinePublishedArtifact(input.artifact);
+      if (
+        run.published_artifact_json !== null &&
+        run.published_artifact_json !== encoded
+      )
+        throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+      const updatedAt = latestPipelineTimestamp(run, input.updatedAt);
+      const result = await transaction.run(
+        `UPDATE pipeline_runs
+         SET published_artifact_json = ?, updated_at = ?
+         WHERE id = ? AND claim_version = ? AND status = 'running'
+           AND (published_artifact_json IS NULL OR published_artifact_json = ?)`,
+        [encoded, updatedAt, input.runId, input.claimVersion, encoded],
+      );
+      return result.changes === 1;
+    });
   }
 
   async completePipelineRun(input: CompletePipelineRunInput): Promise<boolean> {
@@ -890,6 +950,23 @@ export class ExpoSqlitePersistenceRepository
               (run.source_type === 'pdf' ? 'pdf-page-text' : 'ocr-text')))
       )
         throw new DomainError('SCHEMA_INVALID');
+      const checkpoint = run.published_artifact_json
+        ? decodePipelinePublishedArtifact(
+            run.published_artifact_json,
+            run.pack_id,
+            input.runId,
+            run.item_id,
+          )
+        : undefined;
+      if (
+        stage === 'extract' &&
+        (!checkpoint ||
+          !input.artifact ||
+          encodePipelinePublishedArtifact(checkpoint) !==
+            encodePipelinePublishedArtifact(input.artifact))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const settledAt = latestPipelineTimestamp(run, input.updatedAt);
       if (input.artifact) {
         validatePublishedArtifact({
           packId: run.pack_id,
@@ -905,7 +982,7 @@ export class ExpoSqlitePersistenceRepository
          WHERE id = ? AND pack_id = ? AND state = ?`,
         [
           pipelineCompletedState(stage),
-          input.updatedAt,
+          settledAt,
           run.item_id,
           run.pack_id,
           pipelineCheckpointState(stage),
@@ -915,12 +992,12 @@ export class ExpoSqlitePersistenceRepository
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'succeeded', updated_at = ?,
            completed_at = ?, error_code = NULL WHERE id = ?`,
-        [input.updatedAt, input.updatedAt, input.runId],
+        [settledAt, settledAt, input.runId],
       );
       await transaction.run(
         `UPDATE packs SET updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
-        [input.updatedAt, run.pack_id],
+        [settledAt, run.pack_id],
       );
       return true;
     });
@@ -945,26 +1022,27 @@ export class ExpoSqlitePersistenceRepository
         run.item_state !== pipelineCheckpointState(stage)
       )
         return false;
+      const settledAt = latestPipelineTimestamp(run, input.updatedAt);
       await transaction.run(
         `UPDATE context_items SET state = 'failed', retry_stage = ?, updated_at = ?
          WHERE id = ? AND pack_id = ?`,
-        [stage, input.updatedAt, run.item_id, run.pack_id],
+        [stage, settledAt, run.item_id, run.pack_id],
       );
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'failed', updated_at = ?,
            completed_at = ?, error_code = ? WHERE id = ?`,
-        [input.updatedAt, input.updatedAt, input.errorCode, input.runId],
+        [settledAt, settledAt, input.errorCode, input.runId],
       );
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?
          WHERE pack_id = ? AND id <> ?
            AND status IN ('queued', 'running', 'recovering')`,
-        [input.updatedAt, input.updatedAt, run.pack_id, input.runId],
+        [settledAt, settledAt, run.pack_id, input.runId],
       );
       await transaction.run(
         `UPDATE packs SET state = 'failed', updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
-        [input.updatedAt, run.pack_id],
+        [settledAt, run.pack_id],
       );
       return true;
     });
@@ -1514,19 +1592,34 @@ export class ExpoSqlitePersistenceRepository
     if (Date.parse(expiresAt) <= Date.parse(acquiredAt))
       throw new DomainError('SCHEMA_INVALID');
     return this.connection.exclusive(async transaction => {
-      const currentClaim = await transaction.first<{ id: string }>(
-        `SELECT id FROM pipeline_runs
+      const currentClaim = await transaction.first<{
+        id: string;
+        updated_at: string;
+      }>(
+        `SELECT id, updated_at FROM pipeline_runs
          WHERE id = ? AND claim_version = ? AND status = 'running'`,
         [runId, claimVersion],
       );
       if (!currentClaim) return false;
+      requireIsoDateTime(currentClaim.updated_at);
+      const requestedDuration = Date.parse(expiresAt) - Date.parse(acquiredAt);
+      const effectiveAcquiredAt =
+        Date.parse(currentClaim.updated_at) > Date.parse(acquiredAt)
+          ? currentClaim.updated_at
+          : acquiredAt;
+      const effectiveExpiresAt = new Date(
+        Date.parse(effectiveAcquiredAt) + requestedDuration,
+      ).toISOString();
       const existing = await transaction.first<{
         owner_id: string;
         expires_at: string;
       }>(
         "SELECT owner_id, expires_at FROM cleanup_leases WHERE name = 'artifact-cleanup'",
       );
-      if (existing && Date.parse(existing.expires_at) > Date.parse(acquiredAt))
+      if (
+        existing &&
+        Date.parse(existing.expires_at) > Date.parse(effectiveAcquiredAt)
+      )
         return false;
       await transaction.run(
         `INSERT INTO cleanup_leases (name, owner_id, acquired_at, expires_at)
@@ -1535,7 +1628,7 @@ export class ExpoSqlitePersistenceRepository
            owner_id = excluded.owner_id,
            acquired_at = excluded.acquired_at,
            expires_at = excluded.expires_at`,
-        [ownerId, acquiredAt, expiresAt],
+        [ownerId, effectiveAcquiredAt, effectiveExpiresAt],
       );
       return true;
     });
@@ -1595,9 +1688,30 @@ export class ExpoSqlitePersistenceRepository
     const rows = await this.connection.all<{ relative_path: string }>(
       'SELECT relative_path FROM artifacts',
     );
+    const checkpoints = await this.connection.all<{
+      id: string;
+      pack_id: string;
+      item_id: string;
+      published_artifact_json: string;
+    }>(
+      `SELECT id, pack_id, item_id, published_artifact_json
+       FROM pipeline_runs
+       WHERE status IN ('queued', 'running', 'recovering')
+         AND published_artifact_json IS NOT NULL`,
+    );
     return decodePersisted(() => {
       rows.forEach(row => assertOwnedArtifactPath(row.relative_path));
-      return new Set(rows.map(row => row.relative_path));
+      const paths = new Set(rows.map(row => row.relative_path));
+      checkpoints.forEach(row => {
+        const artifact = decodePipelinePublishedArtifact(
+          row.published_artifact_json,
+          row.pack_id,
+          row.id,
+          row.item_id,
+        );
+        paths.add(artifact.relativePath);
+      });
+      return paths;
     });
   }
 
@@ -2011,6 +2125,12 @@ interface PipelineSettlementRow {
   readonly pack_state: string;
   readonly item_state: string;
   readonly source_type: string;
+  readonly run_started_at: string;
+  readonly run_updated_at: string;
+  readonly pack_created_at: string;
+  readonly pack_updated_at: string;
+  readonly item_updated_at: string;
+  readonly published_artifact_json: string | null;
 }
 
 async function startPipelineRunInTransaction(
@@ -2084,8 +2204,11 @@ async function loadPipelineRunForSettlement(
 ): Promise<PipelineSettlementRow | null> {
   return transaction.first<PipelineSettlementRow>(
     `SELECT run.pack_id, run.item_id, run.stage, run.status,
+       run.started_at AS run_started_at, run.updated_at AS run_updated_at,
+       run.published_artifact_json,
        pack.state AS pack_state, item.state AS item_state,
-       item.source_type
+       pack.created_at AS pack_created_at, pack.updated_at AS pack_updated_at,
+       item.updated_at AS item_updated_at, item.source_type
      FROM pipeline_runs run
      JOIN packs pack ON pack.id = run.pack_id AND pack.deleted_at IS NULL
      JOIN context_items item ON item.id = run.item_id AND item.pack_id = run.pack_id
@@ -2267,6 +2390,75 @@ function validatePublishedArtifact(
           ownedOriginalPath(input.packId, input.artifact.itemId)))
   )
     throw new DomainError('SCHEMA_INVALID');
+}
+
+function encodePipelinePublishedArtifact(artifact: Artifact): string {
+  assertArtifact(artifact);
+  const processorVersion = {
+    processor: artifact.processorVersion.processor,
+    version: artifact.processorVersion.version,
+    contractVersion: artifact.processorVersion.contractVersion,
+    ...(artifact.processorVersion.engine
+      ? { engine: artifact.processorVersion.engine }
+      : {}),
+    ...(artifact.processorVersion.engineRevision
+      ? { engineRevision: artifact.processorVersion.engineRevision }
+      : {}),
+  };
+  return JSON.stringify({
+    id: artifact.id,
+    ...(artifact.itemId ? { itemId: artifact.itemId } : {}),
+    kind: artifact.kind,
+    relativePath: artifact.relativePath,
+    mediaType: artifact.mediaType,
+    byteCount: artifact.byteCount,
+    sha256: artifact.sha256,
+    processorVersion,
+    createdAt: artifact.createdAt,
+    immutable: true,
+  });
+}
+
+function decodePipelinePublishedArtifact(
+  encoded: string,
+  packId: string,
+  runId: string,
+  itemId: string,
+): Artifact {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(encoded);
+  } catch {
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  }
+  const artifact = parsed as Artifact;
+  assertArtifact(artifact);
+  validatePublishedArtifact({ packId, artifact });
+  if (
+    artifact.id !== runId ||
+    artifact.itemId !== itemId ||
+    encodePipelinePublishedArtifact(artifact) !== encoded
+  )
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  return artifact;
+}
+
+function latestPipelineTimestamp(
+  run: PipelineSettlementRow,
+  proposed: string,
+): string {
+  const values = [
+    proposed,
+    run.run_started_at,
+    run.run_updated_at,
+    run.pack_created_at,
+    run.pack_updated_at,
+    run.item_updated_at,
+  ];
+  values.forEach(requireIsoDateTime);
+  return values.reduce((latest, value) =>
+    Date.parse(value) > Date.parse(latest) ? value : latest,
+  );
 }
 
 function assertPersistedArtifactPathKind(

@@ -148,11 +148,14 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       '3->4:applied',
       '4->5:starting',
       '4->5:applied',
+      '5->6:starting',
+      '5->6:applied',
     ]);
     expect(executed[0]).toContain('PRAGMA foreign_keys = ON');
     expect(executed[1]).toContain('PRAGMA user_version = 3');
     expect(executed[2]).toContain('PRAGMA user_version = 4');
     expect(executed[3]).toContain('PRAGMA user_version = 5');
+    expect(executed[4]).toContain('PRAGMA user_version = 6');
   });
 
   test('rejects a different artifact hash before deleting the recovery journal', async () => {

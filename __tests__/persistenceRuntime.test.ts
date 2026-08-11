@@ -222,6 +222,10 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     return false;
   }
 
+  async checkpointPipelineRunArtifact() {
+    return false;
+  }
+
   async completePipelineRun() {
     return false;
   }

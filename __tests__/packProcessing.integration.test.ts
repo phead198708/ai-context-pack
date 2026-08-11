@@ -5,6 +5,7 @@ import {
   type ImportManifestV1,
 } from '../src/domain/contracts';
 import type { Artifact, ContextItem } from '../src/domain/models';
+import { DomainError } from '../src/domain/errors';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
 import {
@@ -16,6 +17,7 @@ import {
 } from '../src/features/packLibrary/processing';
 import type { PersistedPipelineRun } from '../src/infrastructure/persistence/contracts';
 import { ownedDerivedPath } from '../src/infrastructure/persistence/ownedPaths';
+import { ReferenceAwareCleanup } from '../src/infrastructure/persistence/recovery';
 import { ExpoSqlitePersistenceRepository } from '../src/infrastructure/persistence/sqlite';
 
 type SqlValue = string | number | null;
@@ -520,6 +522,77 @@ test('cleanup lease ownership is claim-specific and a stale owner cannot release
   ).resolves.toBe(false);
 });
 
+test('publication checkpoints are exact-claim idempotent and reject descriptor changes', async () => {
+  const run: PersistedPipelineRun = {
+    id: '493e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const claimed = await persistAndClaim(run);
+  const artifact: Artifact = {
+    id: run.id,
+    itemId,
+    kind: 'ocr-text',
+    relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+    mediaType: 'text/plain',
+    byteCount: 4,
+    sha256: 'a'.repeat(64),
+    processorVersion: {
+      processor: 'fixture-extraction',
+      version: '1',
+      contractVersion: 1,
+    },
+    createdAt: now,
+    immutable: true,
+  };
+
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+    }),
+  ).resolves.toBe(true);
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+    }),
+  ).resolves.toBe(true);
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact: { ...artifact, sha256: 'b'.repeat(64) },
+    }),
+  ).rejects.toMatchObject({ code: 'STORAGE_ARTIFACT_IMMUTABLE' });
+
+  const replacementClaim = await repository.markPipelineRunRunning(
+    run.id,
+    claimed.claimVersion,
+    '2026-08-11T00:06:00Z',
+    '2026-08-11T00:06:00Z',
+  );
+  expect(replacementClaim).toBe(claimed.claimVersion + 1);
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: '2026-08-11T00:06:00Z',
+      artifact,
+    }),
+  ).resolves.toBe(false);
+});
+
 test('a replacement coordinator does not reclaim a live running claim', async () => {
   const firstWorker = new DeferredWorker();
   const first = new DurablePackProcessingCoordinator(
@@ -765,22 +838,148 @@ test('completion settlement rejection is diagnosed without converting successful
     }),
   ]);
 
-  const replacementWorker = new DeferredWorker();
+  const checkpointed = await repository.listRunnablePipelineRuns(
+    '2026-08-11T00:06:00Z',
+  );
+  expect(checkpointed).toEqual([
+    expect.objectContaining({
+      id: run.id,
+      publishedArtifact: worker.artifact(run),
+    }),
+  ]);
+  expect(await repository.listKnownRelativePaths()).toContain(
+    worker.artifact(run).relativePath,
+  );
+  const quarantineCheckpoint = jest.fn();
+  await new ReferenceAwareCleanup(repository, {
+    listOwnedFiles: jest.fn().mockResolvedValue([
+      {
+        relativePath: worker.artifact(run).relativePath,
+        byteCount: worker.artifact(run).byteCount,
+      },
+    ]),
+    removeOwnedFile: jest.fn(),
+    quarantineOwnedFile: quarantineCheckpoint,
+    purgeQuarantine: jest.fn(),
+  }).run('2026-08-10T00:00:00Z');
+  expect(quarantineCheckpoint).not.toHaveBeenCalled();
+
+  const verifyArtifact = jest.fn(
+    async (relativePath: string, byteCount: number, sha256: string) => ({
+      relativePath,
+      status: 'verified' as const,
+      byteCount,
+      sha256,
+    }),
+  );
+  const recognizeText = jest.fn();
+  const writeTextArtifact = jest.fn();
+  const replacementWorker = new NativeExtractionStageWorker(
+    async () => repository,
+    {
+      verifyArtifact,
+      recognizeText,
+      writeTextArtifact,
+    } as unknown as NativeAdapter,
+    () => '2026-08-11T00:06:00Z',
+  );
   const replacement = new DurablePackProcessingCoordinator(
     async () => repository,
     replacementWorker,
     () => '2026-08-11T00:06:00Z',
   );
   await replacement.recover();
-  await waitFor(() => replacementWorker.starts.length === 1);
-  const recovered = replacementWorker.starts[0]!;
-  replacementWorker.results
-    .get(recovered.id)!
-    .resolve(replacementWorker.artifact(recovered));
   await replacement.waitForIdle();
+  expect(verifyArtifact).toHaveBeenCalledWith(
+    worker.artifact(run).relativePath,
+    worker.artifact(run).byteCount,
+    worker.artifact(run).sha256,
+  );
+  expect(recognizeText).not.toHaveBeenCalled();
+  expect(writeTextArtifact).not.toHaveBeenCalled();
   expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
     'extracted',
   );
+});
+
+test('settlement timestamps never move behind the latest persisted heartbeat', async () => {
+  const worker = new DeferredWorker();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+  );
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).retryItem(packId, itemId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  const latestHeartbeat = '2026-08-11T00:10:00Z';
+  await expect(
+    repository.renewPipelineRunClaim(run.id, run.claimVersion, latestHeartbeat),
+  ).resolves.toBe(true);
+
+  worker.results.get(run.id)!.resolve(worker.artifact(run));
+  await coordinator.waitForIdle();
+
+  const graph = (await repository.findPackGraph(packId))!;
+  expect(graph.pack.updatedAt).toBe(latestHeartbeat);
+  expect(
+    database
+      .prepare('SELECT updated_at FROM context_items WHERE id = ?')
+      .get(itemId),
+  ).toEqual({ updated_at: latestHeartbeat });
+  const settled = database
+    .prepare('SELECT updated_at, completed_at FROM pipeline_runs WHERE id = ?')
+    .get(run.id) as { updated_at: string; completed_at: string };
+  expect(settled).toEqual({
+    updated_at: latestHeartbeat,
+    completed_at: latestHeartbeat,
+  });
+});
+
+test('failure timestamps never move behind the latest persisted heartbeat', async () => {
+  const worker = new DeferredWorker();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+  );
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).retryItem(packId, itemId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  const latestHeartbeat = '2026-08-11T00:10:00Z';
+  await repository.renewPipelineRunClaim(
+    run.id,
+    run.claimVersion,
+    latestHeartbeat,
+  );
+
+  worker.results
+    .get(run.id)!
+    .reject(new Error('synthetic-stage-failure-after-clock-rollback'));
+  await coordinator.waitForIdle();
+
+  const graph = (await repository.findPackGraph(packId))!;
+  expect(graph.pack.updatedAt).toBe(latestHeartbeat);
+  expect(
+    database
+      .prepare('SELECT updated_at FROM context_items WHERE id = ?')
+      .get(itemId),
+  ).toEqual({ updated_at: latestHeartbeat });
+  const settled = database
+    .prepare('SELECT updated_at, completed_at FROM pipeline_runs WHERE id = ?')
+    .get(run.id) as { updated_at: string; completed_at: string };
+  expect(settled).toEqual({
+    updated_at: latestHeartbeat,
+    completed_at: latestHeartbeat,
+  });
 });
 
 test('coordinator timestamps never move the Pack before its creation time', async () => {
@@ -1089,6 +1288,16 @@ test('derivative publication holds the global cleanup lease until settlement fin
   const handle = worker.start(await persistAndClaim(run));
 
   await expect(handle.result).resolves.toBeDefined();
+  expect(
+    database
+      .prepare(
+        "SELECT acquired_at, expires_at FROM cleanup_leases WHERE name = 'artifact-cleanup'",
+      )
+      .get(),
+  ).toEqual({
+    acquired_at: now,
+    expires_at: '2026-08-11T00:05:00.000Z',
+  });
   await expect(
     repository.acquireCleanupLease(otherOwner, now, '2026-08-11T00:01:00Z'),
   ).resolves.toBe(false);
@@ -1097,6 +1306,171 @@ test('derivative publication holds the global cleanup lease until settlement fin
     repository.acquireCleanupLease(otherOwner, now, '2026-08-11T00:01:00Z'),
   ).resolves.toBe(true);
   await repository.releaseCleanupLease(otherOwner);
+});
+
+test('cancellation keeps the cleanup lease until an in-flight native publication settles', async () => {
+  const run: PersistedPipelineRun = {
+    id: '453e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const pendingWrite = deferred<{
+    relativePath: string;
+    byteCount: number;
+    sha256: string;
+    created: boolean;
+  }>();
+  const writeTextArtifact = jest.fn().mockReturnValue(pendingWrite.promise);
+  const native = {
+    verifyArtifact: verifiedOriginal(),
+    resolveOwnedArtifactFileUri: jest
+      .fn()
+      .mockResolvedValue('file:///owned/synthetic.png'),
+    getOCRCapabilities: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      engines: [
+        {
+          engine: 'apple-vision',
+          revision: '3',
+          scripts: ['latin'],
+          recognitionLevels: ['accurate'],
+          ready: true,
+          offline: true,
+        },
+      ],
+      maximumPixelCount: 40_000_000,
+      maximumDimension: 16_384,
+    }),
+    recognizeText: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      text: 'synthetic OCR text',
+      blocks: [],
+      durationMs: 1,
+      engine: 'apple-vision',
+      revision: '3',
+      recognitionLevel: 'accurate',
+      warnings: [],
+    }),
+    cancelTextRecognition: jest.fn().mockResolvedValue(undefined),
+    writeTextArtifact,
+  } as unknown as NativeAdapter;
+  const handle = new NativeExtractionStageWorker(
+    async () => repository,
+    native,
+  ).start(await persistAndClaim(run));
+  await waitFor(() => writeTextArtifact.mock.calls.length === 1);
+
+  await handle.cancel();
+  let finalized = false;
+  const finalization = handle.finalize?.().then(() => {
+    finalized = true;
+  });
+  await Promise.resolve();
+  expect(finalized).toBe(false);
+  const otherOwner = '463e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLease(otherOwner, now, '2026-08-11T00:01:00Z'),
+  ).resolves.toBe(false);
+
+  pendingWrite.resolve({
+    relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+    byteCount: 18,
+    sha256: 'd'.repeat(64),
+    created: true,
+  });
+  await expect(handle.result).rejects.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  await finalization;
+  expect(finalized).toBe(true);
+  await expect(
+    repository.acquireCleanupLease(otherOwner, now, '2026-08-11T00:01:00Z'),
+  ).resolves.toBe(true);
+  await repository.releaseCleanupLease(otherOwner);
+});
+
+test('an uncheckpointed immutable publication orphan is quarantined and replaced under the current claim', async () => {
+  const run: PersistedPipelineRun = {
+    id: '463e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const relativePath = ownedDerivedPath(packId, run.id, 'txt');
+  const writeTextArtifact = jest
+    .fn()
+    .mockRejectedValueOnce(new DomainError('STORAGE_ARTIFACT_IMMUTABLE'))
+    .mockResolvedValue({
+      relativePath,
+      byteCount: 18,
+      sha256: 'd'.repeat(64),
+      created: true,
+    });
+  const quarantineOwnedArtifact = jest.fn().mockResolvedValue({
+    quarantined: true,
+    quarantineId: '473e4567-e89b-42d3-a456-426614174000',
+    anonymousId: '483e4567-e89b-42d3-a456-426614174000',
+    byteCount: 17,
+  });
+  const native = {
+    verifyArtifact: verifiedOriginal(),
+    resolveOwnedArtifactFileUri: jest
+      .fn()
+      .mockResolvedValue('file:///owned/synthetic.png'),
+    getOCRCapabilities: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      engines: [
+        {
+          engine: 'apple-vision',
+          revision: '3',
+          scripts: ['latin'],
+          recognitionLevels: ['accurate'],
+          ready: true,
+          offline: true,
+        },
+      ],
+      maximumPixelCount: 40_000_000,
+      maximumDimension: 16_384,
+    }),
+    recognizeText: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      text: 'synthetic OCR text',
+      blocks: [],
+      durationMs: 1,
+      engine: 'apple-vision',
+      revision: '3',
+      recognitionLevel: 'accurate',
+      warnings: [],
+    }),
+    cancelTextRecognition: jest.fn().mockResolvedValue(undefined),
+    writeTextArtifact,
+    quarantineOwnedArtifact,
+  } as unknown as NativeAdapter;
+  const handle = new NativeExtractionStageWorker(
+    async () => repository,
+    native,
+  ).start(await persistAndClaim(run));
+
+  await expect(handle.result).resolves.toMatchObject({
+    id: run.id,
+    relativePath,
+    sha256: 'd'.repeat(64),
+  });
+  expect(writeTextArtifact).toHaveBeenCalledTimes(2);
+  expect(quarantineOwnedArtifact).toHaveBeenCalledWith(relativePath);
+  expect(
+    database.prepare('SELECT COUNT(*) AS count FROM quarantine_records').get(),
+  ).toEqual({ count: 1 });
+  await handle.finalize?.();
 });
 
 test('the production extraction worker publishes bounded plain-text input without OCR', async () => {
