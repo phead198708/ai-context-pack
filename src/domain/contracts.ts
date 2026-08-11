@@ -98,6 +98,8 @@ export interface OCRCapabilitiesV1 {
 
 export const PDF_MAXIMUM_PAGES = 25 as const;
 export const PDF_MAXIMUM_BYTES = 52_428_800 as const;
+/** Shared immutable text-artifact bound enforced before the native write boundary. */
+export const DERIVED_TEXT_MAXIMUM_UTF8_BYTES = 16_777_216 as const;
 
 export type PDFExtractionWarningV1 =
   | 'PDF_EMBEDDED_TEXT_SPARSE'

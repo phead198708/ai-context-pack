@@ -5,11 +5,12 @@ import type {
   ContextItem,
   ContextPack,
   ExportRecord,
+  PipelineStage,
   RiskFinding,
 } from '../../domain/models';
 import type { NativeHandoffResult } from '../../domain/nativeAdapter';
 
-export const PERSISTENCE_SCHEMA_VERSION = 4 as const;
+export const PERSISTENCE_SCHEMA_VERSION = 7 as const;
 export const DEVELOPMENT_RESET_CONFIRMATION =
   'RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA' as const;
 
@@ -52,6 +53,8 @@ export interface PersistedImportItemSummary {
   readonly mediaType: string;
   readonly status: ImportManifestV1['items'][number]['status'];
   readonly errorCode?: DomainErrorCode;
+  /** True only after an explicit destructive local-original release. */
+  readonly originalReleased?: true;
   readonly retrySource?: {
     readonly relativePath: string;
     readonly byteCount: number;
@@ -95,6 +98,68 @@ export interface SavePackGraphInput {
    * artifact. Destructive release is opt-in and must be guarded by explicit UI confirmation.
    */
   readonly removedItemOriginalDisposition?: 'preserve' | 'release';
+  /** Runs inserted in the same transaction as the restored item checkpoints. */
+  readonly startedPipelineRuns?: readonly StartPipelineRunInput[];
+  /** Cancels active runs atomically with the Pack cancellation transition. */
+  readonly cancelActivePipelineRuns?: true;
+}
+
+export interface StartPipelineRunInput {
+  readonly id: string;
+  readonly packId: string;
+  readonly itemId: string;
+  readonly stage: PipelineStage;
+  readonly startedAt: string;
+}
+
+export interface PersistedPipelineRun extends StartPipelineRunInput {
+  readonly status: 'queued' | 'running' | 'recovering';
+  readonly updatedAt: string;
+  /** Monotonic claim token; only its current owner may settle the run. */
+  readonly claimVersion: number;
+  /**
+   * Immutable derivative published by this run but not yet registered in the
+   * Pack graph. Recovery must verify and settle this exact descriptor instead
+   * of rerunning extraction.
+   */
+  readonly publishedArtifact?: Artifact;
+}
+
+export interface CheckpointPipelineRunArtifactInput {
+  readonly runId: string;
+  readonly claimVersion: number;
+  readonly updatedAt: string;
+  readonly artifact: Artifact;
+  /** Global publication lease owner fenced in the checkpoint transaction. */
+  readonly publicationLeaseOwnerId: string;
+  /** @deprecated Validated when present but never used as lease authority. */
+  readonly publicationLeaseObservedAt?: string;
+}
+
+export type CompletePipelineRunInput = {
+  readonly runId: string;
+  readonly claimVersion: number;
+  readonly updatedAt: string;
+} & (
+  | {
+      readonly artifact: Artifact;
+      /** Required for extraction settlement and fenced in the same transaction. */
+      readonly publicationLeaseOwnerId: string;
+      /** @deprecated Validated when present but never used as lease authority. */
+      readonly publicationLeaseObservedAt?: string;
+    }
+  | {
+      readonly artifact?: undefined;
+      readonly publicationLeaseOwnerId?: never;
+      readonly publicationLeaseObservedAt?: never;
+    }
+);
+
+export interface FailPipelineRunInput {
+  readonly runId: string;
+  readonly claimVersion: number;
+  readonly updatedAt: string;
+  readonly errorCode: DomainErrorCode;
 }
 
 export interface DeletePackResult {
@@ -110,6 +175,10 @@ export interface RegisterPublishedArtifactInput {
   readonly packId: string;
   /** The native file store has already verified these immutable bytes. */
   readonly artifact: Artifact;
+  /** Global publication lease owner fenced in the registration transaction. */
+  readonly publicationLeaseOwnerId: string;
+  /** @deprecated Validated when present but never used as lease authority. */
+  readonly publicationLeaseObservedAt?: string;
 }
 
 export interface StorageUsageSummary {
@@ -126,7 +195,8 @@ export type RecoveryDiagnosticScope =
   | 'migration'
   | 'inbox'
   | 'artifact'
-  | 'cleanup';
+  | 'cleanup'
+  | 'pipeline';
 
 export interface RecoveryDiagnosticInput {
   readonly id: string;
@@ -152,6 +222,30 @@ export interface ContextPackRepository {
     packId: string,
     expectedRevision: number,
   ): Promise<DeletePackResult>;
+  startPipelineRun(input: StartPipelineRunInput): Promise<void>;
+  listRunnablePipelineRuns(
+    claimObservedAt?: string,
+  ): Promise<readonly PersistedPipelineRun[]>;
+  markPipelineRunRunning(
+    runId: string,
+    expectedClaimVersion: number,
+    updatedAt: string,
+    claimObservedAt: string,
+    claimExpiresAt: string,
+  ): Promise<number | null>;
+  renewPipelineRunClaim(
+    runId: string,
+    claimVersion: number,
+    updatedAt: string,
+    claimObservedAt: string,
+    claimExpiresAt: string,
+  ): Promise<boolean>;
+  checkpointPipelineRunArtifact(
+    input: CheckpointPipelineRunArtifactInput,
+  ): Promise<boolean>;
+  completePipelineRun(input: CompletePipelineRunInput): Promise<boolean>;
+  failPipelineRun(input: FailPipelineRunInput): Promise<boolean>;
+  cancelPipelineRuns(packId: string, updatedAt: string): Promise<number>;
 }
 
 export interface ContextItemRepository {
@@ -187,11 +281,15 @@ export interface QuarantineRecordInput {
 }
 
 export interface QuarantineRepository {
-  recordQuarantine(input: QuarantineRecordInput): Promise<void>;
+  recordQuarantine(
+    input: QuarantineRecordInput,
+    cleanupLeaseOwnerId: string,
+  ): Promise<void>;
   /** Marks records quarantined at or before the native mtime cutoff. */
   markQuarantinePurgedBefore(
     quarantinedBefore: string,
     purgedAt: string,
+    cleanupLeaseOwnerId: string,
   ): Promise<number>;
 }
 
@@ -205,6 +303,22 @@ export interface CleanupLeaseRepository {
   acquireCleanupLease(
     ownerId: string,
     acquiredAt: string,
+    expiresAt: string,
+  ): Promise<boolean>;
+  acquireCleanupLeaseForPipelineRun(
+    runId: string,
+    claimVersion: number,
+    ownerId: string,
+    acquiredAt: string,
+    expiresAt: string,
+  ): Promise<boolean>;
+  /**
+   * Extends the currently owned global cleanup lease using owner-and-expiry
+   * compare-and-swap semantics. A false result fences the caller immediately.
+   */
+  renewCleanupLease(
+    ownerId: string,
+    renewedAt: string,
     expiresAt: string,
   ): Promise<boolean>;
   releaseCleanupLease(ownerId: string): Promise<void>;
@@ -229,7 +343,10 @@ export interface PersistenceRepository {
   listCleanupCandidates(
     olderThan: string,
   ): Promise<readonly CleanupCandidate[]>;
-  deleteArtifactRecordIfUnreferenced(artifactId: string): Promise<boolean>;
+  deleteArtifactRecordIfUnreferenced(
+    artifactId: string,
+    cleanupLeaseOwnerId: string,
+  ): Promise<boolean>;
 }
 
 export interface ProductionPersistenceRepository

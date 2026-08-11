@@ -45,6 +45,8 @@ function harness(
     recoverMainAppPickerCache: jest.fn().mockResolvedValue(undefined),
     discardMainAppPickerFiles: jest.fn(),
     publishArtifact: jest.fn(),
+    resolveOwnedArtifactFileUri: jest.fn(),
+    writeTextArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
     listOwnedArtifacts: jest.fn(),
     removeOwnedArtifact: jest.fn(),

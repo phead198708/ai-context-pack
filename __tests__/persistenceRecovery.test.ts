@@ -34,7 +34,18 @@ const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const packId = '223e4567-e89b-42d3-a456-426614174000';
 const itemId = '323e4567-e89b-42d3-a456-426614174000';
 const secondItemId = '423e4567-e89b-42d3-a456-426614174000';
+const cleanupMutationOwnerId = '523e4567-e89b-42d3-a456-426614174000';
 const fingerprint = 'a'.repeat(64);
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
 
 function manifest(
   status: ImportManifestV1['status'] = 'complete',
@@ -297,6 +308,9 @@ class ProductionCleanupRepository extends MemoryRepository {
   leaseAvailable = true;
   released = 0;
   markedPurged = 0;
+  renewals = 0;
+  readonly acquiredOwners: string[] = [];
+  readonly releasedOwners: string[] = [];
   readonly markPurgedCalls: {
     readonly quarantinedBefore: string;
     readonly purgedAt: string;
@@ -314,12 +328,23 @@ class ProductionCleanupRepository extends MemoryRepository {
     return this.markedPurged;
   }
 
-  async acquireCleanupLease() {
+  async acquireCleanupLease(ownerId: string) {
+    if (this.leaseAvailable) this.acquiredOwners.push(ownerId);
     return this.leaseAvailable;
   }
 
-  async releaseCleanupLease() {
+  async acquireCleanupLeaseForPipelineRun() {
+    return this.leaseAvailable;
+  }
+
+  async renewCleanupLease() {
+    this.renewals += 1;
+    return this.leaseAvailable;
+  }
+
+  async releaseCleanupLease(ownerId: string) {
     this.released += 1;
+    this.releasedOwners.push(ownerId);
   }
 
   async recordRecoveryDiagnostic(input: RecoveryDiagnosticInput) {
@@ -540,9 +565,11 @@ describe('persistence and dual-Inbox recovery spike', () => {
     files.files.add(orphanPath);
     files.files.add(orphanPartialPath);
 
-    const result = await new ReferenceAwareCleanup(repository, files).run(
-      '2026-08-03T00:00:00Z',
-    );
+    const result = await new ReferenceAwareCleanup(
+      repository,
+      files,
+      cleanupMutationOwnerId,
+    ).run('2026-08-03T00:00:00Z');
     expect(result).toEqual({ deleted: 0, quarantined: 2 });
     expect(files.removed).toEqual([]);
     expect(files.files).toContain(candidatePath);
@@ -568,7 +595,9 @@ describe('persistence and dual-Inbox recovery spike', () => {
     files.files.add(recoveringPartialPath);
 
     await expect(
-      new ReferenceAwareCleanup(repository, files).run('2026-08-03T00:00:00Z'),
+      new ReferenceAwareCleanup(repository, files, cleanupMutationOwnerId).run(
+        '2026-08-03T00:00:00Z',
+      ),
     ).resolves.toEqual({ deleted: 0, quarantined: 0 });
     expect(files.files).toEqual(
       new Set([recentPath, recoveringPath, recoveringPartialPath]),
@@ -585,6 +614,7 @@ describe('persistence and dual-Inbox recovery spike', () => {
       new ReferenceAwareCleanup(
         repository,
         files,
+        cleanupMutationOwnerId,
         repository,
         () => '2026-08-03T00:00:00Z',
         1_000,
@@ -644,6 +674,155 @@ describe('persistence and dual-Inbox recovery spike', () => {
     expect(repository.released).toBe(1);
     expect(repository.markPurgedCalls).toHaveLength(1);
   });
+
+  test('each scheduled cleanup run uses a fresh lease acquisition token', async () => {
+    const repository = new ProductionCleanupRepository();
+    const cleanup = new ScheduledReferenceAwareCleanup(
+      repository,
+      new MemoryFiles(),
+      '733e4567-e89b-42d3-a456-426614174000',
+      () => '2026-08-03T00:00:00Z',
+    );
+
+    await expect(cleanup.run()).resolves.toMatchObject({ status: 'completed' });
+    await expect(cleanup.run()).resolves.toMatchObject({ status: 'completed' });
+
+    expect(repository.acquiredOwners).toHaveLength(2);
+    expect(new Set(repository.acquiredOwners)).toHaveProperty('size', 2);
+    expect(repository.acquiredOwners).not.toContain(
+      '733e4567-e89b-42d3-a456-426614174000',
+    );
+    expect(repository.releasedOwners).toEqual(repository.acquiredOwners);
+  });
+
+  test('scheduled cleanup renews its fence while a native cleanup snapshot is pending', async () => {
+    jest.useFakeTimers();
+    try {
+      const repository = new ProductionCleanupRepository();
+      const files = new MemoryFiles();
+      const listed = deferred<
+        readonly {
+          readonly relativePath: string;
+          readonly byteCount: number;
+        }[]
+      >();
+      files.listOwnedFiles = jest.fn().mockReturnValue(listed.promise);
+      let clockMs = Date.parse('2026-08-03T00:00:00Z');
+      const cleanup = new ScheduledReferenceAwareCleanup(
+        repository,
+        files,
+        '823e4567-e89b-42d3-a456-426614174000',
+        () => new Date(clockMs).toISOString(),
+        1_000,
+        7 * 24 * 60 * 60 * 1_000,
+        900,
+      );
+      const running = cleanup.run();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      for (let interval = 0; interval < 4; interval += 1) {
+        clockMs += 300;
+        await jest.advanceTimersByTimeAsync(300);
+      }
+      expect(repository.renewals).toBeGreaterThan(0);
+      expect(repository.released).toBe(0);
+
+      listed.resolve([]);
+      await expect(running).resolves.toMatchObject({ status: 'completed' });
+      expect(repository.released).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('scheduled cleanup fails closed when lease renewal ownership is lost', async () => {
+    jest.useFakeTimers();
+    try {
+      const repository = new ProductionCleanupRepository();
+      const files = new MemoryFiles();
+      const listed = deferred<
+        readonly {
+          readonly relativePath: string;
+          readonly byteCount: number;
+        }[]
+      >();
+      files.listOwnedFiles = jest.fn().mockReturnValue(listed.promise);
+      let clockMs = Date.parse('2026-08-03T00:00:00Z');
+      const cleanup = new ScheduledReferenceAwareCleanup(
+        repository,
+        files,
+        '923e4567-e89b-42d3-a456-426614174000',
+        () => new Date(clockMs).toISOString(),
+        1_000,
+        7 * 24 * 60 * 60 * 1_000,
+        900,
+      );
+      const running = cleanup.run();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      repository.leaseAvailable = false;
+      clockMs += 300;
+      await jest.advanceTimersByTimeAsync(300);
+      listed.resolve([]);
+
+      await expect(running).rejects.toMatchObject({
+        code: 'PERSISTENCE_CONFLICT',
+      });
+      expect(repository.released).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('scheduled cleanup fails closed after suspension passes the local lease expiry', async () => {
+    jest.useFakeTimers();
+    try {
+      const repository = new ProductionCleanupRepository();
+      const files = new MemoryFiles();
+      const listed = deferred<
+        readonly {
+          readonly relativePath: string;
+          readonly byteCount: number;
+        }[]
+      >();
+      files.listOwnedFiles = jest.fn().mockReturnValue(listed.promise);
+      let clockMs = Date.parse('2026-08-03T00:00:00Z');
+      let monotonicMs = 0;
+      const cleanup = new ScheduledReferenceAwareCleanup(
+        repository,
+        files,
+        'a23e4567-e89b-42d3-a456-426614174000',
+        () => new Date(clockMs).toISOString(),
+        1_000,
+        7 * 24 * 60 * 60 * 1_000,
+        900,
+        () => monotonicMs,
+      );
+      const running = cleanup.run();
+      const outcome = running.then(
+        value => ({ value }),
+        error => ({ error }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Simulate event-loop/app suspension: wall time advances beyond the TTL
+      // without running the renewal timer, then the native snapshot completes.
+      clockMs += 901;
+      monotonicMs += 901;
+      listed.resolve([]);
+
+      await expect(outcome).resolves.toEqual({
+        error: expect.objectContaining({ code: 'PERSISTENCE_CONFLICT' }),
+      });
+      expect(repository.renewals).toBe(0);
+      expect(repository.released).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('persistence path and migration decisions', () => {
@@ -665,8 +844,8 @@ describe('persistence path and migration decisions', () => {
       expect(isOwnedArtifactPath(invalid)).toBe(false);
   });
 
-  test('schema migrates through v1-v4 without BLOB content columns', () => {
-    expect(PERSISTENCE_MIGRATIONS).toHaveLength(4);
+  test('schema migrates through v1-v7 without BLOB content columns', () => {
+    expect(PERSISTENCE_MIGRATIONS).toHaveLength(7);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
       'relative_path TEXT NOT NULL UNIQUE',
@@ -684,6 +863,27 @@ describe('persistence path and migration decisions', () => {
     expect(PERSISTENCE_MIGRATIONS[3]).toContain('PRAGMA user_version = 4');
     expect(PERSISTENCE_MIGRATIONS[3]).toContain(
       'ALTER TABLE context_items ADD COLUMN retry_stage TEXT',
+    );
+    expect(PERSISTENCE_MIGRATIONS[3]).toContain(
+      "imported_item.status = 'failed'",
+    );
+    expect(PERSISTENCE_MIGRATIONS[4]).toContain('PRAGMA user_version = 5');
+    expect(PERSISTENCE_MIGRATIONS[4]).toContain(
+      'original_disposition TEXT NOT NULL',
+    );
+    expect(PERSISTENCE_MIGRATIONS[4]).toContain(
+      'CREATE UNIQUE INDEX pipeline_runs_one_active_item',
+    );
+    expect(PERSISTENCE_MIGRATIONS[5]).toContain('PRAGMA user_version = 6');
+    expect(PERSISTENCE_MIGRATIONS[5]).toContain(
+      'ALTER TABLE pipeline_runs ADD COLUMN published_artifact_json TEXT',
+    );
+    expect(PERSISTENCE_MIGRATIONS[6]).toContain('PRAGMA user_version = 7');
+    expect(PERSISTENCE_MIGRATIONS[6]).toContain(
+      'ALTER TABLE pipeline_runs ADD COLUMN claim_session_id TEXT',
+    );
+    expect(PERSISTENCE_MIGRATIONS[6]).toContain(
+      'ALTER TABLE cleanup_leases ADD COLUMN deadline_ms REAL',
     );
     for (const migration of PERSISTENCE_MIGRATIONS)
       expect(migration).not.toMatch(/\bBLOB\b/);

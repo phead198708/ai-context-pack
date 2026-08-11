@@ -10,7 +10,7 @@ const source = readFileSync(
 const migrations = [...source.matchAll(/\n\s*`([\s\S]*?)`,/g)].map(
   match => match[1],
 );
-if (migrations.length !== 4)
+if (migrations.length !== 7)
   throw new Error('PRODUCTION_PERSISTENCE_MIGRATION_FIXTURE_INVALID');
 
 const temporary = mkdtempSync(join(tmpdir(), 'ai-context-pack-production-'));
@@ -60,8 +60,9 @@ INSERT INTO artifact_references (owner_type, owner_id, artifact_id) VALUES
   execute(migrations[1]);
   execute(migrations[2]);
   execute(migrations[3]);
+  execute(migrations[4]);
 
-  assertQuery('PRAGMA user_version;', '4');
+  assertQuery('PRAGMA user_version;', '5');
   assertQuery('SELECT COUNT(*) FROM imports;', '2');
   assertQuery('SELECT COUNT(*) FROM artifacts;', '2');
   assertQuery('SELECT COUNT(*) FROM artifact_references;', '2');
@@ -76,6 +77,30 @@ INSERT INTO artifact_references (owner_type, owner_id, artifact_id) VALUES
   assertQuery(
     "SELECT [notnull] FROM pragma_table_info('artifacts') WHERE name = 'item_id';",
     '0',
+  );
+  assertQuery(
+    "SELECT group_concat(original_disposition, ',') FROM (SELECT original_disposition FROM import_items ORDER BY id);",
+    'retained,retained',
+  );
+  assertQuery(
+    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'pipeline_runs';",
+    '1',
+  );
+  execute(migrations[5]);
+  assertQuery('PRAGMA user_version;', '6');
+  assertQuery(
+    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name = 'published_artifact_json';",
+    '1',
+  );
+  execute(migrations[6]);
+  assertQuery('PRAGMA user_version;', '7');
+  assertQuery(
+    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name IN ('claim_session_id', 'claim_deadline_ms');",
+    '2',
+  );
+  assertQuery(
+    "SELECT COUNT(*) FROM pragma_table_info('cleanup_leases') WHERE name IN ('session_id', 'deadline_ms');",
+    '2',
   );
   assertQuery('PRAGMA foreign_key_check;', '');
 
@@ -176,6 +201,8 @@ DELETE FROM artifact_references
     OR (owner_type = 'export' AND owner_id IN
       (SELECT id FROM export_records WHERE pack_id = '${packId}'));
 DELETE FROM export_records WHERE pack_id = '${packId}';
+UPDATE import_items SET original_disposition = 'released'
+ WHERE id IN (SELECT id FROM context_items WHERE pack_id = '${packId}');
 DELETE FROM context_items WHERE pack_id = '${packId}';
 UPDATE packs SET title = '', user_instruction = '', warning_codes_json = '[]',
   state = 'cancelled', deleted_at = '2026-08-05T00:00:05Z', revision = revision + 1
@@ -184,6 +211,10 @@ COMMIT;
 `);
   assertQuery('SELECT COUNT(*) FROM artifact_references;', '0');
   assertQuery('SELECT COUNT(*) FROM artifacts;', '3');
+  assertQuery(
+    "SELECT COUNT(*) FROM import_items WHERE original_disposition = 'released';",
+    '2',
+  );
   execute(
     'DELETE FROM artifacts WHERE id NOT IN (SELECT artifact_id FROM artifact_references);',
   );
@@ -191,7 +222,7 @@ COMMIT;
   assertQuery('PRAGMA foreign_key_check;', '');
 
   process.stdout.write(
-    `PRODUCTION_PERSISTENCE versions=0->1->2->3->4 rowsPreserved=2 ` +
+    `PRODUCTION_PERSISTENCE versions=0->1->2->3->4->5->6->7 rowsPreserved=2 ` +
       `orderedRestart=pass concurrentCas=1-of-2 rollback=pass ` +
       `backupRestore=pass referenceCleanup=pass databaseBytes=${
         statSync(database).size

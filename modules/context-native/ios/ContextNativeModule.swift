@@ -264,6 +264,36 @@ public final class ContextNativeModule: Module {
       }
     }
 
+    AsyncFunction("resolveOwnedArtifactFileUri") { (relativePath: String) throws -> String in
+      do {
+        return try OwnedArtifactStore.resolveFileUri(
+          root: ownedApplicationSupportRoot(),
+          relativePath: relativePath
+        )
+      } catch let error as OwnedArtifactStoreError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+    }
+
+    AsyncFunction("writeTextArtifact") { (
+      relativePath: String,
+      text: String
+    ) throws -> [String: Any] in
+      do {
+        return try OwnedArtifactStore.writeText(
+          root: ownedApplicationSupportRoot(),
+          relativePath: relativePath,
+          text: text
+        )
+      } catch let error as OwnedArtifactStoreError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("STORAGE_WRITE_FAILED")
+      }
+    }
+
     AsyncFunction("verifyArtifact") { (
       relativePath: String,
       expectedByteCount: Int64,

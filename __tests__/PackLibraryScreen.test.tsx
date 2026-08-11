@@ -273,7 +273,8 @@ test('exposes stable loading, error recovery, and empty-state identifiers', asyn
 });
 
 test('renders all required library views and every partial-failure item state', async () => {
-  const renderer = await render(controller());
+  const value = controller();
+  const renderer = await render(value);
   const rendered = text(renderer.root);
 
   for (const section of [
@@ -317,9 +318,30 @@ test('renders all required library views and every partial-failure item state', 
     testID: `drag-${itemIds[1]}`,
   });
   expect(dragHandle.props.accessibilityRole).toBe('adjustable');
+  expect(dragHandle.props.accessibilityValue).toEqual({
+    min: 1,
+    max: itemIds.length,
+    now: 2,
+  });
+  expect(dragHandle.props.accessibilityActions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ name: 'increment' }),
+      expect.objectContaining({ name: 'decrement' }),
+      expect.objectContaining({ name: 'moveUp' }),
+      expect.objectContaining({ name: 'moveDown' }),
+    ]),
+  );
   expect(dragHandle.props.onMoveShouldSetResponder).toEqual(
     expect.any(Function),
   );
+  expect(dragHandle.props.onStartShouldSetResponder()).toBe(true);
+  await act(async () => {
+    dragHandle.props.onAccessibilityAction({
+      nativeEvent: { actionName: 'increment' },
+    });
+    await Promise.resolve();
+  });
+  expect(value.reorderItem).toHaveBeenCalledWith(packId, itemIds[1], 2);
   act(() => renderer.unmount());
 });
 
@@ -359,6 +381,144 @@ test('supports rename, persisted reorder, retry, cancel, and non-destructive rem
   expect(value.removeItem).toHaveBeenCalledWith(packId, itemIds[0], 'preserve');
   expect(value.cancelProcessing).toHaveBeenCalledWith(packId);
   expect(onChanged).toHaveBeenCalledTimes(5);
+  act(() => renderer.unmount());
+});
+
+test('locks editor fields while a mutation is pending so reload cannot discard late typing', async () => {
+  let finishMutation: (() => void) | undefined;
+  const value = controller();
+  value.renamePack.mockReturnValue(
+    new Promise(resolve => {
+      finishMutation = resolve;
+    }),
+  );
+  const renderer = await render(value);
+
+  expect(
+    renderer.root.findAllByType(TextInput).every(input => input.props.editable),
+  ).toBe(true);
+
+  await press(button(renderer, 'Save Pack title'));
+
+  expect(
+    renderer.root
+      .findAllByType(TextInput)
+      .every(input => input.props.editable === false),
+  ).toBe(true);
+
+  await act(async () => {
+    finishMutation?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(
+    renderer.root.findAllByType(TextInput).every(input => input.props.editable),
+  ).toBe(true);
+  act(() => renderer.unmount());
+});
+
+test('preserves an unsaved instruction when saving the Pack title refreshes the graph', async () => {
+  const value = controller();
+  value.load.mockResolvedValueOnce(snapshot).mockResolvedValueOnce({
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: { ...snapshot.selected!.pack, title: 'Renamed Pack' },
+      revision: snapshot.selected!.revision + 1,
+    },
+  });
+  const renderer = await render(value);
+  const inputs = () => renderer.root.findAllByType(TextInput);
+  const title = inputs().find(
+    node => node.props.accessibilityLabel === 'Pack title',
+  )!;
+  const instruction = inputs().find(
+    node => node.props.accessibilityLabel === 'Task instruction',
+  )!;
+
+  act(() => {
+    instruction.props.onChangeText('Unsaved instruction');
+    title.props.onChangeText('Renamed Pack');
+  });
+  await press(button(renderer, 'Save Pack title'));
+
+  expect(
+    inputs().find(node => node.props.accessibilityLabel === 'Task instruction')!
+      .props.value,
+  ).toBe('Unsaved instruction');
+  expect(
+    inputs().find(node => node.props.accessibilityLabel === 'Pack title')!.props
+      .value,
+  ).toBe('Renamed Pack');
+  act(() => renderer.unmount());
+});
+
+test('acknowledges normalized rename drafts so later persisted values replace them', async () => {
+  const value = controller();
+  const withCanonicalTitle: PackLibrarySnapshot = {
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: { ...snapshot.selected!.pack, title: 'Renamed' },
+      revision: 4,
+    },
+  };
+  const withCanonicalNames: PackLibrarySnapshot = {
+    ...withCanonicalTitle,
+    selected: {
+      ...withCanonicalTitle.selected!,
+      items: withCanonicalTitle.selected!.items.map((item, index) =>
+        index === 0 ? { ...item, displayName: 'Renamed item' } : item,
+      ),
+      revision: 5,
+    },
+  };
+  const withExternalValues: PackLibrarySnapshot = {
+    ...withCanonicalNames,
+    selected: {
+      ...withCanonicalNames.selected!,
+      pack: {
+        ...withCanonicalNames.selected!.pack,
+        title: 'Externally updated Pack',
+      },
+      items: withCanonicalNames.selected!.items.map((item, index) =>
+        index === 0
+          ? { ...item, displayName: 'Externally updated item' }
+          : item,
+      ),
+      revision: 6,
+    },
+  };
+  value.load
+    .mockResolvedValueOnce(snapshot)
+    .mockResolvedValueOnce(withCanonicalTitle)
+    .mockResolvedValueOnce(withCanonicalNames)
+    .mockResolvedValueOnce(withExternalValues);
+  const renderer = await render(value);
+  const input = (label: string) =>
+    renderer.root
+      .findAllByType(TextInput)
+      .find(node => node.props.accessibilityLabel === label)!;
+
+  act(() => input('Pack title').props.onChangeText(' Renamed '));
+  await press(button(renderer, 'Save Pack title'));
+  expect(value.renamePack).toHaveBeenCalledWith(packId, ' Renamed ');
+  expect(input('Pack title').props.value).toBe('Renamed');
+
+  act(() => input('Item name 1').props.onChangeText(' Renamed item '));
+  await press(button(renderer, 'Save item name 1'));
+  expect(value.renameItem).toHaveBeenCalledWith(
+    packId,
+    itemIds[0],
+    ' Renamed item ',
+  );
+  expect(input('Item name 1').props.value).toBe('Renamed item');
+
+  await press(button(renderer, 'Save task instruction'));
+  expect(input('Pack title').props.value).toBe('Externally updated Pack');
+  expect(input('Item name 1').props.value).toBe('Externally updated item');
   act(() => renderer.unmount());
 });
 

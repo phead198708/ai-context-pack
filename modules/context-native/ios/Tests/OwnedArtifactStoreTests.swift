@@ -81,6 +81,47 @@ final class OwnedArtifactStoreTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: destination), Data([1, 2, 3, 4]))
   }
 
+  func testTextPublicationAndOwnedFileResolutionAreBoundToImmutableBytes() throws {
+    let path = "Packs/\(packId)/derived/\(artifactId).txt"
+    let created = try OwnedArtifactStore.writeText(
+      root: root,
+      relativePath: path,
+      text: "synthetic text"
+    )
+    XCTAssertEqual(created["created"] as? Bool, true)
+    XCTAssertEqual(created["byteCount"] as? Int64, 14)
+    XCTAssertEqual(
+      try OwnedArtifactStore.resolveFileUri(root: root, relativePath: path),
+      root.appendingPathComponent(path).absoluteURL.absoluteString
+    )
+    XCTAssertEqual(
+      try OwnedArtifactStore.writeText(root: root, relativePath: path, text: "synthetic text")["created"] as? Bool,
+      false
+    )
+    XCTAssertThrowsError(
+      try OwnedArtifactStore.writeText(root: root, relativePath: path, text: "replacement")
+    ) { error in
+      XCTAssertEqual(error as? OwnedArtifactStoreError, .immutableConflict)
+    }
+  }
+
+  func testTextPublicationRejectsSameLengthCorruptionBeforeRename() throws {
+    let path = "Packs/\(packId)/derived/\(artifactId).txt"
+    let destination = root.appendingPathComponent(path)
+
+    XCTAssertThrowsError(try OwnedArtifactStore.writeText(
+      root: root,
+      relativePath: path,
+      text: "synthetic text",
+      partialWriter: { partial, expected in
+        try Data(repeating: 0, count: expected.count).write(to: partial)
+      }
+    )) { error in
+      XCTAssertEqual(error as? OwnedArtifactStoreError, .integrityFailed)
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+  }
+
   func testAbandonedPartialIsListedCountedQuarantinedAndPurged() throws {
     let path = "Packs/\(packId)/derived/\(artifactId).txt"
     let partialPath = "\(path).partial"

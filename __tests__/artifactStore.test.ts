@@ -34,6 +34,16 @@ const itemId = '223e4567-e89b-42d3-a456-426614174000';
 const artifactId = '323e4567-e89b-42d3-a456-426614174000';
 const now = '2026-08-05T00:00:00Z';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function artifact(overrides: Partial<Artifact> = {}): Artifact {
   return {
     id: artifactId,
@@ -65,6 +75,9 @@ class MemoryArtifactRepository
   readonly verified: string[] = [];
   registerError: Error | undefined;
   leaseHeld = false;
+  renewals = 0;
+  readonly acquiredOwners: string[] = [];
+  readonly releasedOwners: string[] = [];
 
   async registerPublishedArtifact(input: RegisterPublishedArtifactInput) {
     if (this.registerError) throw this.registerError;
@@ -110,14 +123,29 @@ class MemoryArtifactRepository
     };
   }
 
-  async acquireCleanupLease() {
+  async acquireCleanupLease(ownerId: string) {
     if (this.leaseHeld) return false;
     this.leaseHeld = true;
+    this.acquiredOwners.push(ownerId);
     return true;
   }
 
-  async releaseCleanupLease() {
+  async acquireCleanupLeaseForPipelineRun(
+    _runId: string,
+    _claimVersion: number,
+    ownerId: string,
+  ) {
+    return this.acquireCleanupLease(ownerId);
+  }
+
+  async renewCleanupLease() {
+    this.renewals += 1;
+    return this.leaseHeld;
+  }
+
+  async releaseCleanupLease(ownerId: string) {
     this.leaseHeld = false;
+    this.releasedOwners.push(ownerId);
   }
 }
 
@@ -220,6 +248,69 @@ describe('production ArtifactStore orchestration', () => {
     expect(repository.artifacts).toEqual([artifact()]);
     expect(repository.leaseHeld).toBe(false);
     expect(files.calls).not.toContain('remove');
+  });
+
+  test('renews the publication fence until a long native publish joins', async () => {
+    jest.useFakeTimers();
+    try {
+      const repository = new MemoryArtifactRepository();
+      const files = new MemoryArtifactFiles();
+      const pending = deferred<PublishedArtifactFile>();
+      files.publishArtifact = jest.fn().mockReturnValue(pending.promise);
+      let clockMs = Date.parse(now);
+      const publication = new PublishedArtifactCoordinator(
+        repository,
+        files,
+        () => new Date(clockMs).toISOString(),
+        900,
+      ).publish({
+        packId,
+        sourceFileUri: 'file:///synthetic-source.txt',
+        artifact: artifact(),
+      });
+      await Promise.resolve();
+
+      for (let interval = 0; interval < 4; interval += 1) {
+        clockMs += 300;
+        await jest.advanceTimersByTimeAsync(300);
+      }
+      expect(repository.renewals).toBeGreaterThan(0);
+      expect(repository.leaseHeld).toBe(true);
+
+      pending.resolve({
+        relativePath: artifact().relativePath,
+        byteCount: artifact().byteCount,
+        sha256: artifact().sha256,
+        created: true,
+      });
+      await expect(publication).resolves.toBe('created');
+      expect(repository.leaseHeld).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('uses a fresh acquisition token for an artifact replay', async () => {
+    const repository = new MemoryArtifactRepository();
+    const files = new MemoryArtifactFiles();
+    const coordinator = new PublishedArtifactCoordinator(
+      repository,
+      files,
+      () => now,
+    );
+    const input = {
+      packId,
+      sourceFileUri: 'file:///synthetic-source.txt',
+      artifact: artifact(),
+    };
+
+    await expect(coordinator.publish(input)).resolves.toBe('created');
+    await expect(coordinator.publish(input)).resolves.toBe('replayed');
+
+    expect(repository.acquiredOwners).toHaveLength(2);
+    expect(new Set(repository.acquiredOwners)).toHaveProperty('size', 2);
+    expect(repository.acquiredOwners).not.toContain(artifactId);
+    expect(repository.releasedOwners).toEqual(repository.acquiredOwners);
   });
 
   test('does not publish while cleanup owns the cross-caller lifecycle lease', async () => {

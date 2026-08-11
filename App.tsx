@@ -19,6 +19,7 @@ import {
 } from './src/domain/inboxEventWorkflow';
 import type { ImportManifestV1 } from './src/domain/contracts';
 import { isCanonicalUuid } from './src/domain/canonicalUuid';
+import { isDomainErrorCode, type DomainErrorCode } from './src/domain/errors';
 import {
   createRetryMainAppImportDraft,
   MAIN_APP_IMPORT_MAX_ITEMS,
@@ -31,13 +32,18 @@ import {
   persistenceInboxProcessor,
 } from './src/infrastructure/persistence/runtime';
 import { PackLibraryScreen } from './src/features/packLibrary/PackLibraryScreen';
-import { packLibraryController } from './src/features/packLibrary/runtime';
+import {
+  packLibraryController,
+  subscribePackProcessingFailures,
+} from './src/features/packLibrary/runtime';
 import { NewPackFlow, type NewPackFlowHandle } from './src/ui/NewPackFlow';
 import { t, type AppLocale } from './src/ui/i18n';
 import { colors, spacing, typography } from './src/ui/tokens';
 
 type Screen = 'inbox' | 'detail' | 'diagnostics' | 'new-pack';
 type LoadState = InboxWorkflowState;
+const PIPELINE_RECOVERY_POLL_MS = 60_000;
+const PIPELINE_RECOVERY_RETRY_MS = 1_000;
 
 function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>('inbox');
@@ -51,10 +57,13 @@ function App(): React.JSX.Element {
   const [selectedDetailPackId, setSelectedDetailPackId] = useState<string>();
   const [retryDraft, setRetryDraft] = useState<MainAppImportDraft>();
   const [retryDraftError, setRetryDraftError] = useState<string>();
+  const [pipelineRecoveryError, setPipelineRecoveryError] = useState<string>();
   const scrollView = useRef<ScrollView | null>(null);
   const newPackFlow = useRef<NewPackFlowHandle | null>(null);
   const screenRef = useRef<Screen>('inbox');
   const workflow = useRef<InboxEventWorkflow | null>(null);
+  const appMounted = useRef(true);
+  const processingRecoveryInFlight = useRef<Promise<boolean> | null>(null);
   screenRef.current = screen;
   const setWorkflowState = useCallback((value: LoadState) => {
     setState(value);
@@ -73,6 +82,27 @@ function App(): React.JSX.Element {
     () => workflow.current?.appBecameActive() ?? Promise.resolve(),
     [],
   );
+  const recoverProcessing = useCallback((): Promise<boolean> => {
+    if (processingRecoveryInFlight.current)
+      return processingRecoveryInFlight.current;
+    let attempt: Promise<boolean>;
+    attempt = packLibraryController
+      .recoverProcessing()
+      .then(() => true)
+      .catch(error => {
+        if (appMounted.current)
+          setPipelineRecoveryError(
+            appErrorCode(error, 'PIPELINE_RECOVERY_REQUIRED'),
+          );
+        return false;
+      })
+      .finally(() => {
+        if (processingRecoveryInFlight.current === attempt)
+          processingRecoveryInFlight.current = null;
+      });
+    processingRecoveryInFlight.current = attempt;
+    return attempt;
+  }, []);
   if (!workflow.current)
     workflow.current = new InboxEventWorkflow(
       nativeAdapter,
@@ -90,12 +120,35 @@ function App(): React.JSX.Element {
   const effectivePackCreationReady = packCreationReady && !creatingEmptyDraft;
   useEffect(() => {
     let mounted = true;
+    appMounted.current = true;
+    let recoveryRetry: ReturnType<typeof setTimeout> | undefined;
+    const recoverWithBoundedRetry = async (): Promise<void> => {
+      const recovered = await recoverProcessing();
+      if (!recovered && mounted && recoveryRetry === undefined)
+        recoveryRetry = setTimeout(() => {
+          recoveryRetry = undefined;
+          if (mounted) recoverProcessing().catch(() => undefined);
+        }, PIPELINE_RECOVERY_RETRY_MS);
+    };
+    const unsubscribeProcessingFailures = subscribePackProcessingFailures(
+      code => {
+        if (mounted) setPipelineRecoveryError(code);
+      },
+    );
+    recoverWithBoundedRetry().catch(() => undefined);
+    const recoveryPoll = setInterval(
+      () => recoverWithBoundedRetry().catch(() => undefined),
+      PIPELINE_RECOVERY_POLL_MS,
+    );
     workflow.current?.bootstrap().finally(() => {
       if (mounted)
         setPackCreationReady(workflow.current?.isPackCreationReady() === true);
     });
     const subscription = AppState.addEventListener('change', next => {
-      if (next === 'active') workflow.current?.appBecameActive();
+      if (next === 'active') {
+        workflow.current?.appBecameActive();
+        recoverWithBoundedRetry().catch(() => undefined);
+      }
     });
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
@@ -129,12 +182,16 @@ function App(): React.JSX.Element {
     );
     return () => {
       mounted = false;
+      appMounted.current = false;
+      clearInterval(recoveryPoll);
+      if (recoveryRetry !== undefined) clearTimeout(recoveryRetry);
       subscription.remove();
       inboxSubscription.remove();
       openPackSubscription.remove();
       backSubscription.remove();
+      unsubscribeProcessingFailures();
     };
-  }, []);
+  }, [recoverProcessing]);
   useEffect(() => {
     scrollView.current?.scrollTo({ animated: false, y: 0 });
   }, [screen]);
@@ -228,6 +285,25 @@ function App(): React.JSX.Element {
               </Pressable>
             ))}
           </View>
+        ) : null}
+        {pipelineRecoveryError ? (
+          <StateCard
+            alert
+            title={t(locale, 'processingRecoveryUnavailable')}
+            detail={pipelineRecoveryError}
+          >
+            <Action
+              label={t(locale, 'retry')}
+              onPress={() => {
+                recoverProcessing()
+                  .then(recovered => {
+                    if (recovered && appMounted.current)
+                      setPipelineRecoveryError(undefined);
+                  })
+                  .catch(() => undefined);
+              }}
+            />
+          </StateCard>
         ) : null}
         <View style={styles.screenContent}>
           {screen === 'inbox' && (
@@ -639,15 +715,23 @@ function StateCard({
   title,
   detail,
   children,
+  alert = false,
 }: {
   title: string;
   detail?: string;
   children?: React.ReactNode;
+  alert?: boolean;
 }): React.JSX.Element {
   return (
     <View style={styles.card}>
-      <Text style={styles.cardTitle}>{title}</Text>
-      {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+      <View
+        accessibilityLiveRegion={alert ? 'assertive' : undefined}
+        accessibilityRole={alert ? 'alert' : undefined}
+        accessible={alert || undefined}
+      >
+        <Text style={styles.cardTitle}>{title}</Text>
+        {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+      </View>
       {children}
     </View>
   );
@@ -720,13 +804,15 @@ function localizedPackState(
   return t(locale, keys[state]);
 }
 
-function appErrorCode(error: unknown): string {
-  if (typeof error !== 'object' || error === null)
-    return 'EMPTY_DRAFT_CREATE_FAILED';
+function appErrorCode(
+  error: unknown,
+  fallback:
+    | DomainErrorCode
+    | 'EMPTY_DRAFT_CREATE_FAILED' = 'EMPTY_DRAFT_CREATE_FAILED',
+): DomainErrorCode | 'EMPTY_DRAFT_CREATE_FAILED' {
+  if (typeof error !== 'object' || error === null) return fallback;
   const value = error as { readonly code?: unknown };
-  return typeof value.code === 'string'
-    ? value.code
-    : 'EMPTY_DRAFT_CREATE_FAILED';
+  return isDomainErrorCode(value.code) ? value.code : fallback;
 }
 
 function packLibraryRefreshKey(state: LoadState): string {

@@ -3,7 +3,10 @@ import {
   isDomainErrorCode,
   type DomainErrorCode,
 } from '../../domain/errors';
-import { isCanonicalUuid } from '../../domain/canonicalUuid';
+import {
+  createCanonicalUuid,
+  isCanonicalUuid,
+} from '../../domain/canonicalUuid';
 import type {
   NativeInboxHandoff,
   OwnedArtifactFileStore,
@@ -18,6 +21,9 @@ import {
   ownedArtifactPackId,
   ownedOriginalPath,
 } from './ownedPaths';
+import { startCleanupLeaseHeartbeat } from './cleanupLeaseHeartbeat';
+import { acquireArtifactLifecycleMutex } from './artifactLifecycleMutex';
+import { monotonicNowMilliseconds } from './operationalLeaseClock';
 
 const DISK_HEADROOM_BYTES = 16 * 1024 * 1024;
 
@@ -166,54 +172,73 @@ export class ReferenceAwareCleanup {
   constructor(
     private readonly repository: PersistenceRepository,
     private readonly files: OwnedArtifactFileStore,
+    private readonly cleanupLeaseOwnerId: string,
     private readonly quarantine?: QuarantineRepository,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly quarantineRetentionMs = 7 * 24 * 60 * 60 * 1_000,
-  ) {}
+    private readonly assertLease: () => void = () => undefined,
+  ) {
+    requireIdentifier(cleanupLeaseOwnerId);
+  }
 
   async run(olderThan: string): Promise<{
     readonly deleted: number;
     readonly quarantined: number;
   }> {
+    this.assertLease();
     const references = await this.repository.listReferencedRelativePaths();
+    this.assertLease();
     const candidates = await this.repository.listCleanupCandidates(olderThan);
+    this.assertLease();
     let deleted = 0;
     for (const candidate of candidates) {
       if (references.has(candidate.relativePath)) continue;
+      this.assertLease();
       const removed = await this.repository.deleteArtifactRecordIfUnreferenced(
         candidate.artifactId,
+        this.cleanupLeaseOwnerId,
       );
+      this.assertLease();
       if (!removed) continue;
       await this.files.removeOwnedFile(candidate.relativePath);
+      this.assertLease();
       deleted += 1;
     }
     // Snapshot files first. Recovery records its journal before it can publish
     // a new file, so the later database snapshot cannot miss a listed file
     // that belongs to an active recovery.
     const ownedFiles = await this.files.listOwnedFiles();
+    this.assertLease();
     const [known, recoveringPackIds] = await Promise.all([
       this.repository.listKnownRelativePaths(),
       this.repository.listRecoveringPackIds(),
     ]);
+    this.assertLease();
     let quarantined = 0;
     for (const file of ownedFiles) {
       const path = file.relativePath;
       if (known.has(path)) continue;
       const filePackId = ownedArtifactPackId(path);
       if (filePackId && recoveringPackIds.has(filePackId)) continue;
+      this.assertLease();
       const result = await this.files.quarantineOwnedFile(path);
+      this.assertLease();
       if (!result) continue;
       const createdAt = this.now();
-      await this.quarantine?.recordQuarantine({
-        id: result.quarantineId,
-        anonymousId: result.anonymousId,
-        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
-        byteCount: result.byteCount,
-        createdAt,
-        purgeAfter: new Date(
-          Date.parse(createdAt) + this.quarantineRetentionMs,
-        ).toISOString(),
-      });
+      await this.quarantine?.recordQuarantine(
+        {
+          id: result.quarantineId,
+          anonymousId: result.anonymousId,
+          reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+          byteCount: result.byteCount,
+          createdAt,
+          purgeAfter: new Date(
+            Date.parse(createdAt) + this.quarantineRetentionMs,
+          ).toISOString(),
+        },
+        this.cleanupLeaseOwnerId,
+      );
+      this.assertLease();
       quarantined += 1;
     }
     return { deleted, quarantined };
@@ -241,15 +266,22 @@ export class ScheduledReferenceAwareCleanup {
     private readonly artifactRetentionMs = 24 * 60 * 60 * 1_000,
     private readonly quarantineRetentionMs = 7 * 24 * 60 * 60 * 1_000,
     private readonly leaseDurationMs = 5 * 60 * 1_000,
+    private readonly monotonicNow: () => number = monotonicNowMilliseconds,
   ) {
     requireIdentifier(ownerId);
+    if (!Number.isSafeInteger(leaseDurationMs) || leaseDurationMs <= 0)
+      throw new DomainError('SCHEMA_INVALID');
   }
 
   async run(): Promise<ScheduledCleanupResult> {
+    // Each acquisition gets a fresh fencing identity. Reusing the process-level
+    // diagnostic ID would allow an older suspended run to renew/release a newer
+    // run after the original TTL expires.
+    const leaseOwnerId = createCanonicalUuid();
     const acquiredAt = this.now();
     const acquiredEpoch = Date.parse(acquiredAt);
     const lease = await this.repository.acquireCleanupLease(
-      this.ownerId,
+      leaseOwnerId,
       acquiredAt,
       new Date(acquiredEpoch + this.leaseDurationMs).toISOString(),
     );
@@ -261,21 +293,37 @@ export class ScheduledReferenceAwareCleanup {
         purged: 0,
         purgedBytes: 0,
       };
+    const heartbeat = startCleanupLeaseHeartbeat(
+      this.repository,
+      leaseOwnerId,
+      acquiredAt,
+      this.leaseDurationMs,
+      this.now,
+      this.monotonicNow,
+    );
+    const releaseLifecycleMutex = await acquireArtifactLifecycleMutex();
     try {
+      heartbeat.assertOwned();
       const cleanup = await new ReferenceAwareCleanup(
         this.repository,
         this.files,
+        leaseOwnerId,
         this.repository,
         this.now,
         this.quarantineRetentionMs,
+        heartbeat.assertOwned,
       ).run(new Date(acquiredEpoch - this.artifactRetentionMs).toISOString());
+      heartbeat.assertOwned();
       const quarantineCutoffEpoch = acquiredEpoch - this.quarantineRetentionMs;
       const quarantineCutoff = new Date(quarantineCutoffEpoch).toISOString();
       const purged = await this.files.purgeQuarantine(quarantineCutoffEpoch);
+      heartbeat.assertOwned();
       const marked = await this.repository.markQuarantinePurgedBefore(
         quarantineCutoff,
         acquiredAt,
+        leaseOwnerId,
       );
+      heartbeat.assertOwned();
       if (marked !== purged.purgedCount) {
         await this.repository.recordRecoveryDiagnostic({
           id: this.ownerId,
@@ -285,7 +333,11 @@ export class ScheduledReferenceAwareCleanup {
           phase: 'quarantine-retention',
           occurredAt: acquiredAt,
         });
+        heartbeat.assertOwned();
       }
+      const heartbeatFailure = await heartbeat.stop();
+      if (heartbeatFailure !== undefined)
+        throw new DomainError('PERSISTENCE_CONFLICT');
       return {
         status: 'completed',
         ...cleanup,
@@ -293,7 +345,12 @@ export class ScheduledReferenceAwareCleanup {
         purgedBytes: purged.purgedBytes,
       };
     } finally {
-      await this.repository.releaseCleanupLease(this.ownerId);
+      try {
+        await heartbeat.stop();
+        await this.repository.releaseCleanupLease(leaseOwnerId);
+      } finally {
+        releaseLifecycleMutex();
+      }
     }
   }
 }

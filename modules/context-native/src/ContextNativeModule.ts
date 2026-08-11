@@ -53,6 +53,11 @@ declare class ContextNativeModule extends NativeModule {
     expectedByteCount: number | null,
     expectedSha256: string | null,
   ): Promise<NativePublishedArtifact>;
+  resolveOwnedArtifactFileUri(relativePath: string): Promise<string>;
+  writeTextArtifact(
+    relativePath: string,
+    text: string,
+  ): Promise<NativePublishedArtifact>;
   verifyArtifact(
     relativePath: string,
     expectedByteCount: number,

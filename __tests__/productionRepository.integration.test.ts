@@ -54,6 +54,7 @@ const appendedIngestionId = '923e4567-e89b-42d3-a456-426614174000';
 const appendedItemId = 'a23e4567-e89b-42d3-a456-426614174000';
 const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
 const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
+const cleanupMutationOwnerId = 'c33e4567-e89b-42d3-a456-426614174000';
 const mainAppPackId = 'd23e4567-e89b-42d3-a456-426614174000';
 const mainAppIngestionId = 'e23e4567-e89b-42d3-a456-426614174000';
 const mainAppImageId = 'f23e4567-e89b-42d3-a456-426614174000';
@@ -163,6 +164,23 @@ describe('production repository against SQLite', () => {
   let databasePath: string;
   let database: NodeDatabase;
   let repository: ExpoSqlitePersistenceRepository;
+
+  function dropV7OperationalLeaseColumns(): void {
+    database.exec('ALTER TABLE cleanup_leases DROP COLUMN session_id');
+    database.exec('ALTER TABLE cleanup_leases DROP COLUMN deadline_ms');
+  }
+
+  async function acquireCleanupMutationLease(): Promise<string> {
+    await repository.releaseCleanupLease(cleanupMutationOwnerId);
+    await expect(
+      repository.acquireCleanupLease(
+        cleanupMutationOwnerId,
+        '2026-08-11T00:00:00Z',
+        '2026-08-11T01:00:00Z',
+      ),
+    ).resolves.toBe(true);
+    return cleanupMutationOwnerId;
+  }
 
   beforeEach(async () => {
     directory = mkdtempSync(join(tmpdir(), 'ai-context-pack-repository-'));
@@ -307,6 +325,329 @@ describe('production repository against SQLite', () => {
     ).toMatchObject({ state: 'failed', retryStage: 'package' });
   });
 
+  test('migrates a retained v3 import failure to the import retry checkpoint', async () => {
+    database
+      .prepare(
+        "UPDATE import_items SET status = 'failed', error_code = 'IMPORT_COPY_FAILED' WHERE id = ?",
+      )
+      .run(firstItemId);
+    database
+      .prepare("UPDATE imports SET status = 'partial' WHERE ingestion_id = ?")
+      .run(ingestionId);
+    database
+      .prepare("UPDATE context_items SET state = 'failed' WHERE id = ?")
+      .run(firstItemId);
+    database.exec('ALTER TABLE context_items DROP COLUMN retry_stage');
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 3');
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === firstItemId,
+      ),
+    ).toMatchObject({ state: 'failed', retryStage: 'import' });
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        status: 'partial',
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            id: firstItemId,
+            status: 'failed',
+            retrySource: expect.objectContaining({
+              relativePath: `Packs/${packId}/originals/${firstItemId}.bin`,
+            }),
+          }),
+        ]),
+      }),
+    ]);
+  });
+
+  test('migrates a post-cleanup v4 destructive release without inventing retained bytes', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'released first original',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'release',
+    });
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
+    ).resolves.toBe(true);
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        ingestionId,
+        items: [
+          expect.objectContaining({
+            id: firstItemId,
+            status: 'copied',
+            originalReleased: true,
+          }),
+          expect.objectContaining({
+            id: secondItemId,
+            status: 'copied',
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  test('migrates a pre-cleanup v4 destructive release while unreferenced bytes still exist', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'released before cleanup',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'release',
+    });
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect((await repository.listImportDetails())[0]?.items[0]).toMatchObject({
+      id: firstItemId,
+      status: 'copied',
+      originalReleased: true,
+    });
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
+    ).resolves.toBe(true);
+    expect((await repository.listImportDetails())[0]?.items[0]).toMatchObject({
+      id: firstItemId,
+      originalReleased: true,
+    });
+  });
+
+  test.each([['pre-cleanup', false] as const, ['post-cleanup', true] as const])(
+    'migrates a %s v4 destructive release for a failed retry-source item without inventing provenance',
+    async (_phase, cleanBeforeMigration) => {
+      database
+        .prepare(
+          "UPDATE import_items SET status = 'failed', error_code = 'IMPORT_COPY_FAILED' WHERE id = ?",
+        )
+        .run(firstItemId);
+      database
+        .prepare("UPDATE imports SET status = 'partial' WHERE ingestion_id = ?")
+        .run(ingestionId);
+      const initial = (await repository.findPackGraph(packId))!;
+      const remaining = [{ ...initial.items[1]!, sortIndex: 0 }];
+      await repository.savePackGraph({
+        pack: updatedPack(
+          initial.pack,
+          remaining,
+          'released failed original',
+          '2026-08-05T00:00:01Z',
+        ),
+        items: remaining,
+        expectedRevision: initial.revision,
+        removedItemOriginalDisposition: 'release',
+      });
+      if (cleanBeforeMigration)
+        await expect(
+          repository.deleteArtifactRecordIfUnreferenced(
+            firstItemId,
+            await acquireCleanupMutationLease(),
+          ),
+        ).resolves.toBe(true);
+
+      database.exec(
+        'ALTER TABLE import_items DROP COLUMN original_disposition',
+      );
+      dropV7OperationalLeaseColumns();
+      database.exec('DROP TABLE pipeline_runs');
+      database.exec('PRAGMA user_version = 4');
+      database.close();
+      database = new DatabaseSync(databasePath);
+      repository = new ExpoSqlitePersistenceRepository(
+        new NodeSqlConnection(database) as never,
+      );
+      await repository.initialize();
+
+      const migrated = (await repository.listImportDetails())[0]?.items[0];
+      expect(migrated).toMatchObject({ id: firstItemId, status: 'failed' });
+      if (cleanBeforeMigration) {
+        // Once both the v4 graph row and physical artifact are gone, explicit
+        // release is indistinguishable from a provider-less failed import.
+        // Preserve unavailable instead of inventing a destructive action.
+        expect(migrated).not.toHaveProperty('originalReleased');
+        expect(migrated).not.toHaveProperty('retrySource');
+      } else {
+        expect(migrated).toMatchObject({ originalReleased: true });
+      }
+      if (!cleanBeforeMigration)
+        await expect(
+          repository.deleteArtifactRecordIfUnreferenced(
+            firstItemId,
+            await acquireCleanupMutationLease(),
+          ),
+        ).resolves.toBe(true);
+    },
+  );
+
+  test('keeps a provider-less v4 failed row unavailable after its graph row is gone', async () => {
+    database
+      .prepare(
+        "UPDATE import_items SET status = 'failed', error_code = 'IMPORT_COPY_FAILED' WHERE id = ?",
+      )
+      .run(firstItemId);
+    database
+      .prepare("UPDATE imports SET status = 'partial' WHERE ingestion_id = ?")
+      .run(ingestionId);
+    database
+      .prepare('DELETE FROM artifact_references WHERE artifact_id = ?')
+      .run(firstItemId);
+    database.prepare('DELETE FROM context_items WHERE id = ?').run(firstItemId);
+    database.prepare('DELETE FROM artifacts WHERE id = ?').run(firstItemId);
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    const unavailable = (await repository.listImportDetails())[0]?.items[0];
+    expect(unavailable).toMatchObject({
+      id: firstItemId,
+      status: 'failed',
+      errorCode: 'IMPORT_COPY_FAILED',
+    });
+    expect(unavailable).not.toHaveProperty('originalReleased');
+    expect(unavailable).not.toHaveProperty('retrySource');
+  });
+
+  test('keeps a v4 failed removed item retained when its preserved reference is live', async () => {
+    database
+      .prepare(
+        "UPDATE import_items SET status = 'failed', error_code = 'IMPORT_COPY_FAILED' WHERE id = ?",
+      )
+      .run(firstItemId);
+    database
+      .prepare("UPDATE imports SET status = 'partial' WHERE ingestion_id = ?")
+      .run(ingestionId);
+    const initial = (await repository.findPackGraph(packId))!;
+    const remaining = [{ ...initial.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial.pack,
+        remaining,
+        'preserved failed original',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial.revision,
+      removedItemOriginalDisposition: 'preserve',
+    });
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    const preserved = (await repository.listImportDetails())[0]?.items[0];
+    expect(preserved).toMatchObject({ id: firstItemId, status: 'failed' });
+    expect(preserved).not.toHaveProperty('originalReleased');
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
+    ).resolves.toBe(false);
+  });
+
+  test('keeps a v4 preserved removal retained through the v5 migration', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'preserved first original',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'preserve',
+    });
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    const preserved = (await repository.listImportDetails())[0]?.items[0];
+    expect(preserved).toMatchObject({ id: firstItemId, status: 'copied' });
+    expect(preserved).not.toHaveProperty('originalReleased');
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
+    ).resolves.toBe(false);
+  });
+
   test('materializes photo, PDF, text, and URL main-app imports as ordered ContextItems', async () => {
     const items = [
       { id: mainAppImageId, mediaType: 'image/png', bytes: 4, hash: '1' },
@@ -422,7 +763,10 @@ describe('production repository against SQLite', () => {
       secondItemId,
     );
     await expect(
-      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
     ).resolves.toBe(true);
     expect(await repository.listArtifactRecords()).toEqual(
       expect.not.arrayContaining([
@@ -432,6 +776,27 @@ describe('production repository against SQLite', () => {
     expect(
       (await repository.findPackGraph(packId))?.pack.orderedItemIds,
     ).toEqual([secondItemId]);
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        ingestionId,
+        items: [
+          expect.objectContaining({
+            id: firstItemId,
+            status: 'copied',
+            originalReleased: true,
+          }),
+          expect.objectContaining({ id: secondItemId, status: 'copied' }),
+        ],
+      }),
+    ]);
   });
 
   test('round-trips risk/export records and releases only unreferenced artifacts on Pack deletion', async () => {
@@ -454,8 +819,17 @@ describe('production repository against SQLite', () => {
       finding,
     ]);
 
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-05T00:00:02Z',
+        '2026-08-05T00:01:02Z',
+      ),
+    ).resolves.toBe(true);
     await repository.registerPublishedArtifact({
       packId,
+      publicationLeaseOwnerId: exportId,
+      publicationLeaseObservedAt: '2026-08-05T00:00:02Z',
       artifact: {
         id: derivedId,
         itemId: firstItemId,
@@ -473,6 +847,7 @@ describe('production repository against SQLite', () => {
         immutable: true,
       },
     });
+    await repository.releaseCleanupLease(exportId);
     await expect(repository.listImportDetails()).resolves.toEqual([
       expect.objectContaining({
         ingestionId,
@@ -519,6 +894,7 @@ describe('production repository against SQLite', () => {
       expect(
         await repository.deleteArtifactRecordIfUnreferenced(
           candidate.artifactId,
+          await acquireCleanupMutationLease(),
         ),
       ).toBe(true);
     expect(await repository.listArtifactRecords()).toEqual([]);
@@ -598,27 +974,34 @@ describe('production repository against SQLite', () => {
   });
 
   test('marks only quarantine records covered by the native mtime cutoff', async () => {
-    await repository.recordQuarantine({
-      id: oldQuarantineId,
-      anonymousId: firstItemId,
-      reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
-      byteCount: 4,
-      createdAt: '2026-08-01T00:00:00Z',
-      purgeAfter: '2026-08-08T00:00:00Z',
-    });
-    await repository.recordQuarantine({
-      id: recentQuarantineId,
-      anonymousId: secondItemId,
-      reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
-      byteCount: 8,
-      createdAt: '2026-08-05T00:00:00Z',
-      purgeAfter: '2026-08-12T00:00:00Z',
-    });
+    await repository.recordQuarantine(
+      {
+        id: oldQuarantineId,
+        anonymousId: firstItemId,
+        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+        byteCount: 4,
+        createdAt: '2026-08-01T00:00:00Z',
+        purgeAfter: '2026-08-08T00:00:00Z',
+      },
+      await acquireCleanupMutationLease(),
+    );
+    await repository.recordQuarantine(
+      {
+        id: recentQuarantineId,
+        anonymousId: secondItemId,
+        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+        byteCount: 8,
+        createdAt: '2026-08-05T00:00:00Z',
+        purgeAfter: '2026-08-12T00:00:00Z',
+      },
+      await acquireCleanupMutationLease(),
+    );
 
     await expect(
       repository.markQuarantinePurgedBefore(
         '2026-08-03T00:00:00Z',
         '2026-08-10T00:00:00Z',
+        await acquireCleanupMutationLease(),
       ),
     ).resolves.toBe(1);
     await expect(repository.getStorageUsage()).resolves.toMatchObject({

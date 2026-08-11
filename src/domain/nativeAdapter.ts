@@ -90,6 +90,11 @@ export interface NativeAdapter {
     expectedByteCount?: number,
     expectedSha256?: string,
   ): Promise<NativePublishedArtifact>;
+  resolveOwnedArtifactFileUri(relativePath: string): Promise<string>;
+  writeTextArtifact(
+    relativePath: string,
+    text: string,
+  ): Promise<NativePublishedArtifact>;
   verifyArtifact(
     relativePath: string,
     expectedByteCount: number,

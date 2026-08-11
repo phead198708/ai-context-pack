@@ -146,10 +146,19 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       '2->3:applied',
       '3->4:starting',
       '3->4:applied',
+      '4->5:starting',
+      '4->5:applied',
+      '5->6:starting',
+      '5->6:applied',
+      '6->7:starting',
+      '6->7:applied',
     ]);
     expect(executed[0]).toContain('PRAGMA foreign_keys = ON');
     expect(executed[1]).toContain('PRAGMA user_version = 3');
     expect(executed[2]).toContain('PRAGMA user_version = 4');
+    expect(executed[3]).toContain('PRAGMA user_version = 5');
+    expect(executed[4]).toContain('PRAGMA user_version = 6');
+    expect(executed[5]).toContain('PRAGMA user_version = 7');
   });
 
   test('rejects a different artifact hash before deleting the recovery journal', async () => {
@@ -252,6 +261,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
   test('rehydrates durable partial-item failures for Inbox visibility', async () => {
     const failedItemId = '423e4567-e89b-42d3-a456-426614174000';
     let swapRetryOwner = false;
+    let retryOriginalReleased = false;
     const connection = {
       exec: async () => undefined,
       run: async () => ({ changes: 0 }),
@@ -275,6 +285,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
                 media_type: 'image/png',
                 status: 'copied',
                 error_code: null,
+                original_disposition: 'retained',
                 artifact_count: 1,
                 artifact_relative_path: `Packs/${packId}/originals/${itemId}.bin`,
                 artifact_byte_count: 4,
@@ -286,6 +297,9 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
                 media_type: 'application/zip',
                 status: 'failed',
                 error_code: 'IMPORT_TYPE_UNSUPPORTED',
+                original_disposition: retryOriginalReleased
+                  ? 'released'
+                  : 'retained',
                 artifact_count: 1,
                 artifact_relative_path: swapRetryOwner
                   ? `Packs/${packId}/originals/${itemId}.bin`
@@ -332,6 +346,23 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       },
     ]);
 
+    retryOriginalReleased = true;
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            id: failedItemId,
+            status: 'failed',
+            originalReleased: true,
+          }),
+        ]),
+      }),
+    ]);
+    expect(
+      (await repository.listImportDetails())[0]?.items[1],
+    ).not.toHaveProperty('retrySource');
+
+    retryOriginalReleased = false;
     swapRetryOwner = true;
     await expect(repository.listImportDetails()).rejects.toMatchObject({
       code: 'STORAGE_DIVERGENCE_DETECTED',
@@ -347,6 +378,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
         media_type: 'application/octet-stream',
         status: 'failed',
         error_code: 'IMPORT_TYPE_UNSUPPORTED',
+        original_disposition: 'unavailable',
         artifact_count: 0,
         artifact_relative_path: null,
         artifact_byte_count: null,
@@ -385,6 +417,8 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
 
   test('registers an exact verified derivative and rejects immutable replacement', async () => {
     const artifactId = '423e4567-e89b-42d3-a456-426614174000';
+    const publicationOwnerId = '523e4567-e89b-42d3-a456-426614174000';
+    const sessionId = '623e4567-e89b-42d3-a456-426614174000';
     const value: Artifact = {
       id: artifactId,
       itemId,
@@ -410,6 +444,13 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
         return { changes: 1 };
       },
       first: async <T>(source: string) => {
+        if (source.includes('FROM cleanup_leases'))
+          return {
+            owner_id: publicationOwnerId,
+            expires_at: '2026-08-05T00:01:00Z',
+            session_id: sessionId,
+            deadline_ms: 60_000,
+          } as T;
         if (source.includes('FROM packs')) return { id: packId } as T;
         if (source.includes('FROM context_items')) return { id: itemId } as T;
         if (source.includes('FROM artifacts WHERE id')) return existing as T;
@@ -419,10 +460,26 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
         task(connection),
     };
-    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+    const repository = new ExpoSqlitePersistenceRepository(
+      connection as never,
+      undefined,
+      false,
+      { sessionId, nowMilliseconds: () => 0 },
+    );
 
     await expect(
-      repository.registerPublishedArtifact({ packId, artifact: value }),
+      repository.registerPublishedArtifact({
+        packId,
+        artifact: value,
+      } as never),
+    ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
+    await expect(
+      repository.registerPublishedArtifact({
+        packId,
+        artifact: value,
+        publicationLeaseOwnerId: publicationOwnerId,
+        publicationLeaseObservedAt: value.createdAt,
+      }),
     ).resolves.toBe('created');
     expect(statements[0]?.params).toEqual([
       artifactId,
@@ -451,7 +508,12 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       last_verified_at: value.createdAt,
     };
     await expect(
-      repository.registerPublishedArtifact({ packId, artifact: value }),
+      repository.registerPublishedArtifact({
+        packId,
+        artifact: value,
+        publicationLeaseOwnerId: publicationOwnerId,
+        publicationLeaseObservedAt: value.createdAt,
+      }),
     ).rejects.toMatchObject({ code: 'STORAGE_ARTIFACT_IMMUTABLE' });
     expect(statements).toEqual([]);
   });

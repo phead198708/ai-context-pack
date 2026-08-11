@@ -86,6 +86,11 @@ const ARTIFACT_KINDS = new Set([
 export function assertPackGraph(input: SavePackGraphInput): void {
   assertContextPack(input.pack);
   if (
+    input.cancelActivePipelineRuns !== undefined &&
+    input.cancelActivePipelineRuns !== true
+  )
+    invalid();
+  if (
     input.removedItemOriginalDisposition !== undefined &&
     input.removedItemOriginalDisposition !== 'preserve' &&
     input.removedItemOriginalDisposition !== 'release'
@@ -109,6 +114,19 @@ export function assertPackGraph(input: SavePackGraphInput): void {
       invalid();
     itemIds.add(item.id);
     indexes.add(item.sortIndex);
+  }
+  const runIds = new Set<string>();
+  for (const run of input.startedPipelineRuns ?? []) {
+    if (
+      !isCanonicalUuid(run.id) ||
+      run.packId !== input.pack.id ||
+      !itemIds.has(run.itemId) ||
+      !PIPELINE_STAGES.has(run.stage) ||
+      !ISO_DATE_TIME.test(run.startedAt) ||
+      runIds.has(run.id)
+    )
+      invalid();
+    runIds.add(run.id);
   }
   const ordered = [...input.items]
     .sort((left, right) => left.sortIndex - right.sortIndex)

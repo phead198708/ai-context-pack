@@ -23,6 +23,10 @@ import { nativeAdapter } from '../src/infrastructure/nativeAdapter';
 import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
 import { mainAppPicker } from '../src/infrastructure/mainAppPickers';
 import {
+  packLibraryController,
+  subscribePackProcessingFailures,
+} from '../src/features/packLibrary/runtime';
+import {
   createEmptyDraftPack,
   persistenceInboxProcessor,
 } from '../src/infrastructure/persistence/runtime';
@@ -45,13 +49,22 @@ jest.mock('../src/infrastructure/nativeAdapter', () => ({
     recoverMainAppPickerCache: jest.fn(),
     discardMainAppPickerFiles: jest.fn(),
     publishArtifact: jest.fn(),
+    resolveOwnedArtifactFileUri: jest.fn(),
+    writeTextArtifact: jest.fn(),
     verifyArtifact: jest.fn(),
     listOwnedArtifacts: jest.fn(),
     removeOwnedArtifact: jest.fn(),
     quarantineOwnedArtifact: jest.fn(),
     purgeArtifactQuarantine: jest.fn(),
     getArtifactStorageUsage: jest.fn(),
+    getOCRCapabilities: jest.fn(),
     recognizeText: jest.fn(),
+    cancelTextRecognition: jest.fn(),
+    inspectPdf: jest.fn(),
+    extractPdfPage: jest.fn(),
+    cancelPdfExtraction: jest.fn(),
+    finishPdfExtraction: jest.fn(),
+    readPlainTextFile: jest.fn(),
     probePdf: jest.fn(),
   },
 }));
@@ -69,6 +82,7 @@ jest.mock('../src/infrastructure/mainAppPickers', () => ({
   },
 }));
 jest.mock('../src/features/packLibrary/runtime', () => ({
+  subscribePackProcessingFailures: jest.fn(),
   packLibraryController: {
     load: jest.fn().mockResolvedValue({
       sections: {
@@ -88,6 +102,7 @@ jest.mock('../src/features/packLibrary/runtime', () => ({
     removeItem: jest.fn(),
     retryItem: jest.fn(),
     cancelProcessing: jest.fn(),
+    recoverProcessing: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -101,6 +116,13 @@ const mockPersistenceInboxProcessor =
 const mockCreateEmptyDraftPack = createEmptyDraftPack as jest.MockedFunction<
   typeof createEmptyDraftPack
 >;
+const mockPackLibraryController = packLibraryController as jest.Mocked<
+  typeof packLibraryController
+>;
+const mockSubscribePackProcessingFailures =
+  subscribePackProcessingFailures as jest.MockedFunction<
+    typeof subscribePackProcessingFailures
+  >;
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const eventId = '223e4567-e89b-42d3-a456-426614174000';
 const newerPackId = '623e4567-e89b-42d3-a456-426614174000';
@@ -159,6 +181,10 @@ let appStateRemove: jest.Mock;
 let inboxRemove: jest.Mock;
 let openPackRemove: jest.Mock;
 let backRemove: jest.Mock;
+let processingFailureListener:
+  | Parameters<typeof subscribePackProcessingFailures>[0]
+  | undefined;
+let processingFailureUnsubscribe: jest.Mock;
 let hardwareBack:
   | Parameters<typeof BackHandler.addEventListener>[1]
   | undefined;
@@ -214,6 +240,8 @@ describe('App interactions', () => {
     inboxListener = undefined;
     openPackListener = undefined;
     hardwareBack = undefined;
+    processingFailureListener = undefined;
+    processingFailureUnsubscribe = jest.fn();
     appStateRemove = jest.fn();
     inboxRemove = jest.fn();
     openPackRemove = jest.fn();
@@ -263,6 +291,13 @@ describe('App interactions', () => {
     mockNative.cleanupMainAppPickerTransients.mockResolvedValue(undefined);
     mockNative.recoverMainAppPickerCache.mockResolvedValue(undefined);
     mockCreateEmptyDraftPack.mockResolvedValue(persistedPack);
+    mockPackLibraryController.recoverProcessing
+      .mockReset()
+      .mockResolvedValue(undefined);
+    mockSubscribePackProcessingFailures.mockImplementation(listener => {
+      processingFailureListener = listener;
+      return processingFailureUnsubscribe;
+    });
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -296,6 +331,7 @@ describe('App interactions', () => {
     expect(inboxRemove).toHaveBeenCalledTimes(1);
     expect(openPackRemove).toHaveBeenCalledTimes(1);
     expect(backRemove).toHaveBeenCalledTimes(1);
+    expect(processingFailureUnsubscribe).toHaveBeenCalledTimes(1);
   }, 15_000);
 
   test('shows a metadata integrity error and Retry terminates after quarantine', async () => {
@@ -348,8 +384,108 @@ describe('App interactions', () => {
       await flushWorkflow();
     });
     expect(mockNative.scanInbox).toHaveBeenCalledTimes(2);
+    expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+      2,
+    );
     expect(renderedText(renderer)).toContain('Share import');
     act(() => renderer.unmount());
+  });
+
+  test('surfaces processing recovery failures and Retry clears the stable error', async () => {
+    mockPackLibraryController.recoverProcessing
+      .mockRejectedValueOnce({ code: 'PIPELINE_STAGE_FAILED' })
+      .mockResolvedValue(undefined);
+    const renderer = await renderApp();
+
+    expect(renderedText(renderer)).toContain('Processing recovery unavailable');
+    expect(renderedText(renderer)).toContain('PIPELINE_STAGE_FAILED');
+    const recoveryAlert = renderer.root.findByProps({
+      accessibilityRole: 'alert',
+      accessibilityLiveRegion: 'assertive',
+    });
+    expect(instanceText(recoveryAlert)).toContain('PIPELINE_STAGE_FAILED');
+    expect(
+      recoveryAlert.findAll(node => node.props.accessibilityRole === 'button'),
+    ).toHaveLength(0);
+    expect(control(renderer, 'button', 'Retry')).toBeDefined();
+
+    await press(control(renderer, 'button', 'Retry'));
+
+    expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(renderedText(renderer)).not.toContain(
+      'Processing recovery unavailable',
+    );
+    act(() => renderer.unmount());
+  });
+
+  test.each([
+    new Error('synthetic raw recovery failure'),
+    { code: 'SYNTHETIC_UNKNOWN_CODE' },
+  ])(
+    'maps raw or unknown recovery failures to the stable pipeline code',
+    async error => {
+      mockPackLibraryController.recoverProcessing.mockRejectedValueOnce(error);
+      const renderer = await renderApp();
+
+      expect(renderedText(renderer)).toContain('PIPELINE_RECOVERY_REQUIRED');
+      expect(renderedText(renderer)).not.toContain('EMPTY_DRAFT_CREATE_FAILED');
+
+      act(() => renderer.unmount());
+    },
+  );
+
+  test('keeps asynchronous coordinator failures visible until explicit Retry succeeds', async () => {
+    const renderer = await renderApp();
+
+    await act(async () => {
+      processingFailureListener?.('PIPELINE_STAGE_FAILED');
+      await flushWorkflow();
+    });
+
+    expect(renderedText(renderer)).toContain('Processing recovery unavailable');
+    expect(renderedText(renderer)).toContain('PIPELINE_STAGE_FAILED');
+
+    await act(async () => {
+      appStateListener?.('active');
+      await flushWorkflow();
+    });
+    expect(renderedText(renderer)).toContain('Processing recovery unavailable');
+
+    await press(control(renderer, 'button', 'Retry'));
+    expect(renderedText(renderer)).not.toContain(
+      'Processing recovery unavailable',
+    );
+    act(() => renderer.unmount());
+    expect(processingFailureUnsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  test('polls processing recovery while open and removes the timer on unmount', async () => {
+    jest.useFakeTimers();
+    try {
+      const renderer = await renderApp();
+      expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+        1,
+      );
+
+      await act(async () => {
+        jest.advanceTimersByTime(60_000);
+        await flushWorkflow();
+      });
+      expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+        2,
+      );
+
+      act(() => renderer.unmount());
+      jest.advanceTimersByTime(60_000);
+      await flushWorkflow();
+      expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+        2,
+      );
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('keeps a bootstrapped error latched across AppState activation', async () => {

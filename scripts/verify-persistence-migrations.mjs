@@ -10,7 +10,7 @@ const source = readFileSync(
 const migrations = [...source.matchAll(/\n\s*`([\s\S]*?)`,/g)].map(
   match => match[1],
 );
-if (migrations.length !== 4)
+if (migrations.length !== 7)
   throw new Error('PERSISTENCE_MIGRATION_FIXTURE_INVALID');
 
 const temporary = mkdtempSync(join(tmpdir(), 'ai-context-pack-migrations-'));
@@ -102,6 +102,48 @@ INSERT INTO artifacts (
     '1',
   );
   assertQuery('SELECT retry_stage FROM context_items;', 'analyze');
+  execute(migrations[4]);
+  assertQuery('PRAGMA user_version;', '5');
+  assertQuery(
+    "SELECT original_disposition FROM import_items WHERE id = '323e4567-e89b-42d3-a456-426614174000';",
+    'retained',
+  );
+  assertQuery(
+    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'pipeline_runs';",
+    '1',
+  );
+  execute(`
+INSERT INTO pipeline_runs (
+  id, pack_id, item_id, stage, status, started_at, updated_at,
+  claim_version, completed_at, error_code
+) VALUES (
+  '623e4567-e89b-42d3-a456-426614174000',
+  '223e4567-e89b-42d3-a456-426614174000',
+  '323e4567-e89b-42d3-a456-426614174000',
+  'extract', 'failed', '2026-08-03T00:00:02Z', '2026-08-03T00:00:03Z',
+  1, '2026-08-03T00:00:03Z', 'PIPELINE_STAGE_FAILED'
+);
+`);
+  execute(migrations[5]);
+  assertQuery('PRAGMA user_version;', '6');
+  assertQuery(
+    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name = 'published_artifact_json';",
+    '1',
+  );
+  assertQuery(
+    "SELECT status || ':' || claim_version || ':' || (published_artifact_json IS NULL) FROM pipeline_runs WHERE id = '623e4567-e89b-42d3-a456-426614174000';",
+    'failed:1:1',
+  );
+  execute(migrations[6]);
+  assertQuery('PRAGMA user_version;', '7');
+  assertQuery(
+    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name IN ('claim_session_id', 'claim_deadline_ms');",
+    '2',
+  );
+  assertQuery(
+    "SELECT status || ':' || claim_version || ':' || (claim_session_id IS NULL) || ':' || (claim_deadline_ms IS NULL) FROM pipeline_runs WHERE id = '623e4567-e89b-42d3-a456-426614174000';",
+    'failed:1:1:1',
+  );
   const binaryColumns = query(
     `SELECT COUNT(*)
      FROM sqlite_schema AS schema
@@ -114,7 +156,7 @@ INSERT INTO artifacts (
     throw new Error('PERSISTENCE_BINARY_COLUMN_ASSERTION_FAILED');
   assertQuery('PRAGMA foreign_key_check;', '');
   process.stdout.write(
-    `PERSISTENCE_MIGRATIONS versions=0->1->2->3->4 rowsPreserved=1 materializedItems=1 binaryColumns=${binaryColumns} result=pass\n`,
+    `PERSISTENCE_MIGRATIONS versions=0->1->2->3->4->5->6->7 rowsPreserved=1 materializedItems=1 pipelineRunsPreserved=1 binaryColumns=${binaryColumns} result=pass\n`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true });

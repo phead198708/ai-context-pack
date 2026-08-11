@@ -72,6 +72,13 @@
     "node": "^22.13.0"
   },
   "expo": {
+    "install": {
+      "exclude": [
+        "expo",
+        "expo-dev-client",
+        "expo-image-picker"
+      ]
+    },
     "doctor": {
       "appConfigFieldsNotSyncedCheck": {
         "enabled": false

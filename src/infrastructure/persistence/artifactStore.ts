@@ -1,4 +1,5 @@
 import { DomainError } from '../../domain/errors';
+import { createCanonicalUuid } from '../../domain/canonicalUuid';
 import type { Artifact } from '../../domain/models';
 import type { NativeAdapter } from '../../domain/nativeAdapter';
 import { DEVELOPMENT_RESET_CONFIRMATION } from './contracts';
@@ -18,6 +19,9 @@ import type {
   PublishedArtifactFile,
 } from './contracts';
 import { assertArtifact } from './modelCodec';
+import { startCleanupLeaseHeartbeat } from './cleanupLeaseHeartbeat';
+import { acquireArtifactLifecycleMutex } from './artifactLifecycleMutex';
+import { monotonicNowMilliseconds } from './operationalLeaseClock';
 import {
   isOwnedArtifactPath,
   isOwnedArtifactStorePath,
@@ -108,26 +112,42 @@ export class PublishedArtifactCoordinator {
     private readonly files: AtomicArtifactFileStore,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly leaseDurationMs = 5 * 60 * 1_000,
+    private readonly monotonicNow: () => number = monotonicNowMilliseconds,
   ) {}
 
   async publish(
     input: PublishAndRegisterArtifactInput,
   ): Promise<'created' | 'replayed'> {
     assertPublishAndRegisterInput(input);
+    // The lease owner is an acquisition token, not the stable artifact ID.
+    // A replay after expiry must not let an older suspended publisher renew or
+    // release the replacement publisher's lease (ABA fencing).
+    const publicationOwnerId = createCanonicalUuid();
     const acquiredAt = this.now();
     const lease = await this.repository.acquireCleanupLease(
-      input.artifact.id,
+      publicationOwnerId,
       acquiredAt,
       new Date(Date.parse(acquiredAt) + this.leaseDurationMs).toISOString(),
     );
     if (!lease) throw new DomainError('PERSISTENCE_CONFLICT');
+    const heartbeat = startCleanupLeaseHeartbeat(
+      this.repository,
+      publicationOwnerId,
+      acquiredAt,
+      this.leaseDurationMs,
+      this.now,
+      this.monotonicNow,
+    );
+    const releaseLifecycleMutex = await acquireArtifactLifecycleMutex();
     try {
+      heartbeat.assertOwned();
       const published = await this.files.publishArtifact({
         sourceFileUri: input.sourceFileUri,
         relativePath: input.artifact.relativePath,
         expectedByteCount: input.artifact.byteCount,
         expectedSha256: input.artifact.sha256,
       });
+      heartbeat.assertOwned();
       if (
         published.relativePath !== input.artifact.relativePath ||
         published.byteCount !== input.artifact.byteCount ||
@@ -135,10 +155,13 @@ export class PublishedArtifactCoordinator {
       )
         throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
       try {
-        return await this.repository.registerPublishedArtifact({
+        const result = await this.repository.registerPublishedArtifact({
           packId: input.packId,
           artifact: input.artifact,
+          publicationLeaseOwnerId: publicationOwnerId,
         });
+        heartbeat.assertOwned();
+        return result;
       } catch (error) {
         try {
           await this.repository.recordRecoveryDiagnostic({
@@ -158,17 +181,24 @@ export class PublishedArtifactCoordinator {
       }
     } finally {
       try {
-        await this.repository.releaseCleanupLease(input.artifact.id);
-      } catch {
-        await recordDiagnosticBestEffort(this.repository, {
-          id: input.artifact.id,
-          scope: 'cleanup',
-          anonymousId: input.artifact.id,
-          code: 'STORAGE_WRITE_FAILED',
-          phase: 'publication-lease-release',
-          occurredAt: this.now(),
-          byteCount: input.artifact.byteCount,
-        });
+        const heartbeatFailure = await heartbeat.stop();
+        try {
+          await this.repository.releaseCleanupLease(publicationOwnerId);
+        } catch {
+          await recordDiagnosticBestEffort(this.repository, {
+            id: input.artifact.id,
+            scope: 'cleanup',
+            anonymousId: input.artifact.id,
+            code: 'STORAGE_WRITE_FAILED',
+            phase: 'publication-lease-release',
+            occurredAt: this.now(),
+            byteCount: input.artifact.byteCount,
+          });
+        }
+        if (heartbeatFailure !== undefined)
+          throw new DomainError('PERSISTENCE_CONFLICT');
+      } finally {
+        releaseLifecycleMutex();
       }
     }
   }

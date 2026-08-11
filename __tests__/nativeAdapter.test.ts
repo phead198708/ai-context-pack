@@ -714,6 +714,15 @@ describe('native adapter runtime boundary', () => {
         sha256: 'a'.repeat(64),
         created: true,
       }),
+      resolveOwnedArtifactFileUri: jest
+        .fn()
+        .mockResolvedValue('file:///owned-artifact.txt'),
+      writeTextArtifact: jest.fn().mockResolvedValue({
+        relativePath,
+        byteCount: 3,
+        sha256: 'a'.repeat(64),
+        created: true,
+      }),
       verifyArtifact: jest.fn().mockResolvedValue({
         relativePath,
         status: 'verified',
@@ -752,6 +761,13 @@ describe('native adapter runtime boundary', () => {
       ),
     ).resolves.toMatchObject({ created: true });
     await expect(
+      guarded.resolveOwnedArtifactFileUri(relativePath),
+    ).resolves.toBe('file:///owned-artifact.txt');
+    await expect(
+      guarded.writeTextArtifact(relativePath, 'abc'),
+    ).resolves.toMatchObject({ relativePath, byteCount: 3 });
+    expect(native.writeTextArtifact).toHaveBeenCalledWith(relativePath, 'abc');
+    await expect(
       guarded.quarantineOwnedArtifact(relativePath),
     ).resolves.toEqual({
       quarantined: true,
@@ -782,6 +798,9 @@ describe('native adapter runtime boundary', () => {
     await expect(guarded.purgeArtifactQuarantine(-1)).rejects.toMatchObject({
       code: 'NATIVE_ARTIFACT_INPUT_INVALID',
     });
+    await expect(
+      guarded.writeTextArtifact(relativePath, '\ud800'),
+    ).rejects.toMatchObject({ code: 'NATIVE_ARTIFACT_INPUT_INVALID' });
   });
 
   test('validates and binds main-app inputs to the exact returned manifest', async () => {

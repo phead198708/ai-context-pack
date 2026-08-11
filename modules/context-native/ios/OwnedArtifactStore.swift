@@ -24,6 +24,7 @@ enum OwnedArtifactStore {
     "bin", "heic", "jpeg", "jpg", "json", "md", "pdf", "png", "txt", "zip",
   ])
   private static let maximumSafeInteger: Int64 = 9_007_199_254_740_991
+  private static let maximumTextBytes = 16_777_216
   private static let processLockRegistry = NSLock()
   private final class ProcessLockEntry {
     let lock = NSLock()
@@ -152,6 +153,86 @@ enum OwnedArtifactStore {
       "byteCount": actual.byteCount,
       "sha256": actual.sha256,
     ]
+  }
+
+  static func resolveFileUri(root: URL, relativePath: String) throws -> String {
+    _ = try validate(relativePath)
+    let destination = root.appendingPathComponent(relativePath)
+    try validateExistingDirectoryChain(
+      root: root,
+      target: destination.deletingLastPathComponent()
+    )
+    _ = try inspect(destination)
+    return destination.absoluteURL.absoluteString
+  }
+
+  static func writeText(
+    root: URL,
+    relativePath: String,
+    text: String,
+    partialWriter: ((URL, Data) throws -> Void)? = nil
+  ) throws -> [String: Any] {
+    let components = try validate(relativePath)
+    guard relativePath.hasSuffix(".txt"),
+          let data = text.data(using: .utf8),
+          data.count <= maximumTextBytes else {
+      throw OwnedArtifactStoreError.invalidInput
+    }
+    let expectedHash = SHA256.hash(data: data)
+      .map { String(format: "%02x", $0) }
+      .joined()
+    let destination = root.appendingPathComponent(relativePath)
+    return try withArtifactLock(root: root, artifactId: components.artifactId) {
+      try ensureDirectoryChain(destination.deletingLastPathComponent())
+      let expectedByteCount = Int64(data.count)
+      if FileManager.default.fileExists(atPath: destination.path) {
+        let existing = try inspect(destination)
+        guard existing.byteCount == expectedByteCount,
+              existing.sha256 == expectedHash else {
+          throw OwnedArtifactStoreError.immutableConflict
+        }
+        return [
+          "relativePath": relativePath,
+          "byteCount": expectedByteCount,
+          "sha256": expectedHash,
+          "created": false,
+        ]
+      }
+      let partial = destination.appendingPathExtension("partial")
+      do {
+        if FileManager.default.fileExists(atPath: partial.path) {
+          try FileManager.default.removeItem(at: partial)
+          try synchronizeDirectory(partial.deletingLastPathComponent())
+        }
+        if let partialWriter {
+          try partialWriter(partial, data)
+        } else {
+          guard FileManager.default.createFile(atPath: partial.path, contents: data) else {
+            throw OwnedArtifactStoreError.writeFailed
+          }
+        }
+        try synchronizeFile(partial)
+        let inspected = try inspect(partial)
+        guard inspected.byteCount == expectedByteCount,
+              inspected.sha256 == expectedHash else {
+          throw OwnedArtifactStoreError.integrityFailed
+        }
+        guard Darwin.rename(partial.path, destination.path) == 0 else {
+          throw OwnedArtifactStoreError.writeFailed
+        }
+        try synchronizeDirectory(destination.deletingLastPathComponent())
+        return [
+          "relativePath": relativePath,
+          "byteCount": inspected.byteCount,
+          "sha256": expectedHash,
+          "created": true,
+        ]
+      } catch let error as OwnedArtifactStoreError {
+        throw error
+      } catch {
+        throw OwnedArtifactStoreError.writeFailed
+      }
+    }
   }
 
   static func list(root: URL) throws -> [[String: Any]] {
