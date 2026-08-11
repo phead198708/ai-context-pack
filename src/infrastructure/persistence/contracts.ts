@@ -162,7 +162,8 @@ export type RecoveryDiagnosticScope =
   | 'migration'
   | 'inbox'
   | 'artifact'
-  | 'cleanup';
+  | 'cleanup'
+  | 'pipeline';
 
 export interface RecoveryDiagnosticInput {
   readonly id: string;
@@ -189,11 +190,14 @@ export interface ContextPackRepository {
     expectedRevision: number,
   ): Promise<DeletePackResult>;
   startPipelineRun(input: StartPipelineRunInput): Promise<void>;
-  listRunnablePipelineRuns(): Promise<readonly PersistedPipelineRun[]>;
+  listRunnablePipelineRuns(
+    staleRunningBefore?: string,
+  ): Promise<readonly PersistedPipelineRun[]>;
   markPipelineRunRunning(
     runId: string,
     expectedClaimVersion: number,
     updatedAt: string,
+    staleRunningBefore: string,
   ): Promise<number | null>;
   completePipelineRun(input: CompletePipelineRunInput): Promise<boolean>;
   failPipelineRun(input: FailPipelineRunInput): Promise<boolean>;

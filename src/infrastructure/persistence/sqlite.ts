@@ -773,7 +773,11 @@ export class ExpoSqlitePersistenceRepository
     );
   }
 
-  async listRunnablePipelineRuns(): Promise<readonly PersistedPipelineRun[]> {
+  async listRunnablePipelineRuns(
+    staleRunningBefore?: string,
+  ): Promise<readonly PersistedPipelineRun[]> {
+    if (staleRunningBefore !== undefined)
+      requireIsoDateTime(staleRunningBefore);
     const rows = await this.connection.all<{
       id: string;
       pack_id: string;
@@ -787,8 +791,10 @@ export class ExpoSqlitePersistenceRepository
       `SELECT id, pack_id, item_id, stage, status, started_at, updated_at,
          claim_version
        FROM pipeline_runs
-       WHERE status IN ('queued', 'running', 'recovering')
+       WHERE status IN ('queued', 'recovering')
+          OR (status = 'running' AND updated_at <= ?)
        ORDER BY updated_at, id`,
+      [staleRunningBefore ?? '0000-01-01T00:00:00.000Z'],
     );
     return rows.map(row =>
       decodePersisted(() => {
@@ -819,6 +825,7 @@ export class ExpoSqlitePersistenceRepository
     runId: string,
     expectedClaimVersion: number,
     updatedAt: string,
+    staleRunningBefore: string,
   ): Promise<number | null> {
     requireCanonicalId(runId);
     if (
@@ -828,12 +835,14 @@ export class ExpoSqlitePersistenceRepository
     )
       throw new DomainError('SCHEMA_INVALID');
     requireIsoDateTime(updatedAt);
+    requireIsoDateTime(staleRunningBefore);
     const result = await this.connection.run(
       `UPDATE pipeline_runs SET status = 'running', updated_at = ?,
          claim_version = claim_version + 1
        WHERE id = ? AND claim_version = ?
-         AND status IN ('queued', 'running', 'recovering')`,
-      [updatedAt, runId, expectedClaimVersion],
+         AND (status IN ('queued', 'recovering')
+           OR (status = 'running' AND updated_at <= ?))`,
+      [updatedAt, runId, expectedClaimVersion, staleRunningBefore],
     );
     return result.changes === 1 ? expectedClaimVersion + 1 : null;
   }
@@ -2605,7 +2614,8 @@ function diagnosticScope(value: string): RecoveryDiagnostic['scope'] {
     value === 'migration' ||
     value === 'inbox' ||
     value === 'artifact' ||
-    value === 'cleanup'
+    value === 'cleanup' ||
+    value === 'pipeline'
   )
     return value;
   throw new DomainError('STORAGE_DIVERGENCE_DETECTED');

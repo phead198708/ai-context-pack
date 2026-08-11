@@ -124,6 +124,8 @@ export class PackLibraryController {
       plan = retryPlanForItem(packId, item, itemArtifacts);
       if (plan.stage === 'import')
         throw new DomainError('DOMAIN_INVALID_TRANSITION');
+      if (this.processing && !this.processing.supports(plan.stage))
+        throw new DomainError('DOMAIN_INVALID_TRANSITION');
       const items = replaceItem(graph.items, itemId, current => ({
         ...withoutRetryStage(current),
         state: restoreItemCheckpoint(
@@ -164,7 +166,11 @@ export class PackLibraryController {
           artifacts.filter(value => value.itemId === item.id),
         );
         // Provider-less failures stay in the retained-source import retry flow.
-        if (plan.stage === 'import') return item;
+        if (
+          plan.stage === 'import' ||
+          (this.processing && !this.processing.supports(plan.stage))
+        )
+          return item;
         plans.push(plan);
         return {
           ...withoutRetryStage(item),
@@ -191,31 +197,36 @@ export class PackLibraryController {
           item,
           artifacts.filter(value => value.itemId === item.id),
         );
-        if (plan.stage !== 'import') plans.push(plan);
+        if (
+          plan.stage !== 'import' &&
+          (!this.processing || this.processing.supports(plan.stage))
+        )
+          plans.push(plan);
       }
+      const allPackaged =
+        items.length > 0 && items.every(item => item.state === 'packaged');
       const hasRunnableCheckpoint =
         plans.length > 0 ||
-        items.some(item =>
-          [
-            'received',
-            'imported',
-            'extracted',
-            'analyzed',
-            'reviewed',
-          ].includes(item.state),
-        ) ||
+        (!this.processing &&
+          items.some(item =>
+            [
+              'received',
+              'imported',
+              'extracted',
+              'analyzed',
+              'reviewed',
+            ].includes(item.state),
+          )) ||
         // A failed Pack whose items are all packaged represents a pack-level
         // packaging/export checkpoint. Retrying must reactivate that checkpoint
         // without fabricating item work or silently accepting a failed item.
-        (items.length > 0 && items.every(item => item.state === 'packaged'));
+        allPackaged;
       if (!hasRunnableCheckpoint)
         throw new DomainError('DOMAIN_INVALID_TRANSITION');
       const updatedAt = this.timestamp(graph.pack);
       const runs = this.processing
         ? plans.map(plan => createPipelineRun(plan, updatedAt))
         : [];
-      const allPackaged =
-        items.length > 0 && items.every(item => item.state === 'packaged');
       const retriedPackState = packStateForRetry(graph.pack.state);
       await repository.savePackGraph({
         pack: updatedPack(

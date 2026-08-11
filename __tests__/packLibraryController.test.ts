@@ -88,6 +88,7 @@ function repository(graph = fixture()) {
 
 function scheduler(): jest.Mocked<PackProcessingScheduler> {
   return {
+    supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
@@ -365,11 +366,13 @@ test('packaging retry restores reviewed without repeating analysis or review', a
   const graph = fixture();
   const packagingFailure: PersistedPackGraph = {
     ...graph,
-    items: graph.items.map(item =>
-      item.id === secondId
-        ? { ...item, state: 'failed', retryStage: 'package' }
-        : item,
-    ),
+    items: graph.items.map(item => {
+      if (item.id === secondId)
+        return { ...item, state: 'failed', retryStage: 'package' };
+      const packaged = { ...item };
+      delete packaged.retryStage;
+      return { ...packaged, state: 'packaged' };
+    }),
   };
   const repo = repository(packagingFailure);
   const controller = new PackLibraryController(async () => repo.value);
@@ -385,6 +388,37 @@ test('packaging retry restores reviewed without repeating analysis or review', a
   expect(
     repo.saves[0]?.items.find(item => item.id === secondId)?.retryStage,
   ).toBeUndefined();
+});
+
+test('production retry rejects stages that have no executable worker', async () => {
+  const graph = fixture();
+  const packagingFailure: PersistedPackGraph = {
+    ...graph,
+    items: graph.items.map(item => {
+      if (item.id === secondId)
+        return { ...item, state: 'failed', retryStage: 'package' };
+      const packaged = { ...item };
+      delete packaged.retryStage;
+      return { ...packaged, state: 'packaged' };
+    }),
+  };
+  const repo = repository(packagingFailure);
+  const processing = scheduler();
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:03Z',
+    processing,
+  );
+
+  await expect(controller.retryItem(packId, secondId)).rejects.toMatchObject({
+    code: 'DOMAIN_INVALID_TRANSITION',
+  });
+  await expect(controller.retryPack(packId)).rejects.toMatchObject({
+    code: 'DOMAIN_INVALID_TRANSITION',
+  });
+  expect(processing.supports).toHaveBeenCalledWith('package');
+  expect(processing.launch).not.toHaveBeenCalled();
+  expect(repo.saves).toHaveLength(0);
 });
 
 test('Pack retry fails closed when every failed item requires retained-source import', async () => {

@@ -352,6 +352,52 @@ describe('production repository against SQLite', () => {
     ]);
   });
 
+  test('migrates a v4 destructively released original without inventing retained bytes', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'released first original',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'release',
+    });
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+    ).resolves.toBe(true);
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    await expect(repository.listImportDetails()).resolves.toEqual([
+      expect.objectContaining({
+        ingestionId,
+        items: [
+          expect.objectContaining({
+            id: firstItemId,
+            status: 'copied',
+            originalReleased: true,
+          }),
+          expect.objectContaining({
+            id: secondItemId,
+            status: 'copied',
+          }),
+        ],
+      }),
+    ]);
+  });
+
   test('materializes photo, PDF, text, and URL main-app imports as ordered ContextItems', async () => {
     const items = [
       { id: mainAppImageId, mediaType: 'image/png', bytes: 4, hash: '1' },

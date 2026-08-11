@@ -259,6 +259,22 @@ WHERE status = 'failed'
     WHERE artifact.item_id = import_items.id AND artifact.kind = 'original'
   );
 
+-- v4 represented an explicit destructive release by removing the item from the
+-- Pack/library graph and eventually deleting its unreferenced original record.
+-- Preserve that user-authorized tombstone instead of misclassifying the row as
+-- a retained original whose bytes have unexpectedly disappeared.
+UPDATE import_items
+SET original_disposition = 'released'
+WHERE status = 'copied'
+  AND NOT EXISTS (
+    SELECT 1 FROM context_items context_item
+    WHERE context_item.id = import_items.id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM artifacts artifact
+    WHERE artifact.item_id = import_items.id AND artifact.kind = 'original'
+  );
+
 CREATE TABLE pipeline_runs (
   id TEXT PRIMARY KEY NOT NULL,
   pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE RESTRICT,

@@ -74,6 +74,17 @@ const itemId = '223e4567-e89b-42d3-a456-426614174000';
 const ingestionId = '323e4567-e89b-42d3-a456-426614174000';
 const now = '2026-08-11T00:00:00Z';
 
+function verifiedOriginal() {
+  return jest.fn(
+    async (relativePath: string, byteCount: number, sha256: string) => ({
+      relativePath,
+      status: 'verified' as const,
+      byteCount,
+      sha256,
+    }),
+  );
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -92,6 +103,10 @@ class DeferredWorker implements PackStageWorker {
     string,
     ReturnType<typeof deferred<Artifact | undefined>>
   >();
+
+  supports(stage: PersistedPipelineRun['stage']): boolean {
+    return stage === 'extract';
+  }
 
   start(run: PersistedPipelineRun): PackStageWorkHandle {
     this.starts.push(run);
@@ -311,6 +326,7 @@ test('removing an item cancels its durable run and rejects a late native success
 
 test('a replacement coordinator resumes a queued run after restart', async () => {
   const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
@@ -344,6 +360,7 @@ test('a replacement coordinator resumes a queued run after restart', async () =>
 
 test('the durable claim token permits only one coordinator to execute a queued run', async () => {
   const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
@@ -390,12 +407,125 @@ test('the durable claim token permits only one coordinator to execute a queued r
   );
 });
 
-test('a superseded coordinator cannot settle a late success', async () => {
+test('a replacement coordinator does not reclaim a live running claim', async () => {
+  const firstWorker = new DeferredWorker();
+  const first = new DurablePackProcessingCoordinator(
+    async () => repository,
+    firstWorker,
+    () => now,
+  );
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    first,
+  ).retryItem(packId, itemId);
+  await waitFor(() => firstWorker.starts.length === 1);
+
+  const replacementWorker = new DeferredWorker();
+  const replacement = new DurablePackProcessingCoordinator(
+    async () => repository,
+    replacementWorker,
+    () => now,
+  );
+  await replacement.recover();
+  await replacement.waitForIdle();
+
+  expect(replacementWorker.starts).toHaveLength(0);
+  const run = firstWorker.starts[0]!;
+  firstWorker.results.get(run.id)!.resolve(firstWorker.artifact(run));
+  await first.waitForIdle();
+  expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
+    'extracted',
+  );
+});
+
+test('an expired running claim is recoverable and rejects its old late success', async () => {
+  const firstWorker = new DeferredWorker();
+  const first = new DurablePackProcessingCoordinator(
+    async () => repository,
+    firstWorker,
+    () => now,
+  );
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    first,
+  ).retryItem(packId, itemId);
+  await waitFor(() => firstWorker.starts.length === 1);
+  const oldRun = firstWorker.starts[0]!;
+
+  const replacementWorker = new DeferredWorker();
+  const replacement = new DurablePackProcessingCoordinator(
+    async () => repository,
+    replacementWorker,
+    () => '2026-08-11T00:06:00Z',
+  );
+  await replacement.recover();
+  await waitFor(() => replacementWorker.starts.length === 1);
+  const replacementRun = replacementWorker.starts[0]!;
+  replacementWorker.results
+    .get(replacementRun.id)!
+    .resolve(replacementWorker.artifact(replacementRun));
+  await replacement.waitForIdle();
+
+  firstWorker.results.get(oldRun.id)!.resolve(firstWorker.artifact(oldRun));
+  await first.waitForIdle();
+
+  expect((await repository.findPackGraph(packId))?.items[0]).toMatchObject({
+    state: 'extracted',
+    artifactIds: expect.arrayContaining([itemId, replacementRun.id]),
+  });
+  expect(await repository.listArtifactRecords()).toHaveLength(2);
+});
+
+test('unexpected coordinator database failures are surfaced and retried once', async () => {
   const worker = new DeferredWorker();
+  const onUnexpectedFailure = jest.fn();
+  jest
+    .spyOn(repository, 'markPipelineRunRunning')
+    .mockRejectedValueOnce(new Error('synthetic-database-failure'));
   const coordinator = new DurablePackProcessingCoordinator(
     async () => repository,
     worker,
     () => now,
+    5 * 60 * 1_000,
+    onUnexpectedFailure,
+  );
+
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).retryItem(packId, itemId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  worker.results.get(run.id)!.resolve(worker.artifact(run));
+  await coordinator.waitForIdle();
+
+  expect(worker.starts).toHaveLength(1);
+  expect(onUnexpectedFailure).toHaveBeenCalledWith({
+    runId: expect.any(String),
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  expect(await repository.listRunnablePipelineRuns()).toEqual([]);
+  expect(await repository.listRecoveryDiagnostics()).toEqual([
+    expect.objectContaining({
+      scope: 'pipeline',
+      phase: 'coordinator-execution',
+      code: 'PIPELINE_STAGE_FAILED',
+    }),
+  ]);
+  expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
+    'extracted',
+  );
+});
+
+test('coordinator timestamps never move the Pack before its creation time', async () => {
+  const worker = new DeferredWorker();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => '2026-08-10T00:00:00Z',
   );
   await new PackLibraryController(
     async () => repository,
@@ -404,18 +534,15 @@ test('a superseded coordinator cannot settle a late success', async () => {
   ).retryItem(packId, itemId);
   await waitFor(() => worker.starts.length === 1);
   const run = worker.starts[0]!;
-  await expect(repository.markPipelineRunRunning(run.id, 1, now)).resolves.toBe(
-    2,
-  );
-
   worker.results.get(run.id)!.resolve(worker.artifact(run));
   await coordinator.waitForIdle();
 
-  expect((await repository.findPackGraph(packId))?.items[0]).toMatchObject({
-    state: 'imported',
-    artifactIds: [itemId],
-  });
-  expect(await repository.listArtifactRecords()).toHaveLength(1);
+  const graph = await repository.findPackGraph(packId);
+  expect(graph?.pack.updatedAt).toBe(now);
+  expect(Date.parse(graph!.pack.updatedAt)).toBeGreaterThanOrEqual(
+    Date.parse(graph!.pack.createdAt),
+  );
+  expect(graph?.items[0]?.state).toBe('extracted');
 });
 
 test('the production extraction worker reads the owned original and publishes immutable OCR text', async () => {
@@ -449,6 +576,7 @@ test('the production extraction worker reads the owned original and publishes im
     created: true,
   });
   const native = {
+    verifyArtifact: verifiedOriginal(),
     resolveOwnedArtifactFileUri,
     getOCRCapabilities: jest.fn().mockResolvedValue({
       schemaVersion: 1,
@@ -473,8 +601,9 @@ test('the production extraction worker reads the owned original and publishes im
     async () => repository,
     native,
   );
+  const handle = worker.start(run);
 
-  await expect(worker.start(run).result).resolves.toEqual({
+  await expect(handle.result).resolves.toEqual({
     id: run.id,
     itemId,
     kind: 'ocr-text',
@@ -503,6 +632,113 @@ test('the production extraction worker reads the owned original and publishes im
     ownedDerivedPath(packId, run.id, 'txt'),
     'synthetic OCR text',
   );
+  await handle.finalize?.();
+});
+
+test('the production extraction worker fails before reading an unverified original', async () => {
+  const run: PersistedPipelineRun = {
+    id: '433e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const resolveOwnedArtifactFileUri = jest.fn();
+  const recognizeText = jest.fn();
+  const writeTextArtifact = jest.fn();
+  const native = {
+    verifyArtifact: jest.fn().mockResolvedValue({
+      relativePath: `Packs/${packId}/originals/${itemId}.bin`,
+      status: 'mismatch',
+      byteCount: 5,
+      sha256: 'f'.repeat(64),
+    }),
+    resolveOwnedArtifactFileUri,
+    recognizeText,
+    writeTextArtifact,
+  } as unknown as NativeAdapter;
+  const worker = new NativeExtractionStageWorker(
+    async () => repository,
+    native,
+  );
+
+  await expect(worker.start(run).result).rejects.toMatchObject({
+    code: 'ARTIFACT_INTEGRITY_FAILED',
+  });
+  expect(resolveOwnedArtifactFileUri).not.toHaveBeenCalled();
+  expect(recognizeText).not.toHaveBeenCalled();
+  expect(writeTextArtifact).not.toHaveBeenCalled();
+});
+
+test('derivative publication holds the global cleanup lease until settlement finalizes', async () => {
+  const run: PersistedPipelineRun = {
+    id: '443e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const otherOwner = '453e4567-e89b-42d3-a456-426614174000';
+  const native = {
+    verifyArtifact: verifiedOriginal(),
+    resolveOwnedArtifactFileUri: jest
+      .fn()
+      .mockResolvedValue('file:///owned/synthetic.png'),
+    getOCRCapabilities: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      engines: [
+        {
+          engine: 'apple-vision',
+          revision: '3',
+          scripts: ['latin'],
+          recognitionLevels: ['accurate'],
+          ready: true,
+          offline: true,
+        },
+      ],
+      maximumPixelCount: 40_000_000,
+      maximumDimension: 16_384,
+    }),
+    recognizeText: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      text: 'synthetic OCR text',
+      blocks: [],
+      durationMs: 1,
+      engine: 'apple-vision',
+      revision: '3',
+      recognitionLevel: 'accurate',
+      warnings: [],
+    }),
+    cancelTextRecognition: jest.fn().mockResolvedValue(undefined),
+    writeTextArtifact: jest.fn().mockResolvedValue({
+      relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+      byteCount: 18,
+      sha256: 'd'.repeat(64),
+      created: true,
+    }),
+  } as unknown as NativeAdapter;
+  const worker = new NativeExtractionStageWorker(
+    async () => repository,
+    native,
+    () => now,
+  );
+  const handle = worker.start(run);
+
+  await expect(handle.result).resolves.toBeDefined();
+  await expect(
+    repository.acquireCleanupLease(otherOwner, now, '2026-08-11T00:01:00Z'),
+  ).resolves.toBe(false);
+  await handle.finalize?.();
+  await expect(
+    repository.acquireCleanupLease(otherOwner, now, '2026-08-11T00:01:00Z'),
+  ).resolves.toBe(true);
+  await repository.releaseCleanupLease(otherOwner);
 });
 
 test('the production extraction worker publishes bounded plain-text input without OCR', async () => {
@@ -538,6 +774,7 @@ test('the production extraction worker publishes bounded plain-text input withou
     created: true,
   });
   const native = {
+    verifyArtifact: verifiedOriginal(),
     resolveOwnedArtifactFileUri: jest
       .fn()
       .mockResolvedValue('file:///owned/synthetic.txt'),
@@ -548,8 +785,9 @@ test('the production extraction worker publishes bounded plain-text input withou
     async () => repository,
     native,
   );
+  const handle = worker.start(run);
 
-  await expect(worker.start(run).result).resolves.toMatchObject({
+  await expect(handle.result).resolves.toMatchObject({
     id: run.id,
     itemId: textItemId,
     kind: 'ocr-text',
@@ -560,6 +798,7 @@ test('the production extraction worker publishes bounded plain-text input withou
     ownedDerivedPath(textPackId, run.id, 'txt'),
     'synthetic text',
   );
+  await handle.finalize?.();
 });
 
 test('the production extraction worker publishes all completed PDF page text in order', async () => {
@@ -603,6 +842,7 @@ test('the production extraction worker publishes all completed PDF page text in 
     created: true,
   });
   const native = {
+    verifyArtifact: verifiedOriginal(),
     resolveOwnedArtifactFileUri: jest
       .fn()
       .mockResolvedValue('file:///owned/synthetic.pdf'),
@@ -639,8 +879,9 @@ test('the production extraction worker publishes all completed PDF page text in 
     async () => repository,
     native,
   );
+  const handle = worker.start(run);
 
-  await expect(worker.start(run).result).resolves.toMatchObject({
+  await expect(handle.result).resolves.toMatchObject({
     id: run.id,
     itemId: pdfItemId,
     kind: 'pdf-page-text',
@@ -653,6 +894,7 @@ test('the production extraction worker publishes all completed PDF page text in 
     ownedDerivedPath(pdfPackId, run.id, 'txt'),
     'page-0\n\npage-1',
   );
+  await handle.finalize?.();
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {
