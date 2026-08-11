@@ -120,6 +120,58 @@ describe('Issue #13 versioned content normalization', () => {
     expect(normalizeContentV1(code).text).toBe(code);
   });
 
+  it('preserves semantic blank runs and fence-like code bytes', () => {
+    const fenced = [
+      '```text',
+      'first',
+      '',
+      '',
+      '',
+      '```not-a-closing-fence',
+      'second',
+      '```',
+    ].join('\n');
+    const unfenced = 'const first = 1;\n\n\n\nconst second = 2;';
+
+    expect(normalizeContentV1(fenced)).toMatchObject({
+      contentKind: 'code',
+      text: fenced,
+      warnings: [],
+    });
+    expect(normalizeContentV1(unfenced)).toMatchObject({
+      contentKind: 'code',
+      text: unfenced,
+      warnings: [],
+    });
+  });
+
+  it('preserves single-line structured code instead of prose-compacting it', () => {
+    const code = '{"message": "semantic  spacing", "ready": true}';
+    expect(normalizeContentV1(code)).toMatchObject({
+      contentKind: 'code',
+      text: code,
+      warnings: [],
+    });
+    const oneSpace = normalizeContentV1('const password = "a b";');
+    const twoSpaces = normalizeContentV1('const password = "a  b";');
+    expect(oneSpace.text).not.toBe(twoSpaces.text);
+    expect(
+      normalizedTextSimilarityV1(
+        fingerprintNormalizedTextV1(oneSpace),
+        fingerprintNormalizedTextV1(twoSpaces),
+      ),
+    ).toBeLessThan(1);
+  });
+
+  it('does not NFC-compose semantic code bytes', () => {
+    const decomposed = 'const label = "Cafe\u0301";';
+    expect(normalizeContentV1(decomposed)).toMatchObject({
+      contentKind: 'code',
+      text: decomposed,
+      warnings: [],
+    });
+  });
+
   it('fails closed on invalid Unicode scalars and unknown validator keys', () => {
     expect(() => normalizeContentV1('\uD800')).toThrow('SCHEMA_INVALID');
     expect(
@@ -328,6 +380,49 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
     expect(analyses[1]?.originalSha256).toBe(SHA_A);
   });
 
+  it('aggregates group savings across every non-representative member', () => {
+    const suggestions = [
+      {
+        schemaVersion: 1 as const,
+        key: `similar-text:${ITEM_IDS[0]}:${ITEM_IDS[1]}`,
+        packId: PACK_ID,
+        leftItemId: ITEM_IDS[0],
+        rightItemId: ITEM_IDS[1],
+        reason: 'similar-text' as const,
+        confidence: 0.9,
+        expectedBytesSaved: 100,
+        expectedCharactersSaved: 80,
+      },
+      {
+        schemaVersion: 1 as const,
+        key: `similar-text:${ITEM_IDS[1]}:${ITEM_IDS[2]}`,
+        packId: PACK_ID,
+        leftItemId: ITEM_IDS[1],
+        rightItemId: ITEM_IDS[2],
+        reason: 'similar-text' as const,
+        confidence: 0.9,
+        expectedBytesSaved: 240,
+        expectedCharactersSaved: 200,
+      },
+      {
+        schemaVersion: 1 as const,
+        key: `similar-text:${ITEM_IDS[0]}:${ITEM_IDS[2]}`,
+        packId: PACK_ID,
+        leftItemId: ITEM_IDS[0],
+        rightItemId: ITEM_IDS[2],
+        reason: 'similar-text' as const,
+        confidence: 0.9,
+        expectedBytesSaved: 100,
+        expectedCharactersSaved: 80,
+      },
+    ];
+
+    expect(groupDuplicateSuggestionsV1(suggestions)[0]).toMatchObject({
+      expectedBytesSaved: 340,
+      expectedCharactersSaved: 280,
+    });
+  });
+
   it('rejects malformed hashes and analysis records without silently excluding items', () => {
     expect(isImagePerceptualHashV1(imageFingerprint('not-a-safe-hash'))).toBe(
       false,
@@ -336,6 +431,28 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
       isDuplicateAnalysisItemV1({
         ...analysis(0, 'valid analysis content long enough to fingerprint'),
         originalByteCount: -1,
+      }),
+    ).toBe(false);
+    const valid = analysis(
+      0,
+      'valid analysis content long enough to fingerprint',
+    );
+    expect(
+      isDuplicateAnalysisItemV1({
+        ...valid,
+        textFingerprint: {
+          ...valid.textFingerprint,
+          shingleCount: 0,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isDuplicateAnalysisItemV1({
+        ...valid,
+        textFingerprint: {
+          ...valid.textFingerprint,
+          hashes: [],
+        },
       }),
     ).toBe(false);
     expect(

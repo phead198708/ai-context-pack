@@ -716,6 +716,24 @@ final class PDFExtractionTests: XCTestCase {
     let result = try PlainTextFileReader.read(fileURL: valid)
     XCTAssertEqual(result["text"] as? String, source)
     XCTAssertEqual(result["byteCount"] as? Int, Data(source.utf8).count)
+    let sourceHash = SHA256.hash(data: Data(source.utf8))
+      .map { String(format: "%02x", $0) }.joined()
+    XCTAssertNoThrow(
+      try PlainTextFileReader.read(
+        fileURL: valid,
+        expectedByteCount: Data(source.utf8).count,
+        expectedSHA256: sourceHash
+      )
+    )
+    XCTAssertThrowsError(
+      try PlainTextFileReader.read(
+        fileURL: valid,
+        expectedByteCount: Data(source.utf8).count,
+        expectedSHA256: String(repeating: "0", count: 64)
+      )
+    ) {
+      XCTAssertEqual($0 as? PlainTextFileReaderError, .integrityFailure)
+    }
 
     let invalid = root.appendingPathComponent("invalid.txt")
     try Data([0xC3, 0x28]).write(to: invalid)
@@ -727,6 +745,19 @@ final class PDFExtractionTests: XCTestCase {
     try Data(repeating: 0x61, count: PlainTextFileReader.maximumBytes + 1).write(to: oversized)
     XCTAssertThrowsError(try PlainTextFileReader.read(fileURL: oversized)) {
       XCTAssertEqual($0 as? PlainTextFileReaderError, .tooLarge)
+    }
+    let derived = try PlainTextFileReader.read(
+      fileURL: oversized,
+      maximumBytes: PlainTextFileReader.maximumDerivedBytes
+    )
+    XCTAssertEqual(derived["byteCount"] as? Int, PlainTextFileReader.maximumBytes + 1)
+    XCTAssertThrowsError(
+      try PlainTextFileReader.read(
+        fileURL: oversized,
+        maximumBytes: PlainTextFileReader.maximumDerivedBytes + 1
+      )
+    ) {
+      XCTAssertEqual($0 as? PlainTextFileReaderError, .resultInvalid)
     }
 
     let link = root.appendingPathComponent("link.txt")

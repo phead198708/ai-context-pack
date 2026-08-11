@@ -48,6 +48,8 @@ export interface PackStageWorker {
 export interface PackProcessingScheduler {
   supports(stage: StartPipelineRunInput['stage']): boolean;
   launch(runs: readonly StartPipelineRunInput[]): void;
+  /** Resolves after every run queued before this call reaches a durable settlement. */
+  waitForIdle(): Promise<void>;
   cancel(packId: string, updatedAt: string): Promise<void>;
   recover(): Promise<void>;
 }
@@ -666,7 +668,12 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         );
         processorVersion = value.document.revision;
       } else {
-        const value = await this.native.readPlainTextFile(fileUri);
+        const value = await this.native.readPlainTextFile(
+          fileUri,
+          undefined,
+          original.byteCount,
+          original.sha256,
+        );
         text = value.text;
         processorVersion = value.revision;
       }
@@ -840,6 +847,7 @@ export class NativeDuplicateAnalysisStageWorker implements PackStageWorker {
     let originalByteCount: number | undefined;
     let originalSha256: string | undefined;
     let analyzedAt: string | undefined;
+    let imageHashActive = false;
     const publicationFence = new Promise<never>((_resolve, reject) => {
       rejectPublicationFence = reject;
     });
@@ -941,17 +949,36 @@ export class NativeDuplicateAnalysisStageWorker implements PackStageWorker {
       const extractedUri = await this.native.resolveOwnedArtifactFileUri(
         extracted.relativePath,
       );
-      const source = await this.native.readPlainTextFile(extractedUri);
+      const source = await this.native.readPlainTextFile(
+        extractedUri,
+        DERIVED_TEXT_MAXIMUM_UTF8_BYTES,
+        extracted.byteCount,
+        extracted.sha256,
+      );
       if (source.byteCount !== extracted.byteCount)
         throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
       normalized = normalizeContentV1(source.text);
       if (item.sourceType === 'image') {
-        if (!this.native.hashImagePerceptually)
+        if (
+          !this.native.hashImagePerceptually ||
+          !this.native.cancelImagePerceptualHash
+        )
           throw new DomainError('PIPELINE_STAGE_FAILED');
         const originalUri = await this.native.resolveOwnedArtifactFileUri(
           original.relativePath,
         );
-        imageFingerprint = await this.native.hashImagePerceptually(originalUri);
+        if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
+        imageHashActive = true;
+        try {
+          imageFingerprint = await this.native.hashImagePerceptually(
+            run.id,
+            originalUri,
+            original.byteCount,
+            original.sha256,
+          );
+        } finally {
+          imageHashActive = false;
+        }
       }
       analyzedAt = validatedTimestamp(this.now(), chronologyFloor);
       if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
@@ -1093,6 +1120,8 @@ export class NativeDuplicateAnalysisStageWorker implements PackStageWorker {
       publicationLeaseOwnerId: publicationOwnerId,
       cancel: async () => {
         cancelled = true;
+        if (imageHashActive)
+          await this.native.cancelImagePerceptualHash?.(run.id);
       },
       finalize: async () => {
         await Promise.allSettled([result, analysis]);
@@ -1131,7 +1160,12 @@ async function verifyNormalizedArtifactContent(
     throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
   await verifyAnalysisSource(native, artifact);
   const uri = await native.resolveOwnedArtifactFileUri(artifact.relativePath);
-  const persisted = await native.readPlainTextFile(uri);
+  const persisted = await native.readPlainTextFile(
+    uri,
+    DERIVED_TEXT_MAXIMUM_UTF8_BYTES,
+    artifact.byteCount,
+    artifact.sha256,
+  );
   if (
     persisted.byteCount !== normalized.utf8ByteCount ||
     persisted.text !== normalized.text

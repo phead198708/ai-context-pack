@@ -58,6 +58,7 @@ internal object AndroidPDFProcessScope {
 }
 
 internal object AndroidImageHashProcessScope {
+  val registry = ImageHashTaskRegistry()
   val executor = ThreadPoolExecutor(
     1,
     1,
@@ -324,6 +325,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
   private val pdfFinishCoordinator = AndroidPDFProcessScope.finishCoordinator
   private val ocrLifecycle = OcrModuleLifecycle()
   private val pdfLifecycle = OcrModuleLifecycle()
+  private val imageHashOwnerId = UUID.randomUUID().toString()
   private var callbackContext: Context? = null
 
   override fun definition() = ModuleDefinition {
@@ -358,6 +360,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         active.close()
         active.reject?.invoke()
       }
+      AndroidImageHashProcessScope.registry.destroyOwner(imageHashOwnerId)
     }
 
     AsyncFunction("scanInbox") {
@@ -592,19 +595,49 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       ocrProcessor.capabilities(context)
     }
 
-    AsyncFunction("hashImagePerceptually") { fileUri: String, promise: Promise ->
+    AsyncFunction("hashImagePerceptually") {
+      taskId: String,
+      fileUri: String,
+      expectedByteCount: Double,
+      expectedSha256: String,
+      promise: Promise ->
       val context = appContext.reactContext
         ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      if (
+        !expectedByteCount.isFinite() ||
+        expectedByteCount % 1.0 != 0.0 ||
+        expectedByteCount !in 1.0..ImagePerceptualHasher.maximumSourceBytes.toDouble()
+      ) return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val token = AndroidImageHashProcessScope.registry.reserve(imageHashOwnerId, taskId)
+        ?: return@AsyncFunction promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
       try {
         AndroidImageHashProcessScope.executor.execute {
-          try { promise.resolve(ImagePerceptualHasher.hash(context, fileUri)) }
+          try {
+            promise.resolve(
+              ImagePerceptualHasher.hash(
+                context,
+                fileUri,
+                expectedByteCount.toLong(),
+                expectedSha256,
+                token,
+              ),
+            )
+          }
           catch (error: NativeException) { promise.reject(error) }
           catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
           catch (_: Throwable) { promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID")) }
+          finally {
+            AndroidImageHashProcessScope.registry.finish(imageHashOwnerId, taskId, token)
+          }
         }
       } catch (_: RejectedExecutionException) {
+        AndroidImageHashProcessScope.registry.finish(imageHashOwnerId, taskId, token)
         promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
       }
+    }
+
+    AsyncFunction("cancelImagePerceptualHash") { taskId: String ->
+      AndroidImageHashProcessScope.registry.cancel(taskId)
     }
 
     AsyncFunction("recognizeText") {
@@ -867,12 +900,27 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       )
     }
 
-    AsyncFunction("readPlainTextFile") { fileUri: String, promise: Promise ->
+    AsyncFunction("readPlainTextFile") {
+      fileUri: String,
+      maximumBytes: Int,
+      expectedByteCount: Int?,
+      expectedSha256: String?,
+      promise: Promise ->
       val context = appContext.reactContext
         ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
       try {
         AndroidPDFProcessScope.executor.execute {
-          try { promise.resolve(AndroidPlainTextFileReader.read(context, fileUri)) }
+          try {
+            promise.resolve(
+              AndroidPlainTextFileReader.read(
+                context,
+                fileUri,
+                maximumBytes,
+                expectedByteCount,
+                expectedSha256,
+              ),
+            )
+          }
           catch (error: NativeException) { promise.reject(error) }
           catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
           catch (_: Throwable) { promise.reject(NativeException("TEXT_RESULT_INVALID")) }

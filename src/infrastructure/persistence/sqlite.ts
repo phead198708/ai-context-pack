@@ -2006,6 +2006,66 @@ export class ExpoSqlitePersistenceRepository
     });
   }
 
+  async restoreDuplicateDecision(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void> {
+    requireCanonicalId(packId);
+    requireCanonicalId(itemId);
+    requireIsoDateTime(restoredAt);
+    await this.connection.exclusive(async transaction => {
+      const pack = await transaction.first<{ updated_at: string }>(
+        'SELECT updated_at FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      );
+      const item = await transaction.first<{
+        inclusion_mode: string;
+        updated_at: string;
+      }>(
+        'SELECT inclusion_mode, updated_at FROM context_items WHERE id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      const row = await transaction.first<{ payload_json: string }>(
+        'SELECT payload_json FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      if (!pack || !item || !row) throw new DomainError('PERSISTENCE_CONFLICT');
+      const decision = decodeStoredJson(
+        row.payload_json,
+        isDuplicateDecisionV1,
+      );
+      if (decision.packId !== packId || decision.itemId !== itemId)
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const expectedInclusionMode =
+        decision.choice === 'exclude'
+          ? 'excluded'
+          : decision.baselineInclusionMode;
+      if (item.inclusion_mode !== expectedInclusionMode)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const effectiveAt = latestTimestamp([
+        pack.updated_at,
+        item.updated_at,
+        decision.decidedAt,
+        restoredAt,
+      ]);
+      await transaction.run(
+        `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
+         WHERE id = ? AND pack_id = ?`,
+        [decision.baselineInclusionMode, effectiveAt, itemId, packId],
+      );
+      await transaction.run(
+        'DELETE FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      await transaction.run(
+        `UPDATE packs SET updated_at = ?, revision = revision + 1
+         WHERE id = ? AND deleted_at IS NULL`,
+        [effectiveAt, packId],
+      );
+    });
+  }
+
   async recordRecoveryDiagnostic(
     input: RecoveryDiagnosticInput,
   ): Promise<void> {

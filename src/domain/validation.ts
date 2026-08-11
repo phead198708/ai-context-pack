@@ -18,7 +18,11 @@ import type {
   PipelineCheckpointV1,
   RiskFindingV1,
 } from './contracts';
-import { PDF_MAXIMUM_BYTES, PDF_MAXIMUM_PAGES } from './contracts';
+import {
+  DERIVED_TEXT_MAXIMUM_UTF8_BYTES,
+  PDF_MAXIMUM_BYTES,
+  PDF_MAXIMUM_PAGES,
+} from './contracts';
 import { DOMAIN_ERROR_CATALOG, type DomainErrorCode } from './errors';
 import { isCanonicalUuid } from './canonicalUuid';
 import { isValidUnicodeScalarString, utf8ByteCount } from './mainAppImport';
@@ -636,7 +640,14 @@ export function isPDFDocumentInfoV1(
 
 export function isNativePlainTextFileV1(
   value: unknown,
+  maximumBytes: number = PLAIN_TEXT_FILE_MAX_BYTES,
 ): value is NativePlainTextFileV1 {
+  if (
+    !Number.isSafeInteger(maximumBytes) ||
+    maximumBytes <= 0 ||
+    maximumBytes > DERIVED_TEXT_MAXIMUM_UTF8_BYTES
+  )
+    return false;
   return (
     record(value) &&
     hasOnlyKeys(value, [
@@ -650,7 +661,7 @@ export function isNativePlainTextFileV1(
     typeof value.text === 'string' &&
     isValidUnicodeScalarString(value.text) &&
     isNonNegativeInteger(value.byteCount) &&
-    (value.byteCount as number) <= PLAIN_TEXT_FILE_MAX_BYTES &&
+    (value.byteCount as number) <= maximumBytes &&
     utf8ByteCount(value.text) === value.byteCount &&
     value.encoding === 'utf-8' &&
     value.revision === '1'

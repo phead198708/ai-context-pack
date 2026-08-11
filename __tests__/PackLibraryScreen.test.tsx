@@ -174,6 +174,7 @@ function controller(): jest.Mocked<PackLibraryController> {
     retryPack: jest.fn().mockResolvedValue([]),
     analyzePack: jest.fn().mockResolvedValue(1),
     reviewDuplicateGroup: jest.fn().mockResolvedValue(undefined),
+    restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
     cancelProcessing: jest.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<PackLibraryController>;
 }
@@ -285,6 +286,16 @@ test('renders side-by-side duplicate review and wires reversible actions', async
         detectorVersion: 1,
         actualBytesSaved: 128,
         actualCharactersSaved: 64,
+        standaloneDecisions: [
+          {
+            id: itemIds[2],
+            displayName: 'Stranded choice',
+            contentKind: 'code',
+            normalizedCharacterCount: 48,
+            normalizedByteCount: 48,
+            choice: 'exclude',
+          },
+        ],
         groups: [
           {
             key: `${itemIds[0]}:${itemIds[4]}`,
@@ -327,6 +338,10 @@ test('renders side-by-side duplicate review and wires reversible actions', async
     renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[0]}` }),
   ).toBeDefined();
   expect(
+    renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[0]}` })
+      .props.accessible,
+  ).not.toBe(true);
+  expect(
     renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[4]}` }),
   ).toBeDefined();
 
@@ -342,6 +357,23 @@ test('renders side-by-side duplicate review and wires reversible actions', async
     [itemIds[0], itemIds[4]],
     { kind: 'keep-all' },
   );
+  expect(
+    renderer.root.findByProps({ testID: 'duplicate-standalone-decisions' }),
+  ).toBeDefined();
+  await press(button(renderer, 'Restore Stranded choice'));
+  expect(value.restoreDuplicateDecision).toHaveBeenCalledWith(
+    packId,
+    itemIds[2],
+  );
+
+  const chineseRenderer = await render(value, 'zh-Hans');
+  const chinese = text(chineseRenderer.root);
+  expect(chinese).toContain('视觉近似图片');
+  expect(chinese).toContain('正文');
+  expect(chinese).toContain('首选');
+  expect(chinese).not.toContain('near-image');
+  expect(chinese).not.toContain('prose');
+  expect(chinese).not.toContain('preferred');
 });
 
 test('renders all required library views and every partial-failure item state', async () => {

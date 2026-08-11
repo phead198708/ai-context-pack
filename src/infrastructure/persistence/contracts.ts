@@ -294,6 +294,12 @@ export interface DuplicateAnalysisRepository {
     packId: string,
     decisions: readonly DuplicateDecisionV1[],
   ): Promise<void>;
+  /** Restores the captured baseline even when the detector group no longer exists. */
+  restoreDuplicateDecision(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void>;
 }
 
 export interface QuarantineRecordInput {

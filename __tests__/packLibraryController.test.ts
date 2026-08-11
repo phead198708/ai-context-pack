@@ -85,6 +85,7 @@ function repository(graph = fixture()) {
       decisions: [],
     }),
     saveDuplicateDecisions: jest.fn().mockResolvedValue(undefined),
+    restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
     savePackGraph: jest.fn(async (input: SavePackGraphInput) => {
       saves.push(input);
       return graph.revision + 1;
@@ -97,6 +98,7 @@ function scheduler(): jest.Mocked<PackProcessingScheduler> {
   return {
     supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
   };
@@ -301,7 +303,7 @@ test('cancels only active work through the shared state machines', async () => {
   ]);
 });
 
-test('starts one durable analyze run for every extracted item', async () => {
+test('waits for every durable analyze run to settle before refreshing the caller', async () => {
   const base = fixture();
   const graph: PersistedPackGraph = {
     ...base,
@@ -317,13 +319,29 @@ test('starts one durable analyze run for every extracted item', async () => {
   processing.supports.mockImplementation(
     stage => stage === 'extract' || stage === 'analyze',
   );
+  let releaseIdle: (() => void) | undefined;
+  processing.waitForIdle.mockImplementation(
+    () =>
+      new Promise<void>(resolve => {
+        releaseIdle = resolve;
+      }),
+  );
   const controller = new PackLibraryController(
     async () => repo.value,
     () => '2026-08-10T00:00:05Z',
     processing,
   );
 
-  await expect(controller.analyzePack(packId)).resolves.toBe(2);
+  let settled = false;
+  const result = controller.analyzePack(packId).then(value => {
+    settled = true;
+    return value;
+  });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (processing.waitForIdle.mock.calls.length > 0) break;
+    await Promise.resolve();
+  }
+  expect(settled).toBe(false);
   expect(repo.saves[0]?.startedPipelineRuns).toEqual([
     expect.objectContaining({ itemId: firstId, stage: 'analyze' }),
     expect.objectContaining({ itemId: secondId, stage: 'analyze' }),
@@ -331,6 +349,9 @@ test('starts one durable analyze run for every extracted item', async () => {
   expect(processing.launch).toHaveBeenCalledWith(
     repo.saves[0]?.startedPipelineRuns,
   );
+  expect(processing.waitForIdle).toHaveBeenCalledTimes(1);
+  releaseIdle?.();
+  await expect(result).resolves.toBe(2);
 });
 
 test('preferred duplicate choice excludes peers without deleting originals', async () => {
@@ -391,6 +412,107 @@ test('preferred duplicate choice excludes peers without deleting originals', asy
     }),
   ]);
   expect(repo.saves).toHaveLength(0);
+});
+
+test('restores a durable duplicate choice without requiring a current suggestion group', async () => {
+  const repo = repository();
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:07Z',
+  );
+
+  await controller.restoreDuplicateDecision(packId, secondId);
+
+  expect(repo.value.restoreDuplicateDecision).toHaveBeenCalledWith(
+    packId,
+    secondId,
+    '2026-08-10T00:00:07Z',
+  );
+});
+
+test('keeps a stranded durable choice visible after its suggestion group disappears', async () => {
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    items: [
+      {
+        ...base.items[1]!,
+        originalDisplayName: 'Remaining item',
+        inclusionMode: 'excluded',
+        sortIndex: 0,
+      },
+    ],
+    pack: { ...base.pack, orderedItemIds: [secondId] },
+  };
+  const repo = repository(graph);
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: {
+      schemaVersion: 1,
+      packId,
+      config: {
+        schemaVersion: 1,
+        exactBinaryAlgorithm: 'sha256-v1',
+        normalizationVersion: 'text-normalization-v1',
+        textFingerprintAlgorithm: 'bottom-k-fnv1a32-5gram-v1',
+        textSimilarityThreshold: 0.82,
+        imageFingerprintAlgorithm: 'dhash-64-v1',
+        imageHammingDistanceThreshold: 8,
+        minimumTextCharacters: 20,
+      },
+      analyzedAt: '2026-08-10T00:00:05Z',
+      itemCount: 1,
+      suggestionCount: 0,
+    },
+    analyses: [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondId,
+        originalByteCount: 128,
+        normalizedArtifactId: '423e4567-e89b-42d3-a456-426614174000',
+        normalizedSha256: 'c'.repeat(64),
+        contentKind: 'prose',
+        normalizedCharacterCount: 80,
+        normalizedByteCount: 80,
+        textFingerprint: {
+          schemaVersion: 1,
+          algorithm: 'bottom-k-fnv1a32-5gram-v1',
+          shingleSize: 5,
+          sampleSize: 128,
+          shingleCount: 1,
+          hashes: ['12345678'],
+        },
+        analyzedAt: '2026-08-10T00:00:05Z',
+      },
+    ],
+    suggestions: [],
+    decisions: [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondId,
+        choice: 'exclude',
+        baselineInclusionMode: 'original',
+        decidedAt: '2026-08-10T00:00:06Z',
+      },
+    ],
+  });
+  const controller = new PackLibraryController(async () => repo.value);
+
+  await expect(controller.load(packId)).resolves.toMatchObject({
+    selected: {
+      duplicateReview: {
+        groups: [],
+        standaloneDecisions: [
+          {
+            id: secondId,
+            displayName: 'Remaining item',
+            choice: 'exclude',
+          },
+        ],
+      },
+    },
+  });
 });
 
 test('Pack retry resumes item checkpoints while retaining immutable originals', async () => {

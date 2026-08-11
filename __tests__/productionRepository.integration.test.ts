@@ -1173,6 +1173,27 @@ describe('production repository against SQLite', () => {
       )
       .run(JSON.stringify(analyses[0]), firstItemId);
 
+    const impossibleFingerprint = {
+      ...analyses[0]!,
+      textFingerprint: {
+        ...analyses[0]!.textFingerprint,
+        shingleCount: 0,
+      },
+    };
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(impossibleFingerprint), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
     database
       .prepare(
         'UPDATE duplicate_analysis_items SET analyzed_at = ? WHERE item_id = ?',
@@ -1254,6 +1275,14 @@ describe('production repository against SQLite', () => {
       )
       .run(JSON.stringify(decision), secondItemId);
 
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        ...decision,
+        choice: 'exclude',
+        decidedAt: '2026-08-05T00:00:05.500Z',
+      },
+    ]);
+
     const graphBeforeRemoval = await repository.findPackGraph(packId);
     expect(graphBeforeRemoval).not.toBeNull();
     const remainingItems = graphBeforeRemoval!.items
@@ -1275,8 +1304,15 @@ describe('production repository against SQLite', () => {
       manifest: { itemCount: 1, suggestionCount: 0 },
       analyses: [expect.objectContaining({ itemId: secondItemId })],
       suggestions: [],
-      decisions: [expect.objectContaining({ itemId: secondItemId })],
+      decisions: [
+        expect.objectContaining({ itemId: secondItemId, choice: 'exclude' }),
+      ],
     });
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === secondItemId,
+      )?.inclusionMode,
+    ).toBe('excluded');
 
     database.exec(
       `DELETE FROM duplicate_suggestions WHERE pack_id = '${packId}';
@@ -1286,6 +1322,23 @@ describe('production repository against SQLite', () => {
     await expect(
       repository.findDuplicateAnalysis(packId),
     ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+
+    await repository.restoreDuplicateDecision(
+      packId,
+      secondItemId,
+      '2026-08-05T00:00:07Z',
+    );
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === secondItemId,
+      )?.inclusionMode,
+    ).toBe('both');
+    await expect(repository.findDuplicateAnalysis(packId)).resolves.toEqual({
+      manifest: null,
+      analyses: [],
+      suggestions: [],
+      decisions: [],
+    });
   });
 
   test('marks only quarantine records covered by the native mtime cutoff', async () => {

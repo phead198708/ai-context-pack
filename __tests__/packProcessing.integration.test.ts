@@ -540,6 +540,7 @@ test('a replacement coordinator resumes a queued run after restart', async () =>
   const paused = {
     supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
   };
@@ -574,6 +575,7 @@ test('the durable claim token permits only one coordinator to execute a queued r
   const paused = {
     supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
   };
@@ -623,6 +625,7 @@ test('cleanup lease ownership is claim-specific and a stale owner cannot release
   const paused = {
     supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
   };
@@ -853,6 +856,7 @@ test('future domain chronology cannot postpone a crashed claim on the wall clock
   const paused = {
     supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
   };
@@ -2481,6 +2485,7 @@ test('failing one run never moves a later-heartbeat sibling or Pack backward', a
   const paused = {
     supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
   };
@@ -2771,6 +2776,7 @@ test('the production worker revalidates the exact claim immediately before publi
   const paused = {
     supports: jest.fn(stage => stage === 'extract'),
     launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
     recover: jest.fn().mockResolvedValue(undefined),
   };
@@ -3565,7 +3571,12 @@ test('the production extraction worker publishes bounded plain-text input withou
     kind: 'ocr-text',
     processorVersion: { version: '1' },
   });
-  expect(readPlainTextFile).toHaveBeenCalledWith('file:///owned/synthetic.txt');
+  expect(readPlainTextFile).toHaveBeenCalledWith(
+    'file:///owned/synthetic.txt',
+    undefined,
+    4,
+    'a'.repeat(64),
+  );
   expect(writeTextArtifact).toHaveBeenCalledWith(
     ownedDerivedPath(textPackId, run.id, 'txt'),
     'synthetic text',

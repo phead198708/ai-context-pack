@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import ContextNativeRecovery
 
@@ -16,12 +17,41 @@ final class ImagePerceptualHasherTests: XCTestCase {
     )
   }
 
+  func testOnlySingleFrameSourcesAreAccepted() {
+    XCTAssertTrue(ImagePerceptualHasher.acceptsFrameCount(1))
+    XCTAssertFalse(ImagePerceptualHasher.acceptsFrameCount(0))
+    XCTAssertFalse(ImagePerceptualHasher.acceptsFrameCount(2))
+  }
+
   func testSyntheticMediaHashesAreStable() throws {
     for name in ["ocr-english.png", "ocr-rotated.jpg"] {
-      let value = try ImagePerceptualHasher.hash(fileURL: fixtureURL(name))
+      let url = fixtureURL(name)
+      let data = try Data(contentsOf: url)
+      let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+      let value = try ImagePerceptualHasher.hash(
+        fileURL: url,
+        expectedByteCount: Int64(data.count),
+        expectedSHA256: digest,
+        cancellation: ImageHashCancellationToken()
+      )
       let hash = try XCTUnwrap(value["hash"] as? String)
       XCTAssertEqual(hash, "000000a810000000")
     }
+  }
+
+  func testRegistryCancellationIsOwnerScopedAndCooperative() throws {
+    let registry = ImageHashTaskRegistry()
+    let taskId = "123e4567-e89b-42d3-a456-426614174000"
+    let token = try XCTUnwrap(registry.reserve(ownerId: "owner-a", taskId: taskId))
+    XCTAssertNil(registry.reserve(ownerId: "owner-b", taskId: taskId))
+    XCTAssertTrue(registry.cancel(taskId: taskId))
+    XCTAssertThrowsError(try token.check()) {
+      XCTAssertEqual(($0 as? ImagePerceptualHashError)?.stableCode, "PIPELINE_STAGE_FAILED")
+    }
+    registry.finish(ownerId: "owner-b", taskId: taskId, token: token)
+    XCTAssertNil(registry.reserve(ownerId: "owner-b", taskId: taskId))
+    registry.finish(ownerId: "owner-a", taskId: taskId, token: token)
+    XCTAssertNotNil(registry.reserve(ownerId: "owner-b", taskId: taskId))
   }
 
   private func fixtureURL(_ name: String) -> URL {

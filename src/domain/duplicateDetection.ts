@@ -152,42 +152,40 @@ export function normalizeContentV1(source: string): NormalizedContentV1 {
     throw new DomainError('SCHEMA_INVALID');
   const warnings = new Set<ContentNormalizationWarningV1>();
   let value = source;
-  if (value.startsWith('\uFEFF')) {
-    value = value.slice(1);
-    warnings.add('OCR_ARTIFACT_REMOVED');
-  }
-  const nfc = value.normalize('NFC');
-  if (nfc !== value) warnings.add('UNICODE_NORMALIZED');
-  value = nfc;
   if (value.includes('\r')) {
     value = value.replace(/\r\n?/g, '\n');
     warnings.add('LINE_ENDINGS_NORMALIZED');
   }
-  const safe = value.replace(unsafeControl, '\uFFFD');
-  if (safe !== value) warnings.add('OCR_ARTIFACT_REMOVED');
-  value = safe;
 
+  // Classification deliberately precedes Unicode/OCR prose cleanup. Code bytes
+  // are semantic and v1 changes only their line-ending representation.
+  const classificationValue = value.startsWith('\uFEFF')
+    ? value.slice(1)
+    : value;
   const lines = value.split('\n');
-  const fenced = lines.some(line => fenceLine.test(line));
-  const codeSignals = lines.filter(isCodeSignalLine).length;
-  const meaningfulLines = lines.filter(line => line.trim().length > 0).length;
+  const classificationLines = classificationValue.split('\n');
+  const fenced = classificationLines.some(line => fenceLine.test(line));
+  const codeSignals = classificationLines.filter(isCodeSignalLine).length;
+  const meaningfulLines = classificationLines.filter(
+    line => line.trim().length > 0,
+  ).length;
   const codeLike =
     fenced ||
-    (meaningfulLines >= 2 &&
-      codeSignals / Math.max(meaningfulLines, 1) >= 0.34);
+    (codeSignals > 0 && codeSignals / Math.max(meaningfulLines, 1) >= 0.34);
   const contentKind: NormalizedContentKindV1 = fenced
-    ? lines.some(line => line.trim().length > 0 && !isCodeSignalLine(line))
+    ? hasProseOutsideFences(classificationLines)
       ? 'mixed'
       : 'code'
     : codeLike
     ? 'code'
     : 'prose';
 
-  const normalized = fenced
-    ? normalizeMixedFencedContent(lines, warnings)
-    : codeLike
-    ? collapseBlankLines(value, warnings)
-    : normalizeProseLines(lines, warnings);
+  const normalized =
+    contentKind === 'code'
+      ? value
+      : fenced
+      ? normalizeMixedFencedContent(lines, warnings)
+      : normalizeProseLines(lines, warnings);
   return {
     schemaVersion: CONTENT_NORMALIZATION_SCHEMA_VERSION,
     normalizationVersion: 'text-normalization-v1',
@@ -351,17 +349,49 @@ export function groupDuplicateSuggestionsV1(
       key: itemIds.join(':'),
       itemIds,
       suggestions: members,
-      expectedBytesSaved: members.reduce(
-        (maximum, value) => Math.max(maximum, value.expectedBytesSaved),
-        0,
+      expectedBytesSaved: maximumSpanningTreeSavings(
+        itemIds,
+        members,
+        value => value.expectedBytesSaved,
       ),
-      expectedCharactersSaved: members.reduce(
-        (maximum, value) => Math.max(maximum, value.expectedCharactersSaved),
-        0,
+      expectedCharactersSaved: maximumSpanningTreeSavings(
+        itemIds,
+        members,
+        value => value.expectedCharactersSaved,
       ),
     });
   }
   return groups;
+}
+
+function maximumSpanningTreeSavings(
+  itemIds: readonly string[],
+  suggestions: readonly DuplicateSuggestionV1[],
+  weight: (suggestion: DuplicateSuggestionV1) => number,
+): number {
+  if (itemIds.length < 2) return 0;
+  const visited = new Set([itemIds[0]!]);
+  let total = 0;
+  while (visited.size < itemIds.length) {
+    const candidate = suggestions
+      .filter(suggestion => {
+        const leftVisited = visited.has(suggestion.leftItemId);
+        const rightVisited = visited.has(suggestion.rightItemId);
+        return leftVisited !== rightVisited;
+      })
+      .sort((left, right) => {
+        const byWeight = weight(right) - weight(left);
+        return byWeight !== 0 ? byWeight : left.key.localeCompare(right.key);
+      })[0];
+    if (!candidate) throw new DomainError('SCHEMA_INVALID');
+    total += weight(candidate);
+    visited.add(
+      visited.has(candidate.leftItemId)
+        ? candidate.rightItemId
+        : candidate.leftItemId,
+    );
+  }
+  return total;
 }
 
 export function calculateDuplicateSavingsV1(
@@ -447,6 +477,8 @@ export function isNormalizedTextFingerprintV1(
     isNonNegativeInteger(value.shingleCount) &&
     Array.isArray(hashes) &&
     hashes.length <= TEXT_FINGERPRINT_SAMPLE_SIZE &&
+    ((value.shingleCount === 0 && hashes.length === 0) ||
+      ((value.shingleCount as number) > 0 && hashes.length > 0)) &&
     hashes.every(hash => typeof hash === 'string' && safeHash32.test(hash)) &&
     new Set(hashes).size === hashes.length &&
     hashes.every((hash, index) => index === 0 || hashes[index - 1]! < hash)
@@ -721,12 +753,7 @@ function normalizeMixedFencedContent(
       output.push(line);
       continue;
     }
-    if (
-      fence &&
-      marker &&
-      marker[0] === fence.character &&
-      marker.length >= fence.length
-    ) {
+    if (fence && isClosingFenceLine(line, fence)) {
       output.push(line);
       fence = undefined;
       continue;
@@ -735,16 +762,53 @@ function normalizeMixedFencedContent(
     else prose.push(line);
   }
   flushProse();
-  return collapseBlankLines(output.join('\n'), warnings);
+  return output.join('\n');
+}
+
+function hasProseOutsideFences(lines: readonly string[]): boolean {
+  let fence:
+    | { readonly character: string; readonly length: number }
+    | undefined;
+  for (const line of lines) {
+    const marker = line.match(fenceLine)?.[1];
+    if (!fence && marker) {
+      fence = { character: marker[0]!, length: marker.length };
+      continue;
+    }
+    if (fence && isClosingFenceLine(line, fence)) {
+      fence = undefined;
+      continue;
+    }
+    if (!fence && line.trim().length > 0) return true;
+  }
+  return false;
+}
+
+function isClosingFenceLine(
+  line: string,
+  fence: { readonly character: string; readonly length: number },
+): boolean {
+  const trimmed = line.trim();
+  return (
+    trimmed.length >= fence.length &&
+    [...trimmed].every(character => character === fence.character)
+  );
 }
 
 function normalizeProseLines(
   lines: readonly string[],
   warnings: Set<ContentNormalizationWarningV1>,
 ): string {
-  const normalized = lines.map(line => {
-    const compatibility = line.normalize('NFKC');
-    if (compatibility !== line) warnings.add('UNICODE_NORMALIZED');
+  const normalized = lines.map((line, index) => {
+    let prepared = line;
+    if (index === 0 && prepared.startsWith('\uFEFF')) {
+      prepared = prepared.slice(1);
+      warnings.add('OCR_ARTIFACT_REMOVED');
+    }
+    const safe = prepared.replace(unsafeControl, '\uFFFD');
+    if (safe !== prepared) warnings.add('OCR_ARTIFACT_REMOVED');
+    const compatibility = safe.normalize('NFKC');
+    if (compatibility !== safe) warnings.add('UNICODE_NORMALIZED');
     const artifactsRemoved = compatibility
       .replace(ocrArtifact, '')
       .replace(/\u00A0/g, ' ');

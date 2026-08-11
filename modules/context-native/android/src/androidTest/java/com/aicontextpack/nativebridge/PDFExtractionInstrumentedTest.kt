@@ -10,8 +10,8 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.File
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.Locale
@@ -611,6 +611,24 @@ class PDFExtractionInstrumentedTest {
     val result = AndroidPlainTextFileReader.read(context, valid.toURI().toString())
     assertEquals(source, result["text"])
     assertEquals(source.toByteArray(Charsets.UTF_8).size, result["byteCount"])
+    val sourceHash = MessageDigest.getInstance("SHA-256")
+      .digest(source.toByteArray(Charsets.UTF_8))
+      .joinToString("") { "%02x".format(it) }
+    AndroidPlainTextFileReader.read(
+      context,
+      valid.toURI().toString(),
+      expectedByteCount = source.toByteArray(Charsets.UTF_8).size,
+      expectedSha256 = sourceHash,
+    )
+    val integrityError = assertThrows(NativeException::class.java) {
+      AndroidPlainTextFileReader.read(
+        context,
+        valid.toURI().toString(),
+        expectedByteCount = source.toByteArray(Charsets.UTF_8).size,
+        expectedSha256 = "0".repeat(64),
+      )
+    }
+    assertEquals("ARTIFACT_INTEGRITY_FAILED", integrityError.code)
 
     val invalid = File(context.cacheDir, "plain-invalid.txt")
     invalid.writeBytes(byteArrayOf(0xC3.toByte(), 0x28))
@@ -628,6 +646,20 @@ class PDFExtractionInstrumentedTest {
       AndroidPlainTextFileReader.read(context, oversized.toURI().toString())
     }
     assertEquals("TEXT_TOO_LARGE", oversizedError.code)
+    val derived = AndroidPlainTextFileReader.read(
+      context,
+      oversized.toURI().toString(),
+      AndroidPlainTextFileReader.maximumDerivedBytes,
+    )
+    assertEquals(17 * 64 * 1024, derived["byteCount"])
+    val invalidMaximum = assertThrows(NativeException::class.java) {
+      AndroidPlainTextFileReader.read(
+        context,
+        oversized.toURI().toString(),
+        AndroidPlainTextFileReader.maximumDerivedBytes + 1,
+      )
+    }
+    assertEquals("TEXT_RESULT_INVALID", invalidMaximum.code)
   }
 
   private fun copyFixture(name: String): File {

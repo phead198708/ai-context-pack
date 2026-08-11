@@ -1,5 +1,6 @@
 import type { Artifact, ContextItem, ContextPack } from '../src/domain/models';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
+import { DomainError } from '../src/domain/errors';
 import type {
   PersistedArtifactRecord,
   PersistedPipelineRun,
@@ -134,6 +135,7 @@ function native(): jest.Mocked<NativeAdapter> {
       durationMs: 1,
       revision: '1',
     }),
+    cancelImagePerceptualHash: jest.fn().mockResolvedValue(undefined),
     writeTextArtifact: jest.fn().mockResolvedValue({
       relativePath: `Packs/${packId}/derived/${runId}.txt`,
       byteCount: 78,
@@ -194,10 +196,55 @@ test('analysis worker publishes a normalized derivative and matching versioned r
     `Packs/${packId}/derived/${runId}.txt`,
     normalizedText,
   );
+  expect(adapter.hashImagePerceptually).toHaveBeenCalledWith(
+    runId,
+    `file:///sandbox/${original.relativePath}`,
+    original.byteCount,
+    original.sha256,
+  );
   await handle.finalize?.();
   expect(repo.releaseCleanupLease).toHaveBeenCalledWith(
     handle.publicationLeaseOwnerId,
   );
+});
+
+test('analysis cancellation interrupts an active native perceptual hash by run ID', async () => {
+  const repo = repository();
+  const adapter = native();
+  const hashImagePerceptually =
+    adapter.hashImagePerceptually as jest.MockedFunction<
+      NonNullable<NativeAdapter['hashImagePerceptually']>
+    >;
+  let rejectHash: ((error: unknown) => void) | undefined;
+  hashImagePerceptually.mockImplementation(
+    () =>
+      new Promise((_resolve, reject) => {
+        rejectHash = reject;
+      }),
+  );
+  const worker = new NativeDuplicateAnalysisStageWorker(
+    async () => repo,
+    adapter,
+  );
+  const handle = worker.start(run());
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (hashImagePerceptually.mock.calls.length > 0) break;
+    await Promise.resolve();
+  }
+  expect(hashImagePerceptually).toHaveBeenCalledTimes(1);
+
+  await handle.cancel();
+
+  expect(adapter.cancelImagePerceptualHash).toHaveBeenCalledWith(runId);
+  rejectHash?.(new DomainError('PIPELINE_STAGE_FAILED'));
+  await expect(handle.result).rejects.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  await expect(handle.analysis).rejects.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  expect(adapter.writeTextArtifact).not.toHaveBeenCalled();
+  await handle.finalize?.();
 });
 
 test('analysis worker fails closed when extracted text bytes diverge from the verified artifact', async () => {

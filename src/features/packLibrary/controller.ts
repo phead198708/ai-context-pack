@@ -296,6 +296,7 @@ export class PackLibraryController {
         startedPipelineRuns: runs,
       });
       this.processing.launch(runs);
+      await this.processing.waitForIdle();
       return runs.length;
     });
   }
@@ -355,6 +356,20 @@ export class PackLibraryController {
               ),
             );
       await repository.saveDuplicateDecisions(packId, decisions);
+    });
+  }
+
+  restoreDuplicateDecision(packId: string, itemId: string): Promise<void> {
+    return this.enqueue(async () => {
+      const repository = await this.getRepository();
+      const graph = await repository.findPackGraph(packId);
+      if (!graph || !graph.items.some(item => item.id === itemId))
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      await repository.restoreDuplicateDecision(
+        packId,
+        itemId,
+        this.timestamp(graph.pack),
+      );
     });
   }
 

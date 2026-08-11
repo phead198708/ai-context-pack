@@ -94,6 +94,8 @@ export interface DuplicateReviewSnapshot {
   readonly normalizationVersion: string;
   readonly detectorVersion: number;
   readonly groups: readonly DuplicateReviewGroupRow[];
+  /** Durable choices whose prior detector group no longer exists. */
+  readonly standaloneDecisions: readonly DuplicateReviewItemRow[];
   readonly actualBytesSaved: number;
   readonly actualCharactersSaved: number;
 }
@@ -351,6 +353,26 @@ function buildDuplicateReview(
       }),
     }),
   );
+  const groupedItemIds = new Set(
+    groups.flatMap(group => group.items.map(item => item.id)),
+  );
+  const standaloneDecisions = snapshot.decisions
+    .filter(decision => !groupedItemIds.has(decision.itemId))
+    .map(decision => {
+      const item = itemById.get(decision.itemId);
+      const analysis = analysisById.get(decision.itemId);
+      if (!item || !analysis) throw new DomainError('SCHEMA_INVALID');
+      return {
+        id: item.id,
+        displayName:
+          item.originalDisplayName ??
+          `${item.sourceType} ${item.sortIndex + 1}`,
+        contentKind: analysis.contentKind,
+        normalizedCharacterCount: analysis.normalizedCharacterCount,
+        normalizedByteCount: analysis.normalizedByteCount,
+        choice: decision.choice,
+      };
+    });
   const actual = calculateDuplicateSavingsV1(
     snapshot.analyses,
     snapshot.decisions,
@@ -359,6 +381,7 @@ function buildDuplicateReview(
     normalizationVersion: snapshot.manifest.config.normalizationVersion,
     detectorVersion: snapshot.manifest.schemaVersion,
     groups,
+    standaloneDecisions,
     actualBytesSaved: actual.bytes,
     actualCharactersSaved: actual.characters,
   };

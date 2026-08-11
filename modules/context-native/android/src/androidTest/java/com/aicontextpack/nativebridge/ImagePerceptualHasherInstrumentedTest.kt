@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.security.MessageDigest
 
 @RunWith(AndroidJUnit4::class)
 class ImagePerceptualHasherInstrumentedTest {
@@ -17,7 +18,14 @@ class ImagePerceptualHasherInstrumentedTest {
       InstrumentationRegistry.getInstrumentation().context.assets.open(name).use { input ->
         file.outputStream().use { output -> input.copyTo(output) }
       }
-      val value = ImagePerceptualHasher.hash(context, file.toURI().toString())
+      val digest = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+        .joinToString("") { "%02x".format(it) }
+      val value = ImagePerceptualHasher.hash(
+        context,
+        file.toURI().toString(),
+        file.length(),
+        digest,
+      )
       val hash = value.getValue("hash") as String
       assertEquals("000000a810000000", hash)
     }

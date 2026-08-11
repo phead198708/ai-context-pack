@@ -452,7 +452,9 @@ function DuplicateReview({
           >
             <Text style={styles.label}>
               {t(locale, 'duplicateCandidateSummary', {
-                reason: group.reasons.join(', '),
+                reason: group.reasons
+                  .map(reason => localizedDuplicateReason(locale, reason))
+                  .join(', '),
                 confidence: Math.round(group.confidence * 100),
                 bytes: group.expectedBytesSaved,
                 characters: group.expectedCharactersSaved,
@@ -461,26 +463,22 @@ function DuplicateReview({
             <View style={styles.comparisonRow}>
               {group.items.map(item => (
                 <View
-                  accessible
-                  accessibilityLabel={t(locale, 'duplicateItemPreview', {
-                    item: item.displayName,
-                    kind: item.contentKind,
-                    characters: item.normalizedCharacterCount,
-                    bytes: item.normalizedByteCount,
-                    choice: item.choice,
-                  })}
                   key={item.id}
                   style={styles.comparisonCard}
                   testID={`duplicate-preview-${item.id}`}
                 >
                   <Text style={styles.label}>{item.displayName}</Text>
-                  <Text style={styles.detail}>
+                  <Text
+                    accessible
+                    accessibilityLabel={duplicateItemSummary(locale, item)}
+                    style={styles.detail}
+                  >
                     {t(locale, 'duplicateItemPreview', {
                       item: item.displayName,
-                      kind: item.contentKind,
+                      kind: localizedDuplicateKind(locale, item.contentKind),
                       characters: item.normalizedCharacterCount,
                       bytes: item.normalizedByteCount,
-                      choice: item.choice,
+                      choice: localizedDuplicateChoice(locale, item.choice),
                     })}
                   </Text>
                   <View style={styles.actions}>
@@ -540,7 +538,104 @@ function DuplicateReview({
           </View>
         ))
       )}
+      {review.standaloneDecisions.length > 0 ? (
+        <View testID="duplicate-standalone-decisions">
+          <Text accessibilityRole="header" style={styles.label}>
+            {t(locale, 'duplicateStandaloneDecisions')}
+          </Text>
+          <Text style={styles.detail}>
+            {t(locale, 'duplicateStandaloneDecisionHelp')}
+          </Text>
+          {review.standaloneDecisions.map(item => (
+            <View key={item.id} style={styles.duplicateGroup}>
+              <Text style={styles.detail}>
+                {t(locale, 'duplicateItemPreview', {
+                  item: item.displayName,
+                  kind: localizedDuplicateKind(locale, item.contentKind),
+                  characters: item.normalizedCharacterCount,
+                  bytes: item.normalizedByteCount,
+                  choice: localizedDuplicateChoice(locale, item.choice),
+                })}
+              </Text>
+              <Button
+                disabled={busy}
+                label={t(locale, 'duplicateRestore', {
+                  item: item.displayName,
+                })}
+                onPress={() =>
+                  run(
+                    mutate(() =>
+                      controller.restoreDuplicateDecision(packId, item.id),
+                    ),
+                  )
+                }
+              />
+            </View>
+          ))}
+        </View>
+      ) : null}
     </View>
+  );
+}
+
+function duplicateItemSummary(
+  locale: AppLocale,
+  item: {
+    readonly displayName: string;
+    readonly contentKind: 'prose' | 'code' | 'mixed';
+    readonly normalizedCharacterCount: number;
+    readonly normalizedByteCount: number;
+    readonly choice: 'keep' | 'exclude' | 'preferred';
+  },
+): string {
+  return t(locale, 'duplicateItemPreview', {
+    item: item.displayName,
+    kind: localizedDuplicateKind(locale, item.contentKind),
+    characters: item.normalizedCharacterCount,
+    bytes: item.normalizedByteCount,
+    choice: localizedDuplicateChoice(locale, item.choice),
+  });
+}
+
+function localizedDuplicateReason(
+  locale: AppLocale,
+  reason: 'exact-binary' | 'near-image' | 'similar-text',
+): string {
+  return t(
+    locale,
+    reason === 'exact-binary'
+      ? 'duplicateReasonExactBinary'
+      : reason === 'near-image'
+      ? 'duplicateReasonNearImage'
+      : 'duplicateReasonSimilarText',
+  );
+}
+
+function localizedDuplicateKind(
+  locale: AppLocale,
+  kind: 'prose' | 'code' | 'mixed',
+): string {
+  return t(
+    locale,
+    kind === 'prose'
+      ? 'duplicateKindProse'
+      : kind === 'code'
+      ? 'duplicateKindCode'
+      : 'duplicateKindMixed',
+  );
+}
+
+function localizedDuplicateChoice(
+  locale: AppLocale,
+  choice: 'keep' | 'exclude' | 'preferred',
+): string {
+  return t(
+    locale,
+    choice === 'keep'
+      ? 'duplicateChoiceKeep'
+      : choice === 'exclude'
+      ? 'duplicateChoiceExclude'
+      : 'duplicateChoicePreferred',
   );
 }
 
