@@ -2,6 +2,7 @@ import {
   DUPLICATE_DETECTOR_CONFIG_V1,
   buildDuplicateSuggestionsV1,
   calculateDuplicateSavingsV1,
+  fingerprintNormalizedTextAsyncV1,
   fingerprintNormalizedTextV1,
   groupDuplicateSuggestionsV1,
   imageHashDistanceV1,
@@ -179,8 +180,11 @@ describe('Issue #13 versioned content normalization', () => {
     expect(normalizeContentV1('می\u200Cخواهم').text).toBe('می\u200Cخواهم');
     for (const assignment of [
       'value = "a  b"',
+      'value += "a  b"',
       "VALUE='a  b'",
       'message: "a  b"',
+      'print("a  b")',
+      'logger.info("a  b");',
     ]) {
       expect(normalizeContentV1(assignment)).toMatchObject({
         contentKind: 'code',
@@ -198,6 +202,23 @@ describe('Issue #13 versioned content normalization', () => {
     });
   });
 
+  it('keeps call-only and augmented-assignment literal whitespace distinct', () => {
+    for (const [oneSpace, twoSpaces] of [
+      ['print("a b")', 'print("a  b")'],
+      ['value += "a b"', 'value += "a  b"'],
+    ] as const) {
+      const normalizedOne = normalizeContentV1(oneSpace);
+      const normalizedTwo = normalizeContentV1(twoSpaces);
+      expect(normalizedOne.contentKind).toBe('code');
+      expect(normalizedTwo).toMatchObject({
+        contentKind: 'code',
+        text: twoSpaces,
+        warnings: [],
+      });
+      expect(normalizedOne.text).not.toBe(normalizedTwo.text);
+    }
+  });
+
   it('fails closed on invalid Unicode scalars and unknown validator keys', () => {
     expect(() => normalizeContentV1('\uD800')).toThrow('SCHEMA_INVALID');
     expect(
@@ -210,6 +231,34 @@ describe('Issue #13 versioned content normalization', () => {
 });
 
 describe('Issue #13 deterministic duplicate suggestions', () => {
+  it('streams large fingerprints with parity, cooperative yields, and cancellation', async () => {
+    const normalized = normalizeContentV1(
+      'Repeated synthetic context for bounded fingerprint work. '.repeat(4_096),
+    );
+    let yields = 0;
+    const streamed = await fingerprintNormalizedTextAsyncV1(normalized, {
+      yieldEveryCodePoints: 257,
+      yieldControl: () => {
+        yields += 1;
+        return Promise.resolve();
+      },
+    });
+    expect(streamed).toEqual(fingerprintNormalizedTextV1(normalized));
+    expect(yields).toBeGreaterThan(100);
+
+    let cancelled = false;
+    await expect(
+      fingerprintNormalizedTextAsyncV1(normalized, {
+        yieldEveryCodePoints: 64,
+        isCancelled: () => cancelled,
+        yieldControl: () => {
+          cancelled = true;
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+  });
+
   it('meets the versioned synthetic corpus precision and recall gates', () => {
     const corpus = JSON.parse(
       readFileSync(
@@ -489,6 +538,20 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
           ...valid.textFingerprint,
           hashes: [],
         },
+      }),
+    ).toBe(false);
+    expect(
+      isDuplicateAnalysisItemV1({
+        ...valid,
+        normalizedByteCount: 0,
+        normalizedCharacterCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      isDuplicateAnalysisItemV1({
+        ...valid,
+        normalizedByteCount: 0,
+        normalizedCharacterCount: 1,
       }),
     ).toBe(false);
     expect(

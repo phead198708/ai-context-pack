@@ -1035,6 +1035,20 @@ describe('production repository against SQLite', () => {
         normalizedCharacterCount: normalized.characterCount,
         contentKind: normalized.contentKind,
         textFingerprint: fingerprintNormalizedTextV1(normalized),
+        ...(index === 0
+          ? {
+              imageFingerprint: {
+                schemaVersion: 1 as const,
+                algorithm: 'dhash-64-v1' as const,
+                hash: '0123456789abcdef',
+                sampleWidth: 9 as const,
+                sampleHeight: 8 as const,
+                orientationApplied: true as const,
+                durationMs: 0,
+                revision: '1' as const,
+              },
+            }
+          : {}),
         analyzedAt: `2026-08-05T00:00:0${index + 2}Z`,
       }),
     );
@@ -1215,6 +1229,68 @@ describe('production repository against SQLite', () => {
         'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
       )
       .run(JSON.stringify(analyses[0]), firstItemId);
+
+    for (const impossibleCounts of [
+      {
+        ...analyses[0]!,
+        normalizedByteCount: 0,
+        normalizedCharacterCount: 0,
+      },
+      {
+        ...analyses[0]!,
+        normalizedByteCount: 0,
+        normalizedCharacterCount: 1,
+      },
+    ]) {
+      database
+        .prepare(
+          'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+        )
+        .run(JSON.stringify(impossibleCounts), firstItemId);
+      await expect(
+        repository.findDuplicateAnalysis(packId),
+      ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    }
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    const missingImageFingerprint = { ...analyses[0]! };
+    delete (missingImageFingerprint as { imageFingerprint?: unknown })
+      .imageFingerprint;
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(missingImageFingerprint), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    const nonImageWithFingerprint = {
+      ...analyses[1]!,
+      imageFingerprint: analyses[0]!.imageFingerprint,
+    };
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(nonImageWithFingerprint), secondItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[1]), secondItemId);
 
     database
       .prepare(

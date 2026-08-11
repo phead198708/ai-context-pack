@@ -1659,6 +1659,7 @@ export class ExpoSqlitePersistenceRepository
         normalized_sha256: string | null;
         normalized_byte_count: number | null;
         normalized_processor_version_json: string | null;
+        item_source_type: string | null;
         original_count: number;
         original_sha256: string | null;
         original_byte_count: number | null;
@@ -1668,6 +1669,7 @@ export class ExpoSqlitePersistenceRepository
            record.normalized_artifact_id AS stored_normalized_artifact_id,
            record.analyzed_at AS stored_analyzed_at,
            item.pack_id AS item_pack_id,
+           item.source_type AS item_source_type,
            normalized.item_id AS normalized_item_id,
            normalized.kind AS normalized_kind,
            normalized.sha256 AS normalized_sha256,
@@ -1737,7 +1739,11 @@ export class ExpoSqlitePersistenceRepository
             row.original_count !== 1 ||
             value.originalSha256 === undefined ||
             row.original_sha256 !== value.originalSha256 ||
-            row.original_byte_count !== value.originalByteCount
+            row.original_byte_count !== value.originalByteCount ||
+            !imageFingerprintMatchesSourceType(
+              row.item_source_type,
+              value.imageFingerprint !== undefined,
+            )
           )
             throw new DomainError('SCHEMA_INVALID');
           return value;
@@ -1824,9 +1830,11 @@ export class ExpoSqlitePersistenceRepository
           sha256: string;
           byte_count: number;
           processor_version_json: string;
+          source_type: string;
         }>(
           `SELECT artifact.item_id, artifact.kind, artifact.sha256,
-             artifact.byte_count, artifact.processor_version_json
+             artifact.byte_count, artifact.processor_version_json,
+             item.source_type
            FROM artifacts artifact
            JOIN context_items item ON item.id = artifact.item_id
            WHERE artifact.id = ? AND item.id = ? AND item.pack_id = ?`,
@@ -1842,6 +1850,10 @@ export class ExpoSqlitePersistenceRepository
           row.kind !== 'normalized-text' ||
           row.sha256 !== analysis.normalizedSha256 ||
           row.byte_count !== analysis.normalizedByteCount ||
+          !imageFingerprintMatchesSourceType(
+            row.source_type,
+            analysis.imageFingerprint !== undefined,
+          ) ||
           !isDuplicateNormalizationProcessorVersion(
             decodeProcessorVersion(row.processor_version_json),
           )
@@ -3125,10 +3137,11 @@ async function upsertDuplicateAnalysisInTransaction(
     byte_count: number;
     processor_version_json: string;
     item_pack_id: string | null;
+    item_source_type: string | null;
   }>(
     `SELECT artifact.item_id, artifact.kind, artifact.sha256,
        artifact.byte_count, artifact.processor_version_json,
-       item.pack_id AS item_pack_id
+       item.pack_id AS item_pack_id, item.source_type AS item_source_type
      FROM artifacts artifact
      LEFT JOIN context_items item ON item.id = artifact.item_id
      WHERE artifact.id = ?`,
@@ -3141,6 +3154,10 @@ async function upsertDuplicateAnalysisInTransaction(
     artifact.kind !== 'normalized-text' ||
     artifact.sha256 !== analysis.normalizedSha256 ||
     artifact.byte_count !== analysis.normalizedByteCount ||
+    !imageFingerprintMatchesSourceType(
+      artifact.item_source_type,
+      analysis.imageFingerprint !== undefined,
+    ) ||
     !isDuplicateNormalizationProcessorVersion(
       decodeProcessorVersion(artifact.processor_version_json),
     )
@@ -3188,14 +3205,27 @@ async function refreshDuplicateAnalysisForPackInTransaction(
   transaction: SqlConnection,
   packId: string,
 ): Promise<void> {
-  const rows = await transaction.all<{ payload_json: string }>(
-    `SELECT payload_json FROM duplicate_analysis_items
-     WHERE pack_id = ? ORDER BY item_id`,
+  const rows = await transaction.all<{
+    payload_json: string;
+    item_source_type: string | null;
+  }>(
+    `SELECT record.payload_json, item.source_type AS item_source_type
+     FROM duplicate_analysis_items record
+     LEFT JOIN context_items item ON item.id = record.item_id
+     WHERE record.pack_id = ? ORDER BY record.item_id`,
     [packId],
   );
-  const analyses = rows.map(row =>
-    decodeStoredJson(row.payload_json, isDuplicateAnalysisItemV1),
-  );
+  const analyses = rows.map(row => {
+    const value = decodeStoredJson(row.payload_json, isDuplicateAnalysisItemV1);
+    if (
+      !imageFingerprintMatchesSourceType(
+        row.item_source_type,
+        value.imageFingerprint !== undefined,
+      )
+    )
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    return value;
+  });
   if (analyses.some(value => value.packId !== packId))
     throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
   if (analyses.length === 0) {
@@ -3703,6 +3733,17 @@ function isDuplicateNormalizationProcessorVersion(
     value.contractVersion === 1 &&
     value.engine === undefined &&
     value.engineRevision === undefined
+  );
+}
+
+function imageFingerprintMatchesSourceType(
+  sourceType: unknown,
+  hasImageFingerprint: boolean,
+): boolean {
+  if (sourceType === 'image') return hasImageFingerprint;
+  return (
+    (sourceType === 'pdf' || sourceType === 'text' || sourceType === 'url') &&
+    !hasImageFingerprint
   );
 }
 

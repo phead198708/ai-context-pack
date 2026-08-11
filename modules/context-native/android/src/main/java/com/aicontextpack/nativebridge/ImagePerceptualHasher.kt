@@ -13,7 +13,6 @@ import android.system.Os
 import android.system.OsConstants
 import java.io.ByteArrayInputStream
 import java.io.Closeable
-import java.io.DataInputStream
 import java.io.File
 import java.io.InputStream
 import java.security.MessageDigest
@@ -23,6 +22,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.CRC32
 
 internal class ImageHashCancellationToken {
   private val cancelled = AtomicBoolean(false)
@@ -285,7 +285,7 @@ internal object ImagePerceptualHasher {
       val file = snapshot.file
       sourceMutationHook?.invoke("snapshot-ready")
       cancellation.throwIfCancelled()
-      if (hasMultipleFrames(file.path, cancellation)) {
+      if (violatesSingleFramePolicy(file.path, cancellation)) {
         throw NativeException("PROCESSOR_OUTPUT_INVALID")
       }
       val orientation = readOrientation(file.path)
@@ -475,13 +475,33 @@ internal object ImagePerceptualHasher {
     ExifInterface.ORIENTATION_NORMAL
   }
 
-  private fun hasMultipleFrames(
+  private fun violatesSingleFramePolicy(
     path: String,
     cancellation: ImageHashCancellationToken,
   ): Boolean {
     cancellation.throwIfCancelled()
-    if (java.io.File(path).inputStream().buffered().use(::isAnimatedPng)) return true
-    if (java.io.File(path).inputStream().buffered().use(::isAnimatedGif)) return true
+    when (
+      java.io.File(path).inputStream().buffered().use { input ->
+        inspectPngFrames(input, maximumSourceBytes, cancellation)
+      }
+    ) {
+      ContainerFrameInspection.ANIMATED,
+      ContainerFrameInspection.INVALID,
+      -> return true
+      ContainerFrameInspection.SINGLE -> return false
+      ContainerFrameInspection.NOT_RECOGNIZED -> Unit
+    }
+    when (
+      java.io.File(path).inputStream().buffered().use { input ->
+        inspectGifFrames(input, maximumSourceBytes, cancellation)
+      }
+    ) {
+      ContainerFrameInspection.ANIMATED,
+      ContainerFrameInspection.INVALID,
+      -> return true
+      ContainerFrameInspection.SINGLE -> return false
+      ContainerFrameInspection.NOT_RECOGNIZED -> Unit
+    }
     if (runCatching { Movie.decodeFile(path)?.duration() ?: 0 }.getOrDefault(0) > 0) {
       return true
     }
@@ -517,89 +537,229 @@ internal object ImagePerceptualHasher {
       (header[20].toInt() and 0x02) != 0
 
   internal fun isAnimatedPng(bytes: ByteArray): Boolean =
-    ByteArrayInputStream(bytes).use(::isAnimatedPng)
+    inspectPngFrames(bytes) == ContainerFrameInspection.ANIMATED
 
   internal fun isAnimatedGif(bytes: ByteArray): Boolean =
-    ByteArrayInputStream(bytes).use(::isAnimatedGif)
+    inspectGifFrames(bytes) == ContainerFrameInspection.ANIMATED
 
-  private fun isAnimatedPng(input: InputStream): Boolean {
-    val data = DataInputStream(input)
-    val signature = ByteArray(8)
-    if (runCatching { data.readFully(signature) }.isFailure ||
-      !signature.contentEquals(byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10))) return false
-    repeat(1_024) {
-      val length = runCatching { data.readInt().toLong() and 0xffff_ffffL }.getOrNull()
-        ?: return false
-      if (length > maximumSourceBytes) return false
-      val type = ByteArray(4)
-      if (runCatching { data.readFully(type) }.isFailure) return false
-      if (type.contentEquals("acTL".toByteArray(Charsets.US_ASCII))) {
-        if (length != 8L) return true
-        val frameCount = runCatching { data.readInt().toLong() and 0xffff_ffffL }.getOrNull()
-          ?: return true
-        return frameCount != 1L
-      }
-      var remaining = length + 4L // chunk data plus CRC
-      while (remaining > 0) {
-        val skipped = data.skip(remaining)
-        if (skipped <= 0) return false
-        remaining -= skipped
-      }
-      if (type.contentEquals("IEND".toByteArray(Charsets.US_ASCII))) return false
+  internal fun inspectPngFrames(bytes: ByteArray): ContainerFrameInspection =
+    ByteArrayInputStream(bytes).use { input ->
+      inspectPngFrames(input, bytes.size.toLong(), ImageHashCancellationToken())
     }
-    return false
+
+  internal fun inspectGifFrames(bytes: ByteArray): ContainerFrameInspection =
+    ByteArrayInputStream(bytes).use { input ->
+      inspectGifFrames(input, bytes.size.toLong(), ImageHashCancellationToken())
+    }
+
+  private fun inspectPngFrames(
+    input: InputStream,
+    maximumBytes: Long,
+    cancellation: ImageHashCancellationToken,
+  ): ContainerFrameInspection {
+    val reader = BoundedContainerReader(input, maximumBytes, cancellation)
+    val signature = reader.readBytes(8) ?: return ContainerFrameInspection.NOT_RECOGNIZED
+    if (!signature.contentEquals(byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10))) {
+      return ContainerFrameInspection.NOT_RECOGNIZED
+    }
+    var sawHeader = false
+    var sawImageData = false
+    var sawAnimationControl = false
+    while (true) {
+      val length = reader.readUnsignedInt() ?: return ContainerFrameInspection.INVALID
+      val type = reader.readBytes(4) ?: return ContainerFrameInspection.INVALID
+      if (!isValidPngChunkType(type) || length > reader.remainingBytes - 4L) {
+        return ContainerFrameInspection.INVALID
+      }
+      val typeName = String(type, Charsets.US_ASCII)
+      if (!sawHeader && (typeName != "IHDR" || length != 13L)) {
+        return ContainerFrameInspection.INVALID
+      }
+      if (typeName == "IHDR" && sawHeader) return ContainerFrameInspection.INVALID
+      if (typeName == "acTL" && (length != 8L || sawAnimationControl || sawImageData)) {
+        return ContainerFrameInspection.INVALID
+      }
+      if (typeName == "IEND" && length != 0L) return ContainerFrameInspection.INVALID
+
+      val crc = CRC32().apply { update(type) }
+      val animationData = if (typeName == "acTL") ByteArray(8) else null
+      if (!reader.readPayload(length, crc, animationData)) {
+        return ContainerFrameInspection.INVALID
+      }
+      val expectedCrc = reader.readUnsignedInt() ?: return ContainerFrameInspection.INVALID
+      if (crc.value != expectedCrc) return ContainerFrameInspection.INVALID
+
+      when (typeName) {
+        "IHDR" -> sawHeader = true
+        "IDAT" -> sawImageData = true
+        "acTL" -> {
+          sawAnimationControl = true
+          val frameCount = unsignedInt(animationData!!, 0)
+          if (frameCount == 0L) return ContainerFrameInspection.INVALID
+          if (frameCount > 1L) return ContainerFrameInspection.ANIMATED
+        }
+        "IEND" -> return if (sawHeader) {
+          ContainerFrameInspection.SINGLE
+        } else {
+          ContainerFrameInspection.INVALID
+        }
+      }
+    }
   }
 
-  private fun isAnimatedGif(input: InputStream): Boolean {
-    val data = DataInputStream(input)
-    val header = ByteArray(6)
-    if (runCatching { data.readFully(header) }.isFailure ||
-      String(header, Charsets.US_ASCII) !in setOf("GIF87a", "GIF89a")) return false
-    val descriptor = ByteArray(7)
-    if (runCatching { data.readFully(descriptor) }.isFailure) return false
+  private fun inspectGifFrames(
+    input: InputStream,
+    maximumBytes: Long,
+    cancellation: ImageHashCancellationToken,
+  ): ContainerFrameInspection {
+    val reader = BoundedContainerReader(input, maximumBytes, cancellation)
+    val header = reader.readBytes(6) ?: return ContainerFrameInspection.NOT_RECOGNIZED
+    if (String(header, Charsets.US_ASCII) !in setOf("GIF87a", "GIF89a")) {
+      return ContainerFrameInspection.NOT_RECOGNIZED
+    }
+    val descriptor = reader.readBytes(7) ?: return ContainerFrameInspection.INVALID
     if ((descriptor[4].toInt() and 0x80) != 0) {
       val tableBytes = 3L * (1 shl ((descriptor[4].toInt() and 0x07) + 1))
-      if (!skipExactly(data, tableBytes)) return false
+      if (!reader.skipExactly(tableBytes)) return ContainerFrameInspection.INVALID
     }
     var frameCount = 0
-    repeat(65_536) {
-      when (runCatching { data.readUnsignedByte() }.getOrNull() ?: return false) {
+    while (true) {
+      when (reader.readByte() ?: return ContainerFrameInspection.INVALID) {
         0x2c -> {
-          val imageDescriptor = ByteArray(9)
-          if (runCatching { data.readFully(imageDescriptor) }.isFailure) return false
+          val imageDescriptor = reader.readBytes(9) ?: return ContainerFrameInspection.INVALID
           if ((imageDescriptor[8].toInt() and 0x80) != 0) {
             val tableBytes = 3L * (1 shl ((imageDescriptor[8].toInt() and 0x07) + 1))
-            if (!skipExactly(data, tableBytes)) return false
+            if (!reader.skipExactly(tableBytes)) return ContainerFrameInspection.INVALID
           }
-          if (runCatching { data.readUnsignedByte() }.isFailure || !skipSubBlocks(data)) return false
+          if (reader.readByte() == null || !skipGifSubBlocks(reader)) {
+            return ContainerFrameInspection.INVALID
+          }
           frameCount += 1
-          if (frameCount > 1) return true
+          if (frameCount > 1) return ContainerFrameInspection.ANIMATED
         }
         0x21 -> {
-          if (runCatching { data.readUnsignedByte() }.isFailure || !skipSubBlocks(data)) return false
+          if (reader.readByte() == null || !skipGifSubBlocks(reader)) {
+            return ContainerFrameInspection.INVALID
+          }
         }
-        0x3b -> return false
-        else -> return false
+        0x3b -> return if (frameCount == 1) {
+          ContainerFrameInspection.SINGLE
+        } else {
+          ContainerFrameInspection.INVALID
+        }
+        else -> return ContainerFrameInspection.INVALID
       }
     }
-    return false
   }
 
-  private fun skipSubBlocks(data: DataInputStream): Boolean {
-    repeat(65_536) {
-      val length = runCatching { data.readUnsignedByte() }.getOrNull() ?: return false
+  private fun skipGifSubBlocks(reader: BoundedContainerReader): Boolean {
+    while (true) {
+      val length = reader.readByte() ?: return false
       if (length == 0) return true
-      if (!skipExactly(data, length.toLong())) return false
+      if (!reader.skipExactly(length.toLong())) return false
     }
-    return false
   }
 
-  private fun skipExactly(data: DataInputStream, byteCount: Long): Boolean {
+  private fun isValidPngChunkType(type: ByteArray): Boolean =
+    type.size == 4 &&
+      type.all { byte ->
+        val value = byte.toInt() and 0xff
+        value in 'A'.code..'Z'.code || value in 'a'.code..'z'.code
+      } &&
+      (type[2].toInt() and 0x20) == 0
+
+  private fun unsignedInt(bytes: ByteArray, offset: Int): Long =
+    ((bytes[offset].toLong() and 0xffL) shl 24) or
+      ((bytes[offset + 1].toLong() and 0xffL) shl 16) or
+      ((bytes[offset + 2].toLong() and 0xffL) shl 8) or
+      (bytes[offset + 3].toLong() and 0xffL)
+}
+
+internal enum class ContainerFrameInspection {
+  NOT_RECOGNIZED,
+  SINGLE,
+  ANIMATED,
+  INVALID,
+}
+
+private class BoundedContainerReader(
+  private val input: InputStream,
+  private val maximumBytes: Long,
+  private val cancellation: ImageHashCancellationToken,
+) {
+  private val transferBuffer = ByteArray(16 * 1_024)
+  var consumedBytes: Long = 0
+    private set
+  val remainingBytes: Long
+    get() = maximumBytes - consumedBytes
+
+  fun readByte(): Int? {
+    cancellation.throwIfCancelled()
+    if (consumedBytes >= maximumBytes) return null
+    val value = input.read()
+    if (value < 0) return null
+    consumedBytes += 1
+    return value
+  }
+
+  fun readBytes(byteCount: Int): ByteArray? {
+    if (byteCount < 0 || byteCount.toLong() > remainingBytes) return null
+    val value = ByteArray(byteCount)
+    var offset = 0
+    while (offset < byteCount) {
+      cancellation.throwIfCancelled()
+      val count = input.read(value, offset, byteCount - offset)
+      if (count <= 0) return null
+      offset += count
+      consumedBytes += count
+    }
+    return value
+  }
+
+  fun readUnsignedInt(): Long? {
+    val bytes = readBytes(4) ?: return null
+    return ((bytes[0].toLong() and 0xffL) shl 24) or
+      ((bytes[1].toLong() and 0xffL) shl 16) or
+      ((bytes[2].toLong() and 0xffL) shl 8) or
+      (bytes[3].toLong() and 0xffL)
+  }
+
+  fun readPayload(byteCount: Long, crc: CRC32, capture: ByteArray?): Boolean {
+    if (
+      byteCount < 0 ||
+      byteCount > remainingBytes ||
+      (capture != null && capture.size.toLong() != byteCount)
+    ) {
+      return false
+    }
+    var remaining = byteCount
+    var captured = 0
+    while (remaining > 0) {
+      cancellation.throwIfCancelled()
+      val requested = minOf(transferBuffer.size.toLong(), remaining).toInt()
+      val count = input.read(transferBuffer, 0, requested)
+      if (count <= 0) return false
+      crc.update(transferBuffer, 0, count)
+      capture?.let {
+        transferBuffer.copyInto(it, captured, 0, count)
+        captured += count
+      }
+      consumedBytes += count
+      remaining -= count
+    }
+    return true
+  }
+
+  fun skipExactly(byteCount: Long): Boolean {
+    if (byteCount < 0 || byteCount > remainingBytes) return false
     var remaining = byteCount
     while (remaining > 0) {
-      val skipped = data.skip(remaining)
-      if (skipped <= 0) return false
-      remaining -= skipped
+      cancellation.throwIfCancelled()
+      val requested = minOf(transferBuffer.size.toLong(), remaining).toInt()
+      val count = input.read(transferBuffer, 0, requested)
+      if (count <= 0) return false
+      consumedBytes += count
+      remaining -= count
     }
     return true
   }

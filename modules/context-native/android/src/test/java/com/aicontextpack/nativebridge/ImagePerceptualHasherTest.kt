@@ -1,5 +1,7 @@
 package com.aicontextpack.nativebridge
 
+import java.io.ByteArrayOutputStream
+import java.util.zip.CRC32
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -98,30 +100,53 @@ class ImagePerceptualHasherTest {
 
   @Test
   fun animatedPngControlChunkIsRejectedOnLegacyAndroid() {
-    val bytes = byteArrayOf(
-      -119, 80, 78, 71, 13, 10, 26, 10,
-      0, 0, 0, 8, 97, 99, 84, 76,
-      0, 0, 0, 2, 0, 0, 0, 0,
-      0, 0, 0, 0,
-    )
+    val bytes = animationFixtures().getValue("animated-apng")
     assertTrue(ImagePerceptualHasher.isAnimatedPng(bytes))
-    bytes[19] = 1
-    assertFalse(ImagePerceptualHasher.isAnimatedPng(bytes))
+    val corrupted = bytes.copyOf()
+    val animationControlOffset = findPngChunk(corrupted, "acTL")
+    corrupted[animationControlOffset + 19] =
+      (corrupted[animationControlOffset + 19].toInt() xor 0x01).toByte()
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectPngFrames(corrupted),
+    )
   }
 
   @Test
   fun sharedAnimatedFixturesAreRejectedWithoutApi28ImageDecoder() {
-    val lines = checkNotNull(
-      javaClass.classLoader?.getResourceAsStream("image-animation-policy-v1.tsv"),
-    ).bufferedReader().readLines()
-    val values = lines.associate { line ->
-      val (name, encoded) = line.split('\t', limit = 2)
-      name to java.util.Base64.getDecoder().decode(encoded)
-    }
+    val values = animationFixtures()
     assertTrue(ImagePerceptualHasher.isAnimatedPng(values.getValue("animated-apng")))
     assertTrue(ImagePerceptualHasher.isAnimatedGif(values.getValue("animated-gif")))
     assertTrue(
       ImagePerceptualHasher.isAnimatedWebPHeader(values.getValue("animated-webp")),
+    )
+  }
+
+  @Test
+  fun structurallyPaddedAnimationContainersCannotBypassLegacyLimits() {
+    val values = animationFixtures()
+    val paddedPng = insertPrivatePngChunks(
+      values.getValue("animated-apng"),
+      2_048,
+    )
+    val paddedGif = insertGifCommentExtensions(
+      values.getValue("animated-gif"),
+      65_536,
+    )
+
+    assertEquals(
+      ContainerFrameInspection.ANIMATED,
+      ImagePerceptualHasher.inspectPngFrames(paddedPng),
+    )
+    assertEquals(
+      ContainerFrameInspection.ANIMATED,
+      ImagePerceptualHasher.inspectGifFrames(paddedGif),
+    )
+    val corruptedGif = paddedGif.copyOf()
+    corruptedGif[gifDataOffset(corruptedGif)] = 0
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectGifFrames(corruptedGif),
     )
   }
 
@@ -166,4 +191,71 @@ class ImagePerceptualHasherTest {
     executor.shutdown()
     assertTrue(executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS))
   }
+
+
+  private fun animationFixtures(): Map<String, ByteArray> {
+    val lines = checkNotNull(
+      javaClass.classLoader?.getResourceAsStream("image-animation-policy-v1.tsv"),
+    ).bufferedReader().readLines()
+    return lines.associate { line ->
+      val (name, encoded) = line.split('\t', limit = 2)
+      name to java.util.Base64.getDecoder().decode(encoded)
+    }
+  }
+
+  private fun insertPrivatePngChunks(bytes: ByteArray, count: Int): ByteArray {
+    val animationControlOffset = findPngChunk(bytes, "acTL")
+    val output = ByteArrayOutputStream(bytes.size + count * 12)
+    output.write(bytes, 0, animationControlOffset)
+    repeat(count) { output.write(pngChunk("vpAg")) }
+    output.write(bytes, animationControlOffset, bytes.size - animationControlOffset)
+    return output.toByteArray()
+  }
+
+  private fun findPngChunk(bytes: ByteArray, expectedType: String): Int {
+    var offset = 8
+    while (offset + 12 <= bytes.size) {
+      val length = readUnsignedInt(bytes, offset).toInt()
+      val type = String(bytes, offset + 4, 4, Charsets.US_ASCII)
+      if (type == expectedType) return offset
+      offset += 12 + length
+    }
+    throw AssertionError("missing PNG chunk")
+  }
+
+  private fun pngChunk(typeName: String): ByteArray {
+    val type = typeName.toByteArray(Charsets.US_ASCII)
+    val crc = CRC32().apply { update(type) }.value
+    return byteArrayOf(0, 0, 0, 0) + type + byteArrayOf(
+      (crc ushr 24).toByte(),
+      (crc ushr 16).toByte(),
+      (crc ushr 8).toByte(),
+      crc.toByte(),
+    )
+  }
+
+  private fun insertGifCommentExtensions(bytes: ByteArray, count: Int): ByteArray {
+    val insertionOffset = gifDataOffset(bytes)
+    val output = ByteArrayOutputStream(bytes.size + count * 3)
+    output.write(bytes, 0, insertionOffset)
+    repeat(count) { output.write(byteArrayOf(0x21, 0xfe.toByte(), 0x00)) }
+    output.write(bytes, insertionOffset, bytes.size - insertionOffset)
+    return output.toByteArray()
+  }
+
+  private fun gifDataOffset(bytes: ByteArray): Int {
+    val packed = bytes[10].toInt() and 0xff
+    val globalColorTableBytes = if ((packed and 0x80) == 0) {
+      0
+    } else {
+      3 * (1 shl ((packed and 0x07) + 1))
+    }
+    return 13 + globalColorTableBytes
+  }
+
+  private fun readUnsignedInt(bytes: ByteArray, offset: Int): Long =
+    ((bytes[offset].toLong() and 0xffL) shl 24) or
+      ((bytes[offset + 1].toLong() and 0xffL) shl 16) or
+      ((bytes[offset + 2].toLong() and 0xffL) shl 8) or
+      (bytes[offset + 3].toLong() and 0xffL)
 }

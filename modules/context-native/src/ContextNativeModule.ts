@@ -102,7 +102,12 @@ declare class ContextNativeModule extends NativeModule {
   ): Promise<PDFPageExtractionV1>;
   cancelPdfExtraction(taskId: string): Promise<boolean>;
   finishPdfExtraction(taskId: string): Promise<boolean>;
-  readPlainTextFile(fileUri: string): Promise<NativePlainTextFileV1>;
+  readPlainTextFile(
+    fileUri: string,
+    maximumBytes: number,
+    expectedByteCount: number | null,
+    expectedSha256: string | null,
+  ): Promise<NativePlainTextFileV1>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }
 export default requireNativeModule<ContextNativeModule>('ContextNative');

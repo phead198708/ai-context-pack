@@ -1487,6 +1487,16 @@ test('analyze settlement atomically registers normalized text and versioned anal
     normalizedCharacterCount: normalized.characterCount,
     contentKind: normalized.contentKind,
     textFingerprint: fingerprintNormalizedTextV1(normalized),
+    imageFingerprint: {
+      schemaVersion: 1,
+      algorithm: 'dhash-64-v1',
+      hash: '0123456789abcdef',
+      sampleWidth: 9,
+      sampleHeight: 8,
+      orientationApplied: true,
+      durationMs: 0,
+      revision: '1',
+    },
     analyzedAt: now,
   };
   const owner = 'e93e4567-e89b-42d3-a456-426614174000';
@@ -1525,6 +1535,39 @@ test('analyze settlement atomically registers normalized text and versioned anal
       publicationLeaseObservedAt: now,
     }),
   ).resolves.toBe(true);
+
+  await expect(
+    repository.completePipelineRun({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+      analysis: {
+        ...analysis,
+        normalizedByteCount: 0,
+        normalizedCharacterCount: 0,
+      },
+      publicationLeaseOwnerId: owner,
+      publicationLeaseObservedAt: now,
+    }),
+  ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
+  const analysisWithoutImageFingerprint = { ...analysis };
+  delete (
+    analysisWithoutImageFingerprint as {
+      imageFingerprint?: DuplicateAnalysisItemV1['imageFingerprint'];
+    }
+  ).imageFingerprint;
+  await expect(
+    repository.completePipelineRun({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+      analysis: analysisWithoutImageFingerprint,
+      publicationLeaseOwnerId: owner,
+      publicationLeaseObservedAt: now,
+    }),
+  ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
 
   await expect(
     repository.completePipelineRun({

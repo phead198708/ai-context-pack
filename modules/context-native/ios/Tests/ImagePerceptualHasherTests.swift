@@ -53,6 +53,33 @@ final class ImagePerceptualHasherTests: XCTestCase {
     }
   }
 
+  func testStructurallyPaddedAnimationContainersRemainMultiFrame() throws {
+    let fixture = fixtureURL("contracts/image-animation-policy-v1.tsv")
+    let values = try Dictionary(
+      uniqueKeysWithValues: String(contentsOf: fixture, encoding: .utf8)
+        .split(separator: "\n")
+        .map { line -> (String, Data) in
+          let fields = line.split(separator: "\t", maxSplits: 1)
+          return (
+            String(fields[0]),
+            try XCTUnwrap(Data(base64Encoded: String(fields[1])))
+          )
+        }
+    )
+    let padded = [
+      try insertPrivatePNGChunks(try XCTUnwrap(values["animated-apng"]), count: 2_048),
+      insertGIFCommentExtensions(
+        try XCTUnwrap(values["animated-gif"]),
+        count: 65_536
+      ),
+    ]
+
+    for data in padded {
+      let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+      XCTAssertFalse(ImagePerceptualHasher.acceptsFrameCount(CGImageSourceGetCount(source)))
+    }
+  }
+
   func testSyntheticMediaHashesAreStable() throws {
     for name in ["ocr-english.png", "ocr-rotated.jpg"] {
       let url = fixtureURL(name)
@@ -67,6 +94,31 @@ final class ImagePerceptualHasherTests: XCTestCase {
       let hash = try XCTUnwrap(value["hash"] as? String)
       XCTAssertEqual(hash, "000000a810000000")
     }
+  }
+
+  private func insertPrivatePNGChunks(_ data: Data, count: Int) throws -> Data {
+    let type = Data("acTL".utf8)
+    let typeRange = try XCTUnwrap(data.range(of: type))
+    let insertionIndex = typeRange.lowerBound - 4
+    let chunk = Data([0, 0, 0, 0]) + Data("vpAg".utf8) + Data([0x01, 0x55, 0xc2, 0xb3])
+    var padding = Data()
+    padding.reserveCapacity(chunk.count * count)
+    for _ in 0..<count { padding.append(chunk) }
+    var result = data
+    result.insert(contentsOf: padding, at: insertionIndex)
+    return result
+  }
+
+  private func insertGIFCommentExtensions(_ data: Data, count: Int) -> Data {
+    let packed = Int(data[10])
+    let colorTableBytes = (packed & 0x80) == 0 ? 0 : 3 * (1 << ((packed & 0x07) + 1))
+    let insertionIndex = 13 + colorTableBytes
+    var padding = Data()
+    padding.reserveCapacity(count * 3)
+    for _ in 0..<count { padding.append(contentsOf: [0x21, 0xfe, 0x00]) }
+    var result = data
+    result.insert(contentsOf: padding, at: insertionIndex)
+    return result
   }
 
   func testRegistryCancellationIsOwnerScopedAndCooperative() throws {

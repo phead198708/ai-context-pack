@@ -6,7 +6,7 @@ import {
 } from '../../domain/errors';
 import type { Artifact } from '../../domain/models';
 import {
-  fingerprintNormalizedTextV1,
+  fingerprintNormalizedTextAsyncV1,
   normalizeContentV1,
   type DuplicateAnalysisItemV1,
   type ImagePerceptualHashV1,
@@ -1108,7 +1108,9 @@ export class NativeDuplicateAnalysisStageWorker implements PackStageWorker {
         normalizedByteCount: artifact.byteCount,
         normalizedCharacterCount: normalized.characterCount,
         contentKind: normalized.contentKind,
-        textFingerprint: fingerprintNormalizedTextV1(normalized),
+        textFingerprint: await fingerprintNormalizedTextAsyncV1(normalized, {
+          isCancelled: () => cancelled,
+        }),
         ...(imageFingerprint ? { imageFingerprint } : {}),
         analyzedAt,
       };

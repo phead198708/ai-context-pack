@@ -52,6 +52,14 @@ export interface NormalizedTextFingerprintV1 {
   readonly hashes: readonly string[];
 }
 
+export interface TextFingerprintWorkOptionsV1 {
+  /** Checked before work, after every host yield, and before publication. */
+  readonly isCancelled?: () => boolean;
+  /** Injectable for deterministic tests; production yields to the host timer queue. */
+  readonly yieldControl?: () => Promise<void>;
+  readonly yieldEveryCodePoints?: number;
+}
+
 export interface ImagePerceptualHashV1 {
   readonly schemaVersion: typeof IMAGE_PERCEPTUAL_HASH_SCHEMA_VERSION;
   readonly algorithm: 'dhash-64-v1';
@@ -204,45 +212,38 @@ export function fingerprintNormalizedTextV1(
 ): NormalizedTextFingerprintV1 {
   if (!isNormalizedContentV1(normalized))
     throw new DomainError('SCHEMA_INVALID');
-  const similaritySource =
-    normalized.contentKind === 'prose'
-      ? normalized.text.toLowerCase().replace(/\s+/g, ' ').trim()
-      : normalized.text;
-  const codePoints = Array.from(similaritySource);
-  const shingleSize = 5;
-  const shingleCount =
-    codePoints.length === 0
-      ? 0
-      : Math.max(1, codePoints.length - shingleSize + 1);
-  const sample: number[] = [];
-  const sampled = new Set<number>();
-  for (let index = 0; index < shingleCount; index += 1) {
-    const shingle = codePoints
-      .slice(index, Math.min(index + shingleSize, codePoints.length))
-      .join('');
-    const hash = fnv1a32(shingle);
-    if (sampled.has(hash)) continue;
-    if (
-      sample.length === TEXT_FINGERPRINT_SAMPLE_SIZE &&
-      hash >= sample[sample.length - 1]!
-    )
-      continue;
-    const position = lowerBound(sample, hash);
-    sample.splice(position, 0, hash);
-    sampled.add(hash);
-    if (sample.length > TEXT_FINGERPRINT_SAMPLE_SIZE) {
-      const removed = sample.pop();
-      if (removed !== undefined) sampled.delete(removed);
-    }
+  const accumulator = new TextFingerprintAccumulatorV1();
+  for (const codePoint of similarityCodePoints(normalized))
+    accumulator.append(codePoint);
+  return accumulator.finish();
+}
+
+/**
+ * Computes the same v1 contract without materializing a code-point array or a
+ * shingle per input position. Long inputs yield cooperatively so UI events and
+ * durable cancellation can run between bounded chunks.
+ */
+export async function fingerprintNormalizedTextAsyncV1(
+  normalized: NormalizedContentV1,
+  options: TextFingerprintWorkOptionsV1 = {},
+): Promise<NormalizedTextFingerprintV1> {
+  if (!isNormalizedContentV1(normalized))
+    throw new DomainError('SCHEMA_INVALID');
+  const yieldEvery = options.yieldEveryCodePoints ?? 32_768;
+  if (!Number.isSafeInteger(yieldEvery) || yieldEvery <= 0)
+    throw new DomainError('SCHEMA_INVALID');
+  assertFingerprintWorkActive(options);
+  const accumulator = new TextFingerprintAccumulatorV1();
+  let visited = 0;
+  for (const codePoint of similarityCodePoints(normalized)) {
+    accumulator.append(codePoint);
+    visited += 1;
+    if (visited % yieldEvery !== 0) continue;
+    await (options.yieldControl ?? yieldTextFingerprintWorkToHost)();
+    assertFingerprintWorkActive(options);
   }
-  return {
-    schemaVersion: 1,
-    algorithm: 'bottom-k-fnv1a32-5gram-v1',
-    shingleSize: 5,
-    sampleSize: TEXT_FINGERPRINT_SAMPLE_SIZE,
-    shingleCount,
-    hashes: sample.map(hash => hash.toString(16).padStart(8, '0')),
-  };
+  assertFingerprintWorkActive(options);
+  return accumulator.finish();
 }
 
 export function normalizedTextSimilarityV1(
@@ -567,10 +568,34 @@ export function isDuplicateAnalysisItemV1(
       value.contentKind === 'code' ||
       value.contentKind === 'mixed') &&
     isNormalizedTextFingerprintV1(value.textFingerprint) &&
+    duplicateAnalysisCountsAreConsistent(
+      value.normalizedByteCount,
+      value.normalizedCharacterCount,
+      value.textFingerprint,
+    ) &&
     (value.imageFingerprint === undefined ||
       isImagePerceptualHashV1(value.imageFingerprint)) &&
     typeof value.analyzedAt === 'string' &&
     isIsoDateTime(value.analyzedAt)
+  );
+}
+
+function duplicateAnalysisCountsAreConsistent(
+  normalizedByteCount: unknown,
+  normalizedCharacterCount: unknown,
+  fingerprint: unknown,
+): boolean {
+  if (
+    !isNonNegativeInteger(normalizedByteCount) ||
+    !isNonNegativeInteger(normalizedCharacterCount) ||
+    !isNormalizedTextFingerprintV1(fingerprint)
+  )
+    return false;
+  if (normalizedCharacterCount === 0)
+    return normalizedByteCount === 0 && fingerprint.shingleCount === 0;
+  return (
+    normalizedByteCount >= normalizedCharacterCount &&
+    fingerprint.shingleCount > 0
   );
 }
 
@@ -851,31 +876,120 @@ function isCodeSignalLine(line: string): boolean {
     fenceLine.test(line) ||
     /^\s+(?:\S|$)/.test(line) ||
     isAssignmentSignalLine(line) ||
+    isCallExpressionSignalLine(line) ||
     /(?:=>|::|\{\s*$|[;{}]\s*$|^\s*(?:const|let|var|func|class|interface|type|import|export|def|fun|if|for|while)\b)/.test(
       line,
     )
   );
 }
 
+function isCallExpressionSignalLine(line: string): boolean {
+  return /^\s*(?:(?:await|return|throw|new)\s+)?[A-Za-z_$][\w$]*(?:(?:\.|\?\.)[A-Za-z_$][\w$]*)*\s*\(.*\)\s*;?\s*$/.test(
+    line,
+  );
+}
+
 function isAssignmentSignalLine(line: string): boolean {
   return (
-    /^\s*(?:export\s+)?[A-Za-z_][\w.-]*\s*=\s*\S/.test(line) ||
+    /^\s*(?:export\s+)?[A-Za-z_$][\w.$[\]'-]*\s*(?:=|\+=|-=|\*=|\/=|%=|\?\?=|&&=|\|\|=|<<=|>>=|>>>=|\*\*=)\s*\S/.test(
+      line,
+    ) ||
     /^\s*[A-Za-z_][\w.-]*\s*:\s*(?:["'[{]|[-+]?\d|true\b|false\b|null\b)/i.test(
       line,
     )
   );
 }
 
-function fnv1a32(value: string): number {
+function* similarityCodePoints(
+  normalized: NormalizedContentV1,
+): Generator<string> {
+  const value =
+    normalized.contentKind === 'prose'
+      ? normalized.text.toLowerCase()
+      : normalized.text;
+  if (normalized.contentKind !== 'prose') {
+    yield* value;
+    return;
+  }
+  let emitted = false;
+  let pendingWhitespace = false;
+  for (const codePoint of value) {
+    if (/^\s$/u.test(codePoint)) {
+      if (emitted) pendingWhitespace = true;
+      continue;
+    }
+    if (pendingWhitespace) yield ' ';
+    yield codePoint;
+    emitted = true;
+    pendingWhitespace = false;
+  }
+}
+
+class TextFingerprintAccumulatorV1 {
+  private readonly sample: number[] = [];
+  private readonly sampled = new Set<number>();
+  private readonly window: string[] = [];
+  private codePointCount = 0;
+
+  append(codePoint: string): void {
+    this.codePointCount += 1;
+    if (this.window.length === 5) this.window.shift();
+    this.window.push(codePoint);
+    if (this.window.length === 5) this.addHash(fnv1a32Parts(this.window));
+  }
+
+  finish(): NormalizedTextFingerprintV1 {
+    if (this.codePointCount > 0 && this.codePointCount < 5)
+      this.addHash(fnv1a32Parts(this.window));
+    return {
+      schemaVersion: 1,
+      algorithm: 'bottom-k-fnv1a32-5gram-v1',
+      shingleSize: 5,
+      sampleSize: TEXT_FINGERPRINT_SAMPLE_SIZE,
+      shingleCount:
+        this.codePointCount === 0 ? 0 : Math.max(1, this.codePointCount - 4),
+      hashes: this.sample.map(hash => hash.toString(16).padStart(8, '0')),
+    };
+  }
+
+  private addHash(hash: number): void {
+    if (this.sampled.has(hash)) return;
+    if (
+      this.sample.length === TEXT_FINGERPRINT_SAMPLE_SIZE &&
+      hash >= this.sample[this.sample.length - 1]!
+    )
+      return;
+    const position = lowerBound(this.sample, hash);
+    this.sample.splice(position, 0, hash);
+    this.sampled.add(hash);
+    if (this.sample.length <= TEXT_FINGERPRINT_SAMPLE_SIZE) return;
+    const removed = this.sample.pop();
+    if (removed !== undefined) this.sampled.delete(removed);
+  }
+}
+
+function fnv1a32Parts(parts: readonly string[]): number {
   let hash = 0x811c9dc5;
   /* eslint-disable no-bitwise -- FNV-1a v1 requires unsigned 32-bit arithmetic. */
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
+  for (const part of parts) {
+    for (let index = 0; index < part.length; index += 1) {
+      hash ^= part.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
   }
   const unsigned = hash >>> 0;
   /* eslint-enable no-bitwise */
   return unsigned;
+}
+
+function assertFingerprintWorkActive(
+  options: TextFingerprintWorkOptionsV1,
+): void {
+  if (options.isCancelled?.()) throw new DomainError('PIPELINE_STAGE_FAILED');
+}
+
+function yieldTextFingerprintWorkToHost(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
 }
 
 function lowerBound(values: readonly number[], target: number): number {
