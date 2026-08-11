@@ -20,7 +20,7 @@ class ImagePerceptualHasherTest {
   @Test
   fun orientationMappingAvoidsASecondFullBitmap() {
     assertEquals(Pair(2, 0), ImagePerceptualHasher.orientedCoordinate(0, 0, 4, 3, 6))
-    assertEquals(Pair(0, 3), ImagePerceptualHasher.orientedCoordinate(3, 0, 4, 3, 6))
+    assertEquals(Pair(0, 3), ImagePerceptualHasher.orientedCoordinate(3, 2, 4, 3, 6))
     assertEquals(Pair(0, 0), ImagePerceptualHasher.orientedCoordinate(0, 0, 4, 3, 5))
   }
 
