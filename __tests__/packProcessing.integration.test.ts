@@ -1697,6 +1697,68 @@ test('checkpoint recovery lease contention stays recoverable instead of failing 
   );
 });
 
+test('fresh extraction publication contention stays recoverable and publishes once after the lease is released', async () => {
+  const cleanupOwner = '173e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLease(cleanupOwner, now, '2026-08-11T00:10:00Z'),
+  ).resolves.toBe(true);
+  const writeTextArtifact = jest.fn().mockResolvedValue({
+    relativePath: ownedDerivedPath(
+      packId,
+      '273e4567-e89b-42d3-a456-426614174000',
+      'txt',
+    ),
+    byteCount: 18,
+    sha256: 'b'.repeat(64),
+    created: true,
+  });
+  const onUnexpectedFailure = jest.fn();
+  const worker = new NativeExtractionStageWorker(
+    async () => repository,
+    imagePublicationNative(writeTextArtifact, jest.fn()),
+    () => now,
+  );
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    5 * 60 * 1_000,
+    onUnexpectedFailure,
+    () => operationalMilliseconds,
+  );
+  const fail = jest.spyOn(repository, 'failPipelineRun');
+
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).retryItem(packId, itemId);
+  await coordinator.waitForIdle();
+
+  expect(writeTextArtifact).not.toHaveBeenCalled();
+  expect(fail).not.toHaveBeenCalled();
+  expect(onUnexpectedFailure).toHaveBeenCalledWith({
+    runId: expect.any(String),
+    code: 'PERSISTENCE_CONFLICT',
+  });
+  expect((await repository.findPackGraph(packId))?.pack.state).toBe(
+    'processing',
+  );
+  await expect(repository.listRunnablePipelineRuns()).resolves.toEqual([]);
+
+  await repository.releaseCleanupLease(cleanupOwner);
+  operationalMilliseconds = 5 * 60 * 1_000;
+  await coordinator.recover();
+  await coordinator.waitForIdle();
+
+  expect(writeTextArtifact).toHaveBeenCalledTimes(1);
+  expect(fail).not.toHaveBeenCalled();
+  expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
+    'extracted',
+  );
+  await expect(repository.listRunnablePipelineRuns()).resolves.toEqual([]);
+});
+
 test('a replacement coordinator does not reclaim a live running claim', async () => {
   const firstWorker = new DeferredWorker();
   const first = new DurablePackProcessingCoordinator(

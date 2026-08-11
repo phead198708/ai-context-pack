@@ -195,14 +195,12 @@ export class DurablePackProcessingCoordinator
             );
             return;
           }
-          if (
-            run.publishedArtifact &&
-            processingErrorCode(error) === 'PERSISTENCE_CONFLICT'
-          ) {
-            // Another still-valid publisher may be finishing the checkpoint.
-            // Do not convert recoverable lease contention into a terminal run;
-            // the running claim becomes stale and recovery retries the exact
-            // checkpoint after the original owner joins/releases its lease.
+          if (processingErrorCode(error) === 'PERSISTENCE_CONFLICT') {
+            // Another still-valid cleanup/publisher may hold the global lease,
+            // or this claimant may have lost one of its ownership fences. Do
+            // not convert routine contention into a terminal run: the running
+            // claim becomes stale and recovery retries either the fresh stage
+            // or its durable checkpoint after the owner joins/releases.
             await this.reportUnexpectedFailure(
               run,
               error,
