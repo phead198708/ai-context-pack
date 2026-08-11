@@ -271,8 +271,8 @@ export class PackLibraryController {
     });
   }
 
-  analyzePack(packId: string): Promise<number> {
-    return this.enqueue(async () => {
+  async analyzePack(packId: string): Promise<number> {
+    const durableRuns = await this.enqueue(async () => {
       if (!this.processing?.supports('analyze'))
         throw new DomainError('DOMAIN_INVALID_TRANSITION');
       const repository = await this.getRepository();
@@ -296,9 +296,12 @@ export class PackLibraryController {
         startedPipelineRuns: runs,
       });
       this.processing.launch(runs);
-      await this.processing.waitForIdle();
-      return runs.length;
+      return runs;
     });
+    // Only durable run creation is serialized. Settlement can take seconds and
+    // must not hold the controller queue that makes cancellation durable.
+    await this.processing!.waitForIdle();
+    return durableRuns.length;
   }
 
   reviewDuplicateGroup(

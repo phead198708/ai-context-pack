@@ -68,7 +68,9 @@ export function PackLibraryScreen({
   });
   const [mutationErrorCode, setMutationErrorCode] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const busyRef = useRef(false);
+  const cancellingRef = useRef(false);
   const selectionLoadStateRef = useRef<PackSelectionLoadState>({
     controlledPackId: selectedPackId,
     activePackId: selectedPackId,
@@ -124,6 +126,28 @@ export function PackLibraryScreen({
       }
     },
     [load, onChanged, selectionLoadState],
+  );
+
+  const cancelProcessing = useCallback(
+    async (packId: string): Promise<void> => {
+      if (cancellingRef.current) return;
+      cancellingRef.current = true;
+      setCancelling(true);
+      setMutationErrorCode(undefined);
+      try {
+        // Cancellation intentionally bypasses the general mutation lock. An
+        // analysis mutation remains busy until its native work settles.
+        await controller.cancelProcessing(packId);
+        await load(selectionLoadState.activePackId);
+        await onChanged();
+      } catch (error) {
+        setMutationErrorCode(errorCode(error));
+      } finally {
+        cancellingRef.current = false;
+        setCancelling(false);
+      }
+    },
+    [controller, load, onChanged, selectionLoadState],
   );
 
   const mutationError = mutationErrorCode ? (
@@ -190,6 +214,8 @@ export function PackLibraryScreen({
       {detail ? (
         <PackEditor
           busy={busy}
+          cancelling={cancelling}
+          cancelProcessing={cancelProcessing}
           controller={controller}
           detail={detail}
           key={detail.pack.id}
@@ -277,12 +303,16 @@ function LibrarySection({
 
 function PackEditor({
   busy,
+  cancelling,
+  cancelProcessing,
   controller,
   detail,
   locale,
   mutate,
 }: {
   readonly busy: boolean;
+  readonly cancelling: boolean;
+  readonly cancelProcessing: (packId: string) => Promise<void>;
   readonly controller: PackLibraryController;
   readonly detail: NonNullable<PackLibrarySnapshot['selected']>;
   readonly locale: AppLocale;
@@ -353,11 +383,9 @@ function PackEditor({
       />
       {['processing', 'recovering'].includes(detail.pack.state) ? (
         <Button
-          disabled={busy}
+          disabled={cancelling}
           label={t(locale, 'cancelProcessing')}
-          onPress={() =>
-            run(mutate(() => controller.cancelProcessing(detail.pack.id)))
-          }
+          onPress={() => run(cancelProcessing(detail.pack.id))}
         />
       ) : null}
       {['processing', 'recovering'].includes(detail.pack.state) &&

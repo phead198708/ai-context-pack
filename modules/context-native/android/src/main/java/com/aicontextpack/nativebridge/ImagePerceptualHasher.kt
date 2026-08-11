@@ -9,9 +9,20 @@ import android.graphics.drawable.AnimatedImageDrawable
 import android.media.ExifInterface
 import android.os.Build
 import android.os.SystemClock
+import android.system.Os
+import android.system.OsConstants
+import java.io.ByteArrayInputStream
+import java.io.Closeable
+import java.io.DataInputStream
+import java.io.File
+import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 internal class ImageHashCancellationToken {
   private val cancelled = AtomicBoolean(false)
@@ -36,12 +47,15 @@ internal class ImageHashCancellationToken {
   fun throwIfCancelled() {
     if (cancelled.get()) throw NativeException("PIPELINE_STAGE_FAILED")
   }
+
+  fun isCancelled(): Boolean = cancelled.get()
 }
 
 internal class ImageHashTaskRegistry {
   private data class Entry(
     val ownerId: String,
     val token: ImageHashCancellationToken,
+    var cancelAndWait: (() -> Boolean)? = null,
   )
 
   private val entries = mutableMapOf<String, Entry>()
@@ -52,10 +66,30 @@ internal class ImageHashTaskRegistry {
     return ImageHashCancellationToken().also { entries[taskId] = Entry(ownerId, it) }
   }
 
-  @Synchronized
-  fun cancel(taskId: String): Boolean {
-    entries[taskId]?.token?.cancel()
-    return true
+  fun attach(
+    ownerId: String,
+    taskId: String,
+    token: ImageHashCancellationToken,
+    cancelAndWait: () -> Boolean,
+  ) {
+    val acceptedAndCancelled = synchronized(this) {
+      val entry = entries[taskId]
+      if (entry?.ownerId == ownerId && entry.token === token) {
+        entry.cancelAndWait = cancelAndWait
+        Pair(true, entry.token.isCancelled())
+      } else Pair(false, false)
+    }
+    if (!acceptedAndCancelled.first || acceptedAndCancelled.second) cancelAndWait()
+  }
+
+  fun cancel(ownerId: String, taskId: String): Boolean {
+    val cancellation = synchronized(this) {
+      val entry = entries[taskId]
+      if (entry?.ownerId != ownerId) return false
+      entry.token.cancel()
+      entry.cancelAndWait
+    }
+    return cancellation?.invoke() ?: true
   }
 
   @Synchronized
@@ -64,9 +98,155 @@ internal class ImageHashTaskRegistry {
     if (entry?.ownerId == ownerId && entry.token === token) entries.remove(taskId)
   }
 
-  @Synchronized
   fun destroyOwner(ownerId: String) {
-    entries.values.filter { it.ownerId == ownerId }.forEach { it.token.cancel() }
+    val owned = synchronized(this) {
+      val ownedEntries = entries.filterValues { it.ownerId == ownerId }.values.toList()
+      entries.entries.removeAll { it.value.ownerId == ownerId }
+      ownedEntries.onEach { it.token.cancel() }.mapNotNull { it.cancelAndWait }
+    }
+    owned.forEach { it() }
+  }
+}
+
+internal class ImageHashScheduledWork(
+  private val executor: ThreadPoolExecutor,
+  private val token: ImageHashCancellationToken,
+  private val action: () -> Unit,
+  private val cancelBeforeStart: () -> Unit,
+  private val afterFinish: () -> Unit,
+) {
+  private val started = AtomicBoolean(false)
+  private val scheduled = AtomicBoolean(false)
+  private val finished = AtomicBoolean(false)
+  private val finishedLatch = CountDownLatch(1)
+  private val worker = AtomicReference<Thread?>()
+  private val runnable = Runnable {
+    started.set(true)
+    worker.set(Thread.currentThread())
+    try {
+      token.throwIfCancelled()
+      action()
+    } finally {
+      worker.set(null)
+      finishOnce()
+    }
+  }
+
+  fun schedule() {
+    check(scheduled.compareAndSet(false, true))
+    if (finished.get() || token.isCancelled()) {
+      cancelBeforeStart()
+      finishOnce()
+      return
+    }
+    try { executor.execute(runnable) } catch (error: RuntimeException) {
+      finishOnce()
+      throw error
+    }
+  }
+
+  fun cancelAndWait(): Boolean {
+    token.cancel()
+    if (!scheduled.get() && !started.get()) {
+      cancelBeforeStart()
+      finishOnce()
+      return true
+    }
+    val removed = executor.remove(runnable)
+    if (removed && !started.get()) {
+      cancelBeforeStart()
+      finishOnce()
+    } else {
+      worker.get()?.interrupt()
+    }
+    return finishedLatch.await(2, TimeUnit.SECONDS)
+  }
+
+  private fun finishOnce() {
+    if (!finished.compareAndSet(false, true)) return
+    try { afterFinish() } finally { finishedLatch.countDown() }
+  }
+}
+
+internal class ImmutableImageSnapshot private constructor(val file: File) : Closeable {
+  override fun close() { file.delete() }
+
+  companion object {
+    fun create(
+      context: Context,
+      source: File,
+      expectedByteCount: Long,
+      expectedSha256: String,
+      cancellation: ImageHashCancellationToken,
+    ): ImmutableImageSnapshot {
+      if (
+        expectedByteCount !in 1..ImagePerceptualHasher.maximumSourceBytes ||
+        !Regex("^[0-9a-f]{64}$").matches(expectedSha256)
+      ) throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+      val sourceFd = try {
+        Os.open(
+          source.path,
+          OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or OsConstants.O_NOFOLLOW,
+          0,
+        )
+      } catch (_: Exception) {
+        throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+      }
+      val snapshot = try {
+        File.createTempFile("aicp-image-hash-", ".snapshot", context.cacheDir)
+      } catch (_: Exception) {
+        Os.close(sourceFd)
+        throw NativeException("RESOURCE_MEMORY_PRESSURE")
+      }
+      var keep = false
+      try {
+        val stat = Os.fstat(sourceFd)
+        if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_size != expectedByteCount) {
+          throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+        }
+        val destinationFd = Os.open(
+          snapshot.path,
+          OsConstants.O_WRONLY or OsConstants.O_TRUNC or OsConstants.O_CLOEXEC or
+            OsConstants.O_NOFOLLOW,
+          0,
+        )
+        try {
+          val digest = MessageDigest.getInstance("SHA-256")
+          val buffer = ByteArray(64 * 1_024)
+          var copied = 0L
+          while (true) {
+            cancellation.throwIfCancelled()
+            val count = Os.read(sourceFd, buffer, 0, buffer.size)
+            if (count == 0) break
+            copied += count
+            if (copied > expectedByteCount) throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+            digest.update(buffer, 0, count)
+            var written = 0
+            while (written < count) {
+              val amount = Os.write(destinationFd, buffer, written, count - written)
+              if (amount <= 0) throw NativeException("RESOURCE_MEMORY_PRESSURE")
+              written += amount
+            }
+          }
+          val actual = digest.digest().joinToString("") { "%02x".format(it) }
+          if (copied != expectedByteCount || actual != expectedSha256) {
+            throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+          }
+        } finally {
+          Os.close(destinationFd)
+        }
+        Os.chmod(snapshot.path, OsConstants.S_IRUSR)
+        keep = true
+        return ImmutableImageSnapshot(snapshot)
+      } catch (error: NativeException) {
+        throw error
+      } catch (_: Exception) {
+        throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+      } finally {
+        Os.close(sourceFd)
+        if (!keep) snapshot.delete()
+      }
+    }
   }
 }
 
@@ -83,7 +263,6 @@ internal object ImagePerceptualHasher {
   // v1 retains one bounded decoded bitmap plus one scanline. It never creates an
   // orientation copy or a full-image IntArray.
   const val maximumPixelCount = 16_000_000L
-  private val sha256Pattern = Regex("^[0-9a-f]{64}$")
 
   fun hash(
     context: Context,
@@ -91,65 +270,67 @@ internal object ImagePerceptualHasher {
     expectedByteCount: Long,
     expectedSha256: String,
     cancellation: ImageHashCancellationToken = ImageHashCancellationToken(),
+    sourceMutationHook: ((String) -> Unit)? = null,
   ): Map<String, Any> {
     val started = SystemClock.elapsedRealtimeNanos()
     cancellation.throwIfCancelled()
-    val file = controlledSandboxFile(context, fileUri)
-    if (
-      !file.isFile ||
-      file.length() !in 1..maximumSourceBytes ||
-      expectedByteCount != file.length() ||
-      !sha256Pattern.matches(expectedSha256) ||
-      sha256(file.path, cancellation) != expectedSha256
-    ) throw NativeException("ARTIFACT_INTEGRITY_FAILED")
-    cancellation.throwIfCancelled()
-    if (hasMultipleFrames(file.path, cancellation)) {
-      throw NativeException("PROCESSOR_OUTPUT_INVALID")
-    }
-    val orientation = readOrientation(file.path)
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(file.path, bounds)
-    val pixelCount = bounds.outWidth.toLong() * bounds.outHeight.toLong()
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-      throw NativeException("PROCESSOR_OUTPUT_INVALID")
-    }
-    if (pixelCount > maximumPixelCount) throw NativeException("RESOURCE_MEMORY_PRESSURE")
-    val decodeOptions = BitmapFactory.Options().apply {
-      inSampleSize = 1
-      inPreferredConfig = Bitmap.Config.ARGB_8888
-    }
-    cancellation.attachDecode(decodeOptions)
-    val decoded = try {
-      BitmapFactory.decodeFile(file.path, decodeOptions)
-        ?: throw NativeException(
-          if (Thread.currentThread().isInterrupted) "PIPELINE_STAGE_FAILED"
-          else "PROCESSOR_OUTPUT_INVALID",
-        )
-    } catch (_: OutOfMemoryError) {
-      throw NativeException("RESOURCE_MEMORY_PRESSURE")
-    } finally {
-      cancellation.detachDecode(decodeOptions)
-    }
-    val luminance = try {
+    val source = controlledSandboxFile(context, fileUri)
+    ImmutableImageSnapshot.create(
+      context,
+      source,
+      expectedByteCount,
+      expectedSha256,
+      cancellation,
+    ).use { snapshot ->
+      val file = snapshot.file
+      sourceMutationHook?.invoke("snapshot-ready")
       cancellation.throwIfCancelled()
-      sampleLuminance(decoded, orientation, cancellation)
-    } finally {
-      decoded.recycle()
+      if (hasMultipleFrames(file.path, cancellation)) {
+        throw NativeException("PROCESSOR_OUTPUT_INVALID")
+      }
+      val orientation = readOrientation(file.path)
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeFile(file.path, bounds)
+      val pixelCount = bounds.outWidth.toLong() * bounds.outHeight.toLong()
+      if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        throw NativeException("PROCESSOR_OUTPUT_INVALID")
+      }
+      if (pixelCount > maximumPixelCount) throw NativeException("RESOURCE_MEMORY_PRESSURE")
+      val decodeOptions = BitmapFactory.Options().apply {
+        inSampleSize = 1
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+      }
+      cancellation.attachDecode(decodeOptions)
+      val decoded = try {
+        BitmapFactory.decodeFile(file.path, decodeOptions)
+          ?: throw NativeException(
+            if (Thread.currentThread().isInterrupted) "PIPELINE_STAGE_FAILED"
+            else "PROCESSOR_OUTPUT_INVALID",
+          )
+      } catch (_: OutOfMemoryError) {
+        throw NativeException("RESOURCE_MEMORY_PRESSURE")
+      } finally {
+        cancellation.detachDecode(decodeOptions)
+      }
+      val luminance = try {
+        cancellation.throwIfCancelled()
+        sampleLuminance(decoded, orientation, cancellation)
+      } finally {
+        decoded.recycle()
+      }
+      sourceMutationHook?.invoke("decode-complete")
+      cancellation.throwIfCancelled()
+      return mapOf(
+        "schemaVersion" to 1,
+        "algorithm" to "dhash-64-v1",
+        "hash" to differenceHash(luminance),
+        "sampleWidth" to sampleWidth,
+        "sampleHeight" to sampleHeight,
+        "orientationApplied" to true,
+        "durationMs" to (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0,
+        "revision" to "1",
+      )
     }
-    cancellation.throwIfCancelled()
-    if (file.length() != expectedByteCount || sha256(file.path, cancellation) != expectedSha256) {
-      throw NativeException("ARTIFACT_INTEGRITY_FAILED")
-    }
-    return mapOf(
-      "schemaVersion" to 1,
-      "algorithm" to "dhash-64-v1",
-      "hash" to differenceHash(luminance),
-      "sampleWidth" to sampleWidth,
-      "sampleHeight" to sampleHeight,
-      "orientationApplied" to true,
-      "durationMs" to (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0,
-      "revision" to "1",
-    )
   }
 
   internal fun differenceHash(luminance: IntArray): String {
@@ -299,6 +480,8 @@ internal object ImagePerceptualHasher {
     cancellation: ImageHashCancellationToken,
   ): Boolean {
     cancellation.throwIfCancelled()
+    if (java.io.File(path).inputStream().buffered().use(::isAnimatedPng)) return true
+    if (java.io.File(path).inputStream().buffered().use(::isAnimatedGif)) return true
     if (runCatching { Movie.decodeFile(path)?.duration() ?: 0 }.getOrDefault(0) > 0) {
       return true
     }
@@ -333,17 +516,91 @@ internal object ImagePerceptualHasher {
       String(header, 12, 4, Charsets.US_ASCII) == "VP8X" &&
       (header[20].toInt() and 0x02) != 0
 
-  private fun sha256(path: String, cancellation: ImageHashCancellationToken): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    java.io.File(path).inputStream().buffered().use { input ->
-      val buffer = ByteArray(64 * 1_024)
-      while (true) {
-        cancellation.throwIfCancelled()
-        val read = input.read(buffer)
-        if (read < 0) break
-        if (read > 0) digest.update(buffer, 0, read)
+  internal fun isAnimatedPng(bytes: ByteArray): Boolean =
+    ByteArrayInputStream(bytes).use(::isAnimatedPng)
+
+  internal fun isAnimatedGif(bytes: ByteArray): Boolean =
+    ByteArrayInputStream(bytes).use(::isAnimatedGif)
+
+  private fun isAnimatedPng(input: InputStream): Boolean {
+    val data = DataInputStream(input)
+    val signature = ByteArray(8)
+    if (runCatching { data.readFully(signature) }.isFailure ||
+      !signature.contentEquals(byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10))) return false
+    repeat(1_024) {
+      val length = runCatching { data.readInt().toLong() and 0xffff_ffffL }.getOrNull()
+        ?: return false
+      if (length > maximumSourceBytes) return false
+      val type = ByteArray(4)
+      if (runCatching { data.readFully(type) }.isFailure) return false
+      if (type.contentEquals("acTL".toByteArray(Charsets.US_ASCII))) {
+        if (length != 8L) return true
+        val frameCount = runCatching { data.readInt().toLong() and 0xffff_ffffL }.getOrNull()
+          ?: return true
+        return frameCount != 1L
+      }
+      var remaining = length + 4L // chunk data plus CRC
+      while (remaining > 0) {
+        val skipped = data.skip(remaining)
+        if (skipped <= 0) return false
+        remaining -= skipped
+      }
+      if (type.contentEquals("IEND".toByteArray(Charsets.US_ASCII))) return false
+    }
+    return false
+  }
+
+  private fun isAnimatedGif(input: InputStream): Boolean {
+    val data = DataInputStream(input)
+    val header = ByteArray(6)
+    if (runCatching { data.readFully(header) }.isFailure ||
+      String(header, Charsets.US_ASCII) !in setOf("GIF87a", "GIF89a")) return false
+    val descriptor = ByteArray(7)
+    if (runCatching { data.readFully(descriptor) }.isFailure) return false
+    if ((descriptor[4].toInt() and 0x80) != 0) {
+      val tableBytes = 3L * (1 shl ((descriptor[4].toInt() and 0x07) + 1))
+      if (!skipExactly(data, tableBytes)) return false
+    }
+    var frameCount = 0
+    repeat(65_536) {
+      when (runCatching { data.readUnsignedByte() }.getOrNull() ?: return false) {
+        0x2c -> {
+          val imageDescriptor = ByteArray(9)
+          if (runCatching { data.readFully(imageDescriptor) }.isFailure) return false
+          if ((imageDescriptor[8].toInt() and 0x80) != 0) {
+            val tableBytes = 3L * (1 shl ((imageDescriptor[8].toInt() and 0x07) + 1))
+            if (!skipExactly(data, tableBytes)) return false
+          }
+          if (runCatching { data.readUnsignedByte() }.isFailure || !skipSubBlocks(data)) return false
+          frameCount += 1
+          if (frameCount > 1) return true
+        }
+        0x21 -> {
+          if (runCatching { data.readUnsignedByte() }.isFailure || !skipSubBlocks(data)) return false
+        }
+        0x3b -> return false
+        else -> return false
       }
     }
-    return digest.digest().joinToString("") { "%02x".format(it) }
+    return false
+  }
+
+  private fun skipSubBlocks(data: DataInputStream): Boolean {
+    repeat(65_536) {
+      val length = runCatching { data.readUnsignedByte() }.getOrNull() ?: return false
+      if (length == 0) return true
+      if (!skipExactly(data, length.toLong())) return false
+    }
+    return false
+  }
+
+  private fun skipExactly(data: DataInputStream, byteCount: Long): Boolean {
+    var remaining = byteCount
+    while (remaining > 0) {
+      val skipped = data.skip(remaining)
+      if (skipped <= 0) return false
+      remaining -= skipped
+    }
+    return true
   }
 }

@@ -1,5 +1,6 @@
 import CoreGraphics
 import CryptoKit
+import Darwin
 import Foundation
 import ImageIO
 
@@ -37,6 +38,12 @@ final class ImageHashCancellationToken: @unchecked Sendable {
       throw ImagePerceptualHashError.cancelled
     }
   }
+
+  var isCancelled: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return cancelled
+  }
 }
 
 final class ImageHashTaskRegistry: @unchecked Sendable {
@@ -44,6 +51,7 @@ final class ImageHashTaskRegistry: @unchecked Sendable {
     let ownerId: String
     let token: ImageHashCancellationToken
     var cancelTask: (@Sendable () -> Void)?
+    var awaitCompletion: (@Sendable () -> Bool)?
 
     init(ownerId: String, token: ImageHashCancellationToken) {
       self.ownerId = ownerId
@@ -64,26 +72,44 @@ final class ImageHashTaskRegistry: @unchecked Sendable {
     return token
   }
 
-  func attach(ownerId: String, taskId: String, cancel: @escaping @Sendable () -> Void) {
+  func attach(
+    ownerId: String,
+    taskId: String,
+    token: ImageHashCancellationToken,
+    cancel: @escaping @Sendable () -> Void,
+    awaitCompletion: @escaping @Sendable () -> Bool
+  ) {
+    lock.lock()
+    let entry = entries[taskId]
+    guard entry?.ownerId == ownerId, entry?.token === token else {
+      lock.unlock()
+      cancel()
+      _ = awaitCompletion()
+      return
+    }
+    entry?.cancelTask = cancel
+    entry?.awaitCompletion = awaitCompletion
+    let alreadyCancelled = entry?.token.isCancelled == true
+    lock.unlock()
+    if alreadyCancelled {
+      cancel()
+      _ = awaitCompletion()
+    }
+  }
+
+  func cancel(ownerId: String, taskId: String) -> Bool {
     lock.lock()
     let entry = entries[taskId]
     guard entry?.ownerId == ownerId else {
       lock.unlock()
-      cancel()
-      return
+      return false
     }
-    entry?.cancelTask = cancel
-    lock.unlock()
-  }
-
-  func cancel(taskId: String) -> Bool {
-    lock.lock()
-    let entry = entries[taskId]
     entry?.token.cancel()
     let cancelTask = entry?.cancelTask
+    let awaitCompletion = entry?.awaitCompletion
     lock.unlock()
     cancelTask?()
-    return true
+    return awaitCompletion?() ?? true
   }
 
   func finish(ownerId: String, taskId: String, token: ImageHashCancellationToken) {
@@ -96,11 +122,198 @@ final class ImageHashTaskRegistry: @unchecked Sendable {
 
   func destroyOwner(_ ownerId: String) {
     lock.lock()
-    let owned = entries.values.filter { $0.ownerId == ownerId }
+    let ownedIds = entries.compactMap { $0.value.ownerId == ownerId ? $0.key : nil }
+    let owned = ownedIds.compactMap { entries.removeValue(forKey: $0) }
     for entry in owned { entry.token.cancel() }
     let cancellations = owned.compactMap(\.cancelTask)
+    let waits = owned.compactMap(\.awaitCompletion)
     lock.unlock()
     cancellations.forEach { $0() }
+    waits.forEach { _ = $0() }
+  }
+}
+
+final class ImageHashScheduledWork: @unchecked Sendable {
+  private let operation: Operation
+  private let completion: DispatchGroup
+  private let token: ImageHashCancellationToken
+
+  init(operation: Operation, completion: DispatchGroup, token: ImageHashCancellationToken) {
+    self.operation = operation
+    self.completion = completion
+    self.token = token
+  }
+
+  func cancel() {
+    token.cancel()
+    operation.cancel()
+  }
+
+  func cancelAndWait() -> Bool {
+    cancel()
+    return completion.wait(timeout: .now() + .seconds(2)) == .success
+  }
+}
+
+final class ImageHashScheduler: @unchecked Sendable {
+  static let maximumScheduledWork = 3
+
+  private final class Delivery: @unchecked Sendable {
+    private let lock = NSLock()
+    private var delivered = false
+
+    func deliver(
+      _ result: Result<[String: Any], Error>,
+      to completion: @escaping @Sendable (Result<[String: Any], Error>) -> Void
+    ) {
+      lock.lock()
+      guard !delivered else {
+        lock.unlock()
+        return
+      }
+      delivered = true
+      lock.unlock()
+      completion(result)
+    }
+  }
+
+  private let lock = NSLock()
+  private let queue: OperationQueue = {
+    let value = OperationQueue()
+    value.name = "ai-context-pack-image-hash"
+    value.qualityOfService = .utility
+    value.maxConcurrentOperationCount = 1
+    return value
+  }()
+  private var scheduledCount = 0
+
+  func submit(
+    token: ImageHashCancellationToken,
+    work: @escaping @Sendable () throws -> [String: Any],
+    completion: @escaping @Sendable (Result<[String: Any], Error>) -> Void
+  ) -> ImageHashScheduledWork? {
+    lock.lock()
+    guard scheduledCount < Self.maximumScheduledWork else {
+      lock.unlock()
+      return nil
+    }
+    scheduledCount += 1
+    lock.unlock()
+
+    let delivery = Delivery()
+    let group = DispatchGroup()
+    group.enter()
+    let operation = BlockOperation()
+    operation.addExecutionBlock { [weak operation] in
+      guard operation?.isCancelled != true else {
+        delivery.deliver(.failure(ImagePerceptualHashError.cancelled), to: completion)
+        return
+      }
+      do {
+        delivery.deliver(.success(try work()), to: completion)
+      } catch {
+        delivery.deliver(.failure(error), to: completion)
+      }
+    }
+    operation.completionBlock = { [weak self, weak operation] in
+      if operation?.isCancelled == true {
+        delivery.deliver(.failure(ImagePerceptualHashError.cancelled), to: completion)
+      }
+      self?.lock.lock()
+      self?.scheduledCount -= 1
+      self?.lock.unlock()
+      group.leave()
+    }
+    let scheduled = ImageHashScheduledWork(
+      operation: operation,
+      completion: group,
+      token: token
+    )
+    queue.addOperation(operation)
+    return scheduled
+  }
+
+  var scheduledWorkCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return scheduledCount
+  }
+}
+
+final class ImmutableImageSnapshot {
+  let url: URL
+
+  init(url: URL) { self.url = url }
+
+  deinit { try? FileManager.default.removeItem(at: url) }
+
+  static func create(
+    sourceURL: URL,
+    expectedByteCount: Int64,
+    expectedSHA256: String,
+    cancellation: ImageHashCancellationToken
+  ) throws -> ImmutableImageSnapshot {
+    guard expectedByteCount > 0,
+          expectedByteCount <= ImagePerceptualHasher.maximumSourceBytes,
+          expectedSHA256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+      throw ImagePerceptualHashError.integrityFailure
+    }
+    let source = Darwin.open(sourceURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard source >= 0 else { throw ImagePerceptualHashError.integrityFailure }
+    defer { Darwin.close(source) }
+    var metadata = stat()
+    guard fstat(source, &metadata) == 0,
+          metadata.st_mode & S_IFMT == S_IFREG,
+          metadata.st_size == expectedByteCount else {
+      throw ImagePerceptualHashError.integrityFailure
+    }
+
+    let snapshotURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "aicp-image-hash-\(UUID().uuidString.lowercased()).snapshot"
+    )
+    let destination = Darwin.open(
+      snapshotURL.path,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+      S_IRUSR | S_IWUSR
+    )
+    guard destination >= 0 else { throw ImagePerceptualHashError.resourceLimit }
+    var keepSnapshot = false
+    defer {
+      Darwin.close(destination)
+      if !keepSnapshot { try? FileManager.default.removeItem(at: snapshotURL) }
+    }
+
+    var digest = SHA256()
+    var copied: Int64 = 0
+    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+    while true {
+      try cancellation.check()
+      let count = buffer.withUnsafeMutableBytes { bytes in
+        Darwin.read(source, bytes.baseAddress, bytes.count)
+      }
+      guard count >= 0 else { throw ImagePerceptualHashError.integrityFailure }
+      if count == 0 { break }
+      copied += Int64(count)
+      guard copied <= expectedByteCount else {
+        throw ImagePerceptualHashError.integrityFailure
+      }
+      digest.update(data: Data(buffer[0..<count]))
+      var written = 0
+      while written < count {
+        let amount = buffer.withUnsafeBytes { bytes in
+          Darwin.write(destination, bytes.baseAddress!.advanced(by: written), count - written)
+        }
+        guard amount > 0 else { throw ImagePerceptualHashError.resourceLimit }
+        written += amount
+      }
+    }
+    let actualSHA256 = digest.finalize().map { String(format: "%02x", $0) }.joined()
+    guard copied == expectedByteCount, actualSHA256 == expectedSHA256,
+          fchmod(destination, S_IRUSR) == 0 else {
+      throw ImagePerceptualHashError.integrityFailure
+    }
+    keepSnapshot = true
+    return ImmutableImageSnapshot(url: snapshotURL)
   }
 }
 
@@ -116,21 +329,19 @@ enum ImagePerceptualHasher {
     fileURL: URL,
     expectedByteCount: Int64,
     expectedSHA256: String,
-    cancellation: ImageHashCancellationToken
+    cancellation: ImageHashCancellationToken,
+    sourceMutationHook: ((String) throws -> Void)? = nil
   ) throws -> [String: Any] {
     let started = ContinuousClock.now
     try cancellation.check()
-    let values = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-    guard values.isRegularFile == true,
-          let fileSize = values.fileSize,
-          fileSize > 0,
-          Int64(fileSize) <= maximumSourceBytes,
-          Int64(fileSize) == expectedByteCount,
-          expectedSHA256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
-          try sourceSHA256(fileURL, cancellation: cancellation) == expectedSHA256 else {
-      throw ImagePerceptualHashError.integrityFailure
-    }
-    guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+    let snapshot = try ImmutableImageSnapshot.create(
+      sourceURL: fileURL,
+      expectedByteCount: expectedByteCount,
+      expectedSHA256: expectedSHA256,
+      cancellation: cancellation
+    )
+    try sourceMutationHook?("snapshot-ready")
+    guard let source = CGImageSourceCreateWithURL(snapshot.url as CFURL, nil),
           acceptsFrameCount(CGImageSourceGetCount(source)) else {
       throw ImagePerceptualHashError.invalidImage
     }
@@ -159,43 +370,9 @@ enum ImagePerceptualHasher {
       throw ImagePerceptualHashError.invalidImage
     }
     try cancellation.check()
-    let bytesPerRow = image.width * 4
-    var rgba = [UInt8](repeating: 0, count: bytesPerRow * image.height)
-    try rgba.withUnsafeMutableBytes { buffer in
-      guard let context = CGContext(
-        data: buffer.baseAddress,
-        width: image.width,
-        height: image.height,
-        bitsPerComponent: 8,
-        bytesPerRow: bytesPerRow,
-        space: CGColorSpaceCreateDeviceRGB(),
-        bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
-          | CGImageAlphaInfo.premultipliedLast.rawValue
-      ) else {
-        throw ImagePerceptualHashError.resourceLimit
-      }
-      context.interpolationQuality = .none
-      context.setFillColor(gray: 1, alpha: 1)
-      context.fill(CGRect(x: 0, y: 0, width: image.width, height: image.height))
-      context.draw(
-        image,
-        in: CGRect(x: 0, y: 0, width: image.width, height: image.height)
-      )
-    }
+    let luminance = try sampleLuminance(image: image, cancellation: cancellation)
+    try sourceMutationHook?("decode-complete")
     try cancellation.check()
-    let luminance = try sampleLuminance(
-      rgba: rgba,
-      width: image.width,
-      height: image.height,
-      bytesPerRow: bytesPerRow,
-      cancellation: cancellation
-    )
-    try cancellation.check()
-    let finalValues = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-    guard Int64(finalValues.fileSize ?? -1) == expectedByteCount,
-          try sourceSHA256(fileURL, cancellation: cancellation) == expectedSHA256 else {
-      throw ImagePerceptualHashError.integrityFailure
-    }
     return [
       "schemaVersion": 1,
       "algorithm": "dhash-64-v1",
@@ -225,40 +402,78 @@ enum ImagePerceptualHasher {
   static func acceptsFrameCount(_ count: Int) -> Bool { count == 1 }
 
   static func sampleLuminance(
-    rgba: [UInt8],
-    width: Int,
-    height: Int,
-    bytesPerRow: Int,
-    cancellation: ImageHashCancellationToken? = nil
+    image: CGImage,
+    cancellation: ImageHashCancellationToken
   ) throws -> [UInt8] {
-    precondition(width > 0 && height > 0)
-    precondition(rgba.count >= bytesPerRow * height)
-    var samples = [UInt8](repeating: 0, count: sampleWidth * sampleHeight)
-    for row in 0..<sampleHeight {
-      try cancellation?.check()
-      let yStart = row * height / sampleHeight
-      let yEnd = min(height, max(yStart + 1, (row + 1) * height / sampleHeight))
-      for column in 0..<sampleWidth {
-        let xStart = column * width / sampleWidth
-        let xEnd = min(width, max(xStart + 1, (column + 1) * width / sampleWidth))
-        var total: UInt64 = 0
-        var count: UInt64 = 0
-        for y in yStart..<yEnd {
-          try cancellation?.check()
-          for x in xStart..<xEnd {
-            let offset = y * bytesPerRow + x * 4
-            total += UInt64(
-              (299 * Int(rgba[offset])
-                + 587 * Int(rgba[offset + 1])
-                + 114 * Int(rgba[offset + 2])) / 1_000
-            )
-            count += 1
+    let width = image.width
+    let height = image.height
+    guard width > 0, height > 0 else { throw ImagePerceptualHashError.invalidImage }
+    let bytesPerRow = width * 4
+    var rowBytes = [UInt8](repeating: 0, count: bytesPerRow)
+    var totals = [UInt64](repeating: 0, count: sampleWidth * sampleHeight)
+    var counts = [UInt64](repeating: 0, count: sampleWidth * sampleHeight)
+    try rowBytes.withUnsafeMutableBytes { buffer in
+      guard let context = CGContext(
+        data: buffer.baseAddress,
+        width: width,
+        height: 1,
+        bitsPerComponent: 8,
+        bytesPerRow: bytesPerRow,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
+          | CGImageAlphaInfo.premultipliedLast.rawValue
+      ) else { throw ImagePerceptualHashError.resourceLimit }
+      let pixels = buffer.bindMemory(to: UInt8.self)
+      context.interpolationQuality = .none
+      for y in 0..<height {
+        try cancellation.check()
+        guard let rowImage = image.cropping(
+          to: CGRect(x: 0, y: y, width: width, height: 1)
+        ) else { throw ImagePerceptualHashError.invalidImage }
+        context.interpolationQuality = .none
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: 1))
+        context.draw(rowImage, in: CGRect(x: 0, y: 0, width: width, height: 1))
+        for x in 0..<width {
+          let offset = x * 4
+          let luminance = UInt64(
+            (299 * Int(pixels[offset])
+              + 587 * Int(pixels[offset + 1])
+              + 114 * Int(pixels[offset + 2])) / 1_000
+          )
+          for row in matchingBuckets(coordinate: y, length: height, count: sampleHeight) {
+            for column in matchingBuckets(coordinate: x, length: width, count: sampleWidth) {
+              let index = row * sampleWidth + column
+              totals[index] += luminance
+              counts[index] += 1
+            }
           }
         }
-        samples[row * sampleWidth + column] = UInt8(total / count)
       }
     }
-    return samples
+    return totals.indices.map { index in
+      precondition(counts[index] > 0)
+      return UInt8(totals[index] / counts[index])
+    }
+  }
+
+  private static func matchingBuckets(coordinate: Int, length: Int, count: Int) -> ClosedRange<Int> {
+    if length >= count {
+      let bucket = min(count - 1, Int(((Int64(coordinate) + 1) * Int64(count) - 1) / Int64(length)))
+      return bucket...bucket
+    }
+    var first = count
+    var last = -1
+    for bucket in 0..<count {
+      let start = bucket * length / count
+      let end = min(length, max(start + 1, (bucket + 1) * length / count))
+      if coordinate >= start && coordinate < end {
+        first = min(first, bucket)
+        last = max(last, bucket)
+      }
+    }
+    precondition(first <= last)
+    return first...last
   }
 
   private static func durationMilliseconds(since start: ContinuousClock.Instant) -> Double {
@@ -267,18 +482,4 @@ enum ImagePerceptualHasher {
       + Double(duration.components.attoseconds) / 1_000_000_000_000_000
   }
 
-  private static func sourceSHA256(
-    _ fileURL: URL,
-    cancellation: ImageHashCancellationToken
-  ) throws -> String {
-    let handle = try FileHandle(forReadingFrom: fileURL)
-    defer { try? handle.close() }
-    var digest = SHA256()
-    while true {
-      try cancellation.check()
-      guard let data = try handle.read(upToCount: 64 * 1_024), !data.isEmpty else { break }
-      digest.update(data: data)
-    }
-    return digest.finalize().map { String(format: "%02x", $0) }.joined()
-  }
 }

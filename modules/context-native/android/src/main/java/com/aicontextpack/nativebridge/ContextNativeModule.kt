@@ -610,34 +610,49 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       ) return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
       val token = AndroidImageHashProcessScope.registry.reserve(imageHashOwnerId, taskId)
         ?: return@AsyncFunction promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
-      try {
-        AndroidImageHashProcessScope.executor.execute {
+      val settled = AtomicBoolean(false)
+      fun rejectOnce(error: NativeException) {
+        if (settled.compareAndSet(false, true)) promise.reject(error)
+      }
+      val work = ImageHashScheduledWork(
+        executor = AndroidImageHashProcessScope.executor,
+        token = token,
+        action = {
           try {
-            promise.resolve(
-              ImagePerceptualHasher.hash(
-                context,
-                fileUri,
-                expectedByteCount.toLong(),
-                expectedSha256,
-                token,
-              ),
+            val value = ImagePerceptualHasher.hash(
+              context,
+              fileUri,
+              expectedByteCount.toLong(),
+              expectedSha256,
+              token,
             )
+            if (settled.compareAndSet(false, true)) promise.resolve(value)
           }
-          catch (error: NativeException) { promise.reject(error) }
-          catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
-          catch (_: Throwable) { promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID")) }
-          finally {
-            AndroidImageHashProcessScope.registry.finish(imageHashOwnerId, taskId, token)
-          }
-        }
+          catch (error: NativeException) { rejectOnce(error) }
+          catch (_: OutOfMemoryError) { rejectOnce(NativeException("RESOURCE_MEMORY_PRESSURE")) }
+          catch (_: Throwable) { rejectOnce(NativeException("PROCESSOR_OUTPUT_INVALID")) }
+        },
+        cancelBeforeStart = { rejectOnce(NativeException("PIPELINE_STAGE_FAILED")) },
+        afterFinish = {
+          AndroidImageHashProcessScope.registry.finish(imageHashOwnerId, taskId, token)
+        },
+      )
+      AndroidImageHashProcessScope.registry.attach(
+        imageHashOwnerId,
+        taskId,
+        token,
+        work::cancelAndWait,
+      )
+      try {
+        work.schedule()
       } catch (_: RejectedExecutionException) {
         AndroidImageHashProcessScope.registry.finish(imageHashOwnerId, taskId, token)
-        promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
+        rejectOnce(NativeException("PIPELINE_STAGE_FAILED"))
       }
     }
 
     AsyncFunction("cancelImagePerceptualHash") { taskId: String ->
-      AndroidImageHashProcessScope.registry.cancel(taskId)
+      AndroidImageHashProcessScope.registry.cancel(imageHashOwnerId, taskId)
     }
 
     AsyncFunction("recognizeText") {

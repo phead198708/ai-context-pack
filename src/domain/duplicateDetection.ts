@@ -140,7 +140,9 @@ export interface DuplicateSavingsV1 {
 const unsafeControl =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g;
 /* eslint-enable no-control-regex */
-const ocrArtifact = /[\u00AD\u200B-\u200D\u2060]/g;
+// ZWJ/ZWNJ are semantic in emoji and joining scripts. Only remove the
+// explicitly non-semantic OCR artifacts in this versioned contract.
+const ocrArtifact = /[\u00AD\u200B\u2060]/g;
 const fenceLine = /^\s*(`{3,}|~{3,})/;
 const safeSha256 = /^[0-9a-f]{64}$/;
 const safeHash32 = /^[0-9a-f]{8}$/;
@@ -476,9 +478,10 @@ export function isNormalizedTextFingerprintV1(
     value.sampleSize === TEXT_FINGERPRINT_SAMPLE_SIZE &&
     isNonNegativeInteger(value.shingleCount) &&
     Array.isArray(hashes) &&
-    hashes.length <= TEXT_FINGERPRINT_SAMPLE_SIZE &&
+    hashes.length <=
+      Math.min(TEXT_FINGERPRINT_SAMPLE_SIZE, value.shingleCount) &&
     ((value.shingleCount === 0 && hashes.length === 0) ||
-      ((value.shingleCount as number) > 0 && hashes.length > 0)) &&
+      (value.shingleCount > 0 && hashes.length > 0)) &&
     hashes.every(hash => typeof hash === 'string' && safeHash32.test(hash)) &&
     new Set(hashes).size === hashes.length &&
     hashes.every((hash, index) => index === 0 || hashes[index - 1]! < hash)
@@ -847,7 +850,17 @@ function isCodeSignalLine(line: string): boolean {
   return (
     fenceLine.test(line) ||
     /^\s+(?:\S|$)/.test(line) ||
+    isAssignmentSignalLine(line) ||
     /(?:=>|::|\{\s*$|[;{}]\s*$|^\s*(?:const|let|var|func|class|interface|type|import|export|def|fun|if|for|while)\b)/.test(
+      line,
+    )
+  );
+}
+
+function isAssignmentSignalLine(line: string): boolean {
+  return (
+    /^\s*(?:export\s+)?[A-Za-z_][\w.-]*\s*=\s*\S/.test(line) ||
+    /^\s*[A-Za-z_][\w.-]*\s*:\s*(?:["'[{]|[-+]?\d|true\b|false\b|null\b)/i.test(
       line,
     )
   );

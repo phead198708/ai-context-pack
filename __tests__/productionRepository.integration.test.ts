@@ -1194,6 +1194,28 @@ describe('production repository against SQLite', () => {
       )
       .run(JSON.stringify(analyses[0]), firstItemId);
 
+    const overpopulatedFingerprint = {
+      ...analyses[0]!,
+      textFingerprint: {
+        ...analyses[0]!.textFingerprint,
+        shingleCount: 1,
+        hashes: ['00000001', '00000002'],
+      },
+    };
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(overpopulatedFingerprint), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
     database
       .prepare(
         'UPDATE duplicate_analysis_items SET analyzed_at = ? WHERE item_id = ?',

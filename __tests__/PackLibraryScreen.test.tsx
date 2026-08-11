@@ -488,6 +488,30 @@ test('supports rename, persisted reorder, retry, cancel, and non-destructive rem
   act(() => renderer.unmount());
 });
 
+test('keeps Cancel enabled and dispatches it while duplicate analysis is pending', async () => {
+  let finishAnalysis: (() => void) | undefined;
+  const value = controller();
+  value.analyzePack.mockReturnValue(
+    new Promise(resolve => {
+      finishAnalysis = () => resolve(1);
+    }),
+  );
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Analyze normalized content'));
+  const cancel = button(renderer, 'Cancel processing');
+  expect(cancel.props.accessibilityState?.disabled).not.toBe(true);
+  await press(cancel);
+  expect(value.cancelProcessing).toHaveBeenCalledWith(packId);
+
+  await act(async () => {
+    finishAnalysis?.();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  act(() => renderer.unmount());
+});
+
 test('locks editor fields while a mutation is pending so reload cannot discard late typing', async () => {
   let finishMutation: (() => void) | undefined;
   const value = controller();

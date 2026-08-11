@@ -354,6 +354,38 @@ test('waits for every durable analyze run to settle before refreshing the caller
   await expect(result).resolves.toBe(2);
 });
 
+test('keeps cancellation reachable while analyze settlement remains pending', async () => {
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: { ...base.pack, state: 'processing' },
+    items: base.items.map(item => ({ ...item, state: 'extracted' as const })),
+  };
+  const repo = repository(graph);
+  const processing = scheduler();
+  processing.supports.mockReturnValue(true);
+  let releaseIdle: (() => void) | undefined;
+  processing.waitForIdle.mockImplementation(
+    () => new Promise<void>(resolve => (releaseIdle = resolve)),
+  );
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:05Z',
+    processing,
+  );
+
+  const analysis = controller.analyzePack(packId);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (processing.waitForIdle.mock.calls.length > 0) break;
+    await Promise.resolve();
+  }
+  await expect(controller.cancelProcessing(packId)).resolves.toBeUndefined();
+  expect(processing.cancel).toHaveBeenCalledTimes(1);
+  expect(repo.saves.at(-1)?.cancelActivePipelineRuns).toBe(true);
+  releaseIdle?.();
+  await expect(analysis).resolves.toBe(2);
+});
+
 test('preferred duplicate choice excludes peers without deleting originals', async () => {
   const repo = repository();
   const suggestion = {

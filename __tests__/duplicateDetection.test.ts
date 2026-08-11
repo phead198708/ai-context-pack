@@ -172,6 +172,32 @@ describe('Issue #13 versioned content normalization', () => {
     });
   });
 
+  it('preserves semantic joiners in prose and ambiguous assignment whitespace', () => {
+    expect(normalizeContentV1('Engineer 👩‍💻 profile').text).toBe(
+      'Engineer 👩‍💻 profile',
+    );
+    expect(normalizeContentV1('می\u200Cخواهم').text).toBe('می\u200Cخواهم');
+    for (const assignment of [
+      'value = "a  b"',
+      "VALUE='a  b'",
+      'message: "a  b"',
+    ]) {
+      expect(normalizeContentV1(assignment)).toMatchObject({
+        contentKind: 'code',
+        text: assignment,
+        warnings: [],
+      });
+    }
+    expect(normalizeContentV1('Note: this is ordinary  prose')).toMatchObject({
+      contentKind: 'prose',
+      text: 'Note: this is ordinary prose',
+    });
+    expect(normalizeContentV1('Note: hello')).toMatchObject({
+      contentKind: 'prose',
+      text: 'Note: hello',
+    });
+  });
+
   it('fails closed on invalid Unicode scalars and unknown validator keys', () => {
     expect(() => normalizeContentV1('\uD800')).toThrow('SCHEMA_INVALID');
     expect(
@@ -437,6 +463,16 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
       0,
       'valid analysis content long enough to fingerprint',
     );
+    expect(
+      isDuplicateAnalysisItemV1({
+        ...valid,
+        textFingerprint: {
+          ...valid.textFingerprint,
+          shingleCount: 1,
+          hashes: ['00000001', '00000002'],
+        },
+      }),
+    ).toBe(false);
     expect(
       isDuplicateAnalysisItemV1({
         ...valid,

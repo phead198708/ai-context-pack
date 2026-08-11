@@ -11,6 +11,14 @@
       "license": "MIT"
     },
     {
+      "path": "contracts/image-animation-policy-v1.tsv",
+      "sha256": "c9a002aff25efaf6667d9d9348970add36793056bcea8c14e9e276eeb3b0a59f",
+      "kind": "contract",
+      "purpose": "cross-platform single-frame policy rejection for synthetic APNG, GIF, and WebP bytes",
+      "source": "project-authored minimal animated image payloads encoded as base64",
+      "license": "MIT"
+    },
+    {
       "path": "contracts/image-perceptual-hash-v1.json",
       "sha256": "4e0774c89558485c52b03d9cced8934657814581daa4bd388369c5d5bb1d3407",
       "kind": "contract",

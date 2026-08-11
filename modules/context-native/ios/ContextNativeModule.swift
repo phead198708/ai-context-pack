@@ -8,6 +8,7 @@ private let appGroupIdentifier = "group.com.example.aicontextpack"
 private enum AppleVisionOCRProcessScope {
   static let registry = OCRCancellationRegistry()
   static let imageHashRegistry = ImageHashTaskRegistry()
+  static let imageHashScheduler = ImageHashScheduler()
   static let pdfFinishCoordinator = PDFProcessorFinishCoordinator()
   static let plainTextReadCoordinator = PlainTextReadCoordinator()
 }
@@ -377,18 +378,35 @@ public final class ContextNativeModule: Module {
       guard let token = registry.reserve(ownerId: imageHashOwnerId, taskId: taskId) else {
         throw NativeError("PIPELINE_STAGE_FAILED")
       }
-      let task = Task.detached(priority: .utility) {
-        try ImagePerceptualHasher.hash(
-          fileURL: url,
-          expectedByteCount: expectedByteCount,
-          expectedSHA256: expectedSha256,
-          cancellation: token
-        )
-      }
-      registry.attach(ownerId: imageHashOwnerId, taskId: taskId) { task.cancel() }
-      defer { registry.finish(ownerId: imageHashOwnerId, taskId: taskId, token: token) }
       do {
-        return try await task.value
+        return try await withCheckedThrowingContinuation { continuation in
+          guard let work = AppleVisionOCRProcessScope.imageHashScheduler.submit(
+            token: token,
+            work: {
+              try ImagePerceptualHasher.hash(
+                fileURL: url,
+                expectedByteCount: expectedByteCount,
+                expectedSHA256: expectedSha256,
+                cancellation: token
+              )
+            },
+            completion: { result in
+              registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+              continuation.resume(with: result)
+            }
+          ) else {
+            registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+            continuation.resume(throwing: ImagePerceptualHashError.resourceLimit)
+            return
+          }
+          registry.attach(
+            ownerId: self.imageHashOwnerId,
+            taskId: taskId,
+            token: token,
+            cancel: { work.cancel() },
+            awaitCompletion: { work.cancelAndWait() }
+          )
+        }
       } catch let error as ImagePerceptualHashError {
         throw NativeError(error.stableCode)
       } catch {
@@ -396,8 +414,12 @@ public final class ContextNativeModule: Module {
       }
     }
 
-    AsyncFunction("cancelImagePerceptualHash") { (taskId: String) -> Bool in
-      AppleVisionOCRProcessScope.imageHashRegistry.cancel(taskId: taskId)
+    AsyncFunction("cancelImagePerceptualHash") { [weak self] (taskId: String) -> Bool in
+      guard let self else { return false }
+      return AppleVisionOCRProcessScope.imageHashRegistry.cancel(
+        ownerId: imageHashOwnerId,
+        taskId: taskId
+      )
     }
 
     AsyncFunction("recognizeText") { [weak self] (

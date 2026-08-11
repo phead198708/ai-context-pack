@@ -74,7 +74,13 @@ declare class ContextNativeModule extends NativeModule {
   ): Promise<NativeQuarantinePurgeResult>;
   getArtifactStorageUsage(): Promise<NativeArtifactStorageUsage>;
   getOCRCapabilities(): Promise<OCRCapabilitiesV1>;
-  hashImagePerceptually(fileUri: string): Promise<ImagePerceptualHashV1>;
+  hashImagePerceptually(
+    taskId: string,
+    fileUri: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<ImagePerceptualHashV1>;
+  cancelImagePerceptualHash(taskId: string): Promise<boolean>;
   recognizeText(
     taskId: string,
     fileUri: string,
