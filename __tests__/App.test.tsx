@@ -22,6 +22,7 @@ import { NativeBoundaryError } from '../src/infrastructure/createNativeAdapter';
 import { nativeAdapter } from '../src/infrastructure/nativeAdapter';
 import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
 import { mainAppPicker } from '../src/infrastructure/mainAppPickers';
+import { packLibraryController } from '../src/features/packLibrary/runtime';
 import {
   createEmptyDraftPack,
   persistenceInboxProcessor,
@@ -110,6 +111,9 @@ const mockPersistenceInboxProcessor =
   };
 const mockCreateEmptyDraftPack = createEmptyDraftPack as jest.MockedFunction<
   typeof createEmptyDraftPack
+>;
+const mockPackLibraryController = packLibraryController as jest.Mocked<
+  typeof packLibraryController
 >;
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const eventId = '223e4567-e89b-42d3-a456-426614174000';
@@ -273,6 +277,9 @@ describe('App interactions', () => {
     mockNative.cleanupMainAppPickerTransients.mockResolvedValue(undefined);
     mockNative.recoverMainAppPickerCache.mockResolvedValue(undefined);
     mockCreateEmptyDraftPack.mockResolvedValue(persistedPack);
+    mockPackLibraryController.recoverProcessing
+      .mockReset()
+      .mockResolvedValue(undefined);
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -358,8 +365,58 @@ describe('App interactions', () => {
       await flushWorkflow();
     });
     expect(mockNative.scanInbox).toHaveBeenCalledTimes(2);
+    expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+      2,
+    );
     expect(renderedText(renderer)).toContain('Share import');
     act(() => renderer.unmount());
+  });
+
+  test('surfaces processing recovery failures and Retry clears the stable error', async () => {
+    mockPackLibraryController.recoverProcessing
+      .mockRejectedValueOnce({ code: 'PIPELINE_STAGE_FAILED' })
+      .mockResolvedValue(undefined);
+    const renderer = await renderApp();
+
+    expect(renderedText(renderer)).toContain('Processing recovery unavailable');
+    expect(renderedText(renderer)).toContain('PIPELINE_STAGE_FAILED');
+
+    await press(control(renderer, 'button', 'Retry'));
+
+    expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(renderedText(renderer)).not.toContain(
+      'Processing recovery unavailable',
+    );
+    act(() => renderer.unmount());
+  });
+
+  test('polls processing recovery while open and removes the timer on unmount', async () => {
+    jest.useFakeTimers();
+    try {
+      const renderer = await renderApp();
+      expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+        1,
+      );
+
+      await act(async () => {
+        jest.advanceTimersByTime(60_000);
+        await flushWorkflow();
+      });
+      expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+        2,
+      );
+
+      act(() => renderer.unmount());
+      jest.advanceTimersByTime(60_000);
+      await flushWorkflow();
+      expect(mockPackLibraryController.recoverProcessing).toHaveBeenCalledTimes(
+        2,
+      );
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('keeps a bootstrapped error latched across AppState activation', async () => {

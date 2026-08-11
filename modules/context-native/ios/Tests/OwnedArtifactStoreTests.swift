@@ -105,6 +105,23 @@ final class OwnedArtifactStoreTests: XCTestCase {
     }
   }
 
+  func testTextPublicationRejectsSameLengthCorruptionBeforeRename() throws {
+    let path = "Packs/\(packId)/derived/\(artifactId).txt"
+    let destination = root.appendingPathComponent(path)
+
+    XCTAssertThrowsError(try OwnedArtifactStore.writeText(
+      root: root,
+      relativePath: path,
+      text: "synthetic text",
+      partialWriter: { partial, expected in
+        try Data(repeating: 0, count: expected.count).write(to: partial)
+      }
+    )) { error in
+      XCTAssertEqual(error as? OwnedArtifactStoreError, .integrityFailed)
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+  }
+
   func testAbandonedPartialIsListedCountedQuarantinedAndPurged() throws {
     let path = "Packs/\(packId)/derived/\(artifactId).txt"
     let partialPath = "\(path).partial"

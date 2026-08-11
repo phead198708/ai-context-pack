@@ -847,6 +847,23 @@ export class ExpoSqlitePersistenceRepository
     return result.changes === 1 ? expectedClaimVersion + 1 : null;
   }
 
+  async renewPipelineRunClaim(
+    runId: string,
+    claimVersion: number,
+    updatedAt: string,
+  ): Promise<boolean> {
+    requireCanonicalId(runId);
+    requirePipelineClaimVersion(claimVersion);
+    requireIsoDateTime(updatedAt);
+    const result = await this.connection.run(
+      `UPDATE pipeline_runs
+       SET updated_at = CASE WHEN updated_at < ? THEN ? ELSE updated_at END
+       WHERE id = ? AND claim_version = ? AND status = 'running'`,
+      [updatedAt, updatedAt, runId, claimVersion],
+    );
+    return result.changes === 1;
+  }
+
   async completePipelineRun(input: CompletePipelineRunInput): Promise<boolean> {
     requireCanonicalId(input.runId);
     requirePipelineClaimVersion(input.claimVersion);
@@ -1461,6 +1478,48 @@ export class ExpoSqlitePersistenceRepository
     if (Date.parse(expiresAt) <= Date.parse(acquiredAt))
       throw new DomainError('SCHEMA_INVALID');
     return this.connection.exclusive(async transaction => {
+      const existing = await transaction.first<{
+        owner_id: string;
+        expires_at: string;
+      }>(
+        "SELECT owner_id, expires_at FROM cleanup_leases WHERE name = 'artifact-cleanup'",
+      );
+      if (existing && Date.parse(existing.expires_at) > Date.parse(acquiredAt))
+        return false;
+      await transaction.run(
+        `INSERT INTO cleanup_leases (name, owner_id, acquired_at, expires_at)
+         VALUES ('artifact-cleanup', ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           owner_id = excluded.owner_id,
+           acquired_at = excluded.acquired_at,
+           expires_at = excluded.expires_at`,
+        [ownerId, acquiredAt, expiresAt],
+      );
+      return true;
+    });
+  }
+
+  async acquireCleanupLeaseForPipelineRun(
+    runId: string,
+    claimVersion: number,
+    ownerId: string,
+    acquiredAt: string,
+    expiresAt: string,
+  ): Promise<boolean> {
+    requireCanonicalId(runId);
+    requirePipelineClaimVersion(claimVersion);
+    requireCanonicalId(ownerId);
+    requireIsoDateTime(acquiredAt);
+    requireIsoDateTime(expiresAt);
+    if (Date.parse(expiresAt) <= Date.parse(acquiredAt))
+      throw new DomainError('SCHEMA_INVALID');
+    return this.connection.exclusive(async transaction => {
+      const currentClaim = await transaction.first<{ id: string }>(
+        `SELECT id FROM pipeline_runs
+         WHERE id = ? AND claim_version = ? AND status = 'running'`,
+        [runId, claimVersion],
+      );
+      if (!currentClaim) return false;
       const existing = await transaction.first<{
         owner_id: string;
         expires_at: string;

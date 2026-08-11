@@ -433,6 +433,73 @@ test('preserves an unsaved instruction when saving the Pack title refreshes the 
   act(() => renderer.unmount());
 });
 
+test('acknowledges normalized rename drafts so later persisted values replace them', async () => {
+  const value = controller();
+  const withCanonicalTitle: PackLibrarySnapshot = {
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: { ...snapshot.selected!.pack, title: 'Renamed' },
+      revision: 4,
+    },
+  };
+  const withCanonicalNames: PackLibrarySnapshot = {
+    ...withCanonicalTitle,
+    selected: {
+      ...withCanonicalTitle.selected!,
+      items: withCanonicalTitle.selected!.items.map((item, index) =>
+        index === 0 ? { ...item, displayName: 'Renamed item' } : item,
+      ),
+      revision: 5,
+    },
+  };
+  const withExternalValues: PackLibrarySnapshot = {
+    ...withCanonicalNames,
+    selected: {
+      ...withCanonicalNames.selected!,
+      pack: {
+        ...withCanonicalNames.selected!.pack,
+        title: 'Externally updated Pack',
+      },
+      items: withCanonicalNames.selected!.items.map((item, index) =>
+        index === 0
+          ? { ...item, displayName: 'Externally updated item' }
+          : item,
+      ),
+      revision: 6,
+    },
+  };
+  value.load
+    .mockResolvedValueOnce(snapshot)
+    .mockResolvedValueOnce(withCanonicalTitle)
+    .mockResolvedValueOnce(withCanonicalNames)
+    .mockResolvedValueOnce(withExternalValues);
+  const renderer = await render(value);
+  const input = (label: string) =>
+    renderer.root
+      .findAllByType(TextInput)
+      .find(node => node.props.accessibilityLabel === label)!;
+
+  act(() => input('Pack title').props.onChangeText(' Renamed '));
+  await press(button(renderer, 'Save Pack title'));
+  expect(value.renamePack).toHaveBeenCalledWith(packId, ' Renamed ');
+  expect(input('Pack title').props.value).toBe('Renamed');
+
+  act(() => input('Item name 1').props.onChangeText(' Renamed item '));
+  await press(button(renderer, 'Save item name 1'));
+  expect(value.renameItem).toHaveBeenCalledWith(
+    packId,
+    itemIds[0],
+    ' Renamed item ',
+  );
+  expect(input('Item name 1').props.value).toBe('Renamed item');
+
+  await press(button(renderer, 'Save task instruction'));
+  expect(input('Pack title').props.value).toBe('Externally updated Pack');
+  expect(input('Item name 1').props.value).toBe('Externally updated item');
+  act(() => renderer.unmount());
+});
+
 test('resumes a cancelled Pack from its durable item checkpoints', async () => {
   const value = controller();
   value.load.mockResolvedValue({

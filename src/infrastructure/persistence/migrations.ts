@@ -271,8 +271,11 @@ WHERE status = 'copied'
     WHERE context_item.id = import_items.id
   )
   AND NOT EXISTS (
-    SELECT 1 FROM artifacts artifact
-    WHERE artifact.item_id = import_items.id AND artifact.kind = 'original'
+    SELECT 1
+    FROM artifacts artifact
+    JOIN artifact_references reference ON reference.artifact_id = artifact.id
+    WHERE artifact.item_id = import_items.id
+      AND artifact.kind = 'original'
   );
 
 CREATE TABLE pipeline_runs (

@@ -38,6 +38,8 @@ import { colors, spacing, typography } from './src/ui/tokens';
 
 type Screen = 'inbox' | 'detail' | 'diagnostics' | 'new-pack';
 type LoadState = InboxWorkflowState;
+const PIPELINE_RECOVERY_POLL_MS = 60_000;
+const PIPELINE_RECOVERY_RETRY_MS = 1_000;
 
 function App(): React.JSX.Element {
   const [screen, setScreen] = useState<Screen>('inbox');
@@ -51,10 +53,13 @@ function App(): React.JSX.Element {
   const [selectedDetailPackId, setSelectedDetailPackId] = useState<string>();
   const [retryDraft, setRetryDraft] = useState<MainAppImportDraft>();
   const [retryDraftError, setRetryDraftError] = useState<string>();
+  const [pipelineRecoveryError, setPipelineRecoveryError] = useState<string>();
   const scrollView = useRef<ScrollView | null>(null);
   const newPackFlow = useRef<NewPackFlowHandle | null>(null);
   const screenRef = useRef<Screen>('inbox');
   const workflow = useRef<InboxEventWorkflow | null>(null);
+  const appMounted = useRef(true);
+  const processingRecoveryInFlight = useRef<Promise<boolean> | null>(null);
   screenRef.current = screen;
   const setWorkflowState = useCallback((value: LoadState) => {
     setState(value);
@@ -73,6 +78,27 @@ function App(): React.JSX.Element {
     () => workflow.current?.appBecameActive() ?? Promise.resolve(),
     [],
   );
+  const recoverProcessing = useCallback((): Promise<boolean> => {
+    if (processingRecoveryInFlight.current)
+      return processingRecoveryInFlight.current;
+    let attempt: Promise<boolean>;
+    attempt = packLibraryController
+      .recoverProcessing()
+      .then(() => {
+        if (appMounted.current) setPipelineRecoveryError(undefined);
+        return true;
+      })
+      .catch(error => {
+        if (appMounted.current) setPipelineRecoveryError(appErrorCode(error));
+        return false;
+      })
+      .finally(() => {
+        if (processingRecoveryInFlight.current === attempt)
+          processingRecoveryInFlight.current = null;
+      });
+    processingRecoveryInFlight.current = attempt;
+    return attempt;
+  }, []);
   if (!workflow.current)
     workflow.current = new InboxEventWorkflow(
       nativeAdapter,
@@ -90,13 +116,30 @@ function App(): React.JSX.Element {
   const effectivePackCreationReady = packCreationReady && !creatingEmptyDraft;
   useEffect(() => {
     let mounted = true;
-    packLibraryController.recoverProcessing().catch(() => undefined);
+    appMounted.current = true;
+    let recoveryRetry: ReturnType<typeof setTimeout> | undefined;
+    const recoverWithBoundedRetry = async (): Promise<void> => {
+      const recovered = await recoverProcessing();
+      if (!recovered && mounted && recoveryRetry === undefined)
+        recoveryRetry = setTimeout(() => {
+          recoveryRetry = undefined;
+          if (mounted) recoverProcessing().catch(() => undefined);
+        }, PIPELINE_RECOVERY_RETRY_MS);
+    };
+    recoverWithBoundedRetry().catch(() => undefined);
+    const recoveryPoll = setInterval(
+      () => recoverWithBoundedRetry().catch(() => undefined),
+      PIPELINE_RECOVERY_POLL_MS,
+    );
     workflow.current?.bootstrap().finally(() => {
       if (mounted)
         setPackCreationReady(workflow.current?.isPackCreationReady() === true);
     });
     const subscription = AppState.addEventListener('change', next => {
-      if (next === 'active') workflow.current?.appBecameActive();
+      if (next === 'active') {
+        workflow.current?.appBecameActive();
+        recoverWithBoundedRetry().catch(() => undefined);
+      }
     });
     const inboxSubscription = DeviceEventEmitter.addListener(
       'AIContextPackInboxChanged',
@@ -130,12 +173,15 @@ function App(): React.JSX.Element {
     );
     return () => {
       mounted = false;
+      appMounted.current = false;
+      clearInterval(recoveryPoll);
+      if (recoveryRetry !== undefined) clearTimeout(recoveryRetry);
       subscription.remove();
       inboxSubscription.remove();
       openPackSubscription.remove();
       backSubscription.remove();
     };
-  }, []);
+  }, [recoverProcessing]);
   useEffect(() => {
     scrollView.current?.scrollTo({ animated: false, y: 0 });
   }, [screen]);
@@ -229,6 +275,19 @@ function App(): React.JSX.Element {
               </Pressable>
             ))}
           </View>
+        ) : null}
+        {pipelineRecoveryError ? (
+          <StateCard
+            title={t(locale, 'processingRecoveryUnavailable')}
+            detail={pipelineRecoveryError}
+          >
+            <Action
+              label={t(locale, 'retry')}
+              onPress={() => {
+                recoverProcessing().catch(() => undefined);
+              }}
+            />
+          </StateCard>
         ) : null}
         <View style={styles.screenContent}>
           {screen === 'inbox' && (

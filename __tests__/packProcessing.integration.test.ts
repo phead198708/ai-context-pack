@@ -1,11 +1,15 @@
 jest.mock('expo-sqlite', () => ({ openDatabaseAsync: jest.fn() }));
 
-import type { ImportManifestV1 } from '../src/domain/contracts';
+import {
+  DERIVED_TEXT_MAXIMUM_UTF8_BYTES,
+  type ImportManifestV1,
+} from '../src/domain/contracts';
 import type { Artifact, ContextItem } from '../src/domain/models';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
 import {
   DurablePackProcessingCoordinator,
+  joinBoundedPdfPageText,
   NativeExtractionStageWorker,
   type PackStageWorker,
   type PackStageWorkHandle,
@@ -211,6 +215,46 @@ async function seedSingleItem(
   });
 }
 
+async function persistAndClaim(
+  run: PersistedPipelineRun,
+): Promise<PersistedPipelineRun> {
+  const input = {
+    id: run.id,
+    packId: run.packId,
+    itemId: run.itemId,
+    stage: run.stage,
+    startedAt: run.startedAt,
+  } as const;
+  const graph = (await repository.findPackGraph(run.packId))!;
+  await repository.savePackGraph({
+    pack: {
+      ...graph.pack,
+      state: 'processing',
+      updatedAt: run.startedAt,
+    },
+    items: graph.items.map(item => {
+      if (item.id !== run.itemId) return item;
+      const withoutRetryStage = { ...item };
+      delete withoutRetryStage.retryStage;
+      return {
+        ...withoutRetryStage,
+        state: 'imported' as const,
+        updatedAt: run.startedAt,
+      };
+    }),
+    expectedRevision: graph.revision,
+    startedPipelineRuns: [input],
+  });
+  const claimVersion = await repository.markPipelineRunRunning(
+    run.id,
+    run.claimVersion,
+    run.updatedAt,
+    run.updatedAt,
+  );
+  if (claimVersion === null) throw new Error('synthetic-claim-failed');
+  return { ...run, status: 'running', claimVersion };
+}
+
 afterEach(() => database.close());
 
 test('executes and atomically settles the exact durable retry run', async () => {
@@ -407,6 +451,75 @@ test('the durable claim token permits only one coordinator to execute a queued r
   );
 });
 
+test('cleanup lease ownership is claim-specific and a stale owner cannot release a replacement lease', async () => {
+  const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
+    launch: jest.fn(),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    paused,
+  ).retryItem(packId, itemId);
+  const queued = (await repository.listRunnablePipelineRuns())[0]!;
+  const firstClaim = await repository.markPipelineRunRunning(
+    queued.id,
+    queued.claimVersion,
+    now,
+    now,
+  );
+  expect(firstClaim).toBe(1);
+  const firstOwner = '423e4567-e89b-42d3-a456-426614174000';
+  const replacementOwner = '523e4567-e89b-42d3-a456-426614174000';
+  const competingOwner = '623e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      queued.id,
+      firstClaim!,
+      firstOwner,
+      now,
+      '2026-08-11T00:01:00Z',
+    ),
+  ).resolves.toBe(true);
+
+  const replacementClaim = await repository.markPipelineRunRunning(
+    queued.id,
+    firstClaim!,
+    '2026-08-11T00:02:00Z',
+    '2026-08-11T00:02:00Z',
+  );
+  expect(replacementClaim).toBe(2);
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      queued.id,
+      replacementClaim!,
+      replacementOwner,
+      '2026-08-11T00:02:00Z',
+      '2026-08-11T00:04:00Z',
+    ),
+  ).resolves.toBe(true);
+
+  await repository.releaseCleanupLease(firstOwner);
+  await expect(
+    repository.acquireCleanupLease(
+      competingOwner,
+      '2026-08-11T00:03:00Z',
+      '2026-08-11T00:05:00Z',
+    ),
+  ).resolves.toBe(false);
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      queued.id,
+      firstClaim!,
+      firstOwner,
+      '2026-08-11T00:05:00Z',
+      '2026-08-11T00:06:00Z',
+    ),
+  ).resolves.toBe(false);
+});
+
 test('a replacement coordinator does not reclaim a live running claim', async () => {
   const firstWorker = new DeferredWorker();
   const first = new DurablePackProcessingCoordinator(
@@ -437,6 +550,98 @@ test('a replacement coordinator does not reclaim a live running claim', async ()
   expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
     'extracted',
   );
+});
+
+test('a heartbeat keeps a long-running claim live for a quick replacement recovery', async () => {
+  jest.useFakeTimers();
+  let clock = Date.parse(now);
+  try {
+    const firstWorker = new DeferredWorker();
+    const renew = jest.spyOn(repository, 'renewPipelineRunClaim');
+    const first = new DurablePackProcessingCoordinator(
+      async () => repository,
+      firstWorker,
+      () => new Date(clock).toISOString(),
+      90,
+    );
+    await new PackLibraryController(
+      async () => repository,
+      () => new Date(clock).toISOString(),
+      first,
+    ).retryItem(packId, itemId);
+    await flushPromises();
+    expect(firstWorker.starts).toHaveLength(1);
+
+    clock += 100;
+    jest.advanceTimersByTime(30);
+    await flushPromises();
+    expect(renew).toHaveBeenCalledWith(
+      firstWorker.starts[0]!.id,
+      firstWorker.starts[0]!.claimVersion,
+      new Date(clock).toISOString(),
+    );
+
+    const replacementWorker = new DeferredWorker();
+    const replacement = new DurablePackProcessingCoordinator(
+      async () => repository,
+      replacementWorker,
+      () => new Date(clock).toISOString(),
+      90,
+    );
+    await replacement.recover();
+    await replacement.waitForIdle();
+    expect(replacementWorker.starts).toHaveLength(0);
+
+    const run = firstWorker.starts[0]!;
+    firstWorker.results.get(run.id)!.resolve(firstWorker.artifact(run));
+    await first.waitForIdle();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a lost heartbeat cancels native work and surfaces a durable diagnostic without stale settlement', async () => {
+  jest.useFakeTimers();
+  try {
+    const worker = new DeferredWorker();
+    const onUnexpectedFailure = jest.fn();
+    jest.spyOn(repository, 'renewPipelineRunClaim').mockResolvedValue(false);
+    const fail = jest.spyOn(repository, 'failPipelineRun');
+    const coordinator = new DurablePackProcessingCoordinator(
+      async () => repository,
+      worker,
+      () => now,
+      30,
+      onUnexpectedFailure,
+    );
+    await new PackLibraryController(
+      async () => repository,
+      () => now,
+      coordinator,
+    ).retryItem(packId, itemId);
+    await flushPromises();
+    expect(worker.starts).toHaveLength(1);
+
+    jest.advanceTimersByTime(10);
+    await flushPromises();
+    await coordinator.waitForIdle();
+
+    expect(worker.cancellations).toEqual([worker.starts[0]!.id]);
+    expect(fail).not.toHaveBeenCalled();
+    expect(onUnexpectedFailure).toHaveBeenCalledWith({
+      runId: worker.starts[0]!.id,
+      code: 'PERSISTENCE_CONFLICT',
+    });
+    expect(await repository.listRecoveryDiagnostics()).toEqual([
+      expect.objectContaining({
+        anonymousId: worker.starts[0]!.id,
+        code: 'PERSISTENCE_CONFLICT',
+        phase: 'coordinator-execution',
+      }),
+    ]);
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('an expired running claim is recoverable and rejects its old late success', async () => {
@@ -515,6 +720,64 @@ test('unexpected coordinator database failures are surfaced and retried once', a
       code: 'PIPELINE_STAGE_FAILED',
     }),
   ]);
+  expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
+    'extracted',
+  );
+});
+
+test('completion settlement rejection is diagnosed without converting successful worker output into a stage failure', async () => {
+  const worker = new DeferredWorker();
+  const onUnexpectedFailure = jest.fn();
+  const complete = jest
+    .spyOn(repository, 'completePipelineRun')
+    .mockRejectedValueOnce(
+      new Error('synthetic-completion-settlement-failure'),
+    );
+  const fail = jest.spyOn(repository, 'failPipelineRun');
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    5 * 60 * 1_000,
+    onUnexpectedFailure,
+  );
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).retryItem(packId, itemId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  worker.results.get(run.id)!.resolve(worker.artifact(run));
+  await coordinator.waitForIdle();
+
+  expect(complete).toHaveBeenCalledTimes(1);
+  expect(fail).not.toHaveBeenCalled();
+  expect(onUnexpectedFailure).toHaveBeenCalledWith({
+    runId: run.id,
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  expect(await repository.listRecoveryDiagnostics()).toEqual([
+    expect.objectContaining({
+      anonymousId: run.id,
+      code: 'PIPELINE_STAGE_FAILED',
+      phase: 'coordinator-execution',
+    }),
+  ]);
+
+  const replacementWorker = new DeferredWorker();
+  const replacement = new DurablePackProcessingCoordinator(
+    async () => repository,
+    replacementWorker,
+    () => '2026-08-11T00:06:00Z',
+  );
+  await replacement.recover();
+  await waitFor(() => replacementWorker.starts.length === 1);
+  const recovered = replacementWorker.starts[0]!;
+  replacementWorker.results
+    .get(recovered.id)!
+    .resolve(replacementWorker.artifact(recovered));
+  await replacement.waitForIdle();
   expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
     'extracted',
   );
@@ -601,7 +864,7 @@ test('the production extraction worker reads the owned original and publishes im
     async () => repository,
     native,
   );
-  const handle = worker.start(run);
+  const handle = worker.start(await persistAndClaim(run));
 
   await expect(handle.result).resolves.toEqual({
     id: run.id,
@@ -665,11 +928,106 @@ test('the production extraction worker fails before reading an unverified origin
     native,
   );
 
-  await expect(worker.start(run).result).rejects.toMatchObject({
+  await expect(
+    worker.start(await persistAndClaim(run)).result,
+  ).rejects.toMatchObject({
     code: 'ARTIFACT_INTEGRITY_FAILED',
   });
   expect(resolveOwnedArtifactFileUri).not.toHaveBeenCalled();
   expect(recognizeText).not.toHaveBeenCalled();
+  expect(writeTextArtifact).not.toHaveBeenCalled();
+});
+
+test('the production worker revalidates the exact claim immediately before publication', async () => {
+  const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
+    launch: jest.fn(),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    paused,
+  ).retryItem(packId, itemId);
+  const queued = (await repository.listRunnablePipelineRuns())[0]!;
+  const firstClaim = await repository.markPipelineRunRunning(
+    queued.id,
+    queued.claimVersion,
+    now,
+    now,
+  );
+  const run: PersistedPipelineRun = {
+    ...queued,
+    status: 'running',
+    updatedAt: now,
+    claimVersion: firstClaim!,
+  };
+  const recognition = deferred<{
+    schemaVersion: 1;
+    text: string;
+    blocks: [];
+    durationMs: number;
+    engine: 'apple-vision';
+    revision: string;
+    recognitionLevel: 'accurate';
+    warnings: [];
+  }>();
+  const writeTextArtifact = jest.fn();
+  const native = {
+    verifyArtifact: verifiedOriginal(),
+    resolveOwnedArtifactFileUri: jest
+      .fn()
+      .mockResolvedValue('file:///owned/synthetic.png'),
+    getOCRCapabilities: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      engines: [
+        {
+          engine: 'apple-vision',
+          revision: '3',
+          scripts: ['latin'],
+          recognitionLevels: ['accurate'],
+          ready: true,
+          offline: true,
+        },
+      ],
+      maximumPixelCount: 40_000_000,
+      maximumDimension: 16_384,
+    }),
+    recognizeText: jest.fn().mockReturnValue(recognition.promise),
+    cancelTextRecognition: jest.fn().mockResolvedValue(undefined),
+    writeTextArtifact,
+  } as unknown as NativeAdapter;
+  const handle = new NativeExtractionStageWorker(
+    async () => repository,
+    native,
+  ).start(run);
+  await waitFor(
+    () => (native.recognizeText as jest.Mock).mock.calls.length === 1,
+  );
+
+  await expect(
+    repository.markPipelineRunRunning(
+      run.id,
+      run.claimVersion,
+      '2026-08-11T00:06:00Z',
+      '2026-08-11T00:06:00Z',
+    ),
+  ).resolves.toBe(2);
+  recognition.resolve({
+    schemaVersion: 1,
+    text: 'stale output',
+    blocks: [],
+    durationMs: 1,
+    engine: 'apple-vision',
+    revision: '3',
+    recognitionLevel: 'accurate',
+    warnings: [],
+  });
+
+  await expect(handle.result).rejects.toMatchObject({
+    code: 'PERSISTENCE_CONFLICT',
+  });
   expect(writeTextArtifact).not.toHaveBeenCalled();
 });
 
@@ -726,9 +1084,9 @@ test('derivative publication holds the global cleanup lease until settlement fin
   const worker = new NativeExtractionStageWorker(
     async () => repository,
     native,
-    () => now,
+    () => '2026-08-10T00:00:00Z',
   );
-  const handle = worker.start(run);
+  const handle = worker.start(await persistAndClaim(run));
 
   await expect(handle.result).resolves.toBeDefined();
   await expect(
@@ -785,7 +1143,7 @@ test('the production extraction worker publishes bounded plain-text input withou
     async () => repository,
     native,
   );
-  const handle = worker.start(run);
+  const handle = worker.start(await persistAndClaim(run));
 
   await expect(handle.result).resolves.toMatchObject({
     id: run.id,
@@ -879,7 +1237,7 @@ test('the production extraction worker publishes all completed PDF page text in 
     async () => repository,
     native,
   );
-  const handle = worker.start(run);
+  const handle = worker.start(await persistAndClaim(run));
 
   await expect(handle.result).resolves.toMatchObject({
     id: run.id,
@@ -897,10 +1255,28 @@ test('the production extraction worker publishes all completed PDF page text in 
   await handle.finalize?.();
 });
 
+test('PDF aggregate text accepts the exact native writer bound and rejects one byte over', () => {
+  const exact = 'a'.repeat(DERIVED_TEXT_MAXIMUM_UTF8_BYTES);
+  expect(joinBoundedPdfPageText([exact])).toHaveLength(
+    DERIVED_TEXT_MAXIMUM_UTF8_BYTES,
+  );
+  expect(() => joinBoundedPdfPageText([exact, 'b'])).toThrow('PDF_TOO_LARGE');
+  expect(() =>
+    joinBoundedPdfPageText([
+      'a'.repeat(DERIVED_TEXT_MAXIMUM_UTF8_BYTES - 4),
+      '界',
+    ]),
+  ).toThrow('PDF_TOO_LARGE');
+});
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;
     await new Promise<void>(resolve => setTimeout(resolve, 0));
   }
   throw new Error('synthetic-timeout');
+}
+
+async function flushPromises(): Promise<void> {
+  for (let attempt = 0; attempt < 12; attempt += 1) await Promise.resolve();
 }

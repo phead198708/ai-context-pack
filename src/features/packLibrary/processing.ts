@@ -5,6 +5,7 @@ import {
   type DomainErrorCode,
 } from '../../domain/errors';
 import type { Artifact } from '../../domain/models';
+import { DERIVED_TEXT_MAXIMUM_UTF8_BYTES } from '../../domain/contracts';
 import type { NativeAdapter } from '../../domain/nativeAdapter';
 import { OCRTaskRunner } from '../../domain/ocrTask';
 import { PDFTaskRunner } from '../../domain/pdfExtraction';
@@ -31,6 +32,11 @@ export interface PackProcessingScheduler {
   launch(runs: readonly StartPipelineRunInput[]): void;
   cancel(packId: string, updatedAt: string): Promise<void>;
   recover(): Promise<void>;
+}
+
+interface ClaimHeartbeat {
+  readonly failure: Promise<never>;
+  stop(): Promise<unknown | undefined>;
 }
 
 /**
@@ -109,6 +115,7 @@ export class DurablePackProcessingCoordinator
       let repository: ProductionPersistenceRepository | undefined;
       let claimVersion: number | null = null;
       let handle: PackStageWorkHandle | undefined;
+      let heartbeat: ClaimHeartbeat | undefined;
       let packCreatedAt = run.startedAt;
       try {
         repository = await this.getRepository();
@@ -123,7 +130,18 @@ export class DurablePackProcessingCoordinator
           this.staleRunningBefore(claimAt),
         );
         if (claimVersion === null) return;
-        handle = this.worker.start(run);
+        const claimedRun: PersistedPipelineRun = {
+          ...run,
+          status: 'running',
+          updatedAt: claimAt,
+          claimVersion,
+        };
+        handle = this.worker.start(claimedRun);
+        heartbeat = this.startClaimHeartbeat(
+          repository,
+          claimedRun,
+          packCreatedAt,
+        );
       } catch (error) {
         await this.reportUnexpectedFailure(
           run,
@@ -138,20 +156,61 @@ export class DurablePackProcessingCoordinator
       }
       this.active.set(run.id, { packId: run.packId, handle });
       try {
-        const artifact = await handle.result;
-        await repository.completePipelineRun({
-          runId: run.id,
-          claimVersion,
-          updatedAt: this.timestamp(packCreatedAt),
-          ...(artifact ? { artifact } : {}),
-        });
-      } catch (error) {
+        let artifact: Artifact | undefined;
         try {
-          await repository.failPipelineRun({
+          artifact = await Promise.race([handle.result, heartbeat.failure]);
+        } catch (error) {
+          const heartbeatFailure = await heartbeat.stop();
+          if (heartbeatFailure !== undefined) {
+            await Promise.allSettled([handle.cancel()]);
+            await this.reportUnexpectedFailure(
+              run,
+              heartbeatFailure,
+              repository,
+              claimVersion,
+              packCreatedAt,
+              false,
+            );
+            return;
+          }
+          try {
+            await repository.failPipelineRun({
+              runId: run.id,
+              claimVersion,
+              updatedAt: this.timestamp(packCreatedAt),
+              errorCode: processingErrorCode(error),
+            });
+          } catch (settlementError) {
+            await this.reportUnexpectedFailure(
+              run,
+              settlementError,
+              repository,
+              claimVersion,
+              packCreatedAt,
+              false,
+            );
+          }
+          return;
+        }
+        const heartbeatFailure = await heartbeat.stop();
+        if (heartbeatFailure !== undefined) {
+          await Promise.allSettled([handle.cancel()]);
+          await this.reportUnexpectedFailure(
+            run,
+            heartbeatFailure,
+            repository,
+            claimVersion,
+            packCreatedAt,
+            false,
+          );
+          return;
+        }
+        try {
+          await repository.completePipelineRun({
             runId: run.id,
             claimVersion,
             updatedAt: this.timestamp(packCreatedAt),
-            errorCode: processingErrorCode(error),
+            ...(artifact ? { artifact } : {}),
           });
         } catch (settlementError) {
           await this.reportUnexpectedFailure(
@@ -160,10 +219,12 @@ export class DurablePackProcessingCoordinator
             repository,
             claimVersion,
             packCreatedAt,
+            false,
           );
         }
       } finally {
         this.active.delete(run.id);
+        await heartbeat.stop();
         try {
           await handle.finalize?.();
         } catch (error) {
@@ -173,6 +234,7 @@ export class DurablePackProcessingCoordinator
             repository,
             claimVersion,
             packCreatedAt,
+            false,
           );
         }
       }
@@ -198,16 +260,65 @@ export class DurablePackProcessingCoordinator
     return new Date(Date.parse(value) - this.claimLeaseMs).toISOString();
   }
 
+  private startClaimHeartbeat(
+    repository: ProductionPersistenceRepository,
+    run: PersistedPipelineRun,
+    packCreatedAt: string,
+  ): ClaimHeartbeat {
+    const intervalMs = Math.max(1, Math.floor(this.claimLeaseMs / 3));
+    let stopped = false;
+    let failed = false;
+    let failureValue: unknown;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight = Promise.resolve();
+    let rejectFailure!: (error: unknown) => void;
+    const failure = new Promise<never>((_resolve, reject) => {
+      rejectFailure = reject;
+    });
+    const recordFailure = (error: unknown): void => {
+      if (failed) return;
+      failed = true;
+      failureValue = error;
+      rejectFailure(error);
+    };
+    const schedule = (): void => {
+      timer = setTimeout(() => {
+        inFlight = (async () => {
+          const renewed = await repository.renewPipelineRunClaim(
+            run.id,
+            run.claimVersion,
+            this.timestamp(packCreatedAt),
+          );
+          if (!renewed) throw new DomainError('PERSISTENCE_CONFLICT');
+        })();
+        inFlight.then(() => {
+          if (!stopped) schedule();
+        }, recordFailure);
+      }, intervalMs);
+    };
+    schedule();
+    return {
+      failure,
+      stop: async () => {
+        stopped = true;
+        if (timer !== undefined) clearTimeout(timer);
+        await inFlight.catch(() => undefined);
+        return failed ? failureValue : undefined;
+      },
+    };
+  }
+
   private async reportUnexpectedFailure(
     run: PersistedPipelineRun,
     error: unknown,
     repository: ProductionPersistenceRepository | undefined,
     claimVersion: number | null,
     packCreatedAt: string,
+    settleRun = true,
   ): Promise<void> {
     const code = processingErrorCode(error);
     const occurredAt = this.timestamp(packCreatedAt);
-    if (repository && claimVersion !== null) {
+    if (settleRun && repository && claimVersion !== null) {
       try {
         await repository.failPipelineRun({
           runId: run.id,
@@ -269,10 +380,11 @@ export class NativeExtractionStageWorker implements PackStageWorker {
     let cancelActive: (() => Promise<void>) | undefined;
     let repository: ProductionPersistenceRepository | undefined;
     let publicationLeaseHeld = false;
+    const publicationOwnerId = createCanonicalUuid();
     const releasePublicationLease = async (): Promise<void> => {
       if (!publicationLeaseHeld || !repository) return;
       publicationLeaseHeld = false;
-      await repository.releaseCleanupLease(run.id);
+      await repository.releaseCleanupLease(publicationOwnerId);
     };
     const result = (async (): Promise<Artifact | undefined> => {
       try {
@@ -338,10 +450,11 @@ export class NativeExtractionStageWorker implements PackStageWorker {
           const value = await handle.result;
           if (value.status !== 'complete')
             throw new DomainError('PDF_PAGE_EXTRACTION_FAILED');
-          text = value.pages
-            .filter(page => page.status === 'complete')
-            .map(page => page.text)
-            .join('\n\n');
+          text = joinBoundedPdfPageText(
+            value.pages
+              .filter(page => page.status === 'complete')
+              .map(page => page.text),
+          );
           processorVersion = value.document.revision;
         } else {
           const value = await this.native.readPlainTextFile(fileUri);
@@ -349,14 +462,17 @@ export class NativeExtractionStageWorker implements PackStageWorker {
           processorVersion = value.revision;
         }
         if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
-        const acquiredAt = validatedTimestamp(this.now());
-        publicationLeaseHeld = await repository.acquireCleanupLease(
-          run.id,
-          acquiredAt,
-          new Date(
-            Date.parse(acquiredAt) + this.publicationLeaseMs,
-          ).toISOString(),
-        );
+        const acquiredAt = validatedTimestamp(this.now(), graph.pack.createdAt);
+        publicationLeaseHeld =
+          await repository.acquireCleanupLeaseForPipelineRun(
+            run.id,
+            run.claimVersion,
+            publicationOwnerId,
+            acquiredAt,
+            new Date(
+              Date.parse(acquiredAt) + this.publicationLeaseMs,
+            ).toISOString(),
+          );
         if (!publicationLeaseHeld)
           throw new DomainError('PERSISTENCE_CONFLICT');
         const relativePath = ownedDerivedPath(run.packId, run.id, 'txt');
@@ -438,8 +554,41 @@ function processingErrorCode(error: unknown): DomainErrorCode {
   return 'PIPELINE_STAGE_FAILED';
 }
 
-function validatedTimestamp(value: string): string {
-  if (!Number.isFinite(Date.parse(value)))
+export function joinBoundedPdfPageText(pageTexts: readonly string[]): string {
+  let byteCount = 0;
+  for (let index = 0; index < pageTexts.length; index += 1) {
+    if (index > 0) byteCount += 2;
+    byteCount += utf8ByteCount(pageTexts[index]!);
+    if (byteCount > DERIVED_TEXT_MAXIMUM_UTF8_BYTES)
+      throw new DomainError('PDF_TOO_LARGE');
+  }
+  return pageTexts.join('\n\n');
+}
+
+function utf8ByteCount(value: string): number {
+  let byteCount = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) byteCount += 1;
+    else if (unit <= 0x7ff) byteCount += 2;
+    else if (
+      unit >= 0xd800 &&
+      unit <= 0xdbff &&
+      index + 1 < value.length &&
+      value.charCodeAt(index + 1) >= 0xdc00 &&
+      value.charCodeAt(index + 1) <= 0xdfff
+    ) {
+      byteCount += 4;
+      index += 1;
+    } else byteCount += 3;
+  }
+  return byteCount;
+}
+
+function validatedTimestamp(value: string, minimum?: string): string {
+  const valueEpoch = Date.parse(value);
+  const minimumEpoch = minimum === undefined ? valueEpoch : Date.parse(minimum);
+  if (!Number.isFinite(valueEpoch) || !Number.isFinite(minimumEpoch))
     throw new DomainError('SCHEMA_INVALID');
-  return value;
+  return valueEpoch < minimumEpoch ? minimum! : value;
 }

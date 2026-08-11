@@ -116,6 +116,10 @@ class MemoryArtifactRepository
     return true;
   }
 
+  async acquireCleanupLeaseForPipelineRun() {
+    return this.acquireCleanupLease();
+  }
+
   async releaseCleanupLease() {
     this.leaseHeld = false;
   }

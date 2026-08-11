@@ -288,10 +288,11 @@ function PackEditor({
   readonly locale: AppLocale;
   readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
 }): React.JSX.Element {
-  const [title, setTitle] = usePersistedDraft(detail.pack.title);
-  const [instruction, setInstruction] = usePersistedDraft(
-    detail.pack.userInstruction,
+  const [title, setTitle, acknowledgeTitle] = usePersistedDraft(
+    detail.pack.title,
   );
+  const [instruction, setInstruction, acknowledgeInstruction] =
+    usePersistedDraft(detail.pack.userInstruction);
   return (
     <View style={styles.editor} testID={`pack-editor-${detail.pack.id}`}>
       <Text accessibilityRole="header" style={styles.heading}>
@@ -321,7 +322,12 @@ function PackEditor({
         disabled={busy}
         label={t(locale, 'savePackTitle')}
         onPress={() =>
-          run(mutate(() => controller.renamePack(detail.pack.id, title)))
+          run(
+            mutate(async () => {
+              await controller.renamePack(detail.pack.id, title);
+              acknowledgeTitle(title.trim());
+            }),
+          )
         }
       />
       <TextInput
@@ -338,9 +344,10 @@ function PackEditor({
         label={t(locale, 'saveInstruction')}
         onPress={() =>
           run(
-            mutate(() =>
-              controller.editInstruction(detail.pack.id, instruction),
-            ),
+            mutate(async () => {
+              await controller.editInstruction(detail.pack.id, instruction);
+              acknowledgeInstruction(instruction);
+            }),
           )
         }
       />
@@ -398,7 +405,7 @@ function ItemEditorRow({
   readonly packId: string;
   readonly total: number;
 }): React.JSX.Element {
-  const [name, setName] = usePersistedDraft(item.displayName);
+  const [name, setName, acknowledgeName] = usePersistedDraft(item.displayName);
   const move = useCallback(
     (target: number) => {
       if (busy || target < 0 || target >= total || target === index) return;
@@ -498,7 +505,12 @@ function ItemEditorRow({
           disabled={busy}
           label={`${t(locale, 'saveItemName')} ${index + 1}`}
           onPress={() =>
-            run(mutate(() => controller.renameItem(packId, item.id, name)))
+            run(
+              mutate(async () => {
+                await controller.renameItem(packId, item.id, name);
+                acknowledgeName(name.trim());
+              }),
+            )
           }
         />
         <Button
@@ -564,7 +576,11 @@ function ItemEditorRow({
 /** Preserve edits to one field while an unrelated mutation refreshes the graph. */
 function usePersistedDraft(
   persistedValue: string,
-): readonly [string, (value: string) => void] {
+): readonly [
+  string,
+  (value: string) => void,
+  (persistedValue: string) => void,
+] {
   const [value, setValue] = useState(persistedValue);
   const dirty = useRef(false);
   useEffect(() => {
@@ -580,7 +596,11 @@ function usePersistedDraft(
     dirty.current = true;
     setValue(next);
   }, []);
-  return [value, change] as const;
+  const acknowledge = useCallback((nextPersistedValue: string) => {
+    dirty.current = false;
+    setValue(nextPersistedValue);
+  }, []);
+  return [value, change, acknowledge] as const;
 }
 
 function Button({

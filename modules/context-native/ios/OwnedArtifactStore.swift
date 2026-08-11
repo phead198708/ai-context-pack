@@ -24,6 +24,7 @@ enum OwnedArtifactStore {
     "bin", "heic", "jpeg", "jpg", "json", "md", "pdf", "png", "txt", "zip",
   ])
   private static let maximumSafeInteger: Int64 = 9_007_199_254_740_991
+  private static let maximumTextBytes = 16_777_216
   private static let processLockRegistry = NSLock()
   private final class ProcessLockEntry {
     let lock = NSLock()
@@ -168,23 +169,24 @@ enum OwnedArtifactStore {
   static func writeText(
     root: URL,
     relativePath: String,
-    text: String
+    text: String,
+    partialWriter: ((URL, Data) throws -> Void)? = nil
   ) throws -> [String: Any] {
     let components = try validate(relativePath)
     guard relativePath.hasSuffix(".txt"),
           let data = text.data(using: .utf8),
-          data.count <= 16 * 1024 * 1024 else {
+          data.count <= maximumTextBytes else {
       throw OwnedArtifactStoreError.invalidInput
     }
+    let expectedHash = SHA256.hash(data: data)
+      .map { String(format: "%02x", $0) }
+      .joined()
     let destination = root.appendingPathComponent(relativePath)
     return try withArtifactLock(root: root, artifactId: components.artifactId) {
       try ensureDirectoryChain(destination.deletingLastPathComponent())
       let expectedByteCount = Int64(data.count)
       if FileManager.default.fileExists(atPath: destination.path) {
         let existing = try inspect(destination)
-        let expectedHash = SHA256.hash(data: data)
-          .map { String(format: "%02x", $0) }
-          .joined()
         guard existing.byteCount == expectedByteCount,
               existing.sha256 == expectedHash else {
           throw OwnedArtifactStoreError.immutableConflict
@@ -202,12 +204,17 @@ enum OwnedArtifactStore {
           try FileManager.default.removeItem(at: partial)
           try synchronizeDirectory(partial.deletingLastPathComponent())
         }
-        guard FileManager.default.createFile(atPath: partial.path, contents: data) else {
-          throw OwnedArtifactStoreError.writeFailed
+        if let partialWriter {
+          try partialWriter(partial, data)
+        } else {
+          guard FileManager.default.createFile(atPath: partial.path, contents: data) else {
+            throw OwnedArtifactStoreError.writeFailed
+          }
         }
         try synchronizeFile(partial)
         let inspected = try inspect(partial)
-        guard inspected.byteCount == expectedByteCount else {
+        guard inspected.byteCount == expectedByteCount,
+              inspected.sha256 == expectedHash else {
           throw OwnedArtifactStoreError.integrityFailed
         }
         guard Darwin.rename(partial.path, destination.path) == 0 else {
@@ -217,7 +224,7 @@ enum OwnedArtifactStore {
         return [
           "relativePath": relativePath,
           "byteCount": inspected.byteCount,
-          "sha256": inspected.sha256,
+          "sha256": expectedHash,
           "created": true,
         ]
       } catch let error as OwnedArtifactStoreError {

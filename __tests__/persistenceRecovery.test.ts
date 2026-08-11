@@ -318,6 +318,10 @@ class ProductionCleanupRepository extends MemoryRepository {
     return this.leaseAvailable;
   }
 
+  async acquireCleanupLeaseForPipelineRun() {
+    return this.leaseAvailable;
+  }
+
   async releaseCleanupLease() {
     this.released += 1;
   }

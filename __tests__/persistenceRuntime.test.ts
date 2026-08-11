@@ -218,6 +218,10 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     return null;
   }
 
+  async renewPipelineRunClaim() {
+    return false;
+  }
+
   async completePipelineRun() {
     return false;
   }
@@ -295,6 +299,10 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     if (this.leaseHeld) return false;
     this.leaseHeld = true;
     return true;
+  }
+
+  async acquireCleanupLeaseForPipelineRun() {
+    return this.acquireCleanupLease();
   }
 
   async releaseCleanupLease() {

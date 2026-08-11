@@ -352,7 +352,7 @@ describe('production repository against SQLite', () => {
     ]);
   });
 
-  test('migrates a v4 destructively released original without inventing retained bytes', async () => {
+  test('migrates a post-cleanup v4 destructive release without inventing retained bytes', async () => {
     const initial = await repository.findPackGraph(packId);
     const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
     await repository.savePackGraph({
@@ -396,6 +396,78 @@ describe('production repository against SQLite', () => {
         ],
       }),
     ]);
+  });
+
+  test('migrates a pre-cleanup v4 destructive release while unreferenced bytes still exist', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'released before cleanup',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'release',
+    });
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    expect((await repository.listImportDetails())[0]?.items[0]).toMatchObject({
+      id: firstItemId,
+      status: 'copied',
+      originalReleased: true,
+    });
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+    ).resolves.toBe(true);
+    expect((await repository.listImportDetails())[0]?.items[0]).toMatchObject({
+      id: firstItemId,
+      originalReleased: true,
+    });
+  });
+
+  test('keeps a v4 preserved removal retained through the v5 migration', async () => {
+    const initial = await repository.findPackGraph(packId);
+    const remaining = [{ ...initial!.items[1]!, sortIndex: 0 }];
+    await repository.savePackGraph({
+      pack: updatedPack(
+        initial!.pack,
+        remaining,
+        'preserved first original',
+        '2026-08-05T00:00:01Z',
+      ),
+      items: remaining,
+      expectedRevision: initial!.revision,
+      removedItemOriginalDisposition: 'preserve',
+    });
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    const preserved = (await repository.listImportDetails())[0]?.items[0];
+    expect(preserved).toMatchObject({ id: firstItemId, status: 'copied' });
+    expect(preserved).not.toHaveProperty('originalReleased');
+    await expect(
+      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+    ).resolves.toBe(false);
   });
 
   test('materializes photo, PDF, text, and URL main-app imports as ordered ContextItems', async () => {

@@ -199,6 +199,11 @@ export interface ContextPackRepository {
     updatedAt: string,
     staleRunningBefore: string,
   ): Promise<number | null>;
+  renewPipelineRunClaim(
+    runId: string,
+    claimVersion: number,
+    updatedAt: string,
+  ): Promise<boolean>;
   completePipelineRun(input: CompletePipelineRunInput): Promise<boolean>;
   failPipelineRun(input: FailPipelineRunInput): Promise<boolean>;
   cancelPipelineRuns(packId: string, updatedAt: string): Promise<number>;
@@ -253,6 +258,13 @@ export interface RecoveryDiagnosticsRepository {
 
 export interface CleanupLeaseRepository {
   acquireCleanupLease(
+    ownerId: string,
+    acquiredAt: string,
+    expiresAt: string,
+  ): Promise<boolean>;
+  acquireCleanupLeaseForPipelineRun(
+    runId: string,
+    claimVersion: number,
     ownerId: string,
     acquiredAt: string,
     expiresAt: string,
