@@ -20,6 +20,7 @@ import {
   type CleanupLeaseHeartbeat,
 } from '../../infrastructure/persistence/cleanupLeaseHeartbeat';
 import { acquireArtifactLifecycleMutex } from '../../infrastructure/persistence/artifactLifecycleMutex';
+import { monotonicNowMilliseconds } from '../../infrastructure/persistence/operationalLeaseClock';
 
 export interface PackStageWorkHandle {
   readonly result: Promise<Artifact | undefined>;
@@ -44,6 +45,7 @@ export interface PackProcessingScheduler {
 
 interface ClaimHeartbeat {
   readonly failure: Promise<never>;
+  assertOwned(): void;
   stop(): Promise<unknown | undefined>;
 }
 
@@ -69,6 +71,7 @@ export class DurablePackProcessingCoordinator
       readonly runId: string;
       readonly code: DomainErrorCode;
     }) => void,
+    private readonly monotonicNow: () => number = monotonicNowMilliseconds,
   ) {
     if (!Number.isSafeInteger(claimLeaseMs) || claimLeaseMs <= 0)
       throw new DomainError('SCHEMA_INVALID');
@@ -177,6 +180,7 @@ export class DurablePackProcessingCoordinator
             heartbeat.failure,
             ...(handle.fence ? [handle.fence] : []),
           ]);
+          heartbeat.assertOwned();
         } catch (error) {
           const heartbeatFailure = await heartbeat.stop();
           if (heartbeatFailure !== undefined) {
@@ -210,6 +214,7 @@ export class DurablePackProcessingCoordinator
             return;
           }
           try {
+            heartbeat.assertOwned();
             await repository.failPipelineRun({
               runId: run.id,
               claimVersion,
@@ -230,6 +235,7 @@ export class DurablePackProcessingCoordinator
         }
         if (artifact) {
           try {
+            heartbeat.assertOwned();
             if (!handle.publicationLeaseOwnerId)
               throw new DomainError('PERSISTENCE_CONFLICT');
             const checkpoint = repository.checkpointPipelineRunArtifact({
@@ -238,12 +244,12 @@ export class DurablePackProcessingCoordinator
               updatedAt: this.timestamp(packCreatedAt),
               artifact,
               publicationLeaseOwnerId: handle.publicationLeaseOwnerId,
-              publicationLeaseObservedAt: validatedTimestamp(this.now()),
             });
             const checkpointed = await Promise.race([
               checkpoint,
               ...(handle.fence ? [handle.fence] : []),
             ]);
+            heartbeat.assertOwned();
             if (!checkpointed) throw new DomainError('PERSISTENCE_CONFLICT');
           } catch (checkpointError) {
             await heartbeat.stop();
@@ -259,6 +265,7 @@ export class DurablePackProcessingCoordinator
           }
         }
         try {
+          heartbeat.assertOwned();
           const completed = await repository.completePipelineRun({
             runId: run.id,
             claimVersion,
@@ -267,10 +274,10 @@ export class DurablePackProcessingCoordinator
             ...(artifact && handle.publicationLeaseOwnerId
               ? {
                   publicationLeaseOwnerId: handle.publicationLeaseOwnerId,
-                  publicationLeaseObservedAt: validatedTimestamp(this.now()),
                 }
               : {}),
           });
+          heartbeat.assertOwned();
           if (!completed) throw new DomainError('PERSISTENCE_CONFLICT');
         } catch (settlementError) {
           await this.reportUnexpectedFailure(
@@ -324,6 +331,7 @@ export class DurablePackProcessingCoordinator
     let failureValue: unknown;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inFlight = Promise.resolve();
+    let localDeadline = this.observedMonotonicNow() + this.claimLeaseMs;
     let logicalAt = latestTimestamp([run.updatedAt, chronologyFloor]);
     let rejectFailure!: (error: unknown) => void;
     const failure = new Promise<never>((_resolve, reject) => {
@@ -359,6 +367,7 @@ export class DurablePackProcessingCoordinator
           );
           if (!renewed) throw new DomainError('PERSISTENCE_CONFLICT');
           logicalAt = renewedAt;
+          localDeadline = this.observedMonotonicNow() + this.claimLeaseMs;
         })();
         inFlight.then(() => {
           if (!stopped) schedule();
@@ -369,13 +378,30 @@ export class DurablePackProcessingCoordinator
     schedule();
     return {
       failure,
+      assertOwned: () => {
+        if (!failed && this.observedMonotonicNow() >= localDeadline)
+          recordFailure(new DomainError('PERSISTENCE_CONFLICT'));
+        if (failed)
+          throw failureValue instanceof Error
+            ? failureValue
+            : new DomainError('PERSISTENCE_CONFLICT');
+      },
       stop: async () => {
         stopped = true;
         if (timer !== undefined) clearTimeout(timer);
         await inFlight.catch(() => undefined);
+        if (!failed && this.observedMonotonicNow() >= localDeadline)
+          recordFailure(new DomainError('PERSISTENCE_CONFLICT'));
         return failed ? failureValue : undefined;
       },
     };
+  }
+
+  private observedMonotonicNow(): number {
+    const value = this.monotonicNow();
+    if (!Number.isFinite(value) || value < 0)
+      throw new DomainError('SCHEMA_INVALID');
+    return value;
   }
 
   private async reportUnexpectedFailure(
@@ -502,6 +528,22 @@ export class NativeExtractionStageWorker implements PackStageWorker {
       releasePublicationLifecycleMutex = await acquireArtifactLifecycleMutex();
       assertPublicationLease();
     };
+    const assertPipelineClaim = async (
+      chronologyFloor: string,
+    ): Promise<void> => {
+      if (!repository) throw new DomainError('PERSISTENCE_CONFLICT');
+      const observedAt = validatedTimestamp(this.now());
+      const renewed = await repository.renewPipelineRunClaim(
+        run.id,
+        run.claimVersion,
+        latestTimestamp([observedAt, chronologyFloor, run.updatedAt]),
+        observedAt,
+        new Date(
+          Date.parse(observedAt) + this.publicationLeaseMs,
+        ).toISOString(),
+      );
+      if (!renewed) throw new DomainError('PERSISTENCE_CONFLICT');
+    };
     const result = (async (): Promise<Artifact | undefined> => {
       if (run.stage !== 'extract')
         throw new DomainError('PIPELINE_STAGE_FAILED');
@@ -603,6 +645,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
       await acquirePublicationLease();
       const relativePath = ownedDerivedPath(run.packId, run.id, 'txt');
       const currentArtifacts = await repository.listArtifactRecords();
+      await assertPipelineClaim(chronologyFloor);
       assertPublicationLease();
       if (
         currentArtifacts.some(
@@ -615,6 +658,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
       > => {
         if (!repository) throw new DomainError('PERSISTENCE_CONFLICT');
         const authoritativeArtifacts = await repository.listArtifactRecords();
+        await assertPipelineClaim(chronologyFloor);
         assertPublicationLease();
         if (
           authoritativeArtifacts.some(
@@ -625,6 +669,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         const quarantined = await this.native.quarantineOwnedArtifact(
           relativePath,
         );
+        await assertPipelineClaim(chronologyFloor);
         assertPublicationLease();
         if (
           !quarantined.quarantined ||
@@ -644,6 +689,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
             Date.parse(quarantinedAt) + 7 * 24 * 60 * 60 * 1_000,
           ).toISOString(),
         });
+        await assertPipelineClaim(chronologyFloor);
         assertPublicationLease();
         const replacement = await this.native.writeTextArtifact(
           relativePath,
@@ -659,6 +705,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         | Awaited<ReturnType<NativeAdapter['writeTextArtifact']>>
         | undefined;
       try {
+        await assertPipelineClaim(chronologyFloor);
         initialPublication = await this.native.writeTextArtifact(
           relativePath,
           text,

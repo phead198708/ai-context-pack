@@ -23,6 +23,7 @@ import {
 } from './ownedPaths';
 import { startCleanupLeaseHeartbeat } from './cleanupLeaseHeartbeat';
 import { acquireArtifactLifecycleMutex } from './artifactLifecycleMutex';
+import { monotonicNowMilliseconds } from './operationalLeaseClock';
 
 const DISK_HEADROOM_BYTES = 16 * 1024 * 1024;
 
@@ -258,6 +259,7 @@ export class ScheduledReferenceAwareCleanup {
     private readonly artifactRetentionMs = 24 * 60 * 60 * 1_000,
     private readonly quarantineRetentionMs = 7 * 24 * 60 * 60 * 1_000,
     private readonly leaseDurationMs = 5 * 60 * 1_000,
+    private readonly monotonicNow: () => number = monotonicNowMilliseconds,
   ) {
     requireIdentifier(ownerId);
     if (!Number.isSafeInteger(leaseDurationMs) || leaseDurationMs <= 0)
@@ -290,6 +292,7 @@ export class ScheduledReferenceAwareCleanup {
       acquiredAt,
       this.leaseDurationMs,
       this.now,
+      this.monotonicNow,
     );
     const releaseLifecycleMutex = await acquireArtifactLifecycleMutex();
     try {

@@ -86,8 +86,8 @@ Keep the existing stable registry file plus per-ingestion POSIX advisory locks f
 | Corrupt/unknown manifest            | Fail closed with stable schema code; no content log                                      | native manifest suites                                        |
 | Expired Android provider permission | Successful files remain; failed item is explicit; no commit of a half-state              | shared injected failure and Android importer tests            |
 | Low disk                            | `RESOURCE_LOW_DISK` before destination creation; Inbox retained                          | shared, Swift, and Kotlin tests                               |
-| v1-v5 app database update           | v6 applied with rows, references, runs, order, release intent, and checkpoints preserved | `npm run test:persistence-migrations`                         |
-| Empty/legacy/restart/concurrent DB  | 0→1→2→3→4→5→6, ordered restart, one-of-two CAS, rollback, backup/restore pass            | `npm run test:persistence-production`                         |
+| v1-v6 app database update           | v7 applied with rows, references, runs, order, release intent, and checkpoints preserved | `npm run test:persistence-migrations`                         |
+| Empty/legacy/restart/concurrent DB  | 0→1→2→3→4→5→6→7, ordered restart, one-of-two CAS, rollback, backup/restore pass          | `npm run test:persistence-production`                         |
 | Cleanup races recovery              | Transactional reference recheck wins; file retained                                      | shared cleanup race test                                      |
 | Replay with low free space          | Existing artifacts require only fixed headroom and remain replayable                     | Swift/Kotlin published-destination budget tests               |
 | New destination hierarchy           | Every new directory and parent is synchronized before handoff returns                    | Swift/Kotlin injected directory-sync tests                    |
@@ -140,12 +140,20 @@ Issue #7 completes the production work owned by this ADR:
 7. Real SQLite verification covers upgrade, repository restart, immutable-source rollback, concurrent compare-and-swap, Pack-append revisioning, risk/export round trips, corrupted-row mapping, interrupted transaction rollback, backup/restore, reference cleanup, and absence of BLOB/provider/absolute-path persistence. The release-size results and license review are recorded above.
 8. Bootstrap, AppState refresh, and cold restart hydrate the persisted Pack projection after recovery, so the transient Inbox scan never replaces committed product state with an empty view.
 
-Issue #12 extends the schema through v4, v5, and v6. Version 4 stores the exact terminal retry
+Issue #12 extends the schema through v4, v5, v6, and v7. Version 4 stores the exact terminal retry
 stage. Version 5 stores retained/released/unavailable original disposition plus durable pipeline
 runs, monotonic claim versions, cancellation, background recovery, and transactional settlement.
 Version 6 stores the immutable derivative checkpoint before settlement so restart verifies and
-settles the exact path, byte count, and SHA-256 without rerunning extraction. The shared
-publication/cleanup lease is renewed and fenced throughout both critical sections; each acquisition has a fresh operation token, and its expiry uses the supplied wall-clock timeline independently of monotonic Pack/run timestamps. A process-wide native lifecycle mutex joins any expired in-process critical section before its replacement mutates files. Post-suspension work synchronously rejects an elapsed local TTL, and registration/checkpoint/settlement transactions require the same unexpired owner. The durable claim heartbeat remains active through completion; valid publication contention leaves a checkpoint runnable. Lease loss or a false settlement compare-and-swap aborts
+settles the exact path, byte count, and SHA-256 without rerunning extraction. Version 7 gives
+pipeline claims and the shared publication/cleanup lease a process-session identity plus a
+monotonic deadline. A process replacement invalidates every prior-session owner immediately;
+within a live session, wall-clock correction cannot extend or prematurely expire ownership. A
+process-wide native lifecycle mutex joins any expired in-process critical section before its
+replacement mutates files. Post-suspension work synchronously rejects an elapsed local TTL, and
+registration/checkpoint/settlement transactions observe the operational clock after acquiring
+their SQLite transaction and require both the current session and an unexpired owner. The durable
+claim heartbeat remains active through completion; valid publication contention leaves a
+checkpoint runnable. Lease loss or a false settlement compare-and-swap aborts
 the database transition and leaves deterministic recovery material. Migrations backfill only
 state provable from prior rows and references, including failed-item destructive-release intent.
 

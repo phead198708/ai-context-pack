@@ -71,6 +71,11 @@ import {
   ownedArtifactPackId,
   ownedOriginalPath,
 } from './ownedPaths';
+import {
+  observeOperationalMilliseconds,
+  processOperationalLeaseClock,
+  type OperationalLeaseClock,
+} from './operationalLeaseClock';
 
 type SqlValue = string | number | null;
 
@@ -166,7 +171,15 @@ export class ExpoSqlitePersistenceRepository
     private readonly connection: SqlConnection,
     private readonly migrationHook?: PersistenceMigrationHook,
     private readonly allowDevelopmentReset = false,
-  ) {}
+    private readonly operationalClock: OperationalLeaseClock = processOperationalLeaseClock,
+  ) {
+    if (!isCanonicalUuid(operationalClock.sessionId))
+      throw new DomainError('SCHEMA_INVALID');
+  }
+
+  private operationalNow(): number {
+    return observeOperationalMilliseconds(this.operationalClock);
+  }
 
   initialize(): Promise<void> {
     if (this.initialized) return Promise.resolve();
@@ -757,7 +770,8 @@ export class ExpoSqlitePersistenceRepository
       );
       if (input.cancelActivePipelineRuns)
         await transaction.run(
-          `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
+          `UPDATE pipeline_runs SET status = 'cancelled',
+             claim_session_id = NULL, claim_deadline_ms = NULL,
              updated_at = CASE
                WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
              completed_at = CASE
@@ -787,7 +801,10 @@ export class ExpoSqlitePersistenceRepository
   async listRunnablePipelineRuns(
     claimObservedAt?: string,
   ): Promise<readonly PersistedPipelineRun[]> {
+    // Retained for source compatibility only. Operational ownership is never
+    // evaluated against a caller-supplied wall-clock observation.
     if (claimObservedAt !== undefined) requireIsoDateTime(claimObservedAt);
+    const operationalNow = this.operationalNow();
     const rows = await this.connection.all<{
       id: string;
       pack_id: string;
@@ -797,11 +814,13 @@ export class ExpoSqlitePersistenceRepository
       started_at: string;
       updated_at: string;
       claim_version: number;
-      claim_expires_at: string | null;
+      claim_session_id: string | null;
+      claim_deadline_ms: number | null;
       published_artifact_json: string | null;
     }>(
       `SELECT id, pack_id, item_id, stage, status, started_at, updated_at,
-         claim_version, claim_expires_at, published_artifact_json
+         claim_version, claim_session_id, claim_deadline_ms,
+         published_artifact_json
        FROM pipeline_runs
        WHERE status IN ('queued', 'running', 'recovering')
        ORDER BY updated_at, id`,
@@ -819,8 +838,11 @@ export class ExpoSqlitePersistenceRepository
         if (!isRunnablePipelineStatus(row.status))
           throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
         if (
-          row.claim_expires_at !== null &&
-          !isIsoDateTime(row.claim_expires_at)
+          (row.claim_session_id !== null &&
+            !isCanonicalUuid(row.claim_session_id)) ||
+          (row.claim_deadline_ms !== null &&
+            (!Number.isFinite(row.claim_deadline_ms) ||
+              row.claim_deadline_ms < 0))
         )
           throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
         const run: PersistedPipelineRun = {
@@ -843,13 +865,17 @@ export class ExpoSqlitePersistenceRepository
               }
             : {}),
         };
-        return { run, claimExpiresAt: row.claim_expires_at };
+        return {
+          run,
+          claimSessionId: row.claim_session_id,
+          claimDeadlineMilliseconds: row.claim_deadline_ms,
+        };
       });
       if (decoded.run.status !== 'running') runnable.push(decoded.run);
       else if (
-        claimObservedAt !== undefined &&
-        (decoded.claimExpiresAt === null ||
-          Date.parse(decoded.claimExpiresAt) <= Date.parse(claimObservedAt))
+        decoded.claimSessionId !== this.operationalClock.sessionId ||
+        decoded.claimDeadlineMilliseconds === null ||
+        decoded.claimDeadlineMilliseconds <= operationalNow
       )
         runnable.push(decoded.run);
     }
@@ -873,29 +899,35 @@ export class ExpoSqlitePersistenceRepository
     requireIsoDateTime(updatedAt);
     requireIsoDateTime(claimObservedAt);
     requireIsoDateTime(claimExpiresAt);
-    if (Date.parse(claimExpiresAt) <= Date.parse(claimObservedAt))
-      throw new DomainError('SCHEMA_INVALID');
-    const result = await this.connection.run(
-      `UPDATE pipeline_runs SET status = 'running',
-         updated_at = CASE
-           WHEN julianday(updated_at) < julianday(?) THEN ? ELSE updated_at END,
-         claim_version = claim_version + 1,
-         claim_expires_at = ?
-       WHERE id = ? AND claim_version = ?
-         AND (status IN ('queued', 'recovering')
-           OR (status = 'running'
-             AND (claim_expires_at IS NULL
-               OR julianday(claim_expires_at) <= julianday(?))))`,
-      [
-        updatedAt,
-        updatedAt,
-        claimExpiresAt,
-        runId,
-        expectedClaimVersion,
-        claimObservedAt,
-      ],
-    );
-    return result.changes === 1 ? expectedClaimVersion + 1 : null;
+    const duration = leaseDurationMilliseconds(claimObservedAt, claimExpiresAt);
+    return this.connection.exclusive(async transaction => {
+      const operationalNow = this.operationalNow();
+      const result = await transaction.run(
+        `UPDATE pipeline_runs SET status = 'running',
+           updated_at = CASE
+             WHEN julianday(updated_at) < julianday(?) THEN ? ELSE updated_at END,
+           claim_version = claim_version + 1,
+           claim_session_id = ?, claim_deadline_ms = ?
+         WHERE id = ? AND claim_version = ?
+           AND (status IN ('queued', 'recovering')
+             OR (status = 'running'
+               AND (claim_session_id IS NULL
+                 OR claim_session_id <> ?
+                 OR claim_deadline_ms IS NULL
+                 OR claim_deadline_ms <= ?)))`,
+        [
+          updatedAt,
+          updatedAt,
+          this.operationalClock.sessionId,
+          operationalNow + duration,
+          runId,
+          expectedClaimVersion,
+          this.operationalClock.sessionId,
+          operationalNow,
+        ],
+      );
+      return result.changes === 1 ? expectedClaimVersion + 1 : null;
+    });
   }
 
   async renewPipelineRunClaim(
@@ -910,26 +942,28 @@ export class ExpoSqlitePersistenceRepository
     requireIsoDateTime(updatedAt);
     requireIsoDateTime(claimObservedAt);
     requireIsoDateTime(claimExpiresAt);
-    if (Date.parse(claimExpiresAt) <= Date.parse(claimObservedAt))
-      throw new DomainError('SCHEMA_INVALID');
-    const result = await this.connection.run(
-      `UPDATE pipeline_runs
-       SET updated_at = CASE
-         WHEN julianday(updated_at) < julianday(?) THEN ? ELSE updated_at END,
-         claim_expires_at = ?
-       WHERE id = ? AND claim_version = ? AND status = 'running'
-         AND claim_expires_at IS NOT NULL
-         AND julianday(claim_expires_at) > julianday(?)`,
-      [
-        updatedAt,
-        updatedAt,
-        claimExpiresAt,
-        runId,
-        claimVersion,
-        claimObservedAt,
-      ],
-    );
-    return result.changes === 1;
+    const duration = leaseDurationMilliseconds(claimObservedAt, claimExpiresAt);
+    return this.connection.exclusive(async transaction => {
+      const operationalNow = this.operationalNow();
+      const result = await transaction.run(
+        `UPDATE pipeline_runs
+         SET updated_at = CASE
+           WHEN julianday(updated_at) < julianday(?) THEN ? ELSE updated_at END,
+           claim_deadline_ms = ?
+         WHERE id = ? AND claim_version = ? AND status = 'running'
+           AND claim_session_id = ? AND claim_deadline_ms > ?`,
+        [
+          updatedAt,
+          updatedAt,
+          operationalNow + duration,
+          runId,
+          claimVersion,
+          this.operationalClock.sessionId,
+          operationalNow,
+        ],
+      );
+      return result.changes === 1;
+    });
   }
 
   async checkpointPipelineRunArtifact(
@@ -940,19 +974,21 @@ export class ExpoSqlitePersistenceRepository
     requireIsoDateTime(input.updatedAt);
     assertArtifact(input.artifact);
     requireCanonicalId(input.publicationLeaseOwnerId);
-    requireIsoDateTime(input.publicationLeaseObservedAt);
+    if (input.publicationLeaseObservedAt !== undefined)
+      requireIsoDateTime(input.publicationLeaseObservedAt);
     return this.connection.exclusive(async transaction => {
       const run = await loadPipelineRunForSettlement(
         transaction,
         input.runId,
         input.claimVersion,
       );
-      if (!run || run.status !== 'running') return false;
+      if (!run || !this.pipelineClaimIsLive(run, this.operationalNow()))
+        return false;
       if (
         !(await cleanupLeaseOwnerMatches(
           transaction,
           input.publicationLeaseOwnerId,
-          input.publicationLeaseObservedAt,
+          this.operationalClock,
         ))
       )
         return false;
@@ -978,12 +1014,23 @@ export class ExpoSqlitePersistenceRepository
       )
         throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
       const updatedAt = latestPipelineTimestamp(run, input.updatedAt);
+      const mutationObservedAt = this.operationalNow();
+      if (!this.pipelineClaimIsLive(run, mutationObservedAt)) return false;
       const result = await transaction.run(
         `UPDATE pipeline_runs
          SET published_artifact_json = ?, updated_at = ?
          WHERE id = ? AND claim_version = ? AND status = 'running'
+           AND claim_session_id = ? AND claim_deadline_ms > ?
            AND (published_artifact_json IS NULL OR published_artifact_json = ?)`,
-        [encoded, updatedAt, input.runId, input.claimVersion, encoded],
+        [
+          encoded,
+          updatedAt,
+          input.runId,
+          input.claimVersion,
+          this.operationalClock.sessionId,
+          mutationObservedAt,
+          encoded,
+        ],
       );
       return result.changes === 1;
     });
@@ -994,13 +1041,16 @@ export class ExpoSqlitePersistenceRepository
     requirePipelineClaimVersion(input.claimVersion);
     requireIsoDateTime(input.updatedAt);
     if (input.artifact) assertArtifact(input.artifact);
+    if (input.publicationLeaseObservedAt !== undefined)
+      requireIsoDateTime(input.publicationLeaseObservedAt);
     return this.connection.exclusive(async transaction => {
       const run = await loadPipelineRunForSettlement(
         transaction,
         input.runId,
         input.claimVersion,
       );
-      if (!run || !isRunnablePipelineStatus(run.status)) return false;
+      if (!run || !this.pipelineClaimIsLive(run, this.operationalNow()))
+        return false;
       if (
         !['processing', 'recovering'].includes(run.pack_state) ||
         run.item_state !== pipelineCheckpointState(pipelineStage(run.stage))
@@ -1019,12 +1069,10 @@ export class ExpoSqlitePersistenceRepository
         stage === 'extract' &&
         (input.publicationLeaseOwnerId === undefined ||
           !isCanonicalUuid(input.publicationLeaseOwnerId) ||
-          input.publicationLeaseObservedAt === undefined ||
-          !isIsoDateTime(input.publicationLeaseObservedAt) ||
           !(await cleanupLeaseOwnerMatches(
             transaction,
             input.publicationLeaseOwnerId,
-            input.publicationLeaseObservedAt,
+            this.operationalClock,
           )))
       )
         return false;
@@ -1061,6 +1109,21 @@ export class ExpoSqlitePersistenceRepository
           ? [siblingChronology.updated_at]
           : []),
       );
+      const mutationObservedAt = this.operationalNow();
+      if (!this.pipelineClaimIsLive(run, mutationObservedAt)) return false;
+      const publicationOwnerId = input.artifact
+        ? input.publicationLeaseOwnerId
+        : undefined;
+      if (
+        stage === 'extract' &&
+        (publicationOwnerId === undefined ||
+          !(await cleanupLeaseOwnerMatches(
+            transaction,
+            publicationOwnerId,
+            this.operationalClock,
+          )))
+      )
+        return false;
       if (input.artifact) {
         validatePublishedArtifact({
           packId: run.pack_id,
@@ -1085,7 +1148,8 @@ export class ExpoSqlitePersistenceRepository
       if (itemUpdate.changes !== 1) return false;
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'succeeded', updated_at = ?,
-           completed_at = ?, error_code = NULL, claim_expires_at = NULL WHERE id = ?`,
+           completed_at = ?, error_code = NULL, claim_session_id = NULL,
+           claim_deadline_ms = NULL WHERE id = ?`,
         [settledAt, settledAt, input.runId],
       );
       await transaction.run(
@@ -1109,7 +1173,8 @@ export class ExpoSqlitePersistenceRepository
         input.runId,
         input.claimVersion,
       );
-      if (!run || !isRunnablePipelineStatus(run.status)) return false;
+      if (!run || !this.pipelineClaimIsLive(run, this.operationalNow()))
+        return false;
       const stage = pipelineStage(run.stage);
       if (
         !['processing', 'recovering'].includes(run.pack_state) ||
@@ -1133,6 +1198,7 @@ export class ExpoSqlitePersistenceRepository
           ? [siblingChronology.updated_at]
           : []),
       );
+      if (!this.pipelineClaimIsLive(run, this.operationalNow())) return false;
       await transaction.run(
         `UPDATE context_items SET state = 'failed', retry_stage = ?, updated_at = ?
          WHERE id = ? AND pack_id = ?`,
@@ -1140,12 +1206,13 @@ export class ExpoSqlitePersistenceRepository
       );
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'failed', updated_at = ?,
-           completed_at = ?, error_code = ?, claim_expires_at = NULL WHERE id = ?`,
+           completed_at = ?, error_code = ?, claim_session_id = NULL,
+           claim_deadline_ms = NULL WHERE id = ?`,
         [settledAt, settledAt, input.errorCode, input.runId],
       );
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?,
-           claim_expires_at = NULL
+           claim_session_id = NULL, claim_deadline_ms = NULL
          WHERE pack_id = ? AND id <> ?
            AND status IN ('queued', 'running', 'recovering')`,
         [settledAt, settledAt, run.pack_id, input.runId],
@@ -1159,11 +1226,28 @@ export class ExpoSqlitePersistenceRepository
     });
   }
 
+  private pipelineClaimIsLive(
+    run: Pick<
+      PipelineSettlementRow,
+      'status' | 'claim_session_id' | 'claim_deadline_ms'
+    >,
+    observedAt: number,
+  ): boolean {
+    return (
+      run.status === 'running' &&
+      run.claim_session_id === this.operationalClock.sessionId &&
+      run.claim_deadline_ms !== null &&
+      Number.isFinite(run.claim_deadline_ms) &&
+      run.claim_deadline_ms > observedAt
+    );
+  }
+
   async cancelPipelineRuns(packId: string, updatedAt: string): Promise<number> {
     requireCanonicalId(packId);
     requireIsoDateTime(updatedAt);
     const result = await this.connection.run(
-      `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
+      `UPDATE pipeline_runs SET status = 'cancelled',
+         claim_session_id = NULL, claim_deadline_ms = NULL,
          updated_at = CASE
            WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
          completed_at = CASE
@@ -1223,7 +1307,8 @@ export class ExpoSqlitePersistenceRepository
       );
       const deletedAt = new Date().toISOString();
       await transaction.run(
-        `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
+        `UPDATE pipeline_runs SET status = 'cancelled',
+           claim_session_id = NULL, claim_deadline_ms = NULL,
            updated_at = CASE
              WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
            completed_at = CASE
@@ -1403,13 +1488,14 @@ export class ExpoSqlitePersistenceRepository
   ): Promise<'created' | 'replayed'> {
     validatePublishedArtifact(input);
     requireCanonicalId(input.publicationLeaseOwnerId);
-    requireIsoDateTime(input.publicationLeaseObservedAt);
+    if (input.publicationLeaseObservedAt !== undefined)
+      requireIsoDateTime(input.publicationLeaseObservedAt);
     return this.connection.exclusive(async transaction => {
       if (
         !(await cleanupLeaseOwnerMatches(
           transaction,
           input.publicationLeaseOwnerId,
-          input.publicationLeaseObservedAt,
+          this.operationalClock,
         ))
       )
         throw new DomainError('PERSISTENCE_CONFLICT');
@@ -1623,25 +1709,41 @@ export class ExpoSqlitePersistenceRepository
     requireCanonicalId(ownerId);
     requireIsoDateTime(acquiredAt);
     requireIsoDateTime(expiresAt);
-    if (Date.parse(expiresAt) <= Date.parse(acquiredAt))
-      throw new DomainError('SCHEMA_INVALID');
+    const duration = leaseDurationMilliseconds(acquiredAt, expiresAt);
     return this.connection.exclusive(async transaction => {
+      const operationalNow = this.operationalNow();
       const existing = await transaction.first<{
         owner_id: string;
-        expires_at: string;
+        session_id: string | null;
+        deadline_ms: number | null;
       }>(
-        "SELECT owner_id, expires_at FROM cleanup_leases WHERE name = 'artifact-cleanup'",
+        `SELECT owner_id, session_id, deadline_ms FROM cleanup_leases
+         WHERE name = 'artifact-cleanup'`,
       );
-      if (existing && Date.parse(existing.expires_at) > Date.parse(acquiredAt))
+      if (
+        existing &&
+        existing.session_id === this.operationalClock.sessionId &&
+        existing.deadline_ms !== null &&
+        existing.deadline_ms > operationalNow
+      )
         return false;
       await transaction.run(
-        `INSERT INTO cleanup_leases (name, owner_id, acquired_at, expires_at)
-         VALUES ('artifact-cleanup', ?, ?, ?)
+        `INSERT INTO cleanup_leases
+           (name, owner_id, acquired_at, expires_at, session_id, deadline_ms)
+         VALUES ('artifact-cleanup', ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            owner_id = excluded.owner_id,
            acquired_at = excluded.acquired_at,
-           expires_at = excluded.expires_at`,
-        [ownerId, acquiredAt, expiresAt],
+           expires_at = excluded.expires_at,
+           session_id = excluded.session_id,
+           deadline_ms = excluded.deadline_ms`,
+        [
+          ownerId,
+          acquiredAt,
+          expiresAt,
+          this.operationalClock.sessionId,
+          operationalNow + duration,
+        ],
       );
       return true;
     });
@@ -1659,13 +1761,15 @@ export class ExpoSqlitePersistenceRepository
     requireCanonicalId(ownerId);
     requireIsoDateTime(acquiredAt);
     requireIsoDateTime(expiresAt);
-    if (Date.parse(expiresAt) <= Date.parse(acquiredAt))
-      throw new DomainError('SCHEMA_INVALID');
+    const duration = leaseDurationMilliseconds(acquiredAt, expiresAt);
     return this.connection.exclusive(async transaction => {
+      const operationalNow = this.operationalNow();
       const currentClaim = await transaction.first<{
-        id: string;
+        status: string;
+        claim_session_id: string | null;
+        claim_deadline_ms: number | null;
       }>(
-        `SELECT run.id
+        `SELECT run.status, run.claim_session_id, run.claim_deadline_ms
          FROM pipeline_runs run
          JOIN packs pack ON pack.id = run.pack_id
          JOIN context_items item ON item.id = run.item_id AND item.pack_id = run.pack_id
@@ -1673,26 +1777,43 @@ export class ExpoSqlitePersistenceRepository
            AND pack.deleted_at IS NULL`,
         [runId, claimVersion],
       );
-      if (!currentClaim) return false;
+      if (
+        !currentClaim ||
+        !this.pipelineClaimIsLive(currentClaim, operationalNow)
+      )
+        return false;
       const existing = await transaction.first<{
         owner_id: string;
-        expires_at: string;
+        session_id: string | null;
+        deadline_ms: number | null;
       }>(
-        "SELECT owner_id, expires_at FROM cleanup_leases WHERE name = 'artifact-cleanup'",
+        `SELECT owner_id, session_id, deadline_ms FROM cleanup_leases
+         WHERE name = 'artifact-cleanup'`,
       );
-      // Cleanup leases are wall-clock mutexes, not domain chronology. A Pack
-      // timestamp can legitimately remain ahead after clock correction; using
-      // it to expire a live cleanup owner would let publication overlap cleanup.
-      if (existing && Date.parse(existing.expires_at) > Date.parse(acquiredAt))
+      if (
+        existing &&
+        existing.session_id === this.operationalClock.sessionId &&
+        existing.deadline_ms !== null &&
+        existing.deadline_ms > operationalNow
+      )
         return false;
       await transaction.run(
-        `INSERT INTO cleanup_leases (name, owner_id, acquired_at, expires_at)
-         VALUES ('artifact-cleanup', ?, ?, ?)
+        `INSERT INTO cleanup_leases
+           (name, owner_id, acquired_at, expires_at, session_id, deadline_ms)
+         VALUES ('artifact-cleanup', ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            owner_id = excluded.owner_id,
            acquired_at = excluded.acquired_at,
-           expires_at = excluded.expires_at`,
-        [ownerId, acquiredAt, expiresAt],
+           expires_at = excluded.expires_at,
+           session_id = excluded.session_id,
+           deadline_ms = excluded.deadline_ms`,
+        [
+          ownerId,
+          acquiredAt,
+          expiresAt,
+          this.operationalClock.sessionId,
+          operationalNow + duration,
+        ],
       );
       return true;
     });
@@ -1706,27 +1827,43 @@ export class ExpoSqlitePersistenceRepository
     requireCanonicalId(ownerId);
     requireIsoDateTime(renewedAt);
     requireIsoDateTime(expiresAt);
-    const requestedDuration = Date.parse(expiresAt) - Date.parse(renewedAt);
-    if (requestedDuration <= 0) throw new DomainError('SCHEMA_INVALID');
+    const requestedDuration = leaseDurationMilliseconds(renewedAt, expiresAt);
     return this.connection.exclusive(async transaction => {
+      const operationalNow = this.operationalNow();
       const existing = await transaction.first<{
         owner_id: string;
         acquired_at: string;
         expires_at: string;
+        session_id: string | null;
+        deadline_ms: number | null;
       }>(
-        `SELECT owner_id, acquired_at, expires_at FROM cleanup_leases
+        `SELECT owner_id, acquired_at, expires_at, session_id, deadline_ms
+         FROM cleanup_leases
          WHERE name = 'artifact-cleanup'`,
       );
-      if (!existing || existing.owner_id !== ownerId) return false;
+      if (
+        !existing ||
+        existing.owner_id !== ownerId ||
+        existing.session_id !== this.operationalClock.sessionId ||
+        existing.deadline_ms === null ||
+        existing.deadline_ms <= operationalNow
+      )
+        return false;
       requireIsoDateTime(existing.acquired_at);
       requireIsoDateTime(existing.expires_at);
-      if (Date.parse(existing.expires_at) <= Date.parse(renewedAt))
-        return false;
       const result = await transaction.run(
         `UPDATE cleanup_leases
-         SET acquired_at = ?, expires_at = ?
-         WHERE name = 'artifact-cleanup' AND owner_id = ? AND expires_at = ?`,
-        [renewedAt, expiresAt, ownerId, existing.expires_at],
+         SET acquired_at = ?, expires_at = ?, deadline_ms = ?
+         WHERE name = 'artifact-cleanup' AND owner_id = ?
+           AND session_id = ? AND deadline_ms = ?`,
+        [
+          renewedAt,
+          expiresAt,
+          operationalNow + requestedDuration,
+          ownerId,
+          this.operationalClock.sessionId,
+          existing.deadline_ms,
+        ],
       );
       return result.changes === 1;
     });
@@ -2058,7 +2195,8 @@ async function replaceContextItems(
   for (const row of existing) {
     if (retained.has(row.id)) continue;
     await transaction.run(
-      `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
+      `UPDATE pipeline_runs SET status = 'cancelled',
+         claim_session_id = NULL, claim_deadline_ms = NULL,
          updated_at = CASE
            WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
          completed_at = CASE
@@ -2233,6 +2371,8 @@ interface PipelineSettlementRow {
   readonly pack_updated_at: string;
   readonly item_updated_at: string;
   readonly published_artifact_json: string | null;
+  readonly claim_session_id: string | null;
+  readonly claim_deadline_ms: number | null;
 }
 
 async function startPipelineRunInTransaction(
@@ -2307,7 +2447,8 @@ async function loadPipelineRunForSettlement(
   return transaction.first<PipelineSettlementRow>(
     `SELECT run.pack_id, run.item_id, run.stage, run.status,
        run.started_at AS run_started_at, run.updated_at AS run_updated_at,
-       run.published_artifact_json,
+       run.published_artifact_json, run.claim_session_id,
+       run.claim_deadline_ms,
        pack.state AS pack_state, item.state AS item_state,
        pack.created_at AS pack_created_at, pack.updated_at AS pack_updated_at,
        item.updated_at AS item_updated_at, item.source_type
@@ -2568,19 +2709,35 @@ function latestPipelineTimestamp(
 async function cleanupLeaseOwnerMatches(
   transaction: SqlConnection,
   ownerId: string,
-  observedAt: string,
+  operationalClock: OperationalLeaseClock,
 ): Promise<boolean> {
-  requireIsoDateTime(observedAt);
+  const observedAt = observeOperationalMilliseconds(operationalClock);
   const lease = await transaction.first<{
     owner_id: string;
-    expires_at: string;
+    session_id: string | null;
+    deadline_ms: number | null;
   }>(
-    `SELECT owner_id, expires_at FROM cleanup_leases
+    `SELECT owner_id, session_id, deadline_ms FROM cleanup_leases
      WHERE name = 'artifact-cleanup'`,
   );
-  if (!lease || lease.owner_id !== ownerId) return false;
-  requireIsoDateTime(lease.expires_at);
-  return Date.parse(lease.expires_at) > Date.parse(observedAt);
+  return (
+    lease !== null &&
+    lease.owner_id === ownerId &&
+    lease.session_id === operationalClock.sessionId &&
+    lease.deadline_ms !== null &&
+    Number.isFinite(lease.deadline_ms) &&
+    lease.deadline_ms > observedAt
+  );
+}
+
+function leaseDurationMilliseconds(
+  observedAt: string,
+  expiresAt: string,
+): number {
+  const duration = Date.parse(expiresAt) - Date.parse(observedAt);
+  if (!Number.isSafeInteger(duration) || duration <= 0)
+    throw new DomainError('SCHEMA_INVALID');
+  return duration;
 }
 
 function assertPersistedArtifactPathKind(

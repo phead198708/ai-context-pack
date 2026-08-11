@@ -132,8 +132,8 @@ export interface CheckpointPipelineRunArtifactInput {
   readonly artifact: Artifact;
   /** Global publication lease owner fenced in the checkpoint transaction. */
   readonly publicationLeaseOwnerId: string;
-  /** Wall-clock instant used to reject an expired checkpoint lease. */
-  readonly publicationLeaseObservedAt: string;
+  /** @deprecated Validated when present but never used as lease authority. */
+  readonly publicationLeaseObservedAt?: string;
 }
 
 export type CompletePipelineRunInput = {
@@ -145,8 +145,8 @@ export type CompletePipelineRunInput = {
       readonly artifact: Artifact;
       /** Required for extraction settlement and fenced in the same transaction. */
       readonly publicationLeaseOwnerId: string;
-      /** Wall-clock observation; never derived from Pack chronology. */
-      readonly publicationLeaseObservedAt: string;
+      /** @deprecated Validated when present but never used as lease authority. */
+      readonly publicationLeaseObservedAt?: string;
     }
   | {
       readonly artifact?: undefined;
@@ -177,8 +177,8 @@ export interface RegisterPublishedArtifactInput {
   readonly artifact: Artifact;
   /** Global publication lease owner fenced in the registration transaction. */
   readonly publicationLeaseOwnerId: string;
-  /** Wall-clock instant used to reject an expired registration lease. */
-  readonly publicationLeaseObservedAt: string;
+  /** @deprecated Validated when present but never used as lease authority. */
+  readonly publicationLeaseObservedAt?: string;
 }
 
 export interface StorageUsageSummary {

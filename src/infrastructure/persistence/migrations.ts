@@ -313,10 +313,13 @@ ALTER TABLE pipeline_runs ADD COLUMN published_artifact_json TEXT;
 PRAGMA user_version = 6;
 `,
   `
-ALTER TABLE pipeline_runs ADD COLUMN claim_expires_at TEXT;
+ALTER TABLE pipeline_runs ADD COLUMN claim_session_id TEXT;
+ALTER TABLE pipeline_runs ADD COLUMN claim_deadline_ms REAL;
+ALTER TABLE cleanup_leases ADD COLUMN session_id TEXT;
+ALTER TABLE cleanup_leases ADD COLUMN deadline_ms REAL;
 DROP INDEX pipeline_runs_runnable_index;
 CREATE INDEX pipeline_runs_runnable_index
-  ON pipeline_runs(status, claim_expires_at, updated_at, id);
+  ON pipeline_runs(status, claim_session_id, claim_deadline_ms, updated_at, id);
 PRAGMA user_version = 7;
 `,
 ] as const;

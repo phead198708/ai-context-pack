@@ -164,6 +164,11 @@ describe('production repository against SQLite', () => {
   let database: NodeDatabase;
   let repository: ExpoSqlitePersistenceRepository;
 
+  function dropV7OperationalLeaseColumns(): void {
+    database.exec('ALTER TABLE cleanup_leases DROP COLUMN session_id');
+    database.exec('ALTER TABLE cleanup_leases DROP COLUMN deadline_ms');
+  }
+
   beforeEach(async () => {
     directory = mkdtempSync(join(tmpdir(), 'ai-context-pack-repository-'));
     databasePath = join(directory, 'repository.db');
@@ -321,6 +326,7 @@ describe('production repository against SQLite', () => {
       .run(firstItemId);
     database.exec('ALTER TABLE context_items DROP COLUMN retry_stage');
     database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
     database.exec('DROP TABLE pipeline_runs');
     database.exec('PRAGMA user_version = 3');
 
@@ -371,6 +377,7 @@ describe('production repository against SQLite', () => {
     ).resolves.toBe(true);
 
     database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
     database.exec('DROP TABLE pipeline_runs');
     database.exec('PRAGMA user_version = 4');
     database.close();
@@ -414,6 +421,7 @@ describe('production repository against SQLite', () => {
     });
 
     database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
     database.exec('DROP TABLE pipeline_runs');
     database.exec('PRAGMA user_version = 4');
     database.close();
@@ -469,6 +477,7 @@ describe('production repository against SQLite', () => {
       database.exec(
         'ALTER TABLE import_items DROP COLUMN original_disposition',
       );
+      dropV7OperationalLeaseColumns();
       database.exec('DROP TABLE pipeline_runs');
       database.exec('PRAGMA user_version = 4');
       database.close();
@@ -512,6 +521,7 @@ describe('production repository against SQLite', () => {
     database.prepare('DELETE FROM artifacts WHERE id = ?').run(firstItemId);
 
     database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
     database.exec('DROP TABLE pipeline_runs');
     database.exec('PRAGMA user_version = 4');
     database.close();
@@ -555,6 +565,7 @@ describe('production repository against SQLite', () => {
     });
 
     database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
     database.exec('DROP TABLE pipeline_runs');
     database.exec('PRAGMA user_version = 4');
     database.close();
@@ -588,6 +599,7 @@ describe('production repository against SQLite', () => {
     });
 
     database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    dropV7OperationalLeaseColumns();
     database.exec('DROP TABLE pipeline_runs');
     database.exec('PRAGMA user_version = 4');
     database.close();

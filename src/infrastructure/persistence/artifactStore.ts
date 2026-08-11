@@ -21,6 +21,7 @@ import type {
 import { assertArtifact } from './modelCodec';
 import { startCleanupLeaseHeartbeat } from './cleanupLeaseHeartbeat';
 import { acquireArtifactLifecycleMutex } from './artifactLifecycleMutex';
+import { monotonicNowMilliseconds } from './operationalLeaseClock';
 import {
   isOwnedArtifactPath,
   isOwnedArtifactStorePath,
@@ -111,6 +112,7 @@ export class PublishedArtifactCoordinator {
     private readonly files: AtomicArtifactFileStore,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly leaseDurationMs = 5 * 60 * 1_000,
+    private readonly monotonicNow: () => number = monotonicNowMilliseconds,
   ) {}
 
   async publish(
@@ -134,6 +136,7 @@ export class PublishedArtifactCoordinator {
       acquiredAt,
       this.leaseDurationMs,
       this.now,
+      this.monotonicNow,
     );
     const releaseLifecycleMutex = await acquireArtifactLifecycleMutex();
     try {
@@ -156,7 +159,6 @@ export class PublishedArtifactCoordinator {
           packId: input.packId,
           artifact: input.artifact,
           publicationLeaseOwnerId: publicationOwnerId,
-          publicationLeaseObservedAt: this.now(),
         });
         heartbeat.assertOwned();
         return result;

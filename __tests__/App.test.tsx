@@ -404,6 +404,10 @@ describe('App interactions', () => {
       accessibilityLiveRegion: 'assertive',
     });
     expect(instanceText(recoveryAlert)).toContain('PIPELINE_STAGE_FAILED');
+    expect(
+      recoveryAlert.findAll(node => node.props.accessibilityRole === 'button'),
+    ).toHaveLength(0);
+    expect(control(renderer, 'button', 'Retry')).toBeDefined();
 
     await press(control(renderer, 'button', 'Retry'));
 

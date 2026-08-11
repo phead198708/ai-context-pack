@@ -137,12 +137,12 @@ INSERT INTO pipeline_runs (
   execute(migrations[6]);
   assertQuery('PRAGMA user_version;', '7');
   assertQuery(
-    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name = 'claim_expires_at';",
-    '1',
+    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name IN ('claim_session_id', 'claim_deadline_ms');",
+    '2',
   );
   assertQuery(
-    "SELECT status || ':' || claim_version || ':' || (claim_expires_at IS NULL) FROM pipeline_runs WHERE id = '623e4567-e89b-42d3-a456-426614174000';",
-    'failed:1:1',
+    "SELECT status || ':' || claim_version || ':' || (claim_session_id IS NULL) || ':' || (claim_deadline_ms IS NULL) FROM pipeline_runs WHERE id = '623e4567-e89b-42d3-a456-426614174000';",
+    'failed:1:1:1',
   );
   const binaryColumns = query(
     `SELECT COUNT(*)

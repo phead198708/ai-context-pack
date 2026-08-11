@@ -723,14 +723,15 @@ function StateCard({
   alert?: boolean;
 }): React.JSX.Element {
   return (
-    <View
-      accessibilityLiveRegion={alert ? 'assertive' : undefined}
-      accessibilityRole={alert ? 'alert' : undefined}
-      accessible={alert || undefined}
-      style={styles.card}
-    >
-      <Text style={styles.cardTitle}>{title}</Text>
-      {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+    <View style={styles.card}>
+      <View
+        accessibilityLiveRegion={alert ? 'assertive' : undefined}
+        accessibilityRole={alert ? 'alert' : undefined}
+        accessible={alert || undefined}
+      >
+        <Text style={styles.cardTitle}>{title}</Text>
+        {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+      </View>
       {children}
     </View>
   );

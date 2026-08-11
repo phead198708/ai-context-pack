@@ -79,10 +79,57 @@ class NodeSqlConnection {
   }
 }
 
+class DelayedExclusiveConnection {
+  private nextGate:
+    | {
+        readonly entered: ReturnType<typeof deferred<void>>;
+        readonly release: ReturnType<typeof deferred<void>>;
+      }
+    | undefined;
+
+  constructor(private readonly delegate: NodeSqlConnection) {}
+
+  exec(source: string) {
+    return this.delegate.exec(source);
+  }
+
+  run(source: string, params: readonly SqlValue[] = []) {
+    return this.delegate.run(source, params);
+  }
+
+  first<T>(source: string, params: readonly SqlValue[] = []) {
+    return this.delegate.first<T>(source, params);
+  }
+
+  all<T>(source: string, params: readonly SqlValue[] = []) {
+    return this.delegate.all<T>(source, params);
+  }
+
+  delayNextExclusive() {
+    const gate = { entered: deferred<void>(), release: deferred<void>() };
+    this.nextGate = gate;
+    return gate;
+  }
+
+  async exclusive<T>(
+    task: (transaction: NodeSqlConnection) => Promise<T>,
+  ): Promise<T> {
+    const gate = this.nextGate;
+    this.nextGate = undefined;
+    if (gate) {
+      gate.entered.resolve();
+      await gate.release.promise;
+    }
+    return this.delegate.exclusive(task);
+  }
+}
+
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const itemId = '223e4567-e89b-42d3-a456-426614174000';
 const ingestionId = '323e4567-e89b-42d3-a456-426614174000';
 const now = '2026-08-11T00:00:00Z';
+const operationalSessionId = '333e4567-e89b-42d3-a456-426614174000';
+let operationalMilliseconds = 0;
 
 function claimExpiresAt(observedAt: string, durationMs = 5 * 60 * 1_000) {
   return new Date(Date.parse(observedAt) + durationMs).toISOString();
@@ -215,9 +262,16 @@ let database: NodeDatabase;
 let repository: ExpoSqlitePersistenceRepository;
 
 beforeEach(async () => {
+  operationalMilliseconds = 0;
   database = new DatabaseSync(':memory:');
   repository = new ExpoSqlitePersistenceRepository(
     new NodeSqlConnection(database) as never,
+    undefined,
+    false,
+    {
+      sessionId: operationalSessionId,
+      nowMilliseconds: () => operationalMilliseconds,
+    },
   );
   await repository.initialize();
   await seedSingleItem(packId, itemId, ingestionId, 'image/png');
@@ -551,6 +605,7 @@ test('cleanup lease ownership is claim-specific and a stale owner cannot release
     ),
   ).resolves.toBe(true);
 
+  operationalMilliseconds = 60_000;
   const replacementClaim = await repository.markPipelineRunRunning(
     queued.id,
     firstClaim!,
@@ -577,6 +632,7 @@ test('cleanup lease ownership is claim-specific and a stale owner cannot release
       '2026-08-11T00:05:00Z',
     ),
   ).resolves.toBe(false);
+  operationalMilliseconds = 61_000;
   await expect(
     repository.acquireCleanupLeaseForPipelineRun(
       queued.id,
@@ -631,6 +687,7 @@ test('future Pack chronology cannot expire an active wall-clock cleanup lease', 
     expires_at: '2026-08-11T00:01:00Z',
   });
 
+  operationalMilliseconds = 61_000;
   await expect(
     repository.acquireCleanupLeaseForPipelineRun(
       run.id,
@@ -725,6 +782,7 @@ test('cleanup lease renewal is owner-CAS fenced and rebases after clock rollback
     acquired_at: '2026-08-11T00:01:00Z',
     expires_at: '2026-08-11T00:06:00Z',
   });
+  operationalMilliseconds = 299_000;
   await expect(
     repository.acquireCleanupLease(
       otherOwner,
@@ -732,6 +790,7 @@ test('cleanup lease renewal is owner-CAS fenced and rebases after clock rollback
       '2026-08-11T00:10:59Z',
     ),
   ).resolves.toBe(false);
+  operationalMilliseconds = 301_000;
   await expect(
     repository.acquireCleanupLease(
       otherOwner,
@@ -767,16 +826,20 @@ test('future domain chronology cannot postpone a crashed claim on the wall clock
   expect(
     database
       .prepare(
-        'SELECT updated_at, claim_expires_at FROM pipeline_runs WHERE id = ?',
+        `SELECT updated_at, claim_session_id, claim_deadline_ms
+         FROM pipeline_runs WHERE id = ?`,
       )
       .get(queued.id),
   ).toEqual({
     updated_at: futureDomainAt,
-    claim_expires_at: '2026-08-11T00:00:00.900Z',
+    claim_session_id: operationalSessionId,
+    claim_deadline_ms: 900,
   });
+  operationalMilliseconds = 899;
   await expect(
     repository.listRunnablePipelineRuns('2026-08-11T00:00:00.899Z'),
   ).resolves.toEqual([]);
+  operationalMilliseconds = 900;
   await expect(
     repository.listRunnablePipelineRuns('2026-08-11T00:00:00.900Z'),
   ).resolves.toEqual([
@@ -795,6 +858,193 @@ test('future domain chronology cannot postpone a crashed claim on the wall clock
       '2026-08-11T00:00:01.800Z',
     ),
   ).resolves.toBe(2);
+});
+
+test('process replacement immediately reclaims prior-session claims and cleanup leases after clock rollback', async () => {
+  const run = await persistAndClaim({
+    id: 'a43e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  });
+  const oldOwner = 'b43e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      run.id,
+      run.claimVersion,
+      oldOwner,
+      '2026-08-11T01:00:00Z',
+      '2026-08-11T01:05:00Z',
+    ),
+  ).resolves.toBe(true);
+
+  const replacementSessionId = 'c43e4567-e89b-42d3-a456-426614174000';
+  const replacement = new ExpoSqlitePersistenceRepository(
+    new NodeSqlConnection(database) as never,
+    undefined,
+    false,
+    {
+      sessionId: replacementSessionId,
+      nowMilliseconds: () => 0,
+    },
+  );
+  await replacement.initialize();
+  await expect(replacement.listRunnablePipelineRuns()).resolves.toEqual([
+    expect.objectContaining({ id: run.id, claimVersion: run.claimVersion }),
+  ]);
+  const replacementClaim = await replacement.markPipelineRunRunning(
+    run.id,
+    run.claimVersion,
+    run.updatedAt,
+    '2026-08-11T00:01:00Z',
+    '2026-08-11T00:06:00Z',
+  );
+  expect(replacementClaim).toBe(run.claimVersion + 1);
+  const replacementOwner = 'd43e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    replacement.acquireCleanupLeaseForPipelineRun(
+      run.id,
+      replacementClaim!,
+      replacementOwner,
+      '2026-08-11T00:01:00Z',
+      '2026-08-11T00:06:00Z',
+    ),
+  ).resolves.toBe(true);
+  await expect(
+    repository.renewCleanupLease(
+      oldOwner,
+      '2026-08-11T01:01:00Z',
+      '2026-08-11T01:06:00Z',
+    ),
+  ).resolves.toBe(false);
+  await expect(
+    repository.failPipelineRun({
+      runId: run.id,
+      claimVersion: run.claimVersion,
+      updatedAt: '2026-08-11T01:01:00Z',
+      errorCode: 'PIPELINE_STAGE_FAILED',
+    }),
+  ).resolves.toBe(false);
+  await replacement.releaseCleanupLease(replacementOwner);
+});
+
+test('checkpoint, completion, and registration observe expiry inside their queued transaction', async () => {
+  const run = await persistAndClaim({
+    id: 'e43e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  });
+  const artifact: Artifact = {
+    id: run.id,
+    itemId,
+    kind: 'ocr-text',
+    relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+    mediaType: 'text/plain',
+    byteCount: 4,
+    sha256: '9'.repeat(64),
+    processorVersion: {
+      processor: 'fixture-extraction',
+      version: '1',
+      contractVersion: 1,
+    },
+    createdAt: now,
+    immutable: true,
+  };
+  const delayedConnection = new DelayedExclusiveConnection(
+    new NodeSqlConnection(database),
+  );
+  const delayedRepository = new ExpoSqlitePersistenceRepository(
+    delayedConnection as never,
+    undefined,
+    false,
+    {
+      sessionId: operationalSessionId,
+      nowMilliseconds: () => operationalMilliseconds,
+    },
+  );
+  await delayedRepository.initialize();
+
+  const checkpointOwner = 'f43e4567-e89b-42d3-a456-426614174000';
+  await repository.acquireCleanupLeaseForPipelineRun(
+    run.id,
+    run.claimVersion,
+    checkpointOwner,
+    now,
+    '2026-08-11T00:01:00Z',
+  );
+  let gate = delayedConnection.delayNextExclusive();
+  const staleCheckpoint = delayedRepository.checkpointPipelineRunArtifact({
+    runId: run.id,
+    claimVersion: run.claimVersion,
+    updatedAt: now,
+    artifact,
+    publicationLeaseOwnerId: checkpointOwner,
+    publicationLeaseObservedAt: now,
+  });
+  await gate.entered.promise;
+  operationalMilliseconds = 60_000;
+  gate.release.resolve();
+  await expect(staleCheckpoint).resolves.toBe(false);
+
+  const completionOwner = '053e4567-e89b-42d3-a456-426614174000';
+  await repository.acquireCleanupLeaseForPipelineRun(
+    run.id,
+    run.claimVersion,
+    completionOwner,
+    '2026-08-11T00:01:00Z',
+    '2026-08-11T00:02:00Z',
+  );
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: run.claimVersion,
+      updatedAt: '2026-08-11T00:01:00Z',
+      artifact,
+      publicationLeaseOwnerId: completionOwner,
+    }),
+  ).resolves.toBe(true);
+  gate = delayedConnection.delayNextExclusive();
+  const staleCompletion = delayedRepository.completePipelineRun({
+    runId: run.id,
+    claimVersion: run.claimVersion,
+    updatedAt: '2026-08-11T00:01:00Z',
+    artifact,
+    publicationLeaseOwnerId: completionOwner,
+    publicationLeaseObservedAt: '2026-08-11T00:01:00Z',
+  });
+  await gate.entered.promise;
+  operationalMilliseconds = 120_000;
+  gate.release.resolve();
+  await expect(staleCompletion).resolves.toBe(false);
+
+  const registrationOwner = '153e4567-e89b-42d3-a456-426614174000';
+  await repository.acquireCleanupLease(
+    registrationOwner,
+    '2026-08-11T00:02:00Z',
+    '2026-08-11T00:03:00Z',
+  );
+  gate = delayedConnection.delayNextExclusive();
+  const staleRegistration = delayedRepository.registerPublishedArtifact({
+    packId,
+    artifact,
+    publicationLeaseOwnerId: registrationOwner,
+    publicationLeaseObservedAt: '2026-08-11T00:02:00Z',
+  });
+  await gate.entered.promise;
+  operationalMilliseconds = 180_000;
+  gate.release.resolve();
+  await expect(staleRegistration).rejects.toMatchObject({
+    code: 'PERSISTENCE_CONFLICT',
+  });
 });
 
 test('publication checkpoints are exact-claim idempotent and reject descriptor changes', async () => {
@@ -867,6 +1117,7 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
     }),
   ).rejects.toMatchObject({ code: 'STORAGE_ARTIFACT_IMMUTABLE' });
 
+  operationalMilliseconds = 300_000;
   const replacementClaim = await repository.markPipelineRunRunning(
     run.id,
     claimed.claimVersion,
@@ -948,6 +1199,7 @@ test('extraction settlement is fenced when the publication lease owner changes',
       artifact,
     } as never),
   ).resolves.toBe(false);
+  operationalMilliseconds = 60_000;
   await expect(
     repository.completePipelineRun({
       runId: run.id,
@@ -976,6 +1228,7 @@ test('extraction settlement is fenced when the publication lease owner changes',
       publicationLeaseObservedAt: '2026-08-11T00:02:00Z',
     }),
   ).resolves.toBe(false);
+  operationalMilliseconds = 300_000;
   expect(
     (await repository.listRunnablePipelineRuns('2026-08-11T00:05:00Z'))[0],
   ).toMatchObject({
@@ -1009,6 +1262,7 @@ test('publication checkpoint fails closed when the matching lease owner has expi
     ),
   ).resolves.toBe(true);
 
+  operationalMilliseconds = 60_000;
   await expect(
     repository.checkpointPipelineRunArtifact({
       runId: run.id,
@@ -1098,6 +1352,7 @@ test('checkpoint recovery lease contention stays recoverable instead of failing 
     5 * 60 * 1_000,
     onUnexpectedFailure,
   );
+  operationalMilliseconds = 300_000;
   await contending.recover();
   await contending.waitForIdle();
 
@@ -1105,6 +1360,7 @@ test('checkpoint recovery lease contention stays recoverable instead of failing 
     runId: run.id,
     code: 'PERSISTENCE_CONFLICT',
   });
+  operationalMilliseconds = 600_000;
   expect(
     await repository.listRunnablePipelineRuns('2026-08-11T00:12:00Z'),
   ).toEqual([
@@ -1190,6 +1446,8 @@ test('a heartbeat keeps a long-running claim live for a quick replacement recove
       firstWorker,
       () => new Date(clock).toISOString(),
       90,
+      undefined,
+      () => operationalMilliseconds,
     );
     await new PackLibraryController(
       async () => repository,
@@ -1200,6 +1458,7 @@ test('a heartbeat keeps a long-running claim live for a quick replacement recove
     expect(firstWorker.starts).toHaveLength(1);
 
     clock += 30;
+    operationalMilliseconds += 30;
     jest.advanceTimersByTime(30);
     await flushPromises();
     expect(renew).toHaveBeenCalledWith(
@@ -1216,6 +1475,8 @@ test('a heartbeat keeps a long-running claim live for a quick replacement recove
       replacementWorker,
       () => new Date(clock).toISOString(),
       90,
+      undefined,
+      () => operationalMilliseconds,
     );
     await replacement.recover();
     await replacement.waitForIdle();
@@ -1242,6 +1503,7 @@ test('a lost heartbeat cancels native work and surfaces a durable diagnostic wit
       () => now,
       30,
       onUnexpectedFailure,
+      () => operationalMilliseconds,
     );
     await new PackLibraryController(
       async () => repository,
@@ -1251,6 +1513,7 @@ test('a lost heartbeat cancels native work and surfaces a durable diagnostic wit
     await flushPromises();
     expect(worker.starts).toHaveLength(1);
 
+    operationalMilliseconds = 10;
     jest.advanceTimersByTime(10);
     await flushPromises();
     await coordinator.waitForIdle();
@@ -1267,6 +1530,47 @@ test('a lost heartbeat cancels native work and surfaces a durable diagnostic wit
         code: 'PERSISTENCE_CONFLICT',
         phase: 'coordinator-execution',
       }),
+    ]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a suspended expired claimant cannot checkpoint or settle a late worker success before its delayed timer runs', async () => {
+  jest.useFakeTimers();
+  try {
+    const worker = new DeferredWorker();
+    const checkpoint = jest.spyOn(repository, 'checkpointPipelineRunArtifact');
+    const complete = jest.spyOn(repository, 'completePipelineRun');
+    const coordinator = new DurablePackProcessingCoordinator(
+      async () => repository,
+      worker,
+      () => now,
+      90,
+      undefined,
+      () => operationalMilliseconds,
+    );
+    await new PackLibraryController(
+      async () => repository,
+      () => now,
+      coordinator,
+    ).retryItem(packId, itemId);
+    await flushPromises();
+    expect(worker.starts).toHaveLength(1);
+    const run = worker.starts[0]!;
+
+    // Model event-loop suspension: monotonic time advances past the deadline,
+    // but the 30 ms heartbeat timer is deliberately not advanced.
+    operationalMilliseconds = 91;
+    worker.results.get(run.id)!.resolve(worker.artifact(run));
+    await flushPromises();
+    await coordinator.waitForIdle();
+
+    expect(checkpoint).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+    expect(worker.cancellations).toEqual([run.id]);
+    await expect(repository.listRunnablePipelineRuns()).resolves.toEqual([
+      expect.objectContaining({ id: run.id, claimVersion: run.claimVersion }),
     ]);
   } finally {
     jest.useRealTimers();
@@ -1294,6 +1598,7 @@ test('an expired running claim is recoverable and rejects its old late success',
     replacementWorker,
     () => '2026-08-11T00:06:00Z',
   );
+  operationalMilliseconds = 300_000;
   await replacement.recover();
   await waitFor(() => replacementWorker.starts.length === 1);
   const replacementRun = replacementWorker.starts[0]!;
@@ -1394,6 +1699,7 @@ test('completion settlement rejection is diagnosed without converting successful
     }),
   ]);
 
+  operationalMilliseconds = 300_000;
   const checkpointed = await repository.listRunnablePipelineRuns(
     '2026-08-11T00:06:00Z',
   );
@@ -1549,6 +1855,7 @@ test('a false completion CAS result is surfaced and leaves the checkpoint recove
     runId: run.id,
     code: 'PERSISTENCE_CONFLICT',
   });
+  operationalMilliseconds = 300_000;
   expect(
     await repository.listRunnablePipelineRuns('2026-08-11T00:06:00Z'),
   ).toEqual([
@@ -1806,6 +2113,8 @@ test('claim heartbeats advance logically when the wall clock rolls backward', as
       worker,
       () => wallClock,
       900,
+      undefined,
+      () => operationalMilliseconds,
     );
     await new PackLibraryController(
       async () => repository,
@@ -1817,6 +2126,7 @@ test('claim heartbeats advance logically when the wall clock rolls backward', as
     const run = worker.starts[0]!;
 
     wallClock = '2026-08-10T00:00:00Z';
+    operationalMilliseconds = 300;
     await jest.advanceTimersByTimeAsync(300);
     const heartbeat = database
       .prepare('SELECT updated_at FROM pipeline_runs WHERE id = ?')
@@ -2030,6 +2340,7 @@ test('the production worker revalidates the exact claim immediately before publi
     () => (native.recognizeText as jest.Mock).mock.calls.length === 1,
   );
 
+  operationalMilliseconds = 300_000;
   await expect(
     repository.markPipelineRunRunning(
       run.id,
@@ -2387,6 +2698,7 @@ test('a publisher takeover waits for suspended cleanup to fence before native mu
       1_000,
       7 * 24 * 60 * 60 * 1_000,
       900,
+      () => operationalMilliseconds,
     );
     const staleCleanup = cleanup.run();
     await listingStarted.promise;
@@ -2395,6 +2707,7 @@ test('a publisher takeover waits for suspended cleanup to fence before native mu
     // takes the expired SQLite lease, but must still wait on the process-level
     // native lifecycle mutex until cleanup observes its stale TTL and exits.
     clockMs += 901;
+    operationalMilliseconds += 901;
     const publishArtifact = jest.fn().mockResolvedValue({
       relativePath,
       byteCount: 4,
@@ -2406,6 +2719,7 @@ test('a publisher takeover waits for suspended cleanup to fence before native mu
       { publishArtifact } as never,
       () => new Date(clockMs).toISOString(),
       900,
+      () => operationalMilliseconds,
     ).publish({
       packId,
       sourceFileUri: 'file:///synthetic-source.txt',
@@ -2814,5 +3128,5 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 async function flushPromises(): Promise<void> {
-  for (let attempt = 0; attempt < 12; attempt += 1) await Promise.resolve();
+  for (let attempt = 0; attempt < 40; attempt += 1) await Promise.resolve();
 }

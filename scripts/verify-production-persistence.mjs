@@ -95,8 +95,12 @@ INSERT INTO artifact_references (owner_type, owner_id, artifact_id) VALUES
   execute(migrations[6]);
   assertQuery('PRAGMA user_version;', '7');
   assertQuery(
-    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name = 'claim_expires_at';",
-    '1',
+    "SELECT COUNT(*) FROM pragma_table_info('pipeline_runs') WHERE name IN ('claim_session_id', 'claim_deadline_ms');",
+    '2',
+  );
+  assertQuery(
+    "SELECT COUNT(*) FROM pragma_table_info('cleanup_leases') WHERE name IN ('session_id', 'deadline_ms');",
+    '2',
   );
   assertQuery('PRAGMA foreign_key_check;', '');
 

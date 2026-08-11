@@ -783,6 +783,7 @@ describe('persistence and dual-Inbox recovery spike', () => {
       >();
       files.listOwnedFiles = jest.fn().mockReturnValue(listed.promise);
       let clockMs = Date.parse('2026-08-03T00:00:00Z');
+      let monotonicMs = 0;
       const cleanup = new ScheduledReferenceAwareCleanup(
         repository,
         files,
@@ -791,18 +792,24 @@ describe('persistence and dual-Inbox recovery spike', () => {
         1_000,
         7 * 24 * 60 * 60 * 1_000,
         900,
+        () => monotonicMs,
       );
       const running = cleanup.run();
+      const outcome = running.then(
+        value => ({ value }),
+        error => ({ error }),
+      );
       await Promise.resolve();
       await Promise.resolve();
 
       // Simulate event-loop/app suspension: wall time advances beyond the TTL
       // without running the renewal timer, then the native snapshot completes.
       clockMs += 901;
+      monotonicMs += 901;
       listed.resolve([]);
 
-      await expect(running).rejects.toMatchObject({
-        code: 'PERSISTENCE_CONFLICT',
+      await expect(outcome).resolves.toEqual({
+        error: expect.objectContaining({ code: 'PERSISTENCE_CONFLICT' }),
       });
       expect(repository.renewals).toBe(0);
       expect(repository.released).toBe(1);
@@ -831,7 +838,7 @@ describe('persistence path and migration decisions', () => {
       expect(isOwnedArtifactPath(invalid)).toBe(false);
   });
 
-  test('schema migrates through v1-v6 without BLOB content columns', () => {
+  test('schema migrates through v1-v7 without BLOB content columns', () => {
     expect(PERSISTENCE_MIGRATIONS).toHaveLength(7);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
@@ -867,7 +874,10 @@ describe('persistence path and migration decisions', () => {
     );
     expect(PERSISTENCE_MIGRATIONS[6]).toContain('PRAGMA user_version = 7');
     expect(PERSISTENCE_MIGRATIONS[6]).toContain(
-      'ALTER TABLE pipeline_runs ADD COLUMN claim_expires_at TEXT',
+      'ALTER TABLE pipeline_runs ADD COLUMN claim_session_id TEXT',
+    );
+    expect(PERSISTENCE_MIGRATIONS[6]).toContain(
+      'ALTER TABLE cleanup_leases ADD COLUMN deadline_ms REAL',
     );
     for (const migration of PERSISTENCE_MIGRATIONS)
       expect(migration).not.toMatch(/\bBLOB\b/);

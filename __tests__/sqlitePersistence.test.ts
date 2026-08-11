@@ -418,6 +418,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
   test('registers an exact verified derivative and rejects immutable replacement', async () => {
     const artifactId = '423e4567-e89b-42d3-a456-426614174000';
     const publicationOwnerId = '523e4567-e89b-42d3-a456-426614174000';
+    const sessionId = '623e4567-e89b-42d3-a456-426614174000';
     const value: Artifact = {
       id: artifactId,
       itemId,
@@ -447,6 +448,8 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
           return {
             owner_id: publicationOwnerId,
             expires_at: '2026-08-05T00:01:00Z',
+            session_id: sessionId,
+            deadline_ms: 60_000,
           } as T;
         if (source.includes('FROM packs')) return { id: packId } as T;
         if (source.includes('FROM context_items')) return { id: itemId } as T;
@@ -457,7 +460,12 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       exclusive: async <T>(task: (transaction: unknown) => Promise<T>) =>
         task(connection),
     };
-    const repository = new ExpoSqlitePersistenceRepository(connection as never);
+    const repository = new ExpoSqlitePersistenceRepository(
+      connection as never,
+      undefined,
+      false,
+      { sessionId, nowMilliseconds: () => 0 },
+    );
 
     await expect(
       repository.registerPublishedArtifact({
