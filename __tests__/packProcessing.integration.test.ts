@@ -84,6 +84,10 @@ const itemId = '223e4567-e89b-42d3-a456-426614174000';
 const ingestionId = '323e4567-e89b-42d3-a456-426614174000';
 const now = '2026-08-11T00:00:00Z';
 
+function claimExpiresAt(observedAt: string, durationMs = 5 * 60 * 1_000) {
+  return new Date(Date.parse(observedAt) + durationMs).toISOString();
+}
+
 function verifiedOriginal() {
   return jest.fn(
     async (relativePath: string, byteCount: number, sha256: string) => ({
@@ -311,6 +315,7 @@ async function persistAndClaim(
     run.claimVersion,
     run.updatedAt,
     run.updatedAt,
+    claimExpiresAt(run.updatedAt),
   );
   if (claimVersion === null) throw new Error('synthetic-claim-failed');
   return { ...run, status: 'running', claimVersion };
@@ -530,6 +535,7 @@ test('cleanup lease ownership is claim-specific and a stale owner cannot release
     queued.claimVersion,
     now,
     now,
+    '2026-08-11T00:01:00Z',
   );
   expect(firstClaim).toBe(1);
   const firstOwner = '423e4567-e89b-42d3-a456-426614174000';
@@ -550,6 +556,7 @@ test('cleanup lease ownership is claim-specific and a stale owner cannot release
     firstClaim!,
     '2026-08-11T00:02:00Z',
     '2026-08-11T00:02:00Z',
+    '2026-08-11T00:07:00Z',
   );
   expect(replacementClaim).toBe(2);
   await expect(
@@ -683,24 +690,28 @@ test('future Pack chronology cannot expire an active wall-clock cleanup lease', 
   await repository.releaseCleanupLease(publicationOwner);
 });
 
-test('cleanup lease renewal is owner-CAS fenced and extends monotonic chronology', async () => {
+test('cleanup lease renewal is owner-CAS fenced and rebases after clock rollback', async () => {
   const owner = 'c93e4567-e89b-42d3-a456-426614174000';
   const otherOwner = 'd93e4567-e89b-42d3-a456-426614174000';
   await expect(
-    repository.acquireCleanupLease(owner, now, '2026-08-11T00:00:01Z'),
+    repository.acquireCleanupLease(
+      owner,
+      '2026-08-11T01:00:00Z',
+      '2026-08-11T01:05:00Z',
+    ),
   ).resolves.toBe(true);
   await expect(
     repository.renewCleanupLease(
       otherOwner,
-      '2026-08-11T00:00:00.300Z',
-      '2026-08-11T00:00:01.300Z',
+      '2026-08-11T00:01:00Z',
+      '2026-08-11T00:06:00Z',
     ),
   ).resolves.toBe(false);
   await expect(
     repository.renewCleanupLease(
       owner,
-      '2026-08-11T00:00:00.300Z',
-      '2026-08-11T00:00:01.300Z',
+      '2026-08-11T00:01:00Z',
+      '2026-08-11T00:06:00Z',
     ),
   ).resolves.toBe(true);
   expect(
@@ -711,17 +722,79 @@ test('cleanup lease renewal is owner-CAS fenced and extends monotonic chronology
       .get(),
   ).toEqual({
     owner_id: owner,
-    acquired_at: '2026-08-11T00:00:00.300Z',
-    expires_at: '2026-08-11T00:00:01.300Z',
+    acquired_at: '2026-08-11T00:01:00Z',
+    expires_at: '2026-08-11T00:06:00Z',
   });
   await expect(
     repository.acquireCleanupLease(
       otherOwner,
-      '2026-08-11T00:00:01.100Z',
-      '2026-08-11T00:00:02.100Z',
+      '2026-08-11T00:05:59Z',
+      '2026-08-11T00:10:59Z',
     ),
   ).resolves.toBe(false);
-  await repository.releaseCleanupLease(owner);
+  await expect(
+    repository.acquireCleanupLease(
+      otherOwner,
+      '2026-08-11T00:06:01Z',
+      '2026-08-11T00:11:01Z',
+    ),
+  ).resolves.toBe(true);
+  await repository.releaseCleanupLease(otherOwner);
+});
+
+test('future domain chronology cannot postpone a crashed claim on the wall clock', async () => {
+  const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
+    launch: jest.fn(),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    paused,
+  ).retryItem(packId, itemId);
+  const queued = (await repository.listRunnablePipelineRuns())[0]!;
+  const futureDomainAt = '2027-08-11T00:00:00Z';
+  const firstClaim = await repository.markPipelineRunRunning(
+    queued.id,
+    queued.claimVersion,
+    futureDomainAt,
+    now,
+    '2026-08-11T00:00:00.900Z',
+  );
+  expect(firstClaim).toBe(1);
+  expect(
+    database
+      .prepare(
+        'SELECT updated_at, claim_expires_at FROM pipeline_runs WHERE id = ?',
+      )
+      .get(queued.id),
+  ).toEqual({
+    updated_at: futureDomainAt,
+    claim_expires_at: '2026-08-11T00:00:00.900Z',
+  });
+  await expect(
+    repository.listRunnablePipelineRuns('2026-08-11T00:00:00.899Z'),
+  ).resolves.toEqual([]);
+  await expect(
+    repository.listRunnablePipelineRuns('2026-08-11T00:00:00.900Z'),
+  ).resolves.toEqual([
+    expect.objectContaining({
+      id: queued.id,
+      updatedAt: futureDomainAt,
+      claimVersion: firstClaim,
+    }),
+  ]);
+  await expect(
+    repository.markPipelineRunRunning(
+      queued.id,
+      firstClaim!,
+      futureDomainAt,
+      '2026-08-11T00:00:00.900Z',
+      '2026-08-11T00:00:01.800Z',
+    ),
+  ).resolves.toBe(2);
 });
 
 test('publication checkpoints are exact-claim idempotent and reject descriptor changes', async () => {
@@ -799,6 +872,7 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
     claimed.claimVersion,
     '2026-08-11T00:06:00Z',
     '2026-08-11T00:06:00Z',
+    '2026-08-11T00:11:00Z',
   );
   expect(replacementClaim).toBe(claimed.claimVersion + 1);
   await expect(
@@ -903,7 +977,7 @@ test('extraction settlement is fenced when the publication lease owner changes',
     }),
   ).resolves.toBe(false);
   expect(
-    (await repository.listRunnablePipelineRuns('2026-08-11T00:04:00Z'))[0],
+    (await repository.listRunnablePipelineRuns('2026-08-11T00:05:00Z'))[0],
   ).toMatchObject({
     id: run.id,
     status: 'running',
@@ -1125,13 +1199,15 @@ test('a heartbeat keeps a long-running claim live for a quick replacement recove
     await flushPromises();
     expect(firstWorker.starts).toHaveLength(1);
 
-    clock += 100;
+    clock += 30;
     jest.advanceTimersByTime(30);
     await flushPromises();
     expect(renew).toHaveBeenCalledWith(
       firstWorker.starts[0]!.id,
       firstWorker.starts[0]!.claimVersion,
       new Date(clock).toISOString(),
+      new Date(clock).toISOString(),
+      new Date(clock + 90).toISOString(),
     );
 
     const replacementWorker = new DeferredWorker();
@@ -1429,7 +1505,8 @@ test('claim heartbeat remains active while completion waits on SQLite', async ()
         run.id,
         run.claimVersion,
         timestamp(),
-        new Date(clockMs - 900).toISOString(),
+        timestamp(),
+        new Date(clockMs + 900).toISOString(),
       ),
     ).resolves.toBeNull();
 
@@ -1498,7 +1575,13 @@ test('settlement timestamps never move behind the latest persisted heartbeat', a
   const run = worker.starts[0]!;
   const latestHeartbeat = '2026-08-11T00:10:00Z';
   await expect(
-    repository.renewPipelineRunClaim(run.id, run.claimVersion, latestHeartbeat),
+    repository.renewPipelineRunClaim(
+      run.id,
+      run.claimVersion,
+      latestHeartbeat,
+      now,
+      claimExpiresAt(now),
+    ),
   ).resolves.toBe(true);
 
   worker.results.get(run.id)!.resolve(worker.artifact(run));
@@ -1539,6 +1622,8 @@ test('failure timestamps never move behind the latest persisted heartbeat', asyn
     run.id,
     run.claimVersion,
     latestHeartbeat,
+    now,
+    claimExpiresAt(now),
   );
 
   worker.results
@@ -1610,18 +1695,21 @@ test('failing one run never moves a later-heartbeat sibling or Pack backward', a
     failing.claimVersion,
     now,
     now,
+    claimExpiresAt(now),
   );
   const siblingClaim = await repository.markPipelineRunRunning(
     sibling.id,
     sibling.claimVersion,
     now,
     now,
+    claimExpiresAt(now),
   );
   const laterSiblingClaim = await repository.markPipelineRunRunning(
     laterSibling.id,
     laterSibling.claimVersion,
     now,
     now,
+    claimExpiresAt(now),
   );
   expect(failingClaim).toBe(1);
   expect(siblingClaim).toBe(1);
@@ -1633,6 +1721,8 @@ test('failing one run never moves a later-heartbeat sibling or Pack backward', a
       sibling.id,
       siblingClaim!,
       siblingHeartbeat,
+      now,
+      claimExpiresAt(now),
     ),
   ).resolves.toBe(true);
   await expect(
@@ -1640,6 +1730,8 @@ test('failing one run never moves a later-heartbeat sibling or Pack backward', a
       laterSibling.id,
       laterSiblingClaim!,
       latestHeartbeat,
+      now,
+      claimExpiresAt(now),
     ),
   ).resolves.toBe(true);
 
@@ -1887,6 +1979,7 @@ test('the production worker revalidates the exact claim immediately before publi
     queued.claimVersion,
     now,
     now,
+    claimExpiresAt(now),
   );
   const run: PersistedPipelineRun = {
     ...queued,
@@ -1943,6 +2036,7 @@ test('the production worker revalidates the exact claim immediately before publi
       run.claimVersion,
       '2026-08-11T00:06:00Z',
       '2026-08-11T00:06:00Z',
+      '2026-08-11T00:11:00Z',
     ),
   ).resolves.toBe(2);
   recognition.resolve({

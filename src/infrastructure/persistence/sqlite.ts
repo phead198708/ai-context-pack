@@ -757,7 +757,7 @@ export class ExpoSqlitePersistenceRepository
       );
       if (input.cancelActivePipelineRuns)
         await transaction.run(
-          `UPDATE pipeline_runs SET status = 'cancelled',
+          `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
              updated_at = CASE
                WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
              completed_at = CASE
@@ -785,10 +785,9 @@ export class ExpoSqlitePersistenceRepository
   }
 
   async listRunnablePipelineRuns(
-    staleRunningBefore?: string,
+    claimObservedAt?: string,
   ): Promise<readonly PersistedPipelineRun[]> {
-    if (staleRunningBefore !== undefined)
-      requireIsoDateTime(staleRunningBefore);
+    if (claimObservedAt !== undefined) requireIsoDateTime(claimObservedAt);
     const rows = await this.connection.all<{
       id: string;
       pack_id: string;
@@ -798,18 +797,18 @@ export class ExpoSqlitePersistenceRepository
       started_at: string;
       updated_at: string;
       claim_version: number;
+      claim_expires_at: string | null;
       published_artifact_json: string | null;
     }>(
       `SELECT id, pack_id, item_id, stage, status, started_at, updated_at,
-         claim_version, published_artifact_json
+         claim_version, claim_expires_at, published_artifact_json
        FROM pipeline_runs
-       WHERE status IN ('queued', 'recovering')
-          OR (status = 'running' AND updated_at <= ?)
+       WHERE status IN ('queued', 'running', 'recovering')
        ORDER BY updated_at, id`,
-      [staleRunningBefore ?? '0000-01-01T00:00:00.000Z'],
     );
-    return rows.map(row =>
-      decodePersisted(() => {
+    const runnable: PersistedPipelineRun[] = [];
+    for (const row of rows) {
+      const decoded = decodePersisted(() => {
         requireCanonicalId(row.id);
         requireCanonicalId(row.pack_id);
         requireCanonicalId(row.item_id);
@@ -819,7 +818,12 @@ export class ExpoSqlitePersistenceRepository
           throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
         if (!isRunnablePipelineStatus(row.status))
           throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-        return {
+        if (
+          row.claim_expires_at !== null &&
+          !isIsoDateTime(row.claim_expires_at)
+        )
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        const run: PersistedPipelineRun = {
           id: row.id,
           packId: row.pack_id,
           itemId: row.item_id,
@@ -839,15 +843,25 @@ export class ExpoSqlitePersistenceRepository
               }
             : {}),
         };
-      }),
-    );
+        return { run, claimExpiresAt: row.claim_expires_at };
+      });
+      if (decoded.run.status !== 'running') runnable.push(decoded.run);
+      else if (
+        claimObservedAt !== undefined &&
+        (decoded.claimExpiresAt === null ||
+          Date.parse(decoded.claimExpiresAt) <= Date.parse(claimObservedAt))
+      )
+        runnable.push(decoded.run);
+    }
+    return runnable;
   }
 
   async markPipelineRunRunning(
     runId: string,
     expectedClaimVersion: number,
     updatedAt: string,
-    staleRunningBefore: string,
+    claimObservedAt: string,
+    claimExpiresAt: string,
   ): Promise<number | null> {
     requireCanonicalId(runId);
     if (
@@ -857,17 +871,29 @@ export class ExpoSqlitePersistenceRepository
     )
       throw new DomainError('SCHEMA_INVALID');
     requireIsoDateTime(updatedAt);
-    requireIsoDateTime(staleRunningBefore);
+    requireIsoDateTime(claimObservedAt);
+    requireIsoDateTime(claimExpiresAt);
+    if (Date.parse(claimExpiresAt) <= Date.parse(claimObservedAt))
+      throw new DomainError('SCHEMA_INVALID');
     const result = await this.connection.run(
       `UPDATE pipeline_runs SET status = 'running',
          updated_at = CASE
            WHEN julianday(updated_at) < julianday(?) THEN ? ELSE updated_at END,
-         claim_version = claim_version + 1
+         claim_version = claim_version + 1,
+         claim_expires_at = ?
        WHERE id = ? AND claim_version = ?
          AND (status IN ('queued', 'recovering')
            OR (status = 'running'
-             AND julianday(updated_at) <= julianday(?)))`,
-      [updatedAt, updatedAt, runId, expectedClaimVersion, staleRunningBefore],
+             AND (claim_expires_at IS NULL
+               OR julianday(claim_expires_at) <= julianday(?))))`,
+      [
+        updatedAt,
+        updatedAt,
+        claimExpiresAt,
+        runId,
+        expectedClaimVersion,
+        claimObservedAt,
+      ],
     );
     return result.changes === 1 ? expectedClaimVersion + 1 : null;
   }
@@ -876,16 +902,32 @@ export class ExpoSqlitePersistenceRepository
     runId: string,
     claimVersion: number,
     updatedAt: string,
+    claimObservedAt: string,
+    claimExpiresAt: string,
   ): Promise<boolean> {
     requireCanonicalId(runId);
     requirePipelineClaimVersion(claimVersion);
     requireIsoDateTime(updatedAt);
+    requireIsoDateTime(claimObservedAt);
+    requireIsoDateTime(claimExpiresAt);
+    if (Date.parse(claimExpiresAt) <= Date.parse(claimObservedAt))
+      throw new DomainError('SCHEMA_INVALID');
     const result = await this.connection.run(
       `UPDATE pipeline_runs
        SET updated_at = CASE
-         WHEN julianday(updated_at) < julianday(?) THEN ? ELSE updated_at END
-       WHERE id = ? AND claim_version = ? AND status = 'running'`,
-      [updatedAt, updatedAt, runId, claimVersion],
+         WHEN julianday(updated_at) < julianday(?) THEN ? ELSE updated_at END,
+         claim_expires_at = ?
+       WHERE id = ? AND claim_version = ? AND status = 'running'
+         AND claim_expires_at IS NOT NULL
+         AND julianday(claim_expires_at) > julianday(?)`,
+      [
+        updatedAt,
+        updatedAt,
+        claimExpiresAt,
+        runId,
+        claimVersion,
+        claimObservedAt,
+      ],
     );
     return result.changes === 1;
   }
@@ -1043,7 +1085,7 @@ export class ExpoSqlitePersistenceRepository
       if (itemUpdate.changes !== 1) return false;
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'succeeded', updated_at = ?,
-           completed_at = ?, error_code = NULL WHERE id = ?`,
+           completed_at = ?, error_code = NULL, claim_expires_at = NULL WHERE id = ?`,
         [settledAt, settledAt, input.runId],
       );
       await transaction.run(
@@ -1098,11 +1140,12 @@ export class ExpoSqlitePersistenceRepository
       );
       await transaction.run(
         `UPDATE pipeline_runs SET status = 'failed', updated_at = ?,
-           completed_at = ?, error_code = ? WHERE id = ?`,
+           completed_at = ?, error_code = ?, claim_expires_at = NULL WHERE id = ?`,
         [settledAt, settledAt, input.errorCode, input.runId],
       );
       await transaction.run(
-        `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?
+        `UPDATE pipeline_runs SET status = 'cancelled', updated_at = ?, completed_at = ?,
+           claim_expires_at = NULL
          WHERE pack_id = ? AND id <> ?
            AND status IN ('queued', 'running', 'recovering')`,
         [settledAt, settledAt, run.pack_id, input.runId],
@@ -1120,7 +1163,7 @@ export class ExpoSqlitePersistenceRepository
     requireCanonicalId(packId);
     requireIsoDateTime(updatedAt);
     const result = await this.connection.run(
-      `UPDATE pipeline_runs SET status = 'cancelled',
+      `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
          updated_at = CASE
            WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
          completed_at = CASE
@@ -1180,7 +1223,7 @@ export class ExpoSqlitePersistenceRepository
       );
       const deletedAt = new Date().toISOString();
       await transaction.run(
-        `UPDATE pipeline_runs SET status = 'cancelled',
+        `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
            updated_at = CASE
              WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
            completed_at = CASE
@@ -1679,22 +1722,11 @@ export class ExpoSqlitePersistenceRepository
       requireIsoDateTime(existing.expires_at);
       if (Date.parse(existing.expires_at) <= Date.parse(renewedAt))
         return false;
-      const previousLogicalAt = new Date(
-        Date.parse(existing.expires_at) - requestedDuration,
-      ).toISOString();
-      const effectiveRenewedAt = latestIsoTimestamp([
-        renewedAt,
-        existing.acquired_at,
-        previousLogicalAt,
-      ]);
-      const effectiveExpiresAt = new Date(
-        Date.parse(effectiveRenewedAt) + requestedDuration,
-      ).toISOString();
       const result = await transaction.run(
         `UPDATE cleanup_leases
          SET acquired_at = ?, expires_at = ?
          WHERE name = 'artifact-cleanup' AND owner_id = ? AND expires_at = ?`,
-        [effectiveRenewedAt, effectiveExpiresAt, ownerId, existing.expires_at],
+        [renewedAt, expiresAt, ownerId, existing.expires_at],
       );
       return result.changes === 1;
     });
@@ -2026,7 +2058,7 @@ async function replaceContextItems(
   for (const row of existing) {
     if (retained.has(row.id)) continue;
     await transaction.run(
-      `UPDATE pipeline_runs SET status = 'cancelled',
+      `UPDATE pipeline_runs SET status = 'cancelled', claim_expires_at = NULL,
          updated_at = CASE
            WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END,
          completed_at = CASE
@@ -2527,14 +2559,6 @@ function latestPipelineTimestamp(
     run.item_updated_at,
     ...additional,
   ];
-  values.forEach(requireIsoDateTime);
-  return values.reduce((latest, value) =>
-    Date.parse(value) > Date.parse(latest) ? value : latest,
-  );
-}
-
-function latestIsoTimestamp(values: readonly string[]): string {
-  if (values.length === 0) throw new DomainError('SCHEMA_INVALID');
   values.forEach(requireIsoDateTime);
   return values.reduce((latest, value) =>
     Date.parse(value) > Date.parse(latest) ? value : latest,

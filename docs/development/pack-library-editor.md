@@ -53,6 +53,11 @@ identity; artifact registration, item advancement, Pack revision, and token comp
 atomically. Restart replays the token rather than copying the original. An import failure without
 an owned original is not made to look executable by a state-only retry.
 
+Schema v7 separates each running token's operational `claim_expires_at` from its monotonic
+domain `updated_at`. Future Pack chronology therefore cannot postpone recovery after a crash,
+while heartbeat renewal can rebase the wall-clock expiry after clock correction without moving
+Pack, item, sibling, or settlement timestamps backward.
+
 Cancel uses the shared Pack state machine as the durable stop gate and invalidates every active
 run token in the same transaction. It then asks the in-flight native task to stop. A late native
 success cannot register an artifact or advance state because its token is no longer active. This

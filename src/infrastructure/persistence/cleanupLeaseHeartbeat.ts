@@ -11,15 +11,15 @@ export interface CleanupLeaseHeartbeat {
 export function startCleanupLeaseHeartbeat(
   repository: CleanupLeaseRepository,
   ownerId: string,
-  initialLogicalAt: string,
+  initialObservedAt: string,
   leaseDurationMs: number,
   now: () => string,
 ): CleanupLeaseHeartbeat {
   if (!Number.isSafeInteger(leaseDurationMs) || leaseDurationMs <= 0)
     throw new DomainError('SCHEMA_INVALID');
-  requireTimestamp(initialLogicalAt);
+  requireTimestamp(initialObservedAt);
   const intervalMs = Math.max(1, Math.floor(leaseDurationMs / 3));
-  let logicalAt = initialLogicalAt;
+  let leaseObservedAt = initialObservedAt;
   let stopped = false;
   let failed = false;
   let failureValue: unknown;
@@ -43,7 +43,10 @@ export function startCleanupLeaseHeartbeat(
     try {
       const observedAt = now();
       requireTimestamp(observedAt);
-      if (Date.parse(observedAt) >= Date.parse(logicalAt) + leaseDurationMs)
+      if (
+        Date.parse(observedAt) >=
+        Date.parse(leaseObservedAt) + leaseDurationMs
+      )
         recordFailure(new DomainError('PERSISTENCE_CONFLICT'));
     } catch (error) {
       recordFailure(error);
@@ -54,21 +57,14 @@ export function startCleanupLeaseHeartbeat(
       inFlight = (async () => {
         const wallClock = now();
         requireTimestamp(wallClock);
-        const intervalFloor = new Date(
-          Date.parse(logicalAt) + intervalMs,
-        ).toISOString();
-        const renewedAt = latestTimestamp([
-          wallClock,
-          logicalAt,
-          intervalFloor,
-        ]);
+        const renewedAt = wallClock;
         const renewed = await repository.renewCleanupLease(
           ownerId,
           renewedAt,
           new Date(Date.parse(renewedAt) + leaseDurationMs).toISOString(),
         );
         if (!renewed) throw new DomainError('PERSISTENCE_CONFLICT');
-        logicalAt = renewedAt;
+        leaseObservedAt = renewedAt;
       })();
       inFlight.then(() => {
         if (!stopped) schedule();
@@ -98,13 +94,6 @@ export function startCleanupLeaseHeartbeat(
       return failed ? failureValue : undefined;
     },
   };
-}
-
-function latestTimestamp(values: readonly string[]): string {
-  values.forEach(requireTimestamp);
-  return values.reduce((latest, value) =>
-    Date.parse(value) > Date.parse(latest) ? value : latest,
-  );
 }
 
 function requireTimestamp(value: string): void {

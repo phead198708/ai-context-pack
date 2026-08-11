@@ -102,10 +102,8 @@ export class DurablePackProcessingCoordinator
 
   async recover(): Promise<void> {
     const repository = await this.getRepository();
-    const recoveryAt = this.timestamp();
-    const runs = await repository.listRunnablePipelineRuns(
-      this.staleRunningBefore(recoveryAt),
-    );
+    const recoveryAt = validatedTimestamp(this.now());
+    const runs = await repository.listRunnablePipelineRuns(recoveryAt);
     for (const run of runs) this.schedule({ ...run, status: 'recovering' });
   }
 
@@ -132,17 +130,22 @@ export class DurablePackProcessingCoordinator
         packCreatedAt = graph.pack.createdAt;
         const item = graph.items.find(value => value.id === run.itemId);
         if (!item) throw new DomainError('PERSISTENCE_CONFLICT');
-        const claimAt = this.timestamp(
+        const claimObservedAt = validatedTimestamp(this.now());
+        const claimAt = latestTimestamp([
+          claimObservedAt,
           packCreatedAt,
           graph.pack.updatedAt,
           run.startedAt,
           run.updatedAt,
-        );
+        ]);
         claimVersion = await repository.markPipelineRunRunning(
           run.id,
           run.claimVersion,
           claimAt,
-          this.staleRunningBefore(claimAt),
+          claimObservedAt,
+          new Date(
+            Date.parse(claimObservedAt) + this.claimLeaseMs,
+          ).toISOString(),
         );
         if (claimVersion === null) return;
         const claimedRun: PersistedPipelineRun = {
@@ -310,10 +313,6 @@ export class DurablePackProcessingCoordinator
     return latestTimestamp([value, ...minimums]);
   }
 
-  private staleRunningBefore(value: string): string {
-    return new Date(Date.parse(value) - this.claimLeaseMs).toISOString();
-  }
-
   private startClaimHeartbeat(
     repository: ProductionPersistenceRepository,
     run: PersistedPipelineRun,
@@ -339,11 +338,13 @@ export class DurablePackProcessingCoordinator
     const schedule = (): void => {
       timer = setTimeout(() => {
         inFlight = (async () => {
+          const claimObservedAt = validatedTimestamp(this.now());
           const intervalFloor = new Date(
             Date.parse(logicalAt) + intervalMs,
           ).toISOString();
           const renewedAt = latestTimestamp([
-            this.timestamp(chronologyFloor),
+            claimObservedAt,
+            chronologyFloor,
             logicalAt,
             intervalFloor,
           ]);
@@ -351,6 +352,10 @@ export class DurablePackProcessingCoordinator
             run.id,
             run.claimVersion,
             renewedAt,
+            claimObservedAt,
+            new Date(
+              Date.parse(claimObservedAt) + this.claimLeaseMs,
+            ).toISOString(),
           );
           if (!renewed) throw new DomainError('PERSISTENCE_CONFLICT');
           logicalAt = renewedAt;

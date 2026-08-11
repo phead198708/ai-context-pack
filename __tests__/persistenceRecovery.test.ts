@@ -832,7 +832,7 @@ describe('persistence path and migration decisions', () => {
   });
 
   test('schema migrates through v1-v6 without BLOB content columns', () => {
-    expect(PERSISTENCE_MIGRATIONS).toHaveLength(6);
+    expect(PERSISTENCE_MIGRATIONS).toHaveLength(7);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
       'relative_path TEXT NOT NULL UNIQUE',
@@ -864,6 +864,10 @@ describe('persistence path and migration decisions', () => {
     expect(PERSISTENCE_MIGRATIONS[5]).toContain('PRAGMA user_version = 6');
     expect(PERSISTENCE_MIGRATIONS[5]).toContain(
       'ALTER TABLE pipeline_runs ADD COLUMN published_artifact_json TEXT',
+    );
+    expect(PERSISTENCE_MIGRATIONS[6]).toContain('PRAGMA user_version = 7');
+    expect(PERSISTENCE_MIGRATIONS[6]).toContain(
+      'ALTER TABLE pipeline_runs ADD COLUMN claim_expires_at TEXT',
     );
     for (const migration of PERSISTENCE_MIGRATIONS)
       expect(migration).not.toMatch(/\bBLOB\b/);

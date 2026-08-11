@@ -312,4 +312,11 @@ PRAGMA user_version = 5;
 ALTER TABLE pipeline_runs ADD COLUMN published_artifact_json TEXT;
 PRAGMA user_version = 6;
 `,
+  `
+ALTER TABLE pipeline_runs ADD COLUMN claim_expires_at TEXT;
+DROP INDEX pipeline_runs_runnable_index;
+CREATE INDEX pipeline_runs_runnable_index
+  ON pipeline_runs(status, claim_expires_at, updated_at, id);
+PRAGMA user_version = 7;
+`,
 ] as const;

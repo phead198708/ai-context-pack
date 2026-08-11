@@ -10,7 +10,7 @@ import type {
 } from '../../domain/models';
 import type { NativeHandoffResult } from '../../domain/nativeAdapter';
 
-export const PERSISTENCE_SCHEMA_VERSION = 6 as const;
+export const PERSISTENCE_SCHEMA_VERSION = 7 as const;
 export const DEVELOPMENT_RESET_CONFIRMATION =
   'RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA' as const;
 
@@ -224,18 +224,21 @@ export interface ContextPackRepository {
   ): Promise<DeletePackResult>;
   startPipelineRun(input: StartPipelineRunInput): Promise<void>;
   listRunnablePipelineRuns(
-    staleRunningBefore?: string,
+    claimObservedAt?: string,
   ): Promise<readonly PersistedPipelineRun[]>;
   markPipelineRunRunning(
     runId: string,
     expectedClaimVersion: number,
     updatedAt: string,
-    staleRunningBefore: string,
+    claimObservedAt: string,
+    claimExpiresAt: string,
   ): Promise<number | null>;
   renewPipelineRunClaim(
     runId: string,
     claimVersion: number,
     updatedAt: string,
+    claimObservedAt: string,
+    claimExpiresAt: string,
   ): Promise<boolean>;
   checkpointPipelineRunArtifact(
     input: CheckpointPipelineRunArtifactInput,
