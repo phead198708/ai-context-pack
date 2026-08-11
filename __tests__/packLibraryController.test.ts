@@ -78,6 +78,13 @@ function repository(graph = fixture()) {
       .fn()
       .mockResolvedValue([original(firstId), original(secondId)]),
     listImportDetails: jest.fn().mockResolvedValue([]),
+    findDuplicateAnalysis: jest.fn().mockResolvedValue({
+      manifest: null,
+      analyses: [],
+      suggestions: [],
+      decisions: [],
+    }),
+    saveDuplicateDecisions: jest.fn().mockResolvedValue(undefined),
     savePackGraph: jest.fn(async (input: SavePackGraphInput) => {
       saves.push(input);
       return graph.revision + 1;
@@ -292,6 +299,98 @@ test('cancels only active work through the shared state machines', async () => {
     'imported',
     'failed',
   ]);
+});
+
+test('starts one durable analyze run for every extracted item', async () => {
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: { ...base.pack, state: 'processing' },
+    items: base.items.map(item => {
+      const checkpoint = { ...item };
+      delete checkpoint.retryStage;
+      return { ...checkpoint, state: 'extracted' as const };
+    }),
+  };
+  const repo = repository(graph);
+  const processing = scheduler();
+  processing.supports.mockImplementation(
+    stage => stage === 'extract' || stage === 'analyze',
+  );
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:05Z',
+    processing,
+  );
+
+  await expect(controller.analyzePack(packId)).resolves.toBe(2);
+  expect(repo.saves[0]?.startedPipelineRuns).toEqual([
+    expect.objectContaining({ itemId: firstId, stage: 'analyze' }),
+    expect.objectContaining({ itemId: secondId, stage: 'analyze' }),
+  ]);
+  expect(processing.launch).toHaveBeenCalledWith(
+    repo.saves[0]?.startedPipelineRuns,
+  );
+});
+
+test('preferred duplicate choice excludes peers without deleting originals', async () => {
+  const repo = repository();
+  const suggestion = {
+    schemaVersion: 1 as const,
+    key: `exact-binary:${firstId}:${secondId}`,
+    packId,
+    leftItemId: firstId,
+    rightItemId: secondId,
+    reason: 'exact-binary' as const,
+    confidence: 1,
+    expectedBytesSaved: 10,
+    expectedCharactersSaved: 0,
+  };
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: {
+      schemaVersion: 1,
+      packId,
+      config: {
+        schemaVersion: 1,
+        exactBinaryAlgorithm: 'sha256-v1',
+        normalizationVersion: 'text-normalization-v1',
+        textFingerprintAlgorithm: 'bottom-k-fnv1a32-5gram-v1',
+        textSimilarityThreshold: 0.82,
+        imageFingerprintAlgorithm: 'dhash-64-v1',
+        imageHammingDistanceThreshold: 8,
+        minimumTextCharacters: 20,
+      },
+      analyzedAt: '2026-08-10T00:00:05Z',
+      itemCount: 2,
+      suggestionCount: 1,
+    },
+    analyses: [],
+    suggestions: [suggestion],
+    decisions: [],
+  });
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:06Z',
+  );
+
+  await controller.reviewDuplicateGroup(packId, [secondId, firstId], {
+    kind: 'preferred',
+    itemId: firstId,
+  });
+
+  expect(repo.value.saveDuplicateDecisions).toHaveBeenCalledWith(packId, [
+    expect.objectContaining({
+      itemId: secondId,
+      choice: 'exclude',
+      baselineInclusionMode: 'original',
+    }),
+    expect.objectContaining({
+      itemId: firstId,
+      choice: 'preferred',
+      baselineInclusionMode: 'original',
+    }),
+  ]);
+  expect(repo.saves).toHaveLength(0);
 });
 
 test('Pack retry resumes item checkpoints while retaining immutable originals', async () => {

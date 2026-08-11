@@ -10,7 +10,7 @@ const source = readFileSync(
 const migrations = [...source.matchAll(/\n\s*`([\s\S]*?)`,/g)].map(
   match => match[1],
 );
-if (migrations.length !== 7)
+if (migrations.length !== 8)
   throw new Error('PRODUCTION_PERSISTENCE_MIGRATION_FIXTURE_INVALID');
 
 const temporary = mkdtempSync(join(tmpdir(), 'ai-context-pack-production-'));
@@ -101,6 +101,12 @@ INSERT INTO artifact_references (owner_type, owner_id, artifact_id) VALUES
   assertQuery(
     "SELECT COUNT(*) FROM pragma_table_info('cleanup_leases') WHERE name IN ('session_id', 'deadline_ms');",
     '2',
+  );
+  execute(migrations[7]);
+  assertQuery('PRAGMA user_version;', '8');
+  assertQuery(
+    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('duplicate_analysis_manifests', 'duplicate_analysis_items', 'duplicate_suggestions', 'duplicate_decisions');",
+    '4',
   );
   assertQuery('PRAGMA foreign_key_check;', '');
 
@@ -222,7 +228,7 @@ COMMIT;
   assertQuery('PRAGMA foreign_key_check;', '');
 
   process.stdout.write(
-    `PRODUCTION_PERSISTENCE versions=0->1->2->3->4->5->6->7 rowsPreserved=2 ` +
+    `PRODUCTION_PERSISTENCE versions=0->1->2->3->4->5->6->7->8 rowsPreserved=2 ` +
       `orderedRestart=pass concurrentCas=1-of-2 rollback=pass ` +
       `backupRestore=pass referenceCleanup=pass databaseBytes=${
         statSync(database).size

@@ -73,7 +73,7 @@ Production system-share ingestion is documented in [System-share ingestion](../d
 
 Persistence, file ownership, migration, locking, cleanup, and replay details are fixed by [ADR-0002](../adr/0002-sqlite-file-storage-and-inbox-recovery.md).
 
-Production persistence uses one app-lifetime Expo SQLite connection at schema v7. Repository boundaries cover Pack graphs, ordered ContextItems with durable terminal retry stages and independently expiring run claims, explicit original-release disposition, RiskFindings, ExportRecords, artifacts, recovery journals, diagnostics, quarantine records, and cleanup leases. Pack updates use optimistic revisions inside exclusive transactions; unknown newer schemas, stale revisions, relationship violations, and artifact-integrity mismatches fail closed with stable codes.
+Production persistence uses one app-lifetime Expo SQLite connection at schema v8. Repository boundaries cover Pack graphs, ordered ContextItems with durable terminal retry stages and independently expiring run claims, explicit original-release disposition, versioned duplicate analyses and separately durable user decisions, RiskFindings, ExportRecords, artifacts, recovery journals, diagnostics, quarantine records, and cleanup leases. Pack updates use optimistic revisions inside exclusive transactions; unknown newer schemas, stale revisions, relationship violations, and artifact-integrity mismatches fail closed with stable codes.
 
 Native `ArtifactStore` implementations own streaming file publication. They accept only sandbox-controlled `file://` sources and canonical internal relative destinations, write and synchronize a `.partial`, verify byte count and SHA-256, publish by same-volume atomic rename, and synchronize the destination directory. Domain-visible artifact metadata is committed only after native verification. Existing originals and their source/media identity are immutable, and replay succeeds only for identical bytes.
 
@@ -89,6 +89,7 @@ Required versioned schemas:
 - PipelineCheckpointV1
 - RiskFindingV1
 - ExportManifestV1
+- ImagePerceptualHashV1
 
 Shared tests compile every structural JSON Schema and then apply the exported TypeScript semantic validator. Swift and Kotlin independently encode the same canonical fixtures, while native boundary readers mirror the semantic rules they consume. Cross-field invariants that standard JSON Schema cannot express are explicitly tested against the runtime semantic authority. Compatibility rules require readers to reject unknown breaking versions explicitly rather than guess.
 

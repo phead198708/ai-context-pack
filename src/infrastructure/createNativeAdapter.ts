@@ -46,6 +46,7 @@ import {
   isOwnedArtifactPath,
   isOwnedArtifactStorePath,
 } from './persistence/ownedPaths';
+import { isImagePerceptualHashV1 } from '../domain/duplicateDetection';
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
@@ -88,6 +89,7 @@ export interface NativeMethods {
   purgeArtifactQuarantine?(olderThanEpochMs: number): Promise<unknown>;
   getArtifactStorageUsage?(): Promise<unknown>;
   getOCRCapabilities?(): Promise<unknown>;
+  hashImagePerceptually?(fileUri: string): Promise<unknown>;
   recognizeText(
     taskId: string,
     uri: string,
@@ -391,6 +393,27 @@ export const createNativeAdapter = (
             throw new NativeBoundaryError('OCR_RESULT_INVALID');
           return value;
         },
+        hashImagePerceptually: async fileUri => {
+          if (!nativeModule.hashImagePerceptually)
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          requireControlledFileUri(fileUri, 'PROCESSOR_OUTPUT_INVALID');
+          let value: unknown;
+          try {
+            value = await nativeModule.hashImagePerceptually(fileUri);
+          } catch (error) {
+            const code = nativeErrorCode(error);
+            throw new NativeBoundaryError(
+              code === 'RESOURCE_MEMORY_PRESSURE' ||
+              code === 'PIPELINE_STAGE_FAILED' ||
+              code === 'INVALID_LOCAL_FILE_URI'
+                ? code
+                : 'PROCESSOR_OUTPUT_INVALID',
+            );
+          }
+          if (!isImagePerceptualHashV1(value))
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          return value;
+        },
         recognizeText: async request => {
           if (!isOCRRequestV1(request))
             throw new NativeBoundaryError('OCR_RESULT_INVALID');
@@ -589,6 +612,9 @@ export const createNativeAdapter = (
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         getOCRCapabilities: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        hashImagePerceptually: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         recognizeText: async () => {

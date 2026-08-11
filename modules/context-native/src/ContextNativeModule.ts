@@ -19,6 +19,7 @@ import type {
   NativeQuarantinePurgeResult,
   NativeQuarantinedArtifact,
 } from '../../../src/domain/nativeAdapter';
+import type { ImagePerceptualHashV1 } from '../../../src/domain/duplicateDetection';
 import type {
   PendingShareEvent,
   RecoveryEvent,
@@ -73,6 +74,7 @@ declare class ContextNativeModule extends NativeModule {
   ): Promise<NativeQuarantinePurgeResult>;
   getArtifactStorageUsage(): Promise<NativeArtifactStorageUsage>;
   getOCRCapabilities(): Promise<OCRCapabilitiesV1>;
+  hashImagePerceptually(fileUri: string): Promise<ImagePerceptualHashV1>;
   recognizeText(
     taskId: string,
     fileUri: string,

@@ -360,6 +360,19 @@ public final class ContextNativeModule: Module {
       return self.ocrProcessor.capabilities()
     }
 
+    AsyncFunction("hashImagePerceptually") { (fileUri: String) async throws -> [String: Any] in
+      let url = try controlledArtifactSourceURL(fileUri)
+      do {
+        return try await Task.detached(priority: .utility) {
+          try ImagePerceptualHasher.hash(fileURL: url)
+        }.value
+      } catch let error as ImagePerceptualHashError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("PROCESSOR_OUTPUT_INVALID")
+      }
+    }
+
     AsyncFunction("recognizeText") { [weak self] (
       taskId: String,
       fileUri: String,

@@ -57,6 +57,20 @@ internal object AndroidPDFProcessScope {
   )
 }
 
+internal object AndroidImageHashProcessScope {
+  val executor = ThreadPoolExecutor(
+    1,
+    1,
+    0L,
+    TimeUnit.MILLISECONDS,
+    ArrayBlockingQueue(2),
+    { action ->
+      Thread(action, "ai-context-pack-image-hash").apply { isDaemon = true }
+    },
+    ThreadPoolExecutor.AbortPolicy(),
+  )
+}
+
 internal data class OcrLifecycleRegistration(
   val taskId: String,
   val close: () -> Unit,
@@ -576,6 +590,21 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
     AsyncFunction("getOCRCapabilities") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       ocrProcessor.capabilities(context)
+    }
+
+    AsyncFunction("hashImagePerceptually") { fileUri: String, promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      try {
+        AndroidImageHashProcessScope.executor.execute {
+          try { promise.resolve(ImagePerceptualHasher.hash(context, fileUri)) }
+          catch (error: NativeException) { promise.reject(error) }
+          catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
+          catch (_: Throwable) { promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID")) }
+        }
+      } catch (_: RejectedExecutionException) {
+        promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
+      }
     }
 
     AsyncFunction("recognizeText") {

@@ -77,6 +77,7 @@ const ARTIFACT_KINDS = new Set([
   'original',
   'ocr-text',
   'pdf-page-text',
+  'normalized-text',
   'compressed-image',
   'redacted-image',
   'preview',

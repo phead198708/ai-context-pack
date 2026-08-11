@@ -141,6 +141,48 @@ describe('native adapter runtime boundary', () => {
     ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
   });
 
+  test('validates image perceptual hashes and preserves only stable resource errors', async () => {
+    const result = {
+      schemaVersion: 1,
+      algorithm: 'dhash-64-v1',
+      hash: '000000a810000000',
+      sampleWidth: 9,
+      sampleHeight: 8,
+      orientationApplied: true,
+      durationMs: 1,
+      revision: '1',
+    };
+    const hashImagePerceptually = jest.fn().mockResolvedValue(result);
+    const guarded = createNativeAdapter({
+      ...mockNativeModule,
+      hashImagePerceptually,
+    });
+
+    await expect(
+      guarded.hashImagePerceptually?.('file:///cache/synthetic.png'),
+    ).resolves.toEqual(result);
+    expect(hashImagePerceptually).toHaveBeenCalledWith(
+      'file:///cache/synthetic.png',
+    );
+
+    hashImagePerceptually.mockResolvedValue({ ...result, hash: 'invalid' });
+    await expect(
+      guarded.hashImagePerceptually?.('file:///cache/synthetic.png'),
+    ).rejects.toMatchObject({ code: 'PROCESSOR_OUTPUT_INVALID' });
+
+    hashImagePerceptually.mockRejectedValue({
+      code: 'RESOURCE_MEMORY_PRESSURE',
+    });
+    await expect(
+      guarded.hashImagePerceptually?.('file:///cache/synthetic.png'),
+    ).rejects.toMatchObject({ code: 'RESOURCE_MEMORY_PRESSURE' });
+
+    hashImagePerceptually.mockRejectedValue({ code: 'PRIVATE_NATIVE_ERROR' });
+    await expect(
+      guarded.hashImagePerceptually?.('file:///cache/synthetic.png'),
+    ).rejects.toMatchObject({ code: 'PROCESSOR_OUTPUT_INVALID' });
+  });
+
   test('validates and binds PDF inspection, page extraction, cancellation, and UTF-8 text reads', async () => {
     const taskId = '123e4567-e89b-42d3-a456-426614174000';
     const fileUri = 'file:///cache/synthetic.pdf';

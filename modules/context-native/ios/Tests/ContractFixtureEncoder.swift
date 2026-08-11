@@ -102,5 +102,15 @@ enum ContractFixtureEncoder {
         "decisionSetSha256": String(repeating: "c", count: 64),
       ],
     ],
+    "image-perceptual-hash-v1.json": [
+      "schemaVersion": 1,
+      "algorithm": "dhash-64-v1",
+      "hash": "0123456789abcdef",
+      "sampleWidth": 9,
+      "sampleHeight": 8,
+      "orientationApplied": true,
+      "durationMs": 2,
+      "revision": "1",
+    ],
   ]
 }

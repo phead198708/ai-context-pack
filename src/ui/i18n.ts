@@ -35,6 +35,22 @@ const en = {
   saveInstruction: 'Save task instruction',
   cancelProcessing: 'Cancel processing',
   retryPack: 'Retry Pack processing',
+  analyzeDuplicates: 'Analyze normalized content',
+  duplicateReview: 'Duplicate suggestions',
+  duplicateDetectorVersion:
+    'Detector contract v{detector} · normalization {normalization}',
+  duplicateActualSavings:
+    'Current selected savings: {bytes} bytes · {characters} characters',
+  duplicateSafetyNotice:
+    'Suggestions never delete originals. Keep, exclude, and preferred choices are reversible.',
+  duplicateNone: 'No duplicate candidates detected.',
+  duplicateCandidateSummary:
+    '{reason} · {confidence}% confidence · up to {bytes} bytes / {characters} characters',
+  duplicateItemPreview:
+    '{item} · {kind} · {characters} normalized characters · {bytes} bytes · {choice}',
+  duplicateExclude: 'Exclude {item}',
+  duplicatePreferred: 'Prefer {item}',
+  duplicateKeepAll: 'Keep all candidates',
   itemName: 'Item name',
   saveItemName: 'Save item name',
   itemMetadata: '{source} · {type} · {bytes} · {stage} · {progress}% · {state}',
@@ -185,6 +201,21 @@ const zhHans: Record<keyof typeof en, string> = {
   saveInstruction: '保存任务说明',
   cancelProcessing: '取消处理',
   retryPack: '重试上下文包处理',
+  analyzeDuplicates: '分析归一化内容',
+  duplicateReview: '重复项建议',
+  duplicateDetectorVersion:
+    '检测器契约 v{detector} · 归一化版本 {normalization}',
+  duplicateActualSavings:
+    '当前选择实际节省：{bytes} 字节 · {characters} 个字符',
+  duplicateSafetyNotice: '建议绝不会删除原件；保留、排除和首选选择均可撤销。',
+  duplicateNone: '未检测到重复候选项。',
+  duplicateCandidateSummary:
+    '{reason} · 置信度 {confidence}% · 最多节省 {bytes} 字节 / {characters} 个字符',
+  duplicateItemPreview:
+    '{item} · {kind} · {characters} 个归一化字符 · {bytes} 字节 · {choice}',
+  duplicateExclude: '排除{item}',
+  duplicatePreferred: '首选{item}',
+  duplicateKeepAll: '保留全部候选项',
   itemName: '项目名称',
   saveItemName: '保存项目名称',
   itemMetadata: '{source} · {type} · {bytes} · {stage} · {progress}% · {state}',

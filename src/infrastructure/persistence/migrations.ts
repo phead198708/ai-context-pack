@@ -322,4 +322,43 @@ CREATE INDEX pipeline_runs_runnable_index
   ON pipeline_runs(status, claim_session_id, claim_deadline_ms, updated_at, id);
 PRAGMA user_version = 7;
 `,
+  `
+CREATE TABLE duplicate_analysis_manifests (
+  pack_id TEXT PRIMARY KEY NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+  payload_json TEXT NOT NULL,
+  analyzed_at TEXT NOT NULL
+);
+
+CREATE TABLE duplicate_analysis_items (
+  item_id TEXT PRIMARY KEY NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+  pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+  normalized_artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
+  payload_json TEXT NOT NULL,
+  analyzed_at TEXT NOT NULL
+);
+
+CREATE TABLE duplicate_suggestions (
+  suggestion_key TEXT PRIMARY KEY NOT NULL,
+  pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+  left_item_id TEXT NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+  right_item_id TEXT NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+  payload_json TEXT NOT NULL,
+  CHECK (left_item_id < right_item_id)
+);
+
+CREATE TABLE duplicate_decisions (
+  item_id TEXT PRIMARY KEY NOT NULL REFERENCES context_items(id) ON DELETE CASCADE,
+  pack_id TEXT NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
+  payload_json TEXT NOT NULL,
+  decided_at TEXT NOT NULL
+);
+
+CREATE INDEX duplicate_analysis_items_pack_index
+  ON duplicate_analysis_items(pack_id, item_id);
+CREATE INDEX duplicate_suggestions_pack_index
+  ON duplicate_suggestions(pack_id, suggestion_key);
+CREATE INDEX duplicate_decisions_pack_index
+  ON duplicate_decisions(pack_id, item_id);
+PRAGMA user_version = 8;
+`,
 ] as const;

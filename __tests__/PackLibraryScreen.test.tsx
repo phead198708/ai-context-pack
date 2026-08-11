@@ -172,6 +172,8 @@ function controller(): jest.Mocked<PackLibraryController> {
       completedArtifactIds: [itemIds[2]],
     }),
     retryPack: jest.fn().mockResolvedValue([]),
+    analyzePack: jest.fn().mockResolvedValue(1),
+    reviewDuplicateGroup: jest.fn().mockResolvedValue(undefined),
     cancelProcessing: jest.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<PackLibraryController>;
 }
@@ -270,6 +272,76 @@ test('exposes stable loading, error recovery, and empty-state identifiers', asyn
     emptyRenderer.root.findByProps({ testID: 'pack-library-no-selection' }),
   ).toBeDefined();
   act(() => emptyRenderer.unmount());
+});
+
+test('renders side-by-side duplicate review and wires reversible actions', async () => {
+  const value = controller();
+  value.load.mockResolvedValue({
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      duplicateReview: {
+        normalizationVersion: 'text-normalization-v1',
+        detectorVersion: 1,
+        actualBytesSaved: 128,
+        actualCharactersSaved: 64,
+        groups: [
+          {
+            key: `${itemIds[0]}:${itemIds[4]}`,
+            reasons: ['near-image'],
+            confidence: 0.98,
+            expectedBytesSaved: 128,
+            expectedCharactersSaved: 64,
+            items: [
+              {
+                id: itemIds[0],
+                displayName: 'Complete image',
+                contentKind: 'prose',
+                normalizedCharacterCount: 80,
+                normalizedByteCount: 80,
+                choice: 'preferred',
+              },
+              {
+                id: itemIds[4],
+                displayName: 'Duplicate image',
+                contentKind: 'prose',
+                normalizedCharacterCount: 80,
+                normalizedByteCount: 80,
+                choice: 'exclude',
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  const renderer = await render(value);
+
+  expect(
+    renderer.root.findByProps({ testID: 'duplicate-review' }),
+  ).toBeDefined();
+  expect(
+    renderer.root.findByProps({ testID: 'duplicate-actual-savings' }),
+  ).toBeDefined();
+  expect(
+    renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[0]}` }),
+  ).toBeDefined();
+  expect(
+    renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[4]}` }),
+  ).toBeDefined();
+
+  await press(button(renderer, 'Prefer Complete image'));
+  expect(value.reviewDuplicateGroup).toHaveBeenCalledWith(
+    packId,
+    [itemIds[0], itemIds[4]],
+    { kind: 'preferred', itemId: itemIds[0] },
+  );
+  await press(button(renderer, 'Keep all candidates'));
+  expect(value.reviewDuplicateGroup).toHaveBeenCalledWith(
+    packId,
+    [itemIds[0], itemIds[4]],
+    { kind: 'keep-all' },
+  );
 });
 
 test('renders all required library views and every partial-failure item state', async () => {

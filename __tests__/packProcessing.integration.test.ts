@@ -6,6 +6,11 @@ import {
 } from '../src/domain/contracts';
 import type { Artifact, ContextItem } from '../src/domain/models';
 import { DomainError } from '../src/domain/errors';
+import {
+  fingerprintNormalizedTextV1,
+  normalizeContentV1,
+  type DuplicateAnalysisItemV1,
+} from '../src/domain/duplicateDetection';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
 import {
@@ -397,7 +402,10 @@ async function persistAndClaim(
       delete withoutRetryStage.retryStage;
       return {
         ...withoutRetryStage,
-        state: 'imported' as const,
+        state:
+          run.stage === 'analyze'
+            ? ('extracted' as const)
+            : ('imported' as const),
         updatedAt: run.startedAt,
       };
     }),
@@ -1430,6 +1438,134 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
       publicationLeaseObservedAt: now,
     }),
   ).resolves.toBe(false);
+});
+
+test('analyze settlement atomically registers normalized text and versioned analysis', async () => {
+  const run: PersistedPipelineRun = {
+    id: '693e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'analyze',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const claimed = await persistAndClaim(run);
+  const normalized = normalizeContentV1(
+    'Synthetic duplicate-analysis text with enough stable characters.',
+  );
+  const artifact: Artifact = {
+    id: run.id,
+    itemId,
+    kind: 'normalized-text',
+    relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+    mediaType: 'text/plain',
+    byteCount: normalized.utf8ByteCount,
+    sha256: 'd'.repeat(64),
+    processorVersion: {
+      processor: 'shared-content-normalization',
+      version: 'text-normalization-v1',
+      contractVersion: 1,
+    },
+    createdAt: now,
+    immutable: true,
+  };
+  const analysis: DuplicateAnalysisItemV1 = {
+    schemaVersion: 1,
+    packId,
+    itemId,
+    originalSha256: 'a'.repeat(64),
+    originalByteCount: 4,
+    normalizedArtifactId: artifact.id,
+    normalizedSha256: artifact.sha256,
+    normalizedByteCount: artifact.byteCount,
+    normalizedCharacterCount: normalized.characterCount,
+    contentKind: normalized.contentKind,
+    textFingerprint: fingerprintNormalizedTextV1(normalized),
+    analyzedAt: now,
+  };
+  const owner = 'e93e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      run.id,
+      claimed.claimVersion,
+      owner,
+      now,
+      '2026-08-11T00:10:00Z',
+    ),
+  ).resolves.toBe(true);
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact: {
+        ...artifact,
+        processorVersion: {
+          ...artifact.processorVersion,
+          version: 'future-normalization',
+        },
+      },
+      publicationLeaseOwnerId: owner,
+      publicationLeaseObservedAt: now,
+    }),
+  ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+      publicationLeaseOwnerId: owner,
+      publicationLeaseObservedAt: now,
+    }),
+  ).resolves.toBe(true);
+
+  await expect(
+    repository.completePipelineRun({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+      analysis: { ...analysis, normalizedSha256: 'e'.repeat(64) },
+      publicationLeaseOwnerId: owner,
+      publicationLeaseObservedAt: now,
+    }),
+  ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
+  expect(
+    database.prepare('SELECT id FROM artifacts WHERE id = ?').get(artifact.id),
+  ).toBeUndefined();
+  await expect(repository.findDuplicateAnalysis(packId)).resolves.toEqual({
+    manifest: null,
+    analyses: [],
+    suggestions: [],
+    decisions: [],
+  });
+
+  await expect(
+    repository.completePipelineRun({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+      analysis,
+      publicationLeaseOwnerId: owner,
+      publicationLeaseObservedAt: now,
+    }),
+  ).resolves.toBe(true);
+  await expect(repository.findDuplicateAnalysis(packId)).resolves.toMatchObject(
+    {
+      manifest: { packId, itemCount: 1, suggestionCount: 0 },
+      analyses: [analysis],
+      suggestions: [],
+      decisions: [],
+    },
+  );
+  await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
+    items: [{ id: itemId, state: 'analyzed' }],
+  });
+  await repository.releaseCleanupLease(owner);
 });
 
 test('extraction settlement is fenced when the publication lease owner changes', async () => {

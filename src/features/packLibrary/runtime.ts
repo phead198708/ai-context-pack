@@ -3,7 +3,9 @@ import { nativeAdapter } from '../../infrastructure/nativeAdapter';
 import type { DomainErrorCode } from '../../domain/errors';
 import { PackLibraryController } from './controller';
 import {
+  CompositePackStageWorker,
   DurablePackProcessingCoordinator,
+  NativeDuplicateAnalysisStageWorker,
   NativeExtractionStageWorker,
 } from './processing';
 
@@ -30,7 +32,10 @@ function publishProcessingFailure(code: DomainErrorCode): void {
 
 const processingCoordinator = new DurablePackProcessingCoordinator(
   productionRepository,
-  new NativeExtractionStageWorker(productionRepository, nativeAdapter),
+  new CompositePackStageWorker([
+    new NativeExtractionStageWorker(productionRepository, nativeAdapter),
+    new NativeDuplicateAnalysisStageWorker(productionRepository, nativeAdapter),
+  ]),
   undefined,
   undefined,
   ({ code }) => publishProcessingFailure(code),

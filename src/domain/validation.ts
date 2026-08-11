@@ -23,6 +23,8 @@ import { DOMAIN_ERROR_CATALOG, type DomainErrorCode } from './errors';
 import { isCanonicalUuid } from './canonicalUuid';
 import { isValidUnicodeScalarString, utf8ByteCount } from './mainAppImport';
 
+export { isImagePerceptualHashV1 } from './duplicateDetection';
+
 const mediaTypePattern =
   /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
 const sha256Pattern = /^[0-9a-f]{64}$/;

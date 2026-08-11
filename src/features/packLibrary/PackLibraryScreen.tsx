@@ -360,6 +360,16 @@ function PackEditor({
           }
         />
       ) : null}
+      {['processing', 'recovering'].includes(detail.pack.state) &&
+      detail.items.some(item => item.state === 'extracted') ? (
+        <Button
+          disabled={busy}
+          label={t(locale, 'analyzeDuplicates')}
+          onPress={() =>
+            run(mutate(() => controller.analyzePack(detail.pack.id)))
+          }
+        />
+      ) : null}
       {['failed', 'cancelled'].includes(detail.pack.state) ? (
         <Button
           disabled={busy}
@@ -367,6 +377,16 @@ function PackEditor({
           onPress={() =>
             run(mutate(() => controller.retryPack(detail.pack.id)))
           }
+        />
+      ) : null}
+      {detail.duplicateReview ? (
+        <DuplicateReview
+          busy={busy}
+          controller={controller}
+          locale={locale}
+          mutate={mutate}
+          packId={detail.pack.id}
+          review={detail.duplicateReview}
         />
       ) : null}
       {detail.items.map((item, index) => (
@@ -382,6 +402,144 @@ function PackEditor({
           total={detail.items.length}
         />
       ))}
+    </View>
+  );
+}
+
+function DuplicateReview({
+  busy,
+  controller,
+  locale,
+  mutate,
+  packId,
+  review,
+}: {
+  readonly busy: boolean;
+  readonly controller: PackLibraryController;
+  readonly locale: AppLocale;
+  readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
+  readonly packId: string;
+  readonly review: NonNullable<
+    NonNullable<PackLibrarySnapshot['selected']>['duplicateReview']
+  >;
+}): React.JSX.Element {
+  return (
+    <View style={styles.card} testID="duplicate-review">
+      <Text accessibilityRole="header" style={styles.sectionTitle}>
+        {t(locale, 'duplicateReview')}
+      </Text>
+      <Text style={styles.detail} testID="duplicate-detector-version">
+        {t(locale, 'duplicateDetectorVersion', {
+          detector: review.detectorVersion,
+          normalization: review.normalizationVersion,
+        })}
+      </Text>
+      <Text style={styles.detail} testID="duplicate-actual-savings">
+        {t(locale, 'duplicateActualSavings', {
+          bytes: review.actualBytesSaved,
+          characters: review.actualCharactersSaved,
+        })}
+      </Text>
+      <Text style={styles.detail}>{t(locale, 'duplicateSafetyNotice')}</Text>
+      {review.groups.length === 0 ? (
+        <Text style={styles.detail}>{t(locale, 'duplicateNone')}</Text>
+      ) : (
+        review.groups.map(group => (
+          <View
+            key={group.key}
+            style={styles.duplicateGroup}
+            testID={`duplicate-group-${group.key}`}
+          >
+            <Text style={styles.label}>
+              {t(locale, 'duplicateCandidateSummary', {
+                reason: group.reasons.join(', '),
+                confidence: Math.round(group.confidence * 100),
+                bytes: group.expectedBytesSaved,
+                characters: group.expectedCharactersSaved,
+              })}
+            </Text>
+            <View style={styles.comparisonRow}>
+              {group.items.map(item => (
+                <View
+                  accessible
+                  accessibilityLabel={t(locale, 'duplicateItemPreview', {
+                    item: item.displayName,
+                    kind: item.contentKind,
+                    characters: item.normalizedCharacterCount,
+                    bytes: item.normalizedByteCount,
+                    choice: item.choice,
+                  })}
+                  key={item.id}
+                  style={styles.comparisonCard}
+                  testID={`duplicate-preview-${item.id}`}
+                >
+                  <Text style={styles.label}>{item.displayName}</Text>
+                  <Text style={styles.detail}>
+                    {t(locale, 'duplicateItemPreview', {
+                      item: item.displayName,
+                      kind: item.contentKind,
+                      characters: item.normalizedCharacterCount,
+                      bytes: item.normalizedByteCount,
+                      choice: item.choice,
+                    })}
+                  </Text>
+                  <View style={styles.actions}>
+                    <Button
+                      disabled={busy}
+                      label={t(locale, 'duplicateExclude', {
+                        item: item.displayName,
+                      })}
+                      onPress={() =>
+                        run(
+                          mutate(() =>
+                            controller.reviewDuplicateGroup(
+                              packId,
+                              group.items.map(value => value.id),
+                              { kind: 'exclude', itemId: item.id },
+                            ),
+                          ),
+                        )
+                      }
+                    />
+                    <Button
+                      disabled={busy}
+                      label={t(locale, 'duplicatePreferred', {
+                        item: item.displayName,
+                      })}
+                      onPress={() =>
+                        run(
+                          mutate(() =>
+                            controller.reviewDuplicateGroup(
+                              packId,
+                              group.items.map(value => value.id),
+                              { kind: 'preferred', itemId: item.id },
+                            ),
+                          ),
+                        )
+                      }
+                    />
+                  </View>
+                </View>
+              ))}
+            </View>
+            <Button
+              disabled={busy}
+              label={t(locale, 'duplicateKeepAll')}
+              onPress={() =>
+                run(
+                  mutate(() =>
+                    controller.reviewDuplicateGroup(
+                      packId,
+                      group.items.map(value => value.id),
+                      { kind: 'keep-all' },
+                    ),
+                  ),
+                )
+              }
+            />
+          </View>
+        ))
+      )}
     </View>
   );
 }
@@ -807,6 +965,26 @@ const styles = StyleSheet.create({
     borderColor: colors.muted,
     borderRadius: 8,
     borderWidth: 1,
+    padding: spacing.sm,
+  },
+  duplicateGroup: {
+    borderColor: colors.muted,
+    borderRadius: 10,
+    borderWidth: 1,
+    gap: spacing.sm,
+    padding: spacing.sm,
+  },
+  comparisonRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  comparisonCard: {
+    backgroundColor: colors.background,
+    borderRadius: 10,
+    flexBasis: 240,
+    flexGrow: 1,
+    gap: spacing.sm,
     padding: spacing.sm,
   },
 });

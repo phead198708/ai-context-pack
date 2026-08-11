@@ -264,6 +264,19 @@ class RuntimeRepository implements ProductionPersistenceRepository {
 
   async markArtifactVerified() {}
 
+  async findDuplicateAnalysis() {
+    return {
+      manifest: null,
+      analyses: [],
+      suggestions: [],
+      decisions: [],
+    } as const;
+  }
+
+  async replaceDuplicateAnalysis() {}
+
+  async saveDuplicateDecisions() {}
+
   async recordRecoveryDiagnostic(input: RecoveryDiagnosticInput) {
     this.diagnostics.push(input);
   }
