@@ -19,6 +19,7 @@ import {
 } from './src/domain/inboxEventWorkflow';
 import type { ImportManifestV1 } from './src/domain/contracts';
 import { isCanonicalUuid } from './src/domain/canonicalUuid';
+import { isDomainErrorCode, type DomainErrorCode } from './src/domain/errors';
 import {
   createRetryMainAppImportDraft,
   MAIN_APP_IMPORT_MAX_ITEMS,
@@ -89,7 +90,10 @@ function App(): React.JSX.Element {
       .recoverProcessing()
       .then(() => true)
       .catch(error => {
-        if (appMounted.current) setPipelineRecoveryError(appErrorCode(error));
+        if (appMounted.current)
+          setPipelineRecoveryError(
+            appErrorCode(error, 'PIPELINE_RECOVERY_REQUIRED'),
+          );
         return false;
       })
       .finally(() => {
@@ -284,6 +288,7 @@ function App(): React.JSX.Element {
         ) : null}
         {pipelineRecoveryError ? (
           <StateCard
+            alert
             title={t(locale, 'processingRecoveryUnavailable')}
             detail={pipelineRecoveryError}
           >
@@ -710,13 +715,20 @@ function StateCard({
   title,
   detail,
   children,
+  alert = false,
 }: {
   title: string;
   detail?: string;
   children?: React.ReactNode;
+  alert?: boolean;
 }): React.JSX.Element {
   return (
-    <View style={styles.card}>
+    <View
+      accessibilityLiveRegion={alert ? 'assertive' : undefined}
+      accessibilityRole={alert ? 'alert' : undefined}
+      accessible={alert || undefined}
+      style={styles.card}
+    >
       <Text style={styles.cardTitle}>{title}</Text>
       {detail ? <Text style={styles.detail}>{detail}</Text> : null}
       {children}
@@ -791,13 +803,15 @@ function localizedPackState(
   return t(locale, keys[state]);
 }
 
-function appErrorCode(error: unknown): string {
-  if (typeof error !== 'object' || error === null)
-    return 'EMPTY_DRAFT_CREATE_FAILED';
+function appErrorCode(
+  error: unknown,
+  fallback:
+    | DomainErrorCode
+    | 'EMPTY_DRAFT_CREATE_FAILED' = 'EMPTY_DRAFT_CREATE_FAILED',
+): DomainErrorCode | 'EMPTY_DRAFT_CREATE_FAILED' {
+  if (typeof error !== 'object' || error === null) return fallback;
   const value = error as { readonly code?: unknown };
-  return typeof value.code === 'string'
-    ? value.code
-    : 'EMPTY_DRAFT_CREATE_FAILED';
+  return isDomainErrorCode(value.code) ? value.code : fallback;
 }
 
 function packLibraryRefreshKey(state: LoadState): string {

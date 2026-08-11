@@ -75,27 +75,27 @@ Keep the existing stable registry file plus per-ingestion POSIX advisory locks f
 
 ## Interruption and failure matrix
 
-| Scenario                            | Expected result                                                             | Reproducible evidence                                         |
-| ----------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| Before copy                         | Journal only; Inbox preserved                                               | shared coordinator test                                       |
-| During copy                         | Partial remains recoverable; replay replaces it                             | Swift/Kotlin native handoff tests                             |
-| After file close                    | Closed partial is revalidated or replaced                                   | Swift/Kotlin native handoff tests                             |
-| Before manifest/publish rename      | Staging is not imported; recovery event is durable                          | existing Inbox recovery tests plus shared interruption matrix |
-| Before DB commit                    | Published owned file and Inbox remain; replay commits once                  | shared coordinator test                                       |
-| Duplicate replay                    | One import row; matching fingerprint; idempotent ACK                        | shared and native tests                                       |
-| Corrupt/unknown manifest            | Fail closed with stable schema code; no content log                         | native manifest suites                                        |
-| Expired Android provider permission | Successful files remain; failed item is explicit; no commit of a half-state | shared injected failure and Android importer tests            |
-| Low disk                            | `RESOURCE_LOW_DISK` before destination creation; Inbox retained             | shared, Swift, and Kotlin tests                               |
-| v1/v2/v3 app database update        | v4 applied with rows, references, order, and safe retry backfill preserved  | `npm run test:persistence-migrations`                         |
-| Empty/legacy/restart/concurrent DB  | 0→1→2→3→4, ordered restart, one-of-two CAS, rollback, backup/restore pass   | `npm run test:persistence-production`                         |
-| Cleanup races recovery              | Transactional reference recheck wins; file retained                         | shared cleanup race test                                      |
-| Replay with low free space          | Existing artifacts require only fixed headroom and remain replayable        | Swift/Kotlin published-destination budget tests               |
-| New destination hierarchy           | Every new directory and parent is synchronized before handoff returns       | Swift/Kotlin injected directory-sync tests                    |
-| Fresh iOS Application Support       | Missing ancestor and owned root are created one level at a time and synced  | Swift fresh-install ancestor test                             |
-| Replay artifact hash mismatch       | Exact fingerprint alone is insufficient; journal retained and no ACK occurs | shared coordinator and SQLite repository tests                |
-| ACK stops after atomic rename       | Live Inbox is absent; tombstone is scanner-invisible and retryable          | Swift/Kotlin acknowledgement interruption tests               |
-| ACK tombstone deletion stops        | ACK remains successful; native-start sweep retries without an ingestion     | Swift/Kotlin startup sweep interruption/deletion/fsync tests  |
-| Handoff races another ingestion ACK | Target snapshot is registry-serialized; unrelated ACK waits, then succeeds  | Swift/Kotlin two-ingestion concurrency tests                  |
+| Scenario                            | Expected result                                                                          | Reproducible evidence                                         |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Before copy                         | Journal only; Inbox preserved                                                            | shared coordinator test                                       |
+| During copy                         | Partial remains recoverable; replay replaces it                                          | Swift/Kotlin native handoff tests                             |
+| After file close                    | Closed partial is revalidated or replaced                                                | Swift/Kotlin native handoff tests                             |
+| Before manifest/publish rename      | Staging is not imported; recovery event is durable                                       | existing Inbox recovery tests plus shared interruption matrix |
+| Before DB commit                    | Published owned file and Inbox remain; replay commits once                               | shared coordinator test                                       |
+| Duplicate replay                    | One import row; matching fingerprint; idempotent ACK                                     | shared and native tests                                       |
+| Corrupt/unknown manifest            | Fail closed with stable schema code; no content log                                      | native manifest suites                                        |
+| Expired Android provider permission | Successful files remain; failed item is explicit; no commit of a half-state              | shared injected failure and Android importer tests            |
+| Low disk                            | `RESOURCE_LOW_DISK` before destination creation; Inbox retained                          | shared, Swift, and Kotlin tests                               |
+| v1-v5 app database update           | v6 applied with rows, references, runs, order, release intent, and checkpoints preserved | `npm run test:persistence-migrations`                         |
+| Empty/legacy/restart/concurrent DB  | 0→1→2→3→4→5→6, ordered restart, one-of-two CAS, rollback, backup/restore pass            | `npm run test:persistence-production`                         |
+| Cleanup races recovery              | Transactional reference recheck wins; file retained                                      | shared cleanup race test                                      |
+| Replay with low free space          | Existing artifacts require only fixed headroom and remain replayable                     | Swift/Kotlin published-destination budget tests               |
+| New destination hierarchy           | Every new directory and parent is synchronized before handoff returns                    | Swift/Kotlin injected directory-sync tests                    |
+| Fresh iOS Application Support       | Missing ancestor and owned root are created one level at a time and synced               | Swift fresh-install ancestor test                             |
+| Replay artifact hash mismatch       | Exact fingerprint alone is insufficient; journal retained and no ACK occurs              | shared coordinator and SQLite repository tests                |
+| ACK stops after atomic rename       | Live Inbox is absent; tombstone is scanner-invisible and retryable                       | Swift/Kotlin acknowledgement interruption tests               |
+| ACK tombstone deletion stops        | ACK remains successful; native-start sweep retries without an ingestion                  | Swift/Kotlin startup sweep interruption/deletion/fsync tests  |
+| Handoff races another ingestion ACK | Target snapshot is registry-serialized; unrelated ACK waits, then succeeds               | Swift/Kotlin two-ingestion concurrency tests                  |
 
 ## Spike benchmarks
 
@@ -140,11 +140,16 @@ Issue #7 completes the production work owned by this ADR:
 7. Real SQLite verification covers upgrade, repository restart, immutable-source rollback, concurrent compare-and-swap, Pack-append revisioning, risk/export round trips, corrupted-row mapping, interrupted transaction rollback, backup/restore, reference cleanup, and absence of BLOB/provider/absolute-path persistence. The release-size results and license review are recorded above.
 8. Bootstrap, AppState refresh, and cold restart hydrate the persisted Pack projection after recovery, so the transient Inbox scan never replaces committed product state with an empty view.
 
-Issue #12 extends the schema to v4: terminal item rows require a durable retry stage, packaging
-failures can resume from `reviewed`, and retry clears the terminal-only marker in the same graph
-transaction. The migration backfills only the earliest safe stage provable from v3 artifacts.
+Issue #12 extends the schema through v4, v5, and v6. Version 4 stores the exact terminal retry
+stage. Version 5 stores retained/released/unavailable original disposition plus durable pipeline
+runs, monotonic claim versions, cancellation, background recovery, and transactional settlement.
+Version 6 stores the immutable derivative checkpoint before settlement so restart verifies and
+settles the exact path, byte count, and SHA-256 without rerunning extraction. The shared
+publication/cleanup lease is renewed and fenced throughout both critical sections; loss aborts
+the database transition and leaves deterministic recovery material. Migrations backfill only
+state provable from prior rows and references, including failed-item destructive-release intent.
 
-Cancellation/background pipeline checkpoints beyond Inbox recovery remain owned by their later processing issues. User-facing storage-management UI remains explicitly out of scope for Issue #7.
+User-facing storage-management UI remains explicitly out of scope for Issue #7.
 
 ## Consequences
 

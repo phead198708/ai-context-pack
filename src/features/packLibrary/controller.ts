@@ -157,6 +157,7 @@ export class PackLibraryController {
       const artifacts = await repository.listArtifactRecords();
       if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
       const plans: RetryPlan[] = [];
+      let hasBlockedFailedItem = false;
       const items = graph.items.map(item => {
         if (!['failed', 'cancelled', 'recovering'].includes(item.state))
           return item;
@@ -169,8 +170,10 @@ export class PackLibraryController {
         if (
           plan.stage === 'import' ||
           (this.processing && !this.processing.supports(plan.stage))
-        )
+        ) {
+          hasBlockedFailedItem = true;
           return item;
+        }
         plans.push(plan);
         return {
           ...withoutRetryStage(item),
@@ -180,6 +183,11 @@ export class PackLibraryController {
           ),
         };
       });
+      // Pack Retry is atomic across every terminal item. Starting executable
+      // siblings while retaining one unsupported failure would move the Pack
+      // out of `failed` and strand the blocked item without a Retry entry.
+      if (hasBlockedFailedItem)
+        throw new DomainError('DOMAIN_INVALID_TRANSITION');
       for (const item of items) {
         if (
           plans.some(plan => plan.itemId === item.id) ||
@@ -304,9 +312,9 @@ export class PackLibraryController {
     const value = this.now();
     if (!Number.isFinite(Date.parse(value)))
       throw new DomainError('SCHEMA_INVALID');
-    return Date.parse(value) < Date.parse(pack.createdAt)
-      ? pack.createdAt
-      : value;
+    return [value, pack.createdAt, pack.updatedAt].reduce((latest, candidate) =>
+      Date.parse(candidate) > Date.parse(latest) ? candidate : latest,
+    );
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {

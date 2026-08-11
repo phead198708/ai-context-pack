@@ -15,9 +15,16 @@ import type {
   StartPipelineRunInput,
 } from '../../infrastructure/persistence/contracts';
 import { ownedDerivedPath } from '../../infrastructure/persistence/ownedPaths';
+import {
+  startCleanupLeaseHeartbeat,
+  type CleanupLeaseHeartbeat,
+} from '../../infrastructure/persistence/cleanupLeaseHeartbeat';
 
 export interface PackStageWorkHandle {
   readonly result: Promise<Artifact | undefined>;
+  /** Rejects when a worker-owned publication fence is lost. */
+  readonly fence?: Promise<never>;
+  readonly publicationLeaseOwnerId?: string;
   cancel(): Promise<void>;
   finalize?(): Promise<void>;
 }
@@ -122,7 +129,14 @@ export class DurablePackProcessingCoordinator
         const graph = await repository.findPackGraph(run.packId);
         if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
         packCreatedAt = graph.pack.createdAt;
-        const claimAt = this.timestamp(packCreatedAt);
+        const item = graph.items.find(value => value.id === run.itemId);
+        if (!item) throw new DomainError('PERSISTENCE_CONFLICT');
+        const claimAt = this.timestamp(
+          packCreatedAt,
+          graph.pack.updatedAt,
+          run.startedAt,
+          run.updatedAt,
+        );
         claimVersion = await repository.markPipelineRunRunning(
           run.id,
           run.claimVersion,
@@ -137,11 +151,7 @@ export class DurablePackProcessingCoordinator
           claimVersion,
         };
         handle = this.worker.start(claimedRun);
-        heartbeat = this.startClaimHeartbeat(
-          repository,
-          claimedRun,
-          packCreatedAt,
-        );
+        heartbeat = this.startClaimHeartbeat(repository, claimedRun, claimAt);
       } catch (error) {
         await this.reportUnexpectedFailure(
           run,
@@ -158,7 +168,11 @@ export class DurablePackProcessingCoordinator
       try {
         let artifact: Artifact | undefined;
         try {
-          artifact = await Promise.race([handle.result, heartbeat.failure]);
+          artifact = await Promise.race([
+            handle.result,
+            heartbeat.failure,
+            ...(handle.fence ? [handle.fence] : []),
+          ]);
         } catch (error) {
           const heartbeatFailure = await heartbeat.stop();
           if (heartbeatFailure !== undefined) {
@@ -194,14 +208,21 @@ export class DurablePackProcessingCoordinator
         }
         if (artifact) {
           try {
-            const checkpointed = await repository.checkpointPipelineRunArtifact(
-              {
-                runId: run.id,
-                claimVersion,
-                updatedAt: this.timestamp(packCreatedAt),
-                artifact,
-              },
-            );
+            const checkpoint = repository.checkpointPipelineRunArtifact({
+              runId: run.id,
+              claimVersion,
+              updatedAt: this.timestamp(packCreatedAt),
+              artifact,
+              ...(handle.publicationLeaseOwnerId
+                ? {
+                    publicationLeaseOwnerId: handle.publicationLeaseOwnerId,
+                  }
+                : {}),
+            });
+            const checkpointed = await Promise.race([
+              checkpoint,
+              ...(handle.fence ? [handle.fence] : []),
+            ]);
             if (!checkpointed) throw new DomainError('PERSISTENCE_CONFLICT');
           } catch (checkpointError) {
             await heartbeat.stop();
@@ -230,12 +251,21 @@ export class DurablePackProcessingCoordinator
           return;
         }
         try {
-          await repository.completePipelineRun({
+          const completion = repository.completePipelineRun({
             runId: run.id,
             claimVersion,
             updatedAt: this.timestamp(packCreatedAt),
             ...(artifact ? { artifact } : {}),
+            ...(handle.publicationLeaseOwnerId
+              ? {
+                  publicationLeaseOwnerId: handle.publicationLeaseOwnerId,
+                }
+              : {}),
           });
+          await Promise.race([
+            completion,
+            ...(handle.fence ? [handle.fence] : []),
+          ]);
         } catch (settlementError) {
           await this.reportUnexpectedFailure(
             run,
@@ -270,14 +300,11 @@ export class DurablePackProcessingCoordinator
     );
   }
 
-  private timestamp(minimum?: string): string {
+  private timestamp(...minimums: readonly string[]): string {
     const value = this.now();
     const valueEpoch = Date.parse(value);
-    const minimumEpoch =
-      minimum === undefined ? valueEpoch : Date.parse(minimum);
-    if (!Number.isFinite(valueEpoch) || !Number.isFinite(minimumEpoch))
-      throw new DomainError('SCHEMA_INVALID');
-    return valueEpoch < minimumEpoch ? minimum! : value;
+    if (!Number.isFinite(valueEpoch)) throw new DomainError('SCHEMA_INVALID');
+    return latestTimestamp([value, ...minimums]);
   }
 
   private staleRunningBefore(value: string): string {
@@ -287,7 +314,7 @@ export class DurablePackProcessingCoordinator
   private startClaimHeartbeat(
     repository: ProductionPersistenceRepository,
     run: PersistedPipelineRun,
-    packCreatedAt: string,
+    chronologyFloor: string,
   ): ClaimHeartbeat {
     const intervalMs = Math.max(1, Math.floor(this.claimLeaseMs / 3));
     let stopped = false;
@@ -295,6 +322,7 @@ export class DurablePackProcessingCoordinator
     let failureValue: unknown;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inFlight = Promise.resolve();
+    let logicalAt = latestTimestamp([run.updatedAt, chronologyFloor]);
     let rejectFailure!: (error: unknown) => void;
     const failure = new Promise<never>((_resolve, reject) => {
       rejectFailure = reject;
@@ -308,17 +336,27 @@ export class DurablePackProcessingCoordinator
     const schedule = (): void => {
       timer = setTimeout(() => {
         inFlight = (async () => {
+          const intervalFloor = new Date(
+            Date.parse(logicalAt) + intervalMs,
+          ).toISOString();
+          const renewedAt = latestTimestamp([
+            this.timestamp(chronologyFloor),
+            logicalAt,
+            intervalFloor,
+          ]);
           const renewed = await repository.renewPipelineRunClaim(
             run.id,
             run.claimVersion,
-            this.timestamp(packCreatedAt),
+            renewedAt,
           );
           if (!renewed) throw new DomainError('PERSISTENCE_CONFLICT');
+          logicalAt = renewedAt;
         })();
         inFlight.then(() => {
           if (!stopped) schedule();
         }, recordFailure);
       }, intervalMs);
+      (timer as unknown as { unref?: () => void }).unref?.();
     };
     schedule();
     return {
@@ -404,17 +442,30 @@ export class NativeExtractionStageWorker implements PackStageWorker {
     let cancelActive: (() => Promise<void>) | undefined;
     let repository: ProductionPersistenceRepository | undefined;
     let publicationLeaseHeld = false;
+    let publicationHeartbeat: CleanupLeaseHeartbeat | undefined;
+    let rejectPublicationFence!: (error: unknown) => void;
+    const publicationFence = new Promise<never>((_resolve, reject) => {
+      rejectPublicationFence = reject;
+    });
+    publicationFence.catch(() => undefined);
     const publicationOwnerId = createCanonicalUuid();
-    const releasePublicationLease = async (): Promise<void> => {
-      if (!publicationLeaseHeld || !repository) return;
+    const assertPublicationLease = (): void => {
+      if (!publicationLeaseHeld || !publicationHeartbeat)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      publicationHeartbeat.assertOwned();
+    };
+    const releasePublicationLease = async (): Promise<unknown | undefined> => {
+      if (!publicationLeaseHeld || !repository) return undefined;
+      const heartbeatFailure = await publicationHeartbeat?.stop();
       publicationLeaseHeld = false;
       await repository.releaseCleanupLease(publicationOwnerId);
+      return heartbeatFailure;
     };
     const acquirePublicationLease = async (
-      graphCreatedAt: string,
+      chronologyFloor: string,
     ): Promise<void> => {
       if (!repository) throw new DomainError('PERSISTENCE_CONFLICT');
-      const acquiredAt = validatedTimestamp(this.now(), graphCreatedAt);
+      const acquiredAt = validatedTimestamp(this.now(), chronologyFloor);
       publicationLeaseHeld = await repository.acquireCleanupLeaseForPipelineRun(
         run.id,
         run.claimVersion,
@@ -425,165 +476,207 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         ).toISOString(),
       );
       if (!publicationLeaseHeld) throw new DomainError('PERSISTENCE_CONFLICT');
+      publicationHeartbeat = startCleanupLeaseHeartbeat(
+        repository,
+        publicationOwnerId,
+        acquiredAt,
+        this.publicationLeaseMs,
+        this.now,
+      );
+      publicationHeartbeat.failure.catch(rejectPublicationFence);
     };
     const result = (async (): Promise<Artifact | undefined> => {
-      try {
-        if (run.stage !== 'extract')
-          throw new DomainError('PIPELINE_STAGE_FAILED');
-        repository = await this.getRepository();
-        const graph = await repository.findPackGraph(run.packId);
-        const item = graph?.items.find(value => value.id === run.itemId);
-        if (!graph || !item)
-          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-        if (run.publishedArtifact) {
-          await acquirePublicationLease(graph.pack.createdAt);
-          const checkpoint = run.publishedArtifact;
-          const verification = await this.native.verifyArtifact(
-            checkpoint.relativePath,
-            checkpoint.byteCount,
-            checkpoint.sha256,
-          );
-          if (
-            verification.status !== 'verified' ||
-            verification.relativePath !== checkpoint.relativePath ||
-            verification.byteCount !== checkpoint.byteCount ||
-            verification.sha256 !== checkpoint.sha256
-          )
-            throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
-          return checkpoint;
-        }
-        const artifacts = await repository.listArtifactRecords();
-        const original = artifacts.find(
-          value => value.itemId === run.itemId && value.kind === 'original',
-        );
-        if (!original) throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      if (run.stage !== 'extract')
+        throw new DomainError('PIPELINE_STAGE_FAILED');
+      repository = await this.getRepository();
+      const graph = await repository.findPackGraph(run.packId);
+      const item = graph?.items.find(value => value.id === run.itemId);
+      if (!graph || !item) throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const chronologyFloor = latestTimestamp([
+        graph.pack.createdAt,
+        graph.pack.updatedAt,
+        run.startedAt,
+        run.updatedAt,
+      ]);
+      if (run.publishedArtifact) {
+        await acquirePublicationLease(chronologyFloor);
+        const checkpoint = run.publishedArtifact;
         const verification = await this.native.verifyArtifact(
-          original.relativePath,
-          original.byteCount,
-          original.sha256,
+          checkpoint.relativePath,
+          checkpoint.byteCount,
+          checkpoint.sha256,
         );
         if (
           verification.status !== 'verified' ||
-          verification.relativePath !== original.relativePath ||
-          verification.byteCount !== original.byteCount ||
-          verification.sha256 !== original.sha256
+          verification.relativePath !== checkpoint.relativePath ||
+          verification.byteCount !== checkpoint.byteCount ||
+          verification.sha256 !== checkpoint.sha256
         )
           throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
-        const fileUri = await this.native.resolveOwnedArtifactFileUri(
-          original.relativePath,
-        );
-        if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
-        let text: string;
-        let processorVersion: string;
-        if (item.sourceType === 'image') {
-          const script = await preferredOCRScript(this.native);
-          const handle = this.ocr.start(
-            {
-              taskId: run.id,
-              fileUri,
-              script,
-              recognitionLevel: 'accurate',
-            },
-            () => undefined,
-          );
-          cancelActive = handle.cancel;
-          if (cancelled) await handle.cancel();
-          const value = await handle.result;
-          text = value.text;
-          processorVersion = value.revision;
-        } else if (item.sourceType === 'pdf') {
-          const script = await preferredOCRScript(this.native);
-          const handle = this.pdf.start(
-            {
-              taskId: run.id,
-              fileUri,
-              sourceSha256: original.sha256,
-              script,
-            },
-            async () => undefined,
-            () => undefined,
-          );
-          cancelActive = handle.cancel;
-          if (cancelled) await handle.cancel();
-          const value = await handle.result;
-          if (value.status !== 'complete')
-            throw new DomainError('PDF_PAGE_EXTRACTION_FAILED');
-          text = joinBoundedPdfPageText(
-            value.pages
-              .filter(page => page.status === 'complete')
-              .map(page => page.text),
-          );
-          processorVersion = value.document.revision;
-        } else {
-          const value = await this.native.readPlainTextFile(fileUri);
-          text = value.text;
-          processorVersion = value.revision;
-        }
-        if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
-        await acquirePublicationLease(graph.pack.createdAt);
-        const relativePath = ownedDerivedPath(run.packId, run.id, 'txt');
-        if (artifacts.some(artifact => artifact.relativePath === relativePath))
-          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-        let published: Awaited<ReturnType<NativeAdapter['writeTextArtifact']>>;
-        try {
-          published = await this.native.writeTextArtifact(relativePath, text);
-        } catch (error) {
-          if (processingErrorCode(error) !== 'STORAGE_ARTIFACT_IMMUTABLE')
-            throw error;
-          const quarantined = await this.native.quarantineOwnedArtifact(
-            relativePath,
-          );
-          if (
-            !quarantined.quarantined ||
-            quarantined.quarantineId === undefined ||
-            quarantined.anonymousId === undefined ||
-            quarantined.byteCount === undefined
-          )
-            throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-          const quarantinedAt = validatedTimestamp(
-            this.now(),
-            graph.pack.createdAt,
-          );
-          await repository.recordQuarantine({
-            id: quarantined.quarantineId,
-            anonymousId: quarantined.anonymousId,
-            reasonCode: 'STORAGE_ARTIFACT_IMMUTABLE',
-            byteCount: quarantined.byteCount,
-            createdAt: quarantinedAt,
-            purgeAfter: new Date(
-              Date.parse(quarantinedAt) + 7 * 24 * 60 * 60 * 1_000,
-            ).toISOString(),
-          });
-          published = await this.native.writeTextArtifact(relativePath, text);
-        }
-        if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
-        return {
-          id: run.id,
-          itemId: run.itemId,
-          kind: item.sourceType === 'pdf' ? 'pdf-page-text' : 'ocr-text',
-          relativePath,
-          mediaType: 'text/plain',
-          byteCount: published.byteCount,
-          sha256: published.sha256,
-          processorVersion: {
-            processor: 'native-phase1-extraction',
-            version: processorVersion,
-            contractVersion: 1,
-          },
-          createdAt: run.startedAt,
-          immutable: true,
-        };
-      } catch (error) {
-        try {
-          await releasePublicationLease();
-        } catch {
-          // The global lease expires durably; preserve the extraction error.
-        }
-        throw error;
+        return checkpoint;
       }
+      const artifacts = await repository.listArtifactRecords();
+      const original = artifacts.find(
+        value => value.itemId === run.itemId && value.kind === 'original',
+      );
+      if (!original) throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const verification = await this.native.verifyArtifact(
+        original.relativePath,
+        original.byteCount,
+        original.sha256,
+      );
+      if (
+        verification.status !== 'verified' ||
+        verification.relativePath !== original.relativePath ||
+        verification.byteCount !== original.byteCount ||
+        verification.sha256 !== original.sha256
+      )
+        throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
+      const fileUri = await this.native.resolveOwnedArtifactFileUri(
+        original.relativePath,
+      );
+      if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
+      let text: string;
+      let processorVersion: string;
+      if (item.sourceType === 'image') {
+        const script = await preferredOCRScript(this.native);
+        const handle = this.ocr.start(
+          {
+            taskId: run.id,
+            fileUri,
+            script,
+            recognitionLevel: 'accurate',
+          },
+          () => undefined,
+        );
+        cancelActive = handle.cancel;
+        if (cancelled) await handle.cancel();
+        const value = await handle.result;
+        text = value.text;
+        processorVersion = value.revision;
+      } else if (item.sourceType === 'pdf') {
+        const script = await preferredOCRScript(this.native);
+        const handle = this.pdf.start(
+          {
+            taskId: run.id,
+            fileUri,
+            sourceSha256: original.sha256,
+            script,
+          },
+          async () => undefined,
+          () => undefined,
+        );
+        cancelActive = handle.cancel;
+        if (cancelled) await handle.cancel();
+        const value = await handle.result;
+        if (value.status !== 'complete')
+          throw new DomainError('PDF_PAGE_EXTRACTION_FAILED');
+        text = joinBoundedPdfPageText(
+          value.pages
+            .filter(page => page.status === 'complete')
+            .map(page => page.text),
+        );
+        processorVersion = value.document.revision;
+      } else {
+        const value = await this.native.readPlainTextFile(fileUri);
+        text = value.text;
+        processorVersion = value.revision;
+      }
+      if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
+      await acquirePublicationLease(chronologyFloor);
+      const relativePath = ownedDerivedPath(run.packId, run.id, 'txt');
+      const currentArtifacts = await repository.listArtifactRecords();
+      assertPublicationLease();
+      if (
+        currentArtifacts.some(
+          artifact => artifact.relativePath === relativePath,
+        )
+      )
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const quarantineAndRewrite = async (): Promise<
+        Awaited<ReturnType<NativeAdapter['writeTextArtifact']>>
+      > => {
+        if (!repository) throw new DomainError('PERSISTENCE_CONFLICT');
+        const authoritativeArtifacts = await repository.listArtifactRecords();
+        assertPublicationLease();
+        if (
+          authoritativeArtifacts.some(
+            artifact => artifact.relativePath === relativePath,
+          )
+        )
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        const quarantined = await this.native.quarantineOwnedArtifact(
+          relativePath,
+        );
+        assertPublicationLease();
+        if (
+          !quarantined.quarantined ||
+          quarantined.quarantineId === undefined ||
+          quarantined.anonymousId === undefined ||
+          quarantined.byteCount === undefined
+        )
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        const quarantinedAt = validatedTimestamp(this.now(), chronologyFloor);
+        await repository.recordQuarantine({
+          id: quarantined.quarantineId,
+          anonymousId: quarantined.anonymousId,
+          reasonCode: 'STORAGE_ARTIFACT_IMMUTABLE',
+          byteCount: quarantined.byteCount,
+          createdAt: quarantinedAt,
+          purgeAfter: new Date(
+            Date.parse(quarantinedAt) + 7 * 24 * 60 * 60 * 1_000,
+          ).toISOString(),
+        });
+        assertPublicationLease();
+        const replacement = await this.native.writeTextArtifact(
+          relativePath,
+          text,
+        );
+        assertPublicationLease();
+        if (!replacement.created)
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        return replacement;
+      };
+      let published: Awaited<ReturnType<NativeAdapter['writeTextArtifact']>>;
+      let initialPublication:
+        | Awaited<ReturnType<NativeAdapter['writeTextArtifact']>>
+        | undefined;
+      try {
+        initialPublication = await this.native.writeTextArtifact(
+          relativePath,
+          text,
+        );
+      } catch (error) {
+        if (processingErrorCode(error) !== 'STORAGE_ARTIFACT_IMMUTABLE')
+          throw error;
+      }
+      assertPublicationLease();
+      published =
+        initialPublication?.created === true
+          ? initialPublication
+          : await quarantineAndRewrite();
+      if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
+      return {
+        id: run.id,
+        itemId: run.itemId,
+        kind: item.sourceType === 'pdf' ? 'pdf-page-text' : 'ocr-text',
+        relativePath,
+        mediaType: 'text/plain',
+        byteCount: published.byteCount,
+        sha256: published.sha256,
+        processorVersion: {
+          processor: 'native-phase1-extraction',
+          version: processorVersion,
+          contractVersion: 1,
+        },
+        createdAt: run.startedAt,
+        immutable: true,
+      };
     })();
     return {
       result,
+      fence: publicationFence,
+      publicationLeaseOwnerId: publicationOwnerId,
       cancel: async () => {
         cancelled = true;
         await cancelActive?.();
@@ -593,7 +686,9 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         // its global lease until the worker promise observes the native result
         // so cleanup never races bytes that are still being renamed/fsynced.
         await result.catch(() => undefined);
-        await releasePublicationLease();
+        const heartbeatFailure = await releasePublicationLease();
+        if (heartbeatFailure !== undefined)
+          throw new DomainError('PERSISTENCE_CONFLICT');
       },
     };
   }
@@ -673,4 +768,15 @@ function validatedTimestamp(value: string, minimum?: string): string {
   if (!Number.isFinite(valueEpoch) || !Number.isFinite(minimumEpoch))
     throw new DomainError('SCHEMA_INVALID');
   return valueEpoch < minimumEpoch ? minimum! : value;
+}
+
+function latestTimestamp(values: readonly string[]): string {
+  if (values.length === 0) throw new DomainError('SCHEMA_INVALID');
+  values.forEach(value => {
+    if (!Number.isFinite(Date.parse(value)))
+      throw new DomainError('SCHEMA_INVALID');
+  });
+  return values.reduce((latest, value) =>
+    Date.parse(value) > Date.parse(latest) ? value : latest,
+  );
 }

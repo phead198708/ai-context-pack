@@ -91,6 +91,46 @@ function verifiedOriginal() {
   );
 }
 
+function imagePublicationNative(
+  writeTextArtifact: jest.Mock,
+  quarantineOwnedArtifact: jest.Mock,
+): NativeAdapter {
+  return {
+    verifyArtifact: verifiedOriginal(),
+    resolveOwnedArtifactFileUri: jest
+      .fn()
+      .mockResolvedValue('file:///owned/synthetic.png'),
+    getOCRCapabilities: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      engines: [
+        {
+          engine: 'apple-vision',
+          revision: '3',
+          scripts: ['latin'],
+          recognitionLevels: ['accurate'],
+          ready: true,
+          offline: true,
+        },
+      ],
+      maximumPixelCount: 40_000_000,
+      maximumDimension: 16_384,
+    }),
+    recognizeText: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      text: 'synthetic OCR text',
+      blocks: [],
+      durationMs: 1,
+      engine: 'apple-vision',
+      revision: '3',
+      recognitionLevel: 'accurate',
+      warnings: [],
+    }),
+    cancelTextRecognition: jest.fn().mockResolvedValue(undefined),
+    writeTextArtifact,
+    quarantineOwnedArtifact,
+  } as unknown as NativeAdapter;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -522,6 +562,47 @@ test('cleanup lease ownership is claim-specific and a stale owner cannot release
   ).resolves.toBe(false);
 });
 
+test('cleanup lease renewal is owner-CAS fenced and extends monotonic chronology', async () => {
+  const owner = 'c93e4567-e89b-42d3-a456-426614174000';
+  const otherOwner = 'd93e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLease(owner, now, '2026-08-11T00:00:01Z'),
+  ).resolves.toBe(true);
+  await expect(
+    repository.renewCleanupLease(
+      otherOwner,
+      '2026-08-11T00:00:00.300Z',
+      '2026-08-11T00:00:01.300Z',
+    ),
+  ).resolves.toBe(false);
+  await expect(
+    repository.renewCleanupLease(
+      owner,
+      '2026-08-11T00:00:00.300Z',
+      '2026-08-11T00:00:01.300Z',
+    ),
+  ).resolves.toBe(true);
+  expect(
+    database
+      .prepare(
+        "SELECT owner_id, acquired_at, expires_at FROM cleanup_leases WHERE name = 'artifact-cleanup'",
+      )
+      .get(),
+  ).toEqual({
+    owner_id: owner,
+    acquired_at: '2026-08-11T00:00:00.300Z',
+    expires_at: '2026-08-11T00:00:01.300Z',
+  });
+  await expect(
+    repository.acquireCleanupLease(
+      otherOwner,
+      '2026-08-11T00:00:01.100Z',
+      '2026-08-11T00:00:02.100Z',
+    ),
+  ).resolves.toBe(false);
+  await repository.releaseCleanupLease(owner);
+});
+
 test('publication checkpoints are exact-claim idempotent and reject descriptor changes', async () => {
   const run: PersistedPipelineRun = {
     id: '493e4567-e89b-42d3-a456-426614174000',
@@ -550,6 +631,16 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
     createdAt: now,
     immutable: true,
   };
+  const publicationOwnerId = 'e83e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      run.id,
+      claimed.claimVersion,
+      publicationOwnerId,
+      now,
+      '2026-08-11T00:10:00Z',
+    ),
+  ).resolves.toBe(true);
 
   await expect(
     repository.checkpointPipelineRunArtifact({
@@ -557,6 +648,7 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
       claimVersion: claimed.claimVersion,
       updatedAt: now,
       artifact,
+      publicationLeaseOwnerId: publicationOwnerId,
     }),
   ).resolves.toBe(true);
   await expect(
@@ -565,6 +657,7 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
       claimVersion: claimed.claimVersion,
       updatedAt: now,
       artifact,
+      publicationLeaseOwnerId: publicationOwnerId,
     }),
   ).resolves.toBe(true);
   await expect(
@@ -573,6 +666,7 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
       claimVersion: claimed.claimVersion,
       updatedAt: now,
       artifact: { ...artifact, sha256: 'b'.repeat(64) },
+      publicationLeaseOwnerId: publicationOwnerId,
     }),
   ).rejects.toMatchObject({ code: 'STORAGE_ARTIFACT_IMMUTABLE' });
 
@@ -589,8 +683,130 @@ test('publication checkpoints are exact-claim idempotent and reject descriptor c
       claimVersion: claimed.claimVersion,
       updatedAt: '2026-08-11T00:06:00Z',
       artifact,
+      publicationLeaseOwnerId: publicationOwnerId,
     }),
   ).resolves.toBe(false);
+});
+
+test('extraction settlement is fenced when the publication lease owner changes', async () => {
+  const run: PersistedPipelineRun = {
+    id: 'f83e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const claimed = await persistAndClaim(run);
+  const artifact: Artifact = {
+    id: run.id,
+    itemId,
+    kind: 'ocr-text',
+    relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+    mediaType: 'text/plain',
+    byteCount: 4,
+    sha256: 'a'.repeat(64),
+    processorVersion: {
+      processor: 'fixture-extraction',
+      version: '1',
+      contractVersion: 1,
+    },
+    createdAt: now,
+    immutable: true,
+  };
+  const owner = 'a73e4567-e89b-42d3-a456-426614174000';
+  const replacementOwner = 'b73e4567-e89b-42d3-a456-426614174000';
+  await repository.acquireCleanupLeaseForPipelineRun(
+    run.id,
+    claimed.claimVersion,
+    owner,
+    now,
+    '2026-08-11T00:01:00Z',
+  );
+  await repository.checkpointPipelineRunArtifact({
+    runId: run.id,
+    claimVersion: claimed.claimVersion,
+    updatedAt: now,
+    artifact,
+    publicationLeaseOwnerId: owner,
+  });
+  await expect(
+    repository.acquireCleanupLease(
+      replacementOwner,
+      '2026-08-11T00:02:00Z',
+      '2026-08-11T00:03:00Z',
+    ),
+  ).resolves.toBe(true);
+
+  await expect(
+    repository.completePipelineRun({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: '2026-08-11T00:02:00Z',
+      artifact,
+      publicationLeaseOwnerId: owner,
+    }),
+  ).resolves.toBe(false);
+  expect(
+    (await repository.listRunnablePipelineRuns('2026-08-11T00:04:00Z'))[0],
+  ).toMatchObject({
+    id: run.id,
+    status: 'running',
+    publishedArtifact: artifact,
+  });
+  await repository.releaseCleanupLease(replacementOwner);
+});
+
+test('publication checkpoint fails closed when the matching lease owner has expired', async () => {
+  const run: PersistedPipelineRun = {
+    id: 'c73e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const claimed = await persistAndClaim(run);
+  const owner = 'd73e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      run.id,
+      claimed.claimVersion,
+      owner,
+      now,
+      '2026-08-11T00:01:00Z',
+    ),
+  ).resolves.toBe(true);
+
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: '2026-08-11T00:01:00Z',
+      publicationLeaseOwnerId: owner,
+      artifact: {
+        id: run.id,
+        itemId,
+        kind: 'ocr-text',
+        relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+        mediaType: 'text/plain',
+        byteCount: 4,
+        sha256: 'a'.repeat(64),
+        processorVersion: {
+          processor: 'fixture-extraction',
+          version: '1',
+          contractVersion: 1,
+        },
+        createdAt: now,
+        immutable: true,
+      },
+    }),
+  ).resolves.toBe(false);
+  await repository.releaseCleanupLease(owner);
 });
 
 test('a replacement coordinator does not reclaim a live running claim', async () => {
@@ -982,6 +1198,123 @@ test('failure timestamps never move behind the latest persisted heartbeat', asyn
   });
 });
 
+test('failing one run never moves a later-heartbeat sibling or Pack backward', async () => {
+  const siblingItemId = 'e93e4567-e89b-42d3-a456-426614174000';
+  const siblingIngestionId = 'f93e4567-e89b-42d3-a456-426614174000';
+  const laterSiblingItemId = 'a03e4567-e89b-42d3-a456-426614174000';
+  const laterSiblingIngestionId = 'b03e4567-e89b-42d3-a456-426614174000';
+  await seedSingleItem(packId, siblingItemId, siblingIngestionId, 'image/png');
+  await seedSingleItem(
+    packId,
+    laterSiblingItemId,
+    laterSiblingIngestionId,
+    'image/png',
+  );
+  const graph = (await repository.findPackGraph(packId))!;
+  const failedItems = graph.items.map(value => ({
+    ...value,
+    state: 'failed' as const,
+    retryStage: 'extract' as const,
+  }));
+  await repository.savePackGraph({
+    pack: {
+      ...graph.pack,
+      state: 'failed',
+      updatedAt: now,
+      orderedItemIds: failedItems.map(value => value.id),
+    },
+    items: failedItems,
+    expectedRevision: graph.revision,
+  });
+  const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
+    launch: jest.fn(),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    paused,
+  ).retryPack(packId);
+  const runs = await repository.listRunnablePipelineRuns();
+  const failing = runs.find(value => value.itemId === itemId)!;
+  const sibling = runs.find(value => value.itemId === siblingItemId)!;
+  const laterSibling = runs.find(value => value.itemId === laterSiblingItemId)!;
+  const failingClaim = await repository.markPipelineRunRunning(
+    failing.id,
+    failing.claimVersion,
+    now,
+    now,
+  );
+  const siblingClaim = await repository.markPipelineRunRunning(
+    sibling.id,
+    sibling.claimVersion,
+    now,
+    now,
+  );
+  const laterSiblingClaim = await repository.markPipelineRunRunning(
+    laterSibling.id,
+    laterSibling.claimVersion,
+    now,
+    now,
+  );
+  expect(failingClaim).toBe(1);
+  expect(siblingClaim).toBe(1);
+  expect(laterSiblingClaim).toBe(1);
+  const siblingHeartbeat = '2026-08-11T00:10:00Z';
+  const latestHeartbeat = '2026-08-11T00:10:00.500Z';
+  await expect(
+    repository.renewPipelineRunClaim(
+      sibling.id,
+      siblingClaim!,
+      siblingHeartbeat,
+    ),
+  ).resolves.toBe(true);
+  await expect(
+    repository.renewPipelineRunClaim(
+      laterSibling.id,
+      laterSiblingClaim!,
+      latestHeartbeat,
+    ),
+  ).resolves.toBe(true);
+
+  await expect(
+    repository.failPipelineRun({
+      runId: failing.id,
+      claimVersion: failingClaim!,
+      updatedAt: '2026-08-11T00:05:00Z',
+      errorCode: 'PIPELINE_STAGE_FAILED',
+    }),
+  ).resolves.toBe(true);
+
+  expect(
+    database
+      .prepare(
+        'SELECT status, updated_at, completed_at FROM pipeline_runs WHERE id = ?',
+      )
+      .get(sibling.id),
+  ).toEqual({
+    status: 'cancelled',
+    updated_at: latestHeartbeat,
+    completed_at: latestHeartbeat,
+  });
+  expect(
+    database
+      .prepare(
+        'SELECT status, updated_at, completed_at FROM pipeline_runs WHERE id = ?',
+      )
+      .get(laterSibling.id),
+  ).toEqual({
+    status: 'cancelled',
+    updated_at: latestHeartbeat,
+    completed_at: latestHeartbeat,
+  });
+  expect((await repository.findPackGraph(packId))?.pack.updatedAt).toBe(
+    latestHeartbeat,
+  );
+});
+
 test('coordinator timestamps never move the Pack before its creation time', async () => {
   const worker = new DeferredWorker();
   const coordinator = new DurablePackProcessingCoordinator(
@@ -1005,6 +1338,41 @@ test('coordinator timestamps never move the Pack before its creation time', asyn
     Date.parse(graph!.pack.createdAt),
   );
   expect(graph?.items[0]?.state).toBe('extracted');
+});
+
+test('claim heartbeats advance logically when the wall clock rolls backward', async () => {
+  jest.useFakeTimers();
+  try {
+    let wallClock = now;
+    const worker = new DeferredWorker();
+    const coordinator = new DurablePackProcessingCoordinator(
+      async () => repository,
+      worker,
+      () => wallClock,
+      900,
+    );
+    await new PackLibraryController(
+      async () => repository,
+      () => wallClock,
+      coordinator,
+    ).retryItem(packId, itemId);
+    await flushPromises();
+    expect(worker.starts).toHaveLength(1);
+    const run = worker.starts[0]!;
+
+    wallClock = '2026-08-10T00:00:00Z';
+    await jest.advanceTimersByTimeAsync(300);
+    const heartbeat = database
+      .prepare('SELECT updated_at FROM pipeline_runs WHERE id = ?')
+      .get(run.id) as { updated_at: string };
+    expect(Date.parse(heartbeat.updated_at)).toBeGreaterThan(Date.parse(now));
+
+    worker.results.get(run.id)!.resolve(worker.artifact(run));
+    await flushPromises();
+    await coordinator.waitForIdle();
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('the production extraction worker reads the owned original and publishes immutable OCR text', async () => {
@@ -1394,6 +1762,133 @@ test('cancellation keeps the cleanup lease until an in-flight native publication
   await repository.releaseCleanupLease(otherOwner);
 });
 
+test('publication renews its cleanup fence across lease expiry until native write joins', async () => {
+  jest.useFakeTimers();
+  try {
+    const run: PersistedPipelineRun = {
+      id: 'a93e4567-e89b-42d3-a456-426614174000',
+      packId,
+      itemId,
+      stage: 'extract',
+      status: 'queued',
+      startedAt: now,
+      updatedAt: now,
+      claimVersion: 0,
+    };
+    const pendingWrite = deferred<{
+      relativePath: string;
+      byteCount: number;
+      sha256: string;
+      created: boolean;
+    }>();
+    const writeStarted = deferred<void>();
+    const writeTextArtifact = jest.fn().mockImplementation(() => {
+      writeStarted.resolve();
+      return pendingWrite.promise;
+    });
+    let clockMs = Date.parse(now);
+    const handle = new NativeExtractionStageWorker(
+      async () => repository,
+      imagePublicationNative(writeTextArtifact, jest.fn()),
+      () => new Date(clockMs).toISOString(),
+      900,
+    ).start(await persistAndClaim(run));
+    await writeStarted.promise;
+
+    for (let interval = 0; interval < 4; interval += 1) {
+      clockMs += 300;
+      await jest.advanceTimersByTimeAsync(300);
+    }
+    const competingOwner = 'b93e4567-e89b-42d3-a456-426614174000';
+    await expect(
+      repository.acquireCleanupLease(
+        competingOwner,
+        new Date(clockMs).toISOString(),
+        new Date(clockMs + 100).toISOString(),
+      ),
+    ).resolves.toBe(false);
+
+    pendingWrite.resolve({
+      relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+      byteCount: 18,
+      sha256: 'd'.repeat(64),
+      created: true,
+    });
+    await expect(handle.result).resolves.toBeDefined();
+    await handle.finalize?.();
+    await expect(
+      repository.acquireCleanupLease(
+        competingOwner,
+        new Date(clockMs).toISOString(),
+        new Date(clockMs + 100).toISOString(),
+      ),
+    ).resolves.toBe(true);
+    await repository.releaseCleanupLease(competingOwner);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('publication fails closed after cleanup lease renewal ownership is lost', async () => {
+  jest.useFakeTimers();
+  try {
+    const run: PersistedPipelineRun = {
+      id: 'c83e4567-e89b-42d3-a456-426614174000',
+      packId,
+      itemId,
+      stage: 'extract',
+      status: 'queued',
+      startedAt: now,
+      updatedAt: now,
+      claimVersion: 0,
+    };
+    const pendingWrite = deferred<{
+      relativePath: string;
+      byteCount: number;
+      sha256: string;
+      created: boolean;
+    }>();
+    const writeStarted = deferred<void>();
+    const writeTextArtifact = jest.fn().mockImplementation(() => {
+      writeStarted.resolve();
+      return pendingWrite.promise;
+    });
+    const renew = jest
+      .spyOn(repository, 'renewCleanupLease')
+      .mockResolvedValueOnce(false);
+    let clockMs = Date.parse(now);
+    const handle = new NativeExtractionStageWorker(
+      async () => repository,
+      imagePublicationNative(writeTextArtifact, jest.fn()),
+      () => new Date(clockMs).toISOString(),
+      900,
+    ).start(await persistAndClaim(run));
+    await writeStarted.promise;
+
+    clockMs += 300;
+    await jest.advanceTimersByTimeAsync(300);
+    await expect(handle.fence).rejects.toMatchObject({
+      code: 'PERSISTENCE_CONFLICT',
+    });
+    expect(renew).toHaveBeenCalledTimes(1);
+
+    pendingWrite.resolve({
+      relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+      byteCount: 18,
+      sha256: 'd'.repeat(64),
+      created: true,
+    });
+    await expect(handle.result).rejects.toMatchObject({
+      code: 'PERSISTENCE_CONFLICT',
+    });
+    await expect(handle.finalize?.()).rejects.toMatchObject({
+      code: 'PERSISTENCE_CONFLICT',
+    });
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test('an uncheckpointed immutable publication orphan is quarantined and replaced under the current claim', async () => {
   const run: PersistedPipelineRun = {
     id: '463e4567-e89b-42d3-a456-426614174000',
@@ -1470,6 +1965,104 @@ test('an uncheckpointed immutable publication orphan is quarantined and replaced
   expect(
     database.prepare('SELECT COUNT(*) AS count FROM quarantine_records').get(),
   ).toEqual({ count: 1 });
+  await handle.finalize?.();
+});
+
+test('an identical created-false orphan is audited, quarantined, and rewritten exactly once', async () => {
+  const run: PersistedPipelineRun = {
+    id: '493e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const relativePath = ownedDerivedPath(packId, run.id, 'txt');
+  const writeTextArtifact = jest
+    .fn()
+    .mockResolvedValueOnce({
+      relativePath,
+      byteCount: 18,
+      sha256: 'd'.repeat(64),
+      created: false,
+    })
+    .mockResolvedValueOnce({
+      relativePath,
+      byteCount: 18,
+      sha256: 'd'.repeat(64),
+      created: true,
+    });
+  const quarantineOwnedArtifact = jest.fn().mockResolvedValue({
+    quarantined: true,
+    quarantineId: '593e4567-e89b-42d3-a456-426614174000',
+    anonymousId: '693e4567-e89b-42d3-a456-426614174000',
+    byteCount: 18,
+  });
+  const handle = new NativeExtractionStageWorker(
+    async () => repository,
+    imagePublicationNative(writeTextArtifact, quarantineOwnedArtifact),
+  ).start(await persistAndClaim(run));
+
+  await expect(handle.result).resolves.toMatchObject({
+    id: run.id,
+    relativePath,
+    sha256: 'd'.repeat(64),
+  });
+  expect(writeTextArtifact).toHaveBeenCalledTimes(2);
+  expect(quarantineOwnedArtifact).toHaveBeenCalledTimes(1);
+  expect(
+    database.prepare('SELECT COUNT(*) AS count FROM quarantine_records').get(),
+  ).toEqual({ count: 1 });
+  await handle.finalize?.();
+});
+
+test('an immutable conflict never quarantines a path registered after the initial snapshot', async () => {
+  const run: PersistedPipelineRun = {
+    id: '793e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  };
+  const relativePath = ownedDerivedPath(packId, run.id, 'txt');
+  const registeredArtifact: Artifact = {
+    id: run.id,
+    itemId,
+    kind: 'ocr-text',
+    relativePath,
+    mediaType: 'text/plain',
+    byteCount: 18,
+    sha256: 'd'.repeat(64),
+    processorVersion: {
+      processor: 'fixture-extraction',
+      version: '1',
+      contractVersion: 1,
+    },
+    createdAt: now,
+    immutable: true,
+  };
+  const writeTextArtifact = jest.fn().mockImplementation(async () => {
+    await repository.registerPublishedArtifact({
+      packId,
+      artifact: registeredArtifact,
+    });
+    throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+  });
+  const quarantineOwnedArtifact = jest.fn();
+  const handle = new NativeExtractionStageWorker(
+    async () => repository,
+    imagePublicationNative(writeTextArtifact, quarantineOwnedArtifact),
+  ).start(await persistAndClaim(run));
+
+  await expect(handle.result).rejects.toMatchObject({
+    code: 'STORAGE_DIVERGENCE_DETECTED',
+  });
+  expect(quarantineOwnedArtifact).not.toHaveBeenCalled();
   await handle.finalize?.();
 });
 

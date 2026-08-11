@@ -416,6 +416,9 @@ function ItemEditorRow({
   const panResponder = useMemo(
     () =>
       PanResponder.create({
+        // Claim touches that start on the dedicated handle before the parent
+        // ScrollView can intercept the vertical gesture.
+        onStartShouldSetPanResponder: () => !busy,
         onMoveShouldSetPanResponder: (_event, gesture) =>
           Math.abs(gesture.dy) > 8,
         onPanResponderRelease: (_event, gesture) =>
@@ -426,7 +429,7 @@ function ItemEditorRow({
             ),
           ),
       }),
-    [index, move, total],
+    [busy, index, move, total],
   );
   const warningText =
     item.warningCodes.length > 0
@@ -435,10 +438,34 @@ function ItemEditorRow({
   return (
     <View style={styles.itemCard} testID={`pack-item-${item.id}`}>
       <View
+        accessibilityActions={[
+          {
+            name: 'increment',
+            label: t(locale, 'moveDown', { item: item.displayName }),
+          },
+          {
+            name: 'decrement',
+            label: t(locale, 'moveUp', { item: item.displayName }),
+          },
+          {
+            name: 'moveUp',
+            label: t(locale, 'moveUp', { item: item.displayName }),
+          },
+          {
+            name: 'moveDown',
+            label: t(locale, 'moveDown', { item: item.displayName }),
+          },
+        ]}
         accessibilityLabel={t(locale, 'dragReorder', {
           item: item.displayName,
         })}
         accessibilityRole="adjustable"
+        accessibilityValue={{ min: 1, max: total, now: index + 1 }}
+        onAccessibilityAction={event => {
+          const action = event.nativeEvent.actionName;
+          if (action === 'decrement' || action === 'moveUp') move(index - 1);
+          if (action === 'increment' || action === 'moveDown') move(index + 1);
+        }}
         style={styles.dragHandle}
         testID={`drag-${item.id}`}
         {...panResponder.panHandlers}
@@ -465,9 +492,11 @@ function ItemEditorRow({
           error: item.errorCode ?? t(locale, 'noError'),
         })}
         accessible
-        onAccessibilityAction={event =>
-          move(index + (event.nativeEvent.actionName === 'moveUp' ? -1 : 1))
-        }
+        onAccessibilityAction={event => {
+          const action = event.nativeEvent.actionName;
+          if (action === 'moveUp') move(index - 1);
+          if (action === 'moveDown') move(index + 1);
+        }}
         testID={`item-summary-${item.id}`}
       >
         <Text style={styles.label}>{item.displayName}</Text>

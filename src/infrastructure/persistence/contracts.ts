@@ -130,6 +130,8 @@ export interface CheckpointPipelineRunArtifactInput {
   readonly claimVersion: number;
   readonly updatedAt: string;
   readonly artifact: Artifact;
+  /** Global publication lease owner fenced in the checkpoint transaction. */
+  readonly publicationLeaseOwnerId?: string;
 }
 
 export interface CompletePipelineRunInput {
@@ -137,6 +139,8 @@ export interface CompletePipelineRunInput {
   readonly claimVersion: number;
   readonly updatedAt: string;
   readonly artifact?: Artifact;
+  /** Required for extraction settlement and fenced in the same transaction. */
+  readonly publicationLeaseOwnerId?: string;
 }
 
 export interface FailPipelineRunInput {
@@ -283,6 +287,15 @@ export interface CleanupLeaseRepository {
     claimVersion: number,
     ownerId: string,
     acquiredAt: string,
+    expiresAt: string,
+  ): Promise<boolean>;
+  /**
+   * Extends the currently owned global cleanup lease using owner-and-expiry
+   * compare-and-swap semantics. A false result fences the caller immediately.
+   */
+  renewCleanupLease(
+    ownerId: string,
+    renewedAt: string,
     expiresAt: string,
   ): Promise<boolean>;
   releaseCleanupLease(ownerId: string): Promise<void>;

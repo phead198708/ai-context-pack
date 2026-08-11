@@ -265,8 +265,7 @@ WHERE status = 'failed'
 -- a retained original whose bytes have unexpectedly disappeared.
 UPDATE import_items
 SET original_disposition = 'released'
-WHERE status = 'copied'
-  AND NOT EXISTS (
+WHERE NOT EXISTS (
     SELECT 1 FROM context_items context_item
     WHERE context_item.id = import_items.id
   )

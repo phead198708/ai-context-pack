@@ -120,6 +120,10 @@ class MemoryArtifactRepository
     return this.acquireCleanupLease();
   }
 
+  async renewCleanupLease() {
+    return this.leaseHeld;
+  }
+
   async releaseCleanupLease() {
     this.leaseHeld = false;
   }

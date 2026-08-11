@@ -273,7 +273,8 @@ test('exposes stable loading, error recovery, and empty-state identifiers', asyn
 });
 
 test('renders all required library views and every partial-failure item state', async () => {
-  const renderer = await render(controller());
+  const value = controller();
+  const renderer = await render(value);
   const rendered = text(renderer.root);
 
   for (const section of [
@@ -317,9 +318,30 @@ test('renders all required library views and every partial-failure item state', 
     testID: `drag-${itemIds[1]}`,
   });
   expect(dragHandle.props.accessibilityRole).toBe('adjustable');
+  expect(dragHandle.props.accessibilityValue).toEqual({
+    min: 1,
+    max: itemIds.length,
+    now: 2,
+  });
+  expect(dragHandle.props.accessibilityActions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ name: 'increment' }),
+      expect.objectContaining({ name: 'decrement' }),
+      expect.objectContaining({ name: 'moveUp' }),
+      expect.objectContaining({ name: 'moveDown' }),
+    ]),
+  );
   expect(dragHandle.props.onMoveShouldSetResponder).toEqual(
     expect.any(Function),
   );
+  expect(dragHandle.props.onStartShouldSetResponder()).toBe(true);
+  await act(async () => {
+    dragHandle.props.onAccessibilityAction({
+      nativeEvent: { actionName: 'increment' },
+    });
+    await Promise.resolve();
+  });
+  expect(value.reorderItem).toHaveBeenCalledWith(packId, itemIds[1], 2);
   act(() => renderer.unmount());
 });
 

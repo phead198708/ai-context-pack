@@ -36,6 +36,16 @@ const itemId = '323e4567-e89b-42d3-a456-426614174000';
 const secondItemId = '423e4567-e89b-42d3-a456-426614174000';
 const fingerprint = 'a'.repeat(64);
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function manifest(
   status: ImportManifestV1['status'] = 'complete',
 ): ImportManifestV1 {
@@ -297,6 +307,7 @@ class ProductionCleanupRepository extends MemoryRepository {
   leaseAvailable = true;
   released = 0;
   markedPurged = 0;
+  renewals = 0;
   readonly markPurgedCalls: {
     readonly quarantinedBefore: string;
     readonly purgedAt: string;
@@ -319,6 +330,11 @@ class ProductionCleanupRepository extends MemoryRepository {
   }
 
   async acquireCleanupLeaseForPipelineRun() {
+    return this.leaseAvailable;
+  }
+
+  async renewCleanupLease() {
+    this.renewals += 1;
     return this.leaseAvailable;
   }
 
@@ -647,6 +663,85 @@ describe('persistence and dual-Inbox recovery spike', () => {
     });
     expect(repository.released).toBe(1);
     expect(repository.markPurgedCalls).toHaveLength(1);
+  });
+
+  test('scheduled cleanup renews its fence while a native cleanup snapshot is pending', async () => {
+    jest.useFakeTimers();
+    try {
+      const repository = new ProductionCleanupRepository();
+      const files = new MemoryFiles();
+      const listed = deferred<
+        readonly {
+          readonly relativePath: string;
+          readonly byteCount: number;
+        }[]
+      >();
+      files.listOwnedFiles = jest.fn().mockReturnValue(listed.promise);
+      let clockMs = Date.parse('2026-08-03T00:00:00Z');
+      const cleanup = new ScheduledReferenceAwareCleanup(
+        repository,
+        files,
+        '823e4567-e89b-42d3-a456-426614174000',
+        () => new Date(clockMs).toISOString(),
+        1_000,
+        7 * 24 * 60 * 60 * 1_000,
+        900,
+      );
+      const running = cleanup.run();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      clockMs += 1_200;
+      await jest.advanceTimersByTimeAsync(1_200);
+      expect(repository.renewals).toBeGreaterThan(0);
+      expect(repository.released).toBe(0);
+
+      listed.resolve([]);
+      await expect(running).resolves.toMatchObject({ status: 'completed' });
+      expect(repository.released).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('scheduled cleanup fails closed when lease renewal ownership is lost', async () => {
+    jest.useFakeTimers();
+    try {
+      const repository = new ProductionCleanupRepository();
+      const files = new MemoryFiles();
+      const listed = deferred<
+        readonly {
+          readonly relativePath: string;
+          readonly byteCount: number;
+        }[]
+      >();
+      files.listOwnedFiles = jest.fn().mockReturnValue(listed.promise);
+      let clockMs = Date.parse('2026-08-03T00:00:00Z');
+      const cleanup = new ScheduledReferenceAwareCleanup(
+        repository,
+        files,
+        '923e4567-e89b-42d3-a456-426614174000',
+        () => new Date(clockMs).toISOString(),
+        1_000,
+        7 * 24 * 60 * 60 * 1_000,
+        900,
+      );
+      const running = cleanup.run();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      repository.leaseAvailable = false;
+      clockMs += 300;
+      await jest.advanceTimersByTimeAsync(300);
+      listed.resolve([]);
+
+      await expect(running).rejects.toMatchObject({
+        code: 'PERSISTENCE_CONFLICT',
+      });
+      expect(repository.released).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

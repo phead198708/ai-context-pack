@@ -126,6 +126,23 @@ test('serializes rename/reorder and persists downstream order', async () => {
   expect(repo.saves.every(save => save.expectedRevision === 7)).toBe(true);
 });
 
+test('controller mutations clamp a rolled-back clock to the latest Pack update', async () => {
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: { ...base.pack, updatedAt: '2026-08-10T00:10:00Z' },
+  };
+  const repo = repository(graph);
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:05:00Z',
+  );
+
+  await controller.renamePack(packId, 'Chronology preserved');
+
+  expect(repo.saves[0]?.pack.updatedAt).toBe('2026-08-10T00:10:00Z');
+});
+
 test('reorder invalidates packaged rows and restarts downstream packaging', async () => {
   const readyGraph = graphWithPackagedItems('ready');
   const repo = repository(readyGraph);
@@ -417,6 +434,35 @@ test('production retry rejects stages that have no executable worker', async () 
     code: 'DOMAIN_INVALID_TRANSITION',
   });
   expect(processing.supports).toHaveBeenCalledWith('package');
+  expect(processing.launch).not.toHaveBeenCalled();
+  expect(repo.saves).toHaveLength(0);
+});
+
+test('Pack retry rejects the whole mixed retry when any failed item has no worker', async () => {
+  const graph = fixture();
+  const extractFailure = graph.items[1]!;
+  const packageFailure: ContextItem = {
+    ...graph.items[0]!,
+    state: 'failed',
+    retryStage: 'package',
+  };
+  const repo = repository({
+    ...graph,
+    items: [packageFailure, extractFailure],
+  });
+  const processing = scheduler();
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:03Z',
+    processing,
+  );
+
+  await expect(controller.retryPack(packId)).rejects.toMatchObject({
+    code: 'DOMAIN_INVALID_TRANSITION',
+  });
+
+  expect(processing.supports).toHaveBeenCalledWith('package');
+  expect(processing.supports).toHaveBeenCalledWith('extract');
   expect(processing.launch).not.toHaveBeenCalled();
   expect(repo.saves).toHaveLength(0);
 });

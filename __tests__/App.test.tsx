@@ -399,6 +399,11 @@ describe('App interactions', () => {
 
     expect(renderedText(renderer)).toContain('Processing recovery unavailable');
     expect(renderedText(renderer)).toContain('PIPELINE_STAGE_FAILED');
+    const recoveryAlert = renderer.root.findByProps({
+      accessibilityRole: 'alert',
+      accessibilityLiveRegion: 'assertive',
+    });
+    expect(instanceText(recoveryAlert)).toContain('PIPELINE_STAGE_FAILED');
 
     await press(control(renderer, 'button', 'Retry'));
 
@@ -410,6 +415,22 @@ describe('App interactions', () => {
     );
     act(() => renderer.unmount());
   });
+
+  test.each([
+    new Error('synthetic raw recovery failure'),
+    { code: 'SYNTHETIC_UNKNOWN_CODE' },
+  ])(
+    'maps raw or unknown recovery failures to the stable pipeline code',
+    async error => {
+      mockPackLibraryController.recoverProcessing.mockRejectedValueOnce(error);
+      const renderer = await renderApp();
+
+      expect(renderedText(renderer)).toContain('PIPELINE_RECOVERY_REQUIRED');
+      expect(renderedText(renderer)).not.toContain('EMPTY_DRAFT_CREATE_FAILED');
+
+      act(() => renderer.unmount());
+    },
+  );
 
   test('keeps asynchronous coordinator failures visible until explicit Retry succeeds', async () => {
     const renderer = await renderApp();
