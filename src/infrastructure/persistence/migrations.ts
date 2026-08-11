@@ -260,12 +260,14 @@ WHERE status = 'failed'
   );
 
 -- v4 represented an explicit destructive release by removing the item from the
--- Pack/library graph and eventually deleting its unreferenced original record.
--- Preserve that user-authorized tombstone instead of misclassifying the row as
--- a retained original whose bytes have unexpectedly disappeared.
+-- Pack/library graph. A copied row proves that bytes once existed; for a failed
+-- row, an unreferenced original provides the same proof before physical cleanup.
+-- Preserve provider-less failed rows already classified unavailable instead of
+-- inventing destructive intent once both the graph row and bytes are absent.
 UPDATE import_items
 SET original_disposition = 'released'
-WHERE NOT EXISTS (
+WHERE original_disposition <> 'unavailable'
+  AND NOT EXISTS (
     SELECT 1 FROM context_items context_item
     WHERE context_item.id = import_items.id
   )

@@ -438,7 +438,7 @@ describe('production repository against SQLite', () => {
   });
 
   test.each([['pre-cleanup', false] as const, ['post-cleanup', true] as const])(
-    'migrates a %s v4 destructive release for a failed retry-source item',
+    'migrates a %s v4 destructive release for a failed retry-source item without inventing provenance',
     async (_phase, cleanBeforeMigration) => {
       database
         .prepare(
@@ -478,19 +478,58 @@ describe('production repository against SQLite', () => {
       );
       await repository.initialize();
 
-      expect((await repository.listImportDetails())[0]?.items[0]).toMatchObject(
-        {
-          id: firstItemId,
-          status: 'failed',
-          originalReleased: true,
-        },
-      );
+      const migrated = (await repository.listImportDetails())[0]?.items[0];
+      expect(migrated).toMatchObject({ id: firstItemId, status: 'failed' });
+      if (cleanBeforeMigration) {
+        // Once both the v4 graph row and physical artifact are gone, explicit
+        // release is indistinguishable from a provider-less failed import.
+        // Preserve unavailable instead of inventing a destructive action.
+        expect(migrated).not.toHaveProperty('originalReleased');
+        expect(migrated).not.toHaveProperty('retrySource');
+      } else {
+        expect(migrated).toMatchObject({ originalReleased: true });
+      }
       if (!cleanBeforeMigration)
         await expect(
           repository.deleteArtifactRecordIfUnreferenced(firstItemId),
         ).resolves.toBe(true);
     },
   );
+
+  test('keeps a provider-less v4 failed row unavailable after its graph row is gone', async () => {
+    database
+      .prepare(
+        "UPDATE import_items SET status = 'failed', error_code = 'IMPORT_COPY_FAILED' WHERE id = ?",
+      )
+      .run(firstItemId);
+    database
+      .prepare("UPDATE imports SET status = 'partial' WHERE ingestion_id = ?")
+      .run(ingestionId);
+    database
+      .prepare('DELETE FROM artifact_references WHERE artifact_id = ?')
+      .run(firstItemId);
+    database.prepare('DELETE FROM context_items WHERE id = ?').run(firstItemId);
+    database.prepare('DELETE FROM artifacts WHERE id = ?').run(firstItemId);
+
+    database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
+    database.exec('DROP TABLE pipeline_runs');
+    database.exec('PRAGMA user_version = 4');
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    const unavailable = (await repository.listImportDetails())[0]?.items[0];
+    expect(unavailable).toMatchObject({
+      id: firstItemId,
+      status: 'failed',
+      errorCode: 'IMPORT_COPY_FAILED',
+    });
+    expect(unavailable).not.toHaveProperty('originalReleased');
+    expect(unavailable).not.toHaveProperty('retrySource');
+  });
 
   test('keeps a v4 failed removed item retained when its preserved reference is live', async () => {
     database
@@ -734,8 +773,17 @@ describe('production repository against SQLite', () => {
       finding,
     ]);
 
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-05T00:00:02Z',
+        '2026-08-05T00:01:02Z',
+      ),
+    ).resolves.toBe(true);
     await repository.registerPublishedArtifact({
       packId,
+      publicationLeaseOwnerId: exportId,
+      publicationLeaseObservedAt: '2026-08-05T00:00:02Z',
       artifact: {
         id: derivedId,
         itemId: firstItemId,
@@ -753,6 +801,7 @@ describe('production repository against SQLite', () => {
         immutable: true,
       },
     });
+    await repository.releaseCleanupLease(exportId);
     await expect(repository.listImportDetails()).resolves.toEqual([
       expect.objectContaining({
         ingestionId,

@@ -897,8 +897,8 @@ export class ExpoSqlitePersistenceRepository
     requirePipelineClaimVersion(input.claimVersion);
     requireIsoDateTime(input.updatedAt);
     assertArtifact(input.artifact);
-    if (input.publicationLeaseOwnerId)
-      requireCanonicalId(input.publicationLeaseOwnerId);
+    requireCanonicalId(input.publicationLeaseOwnerId);
+    requireIsoDateTime(input.publicationLeaseObservedAt);
     return this.connection.exclusive(async transaction => {
       const run = await loadPipelineRunForSettlement(
         transaction,
@@ -907,11 +907,10 @@ export class ExpoSqlitePersistenceRepository
       );
       if (!run || run.status !== 'running') return false;
       if (
-        input.publicationLeaseOwnerId &&
         !(await cleanupLeaseOwnerMatches(
           transaction,
           input.publicationLeaseOwnerId,
-          input.updatedAt,
+          input.publicationLeaseObservedAt,
         ))
       )
         return false;
@@ -976,12 +975,14 @@ export class ExpoSqlitePersistenceRepository
         throw new DomainError('SCHEMA_INVALID');
       if (
         stage === 'extract' &&
-        input.publicationLeaseOwnerId !== undefined &&
-        (!isCanonicalUuid(input.publicationLeaseOwnerId) ||
+        (input.publicationLeaseOwnerId === undefined ||
+          !isCanonicalUuid(input.publicationLeaseOwnerId) ||
+          input.publicationLeaseObservedAt === undefined ||
+          !isIsoDateTime(input.publicationLeaseObservedAt) ||
           !(await cleanupLeaseOwnerMatches(
             transaction,
             input.publicationLeaseOwnerId,
-            input.updatedAt,
+            input.publicationLeaseObservedAt,
           )))
       )
         return false;
@@ -1358,67 +1359,18 @@ export class ExpoSqlitePersistenceRepository
     input: RegisterPublishedArtifactInput,
   ): Promise<'created' | 'replayed'> {
     validatePublishedArtifact(input);
+    requireCanonicalId(input.publicationLeaseOwnerId);
+    requireIsoDateTime(input.publicationLeaseObservedAt);
     return this.connection.exclusive(async transaction => {
-      const pack = await transaction.first<{ id: string }>(
-        'SELECT id FROM packs WHERE id = ? AND deleted_at IS NULL',
-        [input.packId],
-      );
-      if (!pack) throw new DomainError('PERSISTENCE_CONFLICT');
-      if (input.artifact.itemId !== undefined) {
-        const item = await transaction.first<{ id: string }>(
-          'SELECT id FROM context_items WHERE id = ? AND pack_id = ?',
-          [input.artifact.itemId, input.packId],
-        );
-        if (!item) throw new DomainError('PERSISTENCE_CONFLICT');
-      }
-      if (input.artifact.kind === 'original') {
-        const original = await transaction.first<{ id: string }>(
-          "SELECT id FROM artifacts WHERE item_id = ? AND kind = 'original'",
-          [input.artifact.itemId ?? null],
-        );
-        if (original && original.id !== input.artifact.id)
-          throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
-      }
-      const existing = await transaction.first<ArtifactRow>(
-        `SELECT id, item_id, relative_path, media_type, byte_count, sha256,
-           kind, processor_version_json, created_at, last_verified_at
-         FROM artifacts WHERE id = ? OR relative_path = ?`,
-        [input.artifact.id, input.artifact.relativePath],
-      );
-      if (existing) {
-        if (!persistedArtifactEquals(existing, input.artifact))
-          throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
-        await transaction.run(
-          `INSERT OR IGNORE INTO artifact_references
-            (owner_type, owner_id, artifact_id) VALUES ('pack', ?, ?)`,
-          [input.packId, input.artifact.id],
-        );
-        return 'replayed';
-      }
-      await transaction.run(
-        `INSERT INTO artifacts
-          (id, item_id, relative_path, media_type, byte_count, sha256, created_at,
-           last_verified_at, kind, processor_version_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          input.artifact.id,
-          input.artifact.itemId ?? null,
-          input.artifact.relativePath,
-          input.artifact.mediaType,
-          input.artifact.byteCount,
-          input.artifact.sha256,
-          input.artifact.createdAt,
-          input.artifact.createdAt,
-          input.artifact.kind,
-          encodeProcessorVersion(input.artifact.processorVersion),
-        ],
-      );
-      await transaction.run(
-        `INSERT INTO artifact_references (owner_type, owner_id, artifact_id)
-         VALUES ('pack', ?, ?)`,
-        [input.packId, input.artifact.id],
-      );
-      return 'created';
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          input.publicationLeaseOwnerId,
+          input.publicationLeaseObservedAt,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      return registerPublishedArtifactInTransaction(transaction, input);
     });
   }
 
@@ -1669,18 +1621,8 @@ export class ExpoSqlitePersistenceRepository
     return this.connection.exclusive(async transaction => {
       const currentClaim = await transaction.first<{
         id: string;
-        run_started_at: string;
-        run_updated_at: string;
-        pack_created_at: string;
-        pack_updated_at: string;
-        item_updated_at: string;
       }>(
-        `SELECT run.id,
-                run.started_at AS run_started_at,
-                run.updated_at AS run_updated_at,
-                pack.created_at AS pack_created_at,
-                pack.updated_at AS pack_updated_at,
-                item.updated_at AS item_updated_at
+        `SELECT run.id
          FROM pipeline_runs run
          JOIN packs pack ON pack.id = run.pack_id
          JOIN context_items item ON item.id = run.item_id AND item.pack_id = run.pack_id
@@ -1689,31 +1631,16 @@ export class ExpoSqlitePersistenceRepository
         [runId, claimVersion],
       );
       if (!currentClaim) return false;
-      const chronologyFloor = latestIsoTimestamp([
-        currentClaim.run_started_at,
-        currentClaim.run_updated_at,
-        currentClaim.pack_created_at,
-        currentClaim.pack_updated_at,
-        currentClaim.item_updated_at,
-      ]);
-      const requestedDuration = Date.parse(expiresAt) - Date.parse(acquiredAt);
-      const effectiveAcquiredAt =
-        Date.parse(chronologyFloor) > Date.parse(acquiredAt)
-          ? chronologyFloor
-          : acquiredAt;
-      const effectiveExpiresAt = new Date(
-        Date.parse(effectiveAcquiredAt) + requestedDuration,
-      ).toISOString();
       const existing = await transaction.first<{
         owner_id: string;
         expires_at: string;
       }>(
         "SELECT owner_id, expires_at FROM cleanup_leases WHERE name = 'artifact-cleanup'",
       );
-      if (
-        existing &&
-        Date.parse(existing.expires_at) > Date.parse(effectiveAcquiredAt)
-      )
+      // Cleanup leases are wall-clock mutexes, not domain chronology. A Pack
+      // timestamp can legitimately remain ahead after clock correction; using
+      // it to expire a live cleanup owner would let publication overlap cleanup.
+      if (existing && Date.parse(existing.expires_at) > Date.parse(acquiredAt))
         return false;
       await transaction.run(
         `INSERT INTO cleanup_leases (name, owner_id, acquired_at, expires_at)
@@ -1722,7 +1649,7 @@ export class ExpoSqlitePersistenceRepository
            owner_id = excluded.owner_id,
            acquired_at = excluded.acquired_at,
            expires_at = excluded.expires_at`,
-        [ownerId, effectiveAcquiredAt, effectiveExpiresAt],
+        [ownerId, acquiredAt, expiresAt],
       );
       return true;
     });
@@ -2362,7 +2289,7 @@ async function loadPipelineRunForSettlement(
 
 async function registerPublishedArtifactInTransaction(
   transaction: SqlConnection,
-  input: RegisterPublishedArtifactInput,
+  input: Pick<RegisterPublishedArtifactInput, 'packId' | 'artifact'>,
 ): Promise<'created' | 'replayed'> {
   const pack = await transaction.first<{ id: string }>(
     'SELECT id FROM packs WHERE id = ? AND deleted_at IS NULL',
@@ -2510,7 +2437,7 @@ function validateCommitImport(input: CommitImportInput): void {
 }
 
 function validatePublishedArtifact(
-  input: RegisterPublishedArtifactInput,
+  input: Pick<RegisterPublishedArtifactInput, 'packId' | 'artifact'>,
 ): void {
   requireCanonicalId(input.packId);
   assertArtifact(input.artifact);

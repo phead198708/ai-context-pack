@@ -414,6 +414,7 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
 
   test('registers an exact verified derivative and rejects immutable replacement', async () => {
     const artifactId = '423e4567-e89b-42d3-a456-426614174000';
+    const publicationOwnerId = '523e4567-e89b-42d3-a456-426614174000';
     const value: Artifact = {
       id: artifactId,
       itemId,
@@ -439,6 +440,11 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
         return { changes: 1 };
       },
       first: async <T>(source: string) => {
+        if (source.includes('FROM cleanup_leases'))
+          return {
+            owner_id: publicationOwnerId,
+            expires_at: '2026-08-05T00:01:00Z',
+          } as T;
         if (source.includes('FROM packs')) return { id: packId } as T;
         if (source.includes('FROM context_items')) return { id: itemId } as T;
         if (source.includes('FROM artifacts WHERE id')) return existing as T;
@@ -451,7 +457,18 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
     const repository = new ExpoSqlitePersistenceRepository(connection as never);
 
     await expect(
-      repository.registerPublishedArtifact({ packId, artifact: value }),
+      repository.registerPublishedArtifact({
+        packId,
+        artifact: value,
+      } as never),
+    ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
+    await expect(
+      repository.registerPublishedArtifact({
+        packId,
+        artifact: value,
+        publicationLeaseOwnerId: publicationOwnerId,
+        publicationLeaseObservedAt: value.createdAt,
+      }),
     ).resolves.toBe('created');
     expect(statements[0]?.params).toEqual([
       artifactId,
@@ -480,7 +497,12 @@ describe('ExpoSqlitePersistenceRepository replay identity', () => {
       last_verified_at: value.createdAt,
     };
     await expect(
-      repository.registerPublishedArtifact({ packId, artifact: value }),
+      repository.registerPublishedArtifact({
+        packId,
+        artifact: value,
+        publicationLeaseOwnerId: publicationOwnerId,
+        publicationLeaseObservedAt: value.createdAt,
+      }),
     ).rejects.toMatchObject({ code: 'STORAGE_ARTIFACT_IMMUTABLE' });
     expect(statements).toEqual([]);
   });

@@ -308,6 +308,8 @@ class ProductionCleanupRepository extends MemoryRepository {
   released = 0;
   markedPurged = 0;
   renewals = 0;
+  readonly acquiredOwners: string[] = [];
+  readonly releasedOwners: string[] = [];
   readonly markPurgedCalls: {
     readonly quarantinedBefore: string;
     readonly purgedAt: string;
@@ -325,7 +327,8 @@ class ProductionCleanupRepository extends MemoryRepository {
     return this.markedPurged;
   }
 
-  async acquireCleanupLease() {
+  async acquireCleanupLease(ownerId: string) {
+    if (this.leaseAvailable) this.acquiredOwners.push(ownerId);
     return this.leaseAvailable;
   }
 
@@ -338,8 +341,9 @@ class ProductionCleanupRepository extends MemoryRepository {
     return this.leaseAvailable;
   }
 
-  async releaseCleanupLease() {
+  async releaseCleanupLease(ownerId: string) {
     this.released += 1;
+    this.releasedOwners.push(ownerId);
   }
 
   async recordRecoveryDiagnostic(input: RecoveryDiagnosticInput) {
@@ -665,6 +669,26 @@ describe('persistence and dual-Inbox recovery spike', () => {
     expect(repository.markPurgedCalls).toHaveLength(1);
   });
 
+  test('each scheduled cleanup run uses a fresh lease acquisition token', async () => {
+    const repository = new ProductionCleanupRepository();
+    const cleanup = new ScheduledReferenceAwareCleanup(
+      repository,
+      new MemoryFiles(),
+      '733e4567-e89b-42d3-a456-426614174000',
+      () => '2026-08-03T00:00:00Z',
+    );
+
+    await expect(cleanup.run()).resolves.toMatchObject({ status: 'completed' });
+    await expect(cleanup.run()).resolves.toMatchObject({ status: 'completed' });
+
+    expect(repository.acquiredOwners).toHaveLength(2);
+    expect(new Set(repository.acquiredOwners)).toHaveProperty('size', 2);
+    expect(repository.acquiredOwners).not.toContain(
+      '733e4567-e89b-42d3-a456-426614174000',
+    );
+    expect(repository.releasedOwners).toEqual(repository.acquiredOwners);
+  });
+
   test('scheduled cleanup renews its fence while a native cleanup snapshot is pending', async () => {
     jest.useFakeTimers();
     try {
@@ -691,8 +715,10 @@ describe('persistence and dual-Inbox recovery spike', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      clockMs += 1_200;
-      await jest.advanceTimersByTimeAsync(1_200);
+      for (let interval = 0; interval < 4; interval += 1) {
+        clockMs += 300;
+        await jest.advanceTimersByTimeAsync(300);
+      }
       expect(repository.renewals).toBeGreaterThan(0);
       expect(repository.released).toBe(0);
 
@@ -738,6 +764,47 @@ describe('persistence and dual-Inbox recovery spike', () => {
       await expect(running).rejects.toMatchObject({
         code: 'PERSISTENCE_CONFLICT',
       });
+      expect(repository.released).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('scheduled cleanup fails closed after suspension passes the local lease expiry', async () => {
+    jest.useFakeTimers();
+    try {
+      const repository = new ProductionCleanupRepository();
+      const files = new MemoryFiles();
+      const listed = deferred<
+        readonly {
+          readonly relativePath: string;
+          readonly byteCount: number;
+        }[]
+      >();
+      files.listOwnedFiles = jest.fn().mockReturnValue(listed.promise);
+      let clockMs = Date.parse('2026-08-03T00:00:00Z');
+      const cleanup = new ScheduledReferenceAwareCleanup(
+        repository,
+        files,
+        'a23e4567-e89b-42d3-a456-426614174000',
+        () => new Date(clockMs).toISOString(),
+        1_000,
+        7 * 24 * 60 * 60 * 1_000,
+        900,
+      );
+      const running = cleanup.run();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Simulate event-loop/app suspension: wall time advances beyond the TTL
+      // without running the renewal timer, then the native snapshot completes.
+      clockMs += 901;
+      listed.resolve([]);
+
+      await expect(running).rejects.toMatchObject({
+        code: 'PERSISTENCE_CONFLICT',
+      });
+      expect(repository.renewals).toBe(0);
       expect(repository.released).toBe(1);
     } finally {
       jest.useRealTimers();

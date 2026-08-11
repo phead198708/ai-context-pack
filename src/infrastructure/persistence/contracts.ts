@@ -131,17 +131,29 @@ export interface CheckpointPipelineRunArtifactInput {
   readonly updatedAt: string;
   readonly artifact: Artifact;
   /** Global publication lease owner fenced in the checkpoint transaction. */
-  readonly publicationLeaseOwnerId?: string;
+  readonly publicationLeaseOwnerId: string;
+  /** Wall-clock instant used to reject an expired checkpoint lease. */
+  readonly publicationLeaseObservedAt: string;
 }
 
-export interface CompletePipelineRunInput {
+export type CompletePipelineRunInput = {
   readonly runId: string;
   readonly claimVersion: number;
   readonly updatedAt: string;
-  readonly artifact?: Artifact;
-  /** Required for extraction settlement and fenced in the same transaction. */
-  readonly publicationLeaseOwnerId?: string;
-}
+} & (
+  | {
+      readonly artifact: Artifact;
+      /** Required for extraction settlement and fenced in the same transaction. */
+      readonly publicationLeaseOwnerId: string;
+      /** Wall-clock observation; never derived from Pack chronology. */
+      readonly publicationLeaseObservedAt: string;
+    }
+  | {
+      readonly artifact?: undefined;
+      readonly publicationLeaseOwnerId?: never;
+      readonly publicationLeaseObservedAt?: never;
+    }
+);
 
 export interface FailPipelineRunInput {
   readonly runId: string;
@@ -163,6 +175,10 @@ export interface RegisterPublishedArtifactInput {
   readonly packId: string;
   /** The native file store has already verified these immutable bytes. */
   readonly artifact: Artifact;
+  /** Global publication lease owner fenced in the registration transaction. */
+  readonly publicationLeaseOwnerId: string;
+  /** Wall-clock instant used to reject an expired registration lease. */
+  readonly publicationLeaseObservedAt: string;
 }
 
 export interface StorageUsageSummary {

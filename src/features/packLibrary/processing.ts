@@ -19,6 +19,7 @@ import {
   startCleanupLeaseHeartbeat,
   type CleanupLeaseHeartbeat,
 } from '../../infrastructure/persistence/cleanupLeaseHeartbeat';
+import { acquireArtifactLifecycleMutex } from '../../infrastructure/persistence/artifactLifecycleMutex';
 
 export interface PackStageWorkHandle {
   readonly result: Promise<Artifact | undefined>;
@@ -187,6 +188,24 @@ export class DurablePackProcessingCoordinator
             );
             return;
           }
+          if (
+            run.publishedArtifact &&
+            processingErrorCode(error) === 'PERSISTENCE_CONFLICT'
+          ) {
+            // Another still-valid publisher may be finishing the checkpoint.
+            // Do not convert recoverable lease contention into a terminal run;
+            // the running claim becomes stale and recovery retries the exact
+            // checkpoint after the original owner joins/releases its lease.
+            await this.reportUnexpectedFailure(
+              run,
+              error,
+              repository,
+              claimVersion,
+              packCreatedAt,
+              false,
+            );
+            return;
+          }
           try {
             await repository.failPipelineRun({
               runId: run.id,
@@ -208,16 +227,15 @@ export class DurablePackProcessingCoordinator
         }
         if (artifact) {
           try {
+            if (!handle.publicationLeaseOwnerId)
+              throw new DomainError('PERSISTENCE_CONFLICT');
             const checkpoint = repository.checkpointPipelineRunArtifact({
               runId: run.id,
               claimVersion,
               updatedAt: this.timestamp(packCreatedAt),
               artifact,
-              ...(handle.publicationLeaseOwnerId
-                ? {
-                    publicationLeaseOwnerId: handle.publicationLeaseOwnerId,
-                  }
-                : {}),
+              publicationLeaseOwnerId: handle.publicationLeaseOwnerId,
+              publicationLeaseObservedAt: validatedTimestamp(this.now()),
             });
             const checkpointed = await Promise.race([
               checkpoint,
@@ -237,35 +255,20 @@ export class DurablePackProcessingCoordinator
             return;
           }
         }
-        const heartbeatFailure = await heartbeat.stop();
-        if (heartbeatFailure !== undefined) {
-          await Promise.allSettled([handle.cancel()]);
-          await this.reportUnexpectedFailure(
-            run,
-            heartbeatFailure,
-            repository,
-            claimVersion,
-            packCreatedAt,
-            false,
-          );
-          return;
-        }
         try {
-          const completion = repository.completePipelineRun({
+          const completed = await repository.completePipelineRun({
             runId: run.id,
             claimVersion,
             updatedAt: this.timestamp(packCreatedAt),
             ...(artifact ? { artifact } : {}),
-            ...(handle.publicationLeaseOwnerId
+            ...(artifact && handle.publicationLeaseOwnerId
               ? {
                   publicationLeaseOwnerId: handle.publicationLeaseOwnerId,
+                  publicationLeaseObservedAt: validatedTimestamp(this.now()),
                 }
               : {}),
           });
-          await Promise.race([
-            completion,
-            ...(handle.fence ? [handle.fence] : []),
-          ]);
+          if (!completed) throw new DomainError('PERSISTENCE_CONFLICT');
         } catch (settlementError) {
           await this.reportUnexpectedFailure(
             run,
@@ -443,6 +446,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
     let repository: ProductionPersistenceRepository | undefined;
     let publicationLeaseHeld = false;
     let publicationHeartbeat: CleanupLeaseHeartbeat | undefined;
+    let releasePublicationLifecycleMutex: (() => void) | undefined;
     let rejectPublicationFence!: (error: unknown) => void;
     const publicationFence = new Promise<never>((_resolve, reject) => {
       rejectPublicationFence = reject;
@@ -458,14 +462,20 @@ export class NativeExtractionStageWorker implements PackStageWorker {
       if (!publicationLeaseHeld || !repository) return undefined;
       const heartbeatFailure = await publicationHeartbeat?.stop();
       publicationLeaseHeld = false;
-      await repository.releaseCleanupLease(publicationOwnerId);
+      try {
+        await repository.releaseCleanupLease(publicationOwnerId);
+      } finally {
+        releasePublicationLifecycleMutex?.();
+        releasePublicationLifecycleMutex = undefined;
+      }
       return heartbeatFailure;
     };
-    const acquirePublicationLease = async (
-      chronologyFloor: string,
-    ): Promise<void> => {
+    const acquirePublicationLease = async (): Promise<void> => {
       if (!repository) throw new DomainError('PERSISTENCE_CONFLICT');
-      const acquiredAt = validatedTimestamp(this.now(), chronologyFloor);
+      // The global cleanup/publication lease is an operational wall-clock
+      // mutex. Domain chronology may remain ahead after a clock correction,
+      // but it must never make another live cleanup owner's TTL look expired.
+      const acquiredAt = validatedTimestamp(this.now());
       publicationLeaseHeld = await repository.acquireCleanupLeaseForPipelineRun(
         run.id,
         run.claimVersion,
@@ -484,6 +494,8 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         this.now,
       );
       publicationHeartbeat.failure.catch(rejectPublicationFence);
+      releasePublicationLifecycleMutex = await acquireArtifactLifecycleMutex();
+      assertPublicationLease();
     };
     const result = (async (): Promise<Artifact | undefined> => {
       if (run.stage !== 'extract')
@@ -499,7 +511,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         run.updatedAt,
       ]);
       if (run.publishedArtifact) {
-        await acquirePublicationLease(chronologyFloor);
+        await acquirePublicationLease();
         const checkpoint = run.publishedArtifact;
         const verification = await this.native.verifyArtifact(
           checkpoint.relativePath,
@@ -583,7 +595,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         processorVersion = value.revision;
       }
       if (cancelled) throw new DomainError('PIPELINE_STAGE_FAILED');
-      await acquirePublicationLease(chronologyFloor);
+      await acquirePublicationLease();
       const relativePath = ownedDerivedPath(run.packId, run.id, 'txt');
       const currentArtifacts = await repository.listArtifactRecords();
       assertPublicationLease();

@@ -38,6 +38,17 @@ export function startCleanupLeaseHeartbeat(
     failureValue = error;
     rejectFailure(error);
   };
+  const checkLocalExpiry = (): void => {
+    if (failed) return;
+    try {
+      const observedAt = now();
+      requireTimestamp(observedAt);
+      if (Date.parse(observedAt) >= Date.parse(logicalAt) + leaseDurationMs)
+        recordFailure(new DomainError('PERSISTENCE_CONFLICT'));
+    } catch (error) {
+      recordFailure(error);
+    }
+  };
   const schedule = (): void => {
     timer = setTimeout(() => {
       inFlight = (async () => {
@@ -70,6 +81,10 @@ export function startCleanupLeaseHeartbeat(
   return {
     failure,
     assertOwned: () => {
+      // Timers do not run while the app/event loop is suspended. Detect the
+      // elapsed local TTL synchronously before allowing any post-await native
+      // or database mutation, even if the delayed renewal callback has not run.
+      checkLocalExpiry();
       if (failed)
         throw failureValue instanceof Error
           ? failureValue
@@ -79,6 +94,7 @@ export function startCleanupLeaseHeartbeat(
       stopped = true;
       if (timer !== undefined) clearTimeout(timer);
       await inFlight.catch(() => undefined);
+      checkLocalExpiry();
       return failed ? failureValue : undefined;
     },
   };

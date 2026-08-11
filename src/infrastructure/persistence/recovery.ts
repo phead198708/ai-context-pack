@@ -3,7 +3,10 @@ import {
   isDomainErrorCode,
   type DomainErrorCode,
 } from '../../domain/errors';
-import { isCanonicalUuid } from '../../domain/canonicalUuid';
+import {
+  createCanonicalUuid,
+  isCanonicalUuid,
+} from '../../domain/canonicalUuid';
 import type {
   NativeInboxHandoff,
   OwnedArtifactFileStore,
@@ -19,6 +22,7 @@ import {
   ownedOriginalPath,
 } from './ownedPaths';
 import { startCleanupLeaseHeartbeat } from './cleanupLeaseHeartbeat';
+import { acquireArtifactLifecycleMutex } from './artifactLifecycleMutex';
 
 const DISK_HEADROOM_BYTES = 16 * 1024 * 1024;
 
@@ -261,10 +265,14 @@ export class ScheduledReferenceAwareCleanup {
   }
 
   async run(): Promise<ScheduledCleanupResult> {
+    // Each acquisition gets a fresh fencing identity. Reusing the process-level
+    // diagnostic ID would allow an older suspended run to renew/release a newer
+    // run after the original TTL expires.
+    const leaseOwnerId = createCanonicalUuid();
     const acquiredAt = this.now();
     const acquiredEpoch = Date.parse(acquiredAt);
     const lease = await this.repository.acquireCleanupLease(
-      this.ownerId,
+      leaseOwnerId,
       acquiredAt,
       new Date(acquiredEpoch + this.leaseDurationMs).toISOString(),
     );
@@ -278,12 +286,14 @@ export class ScheduledReferenceAwareCleanup {
       };
     const heartbeat = startCleanupLeaseHeartbeat(
       this.repository,
-      this.ownerId,
+      leaseOwnerId,
       acquiredAt,
       this.leaseDurationMs,
       this.now,
     );
+    const releaseLifecycleMutex = await acquireArtifactLifecycleMutex();
     try {
+      heartbeat.assertOwned();
       const cleanup = await new ReferenceAwareCleanup(
         this.repository,
         this.files,
@@ -323,8 +333,12 @@ export class ScheduledReferenceAwareCleanup {
         purgedBytes: purged.purgedBytes,
       };
     } finally {
-      await heartbeat.stop();
-      await this.repository.releaseCleanupLease(this.ownerId);
+      try {
+        await heartbeat.stop();
+        await this.repository.releaseCleanupLease(leaseOwnerId);
+      } finally {
+        releaseLifecycleMutex();
+      }
     }
   }
 }
