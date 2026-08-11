@@ -679,16 +679,19 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         )
           throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
         const quarantinedAt = validatedTimestamp(this.now(), chronologyFloor);
-        await repository.recordQuarantine({
-          id: quarantined.quarantineId,
-          anonymousId: quarantined.anonymousId,
-          reasonCode: 'STORAGE_ARTIFACT_IMMUTABLE',
-          byteCount: quarantined.byteCount,
-          createdAt: quarantinedAt,
-          purgeAfter: new Date(
-            Date.parse(quarantinedAt) + 7 * 24 * 60 * 60 * 1_000,
-          ).toISOString(),
-        });
+        await repository.recordQuarantine(
+          {
+            id: quarantined.quarantineId,
+            anonymousId: quarantined.anonymousId,
+            reasonCode: 'STORAGE_ARTIFACT_IMMUTABLE',
+            byteCount: quarantined.byteCount,
+            createdAt: quarantinedAt,
+            purgeAfter: new Date(
+              Date.parse(quarantinedAt) + 7 * 24 * 60 * 60 * 1_000,
+            ).toISOString(),
+          },
+          publicationOwnerId,
+        );
         await assertPipelineClaim(chronologyFloor);
         assertPublicationLease();
         const replacement = await this.native.writeTextArtifact(
@@ -706,6 +709,7 @@ export class NativeExtractionStageWorker implements PackStageWorker {
         | undefined;
       try {
         await assertPipelineClaim(chronologyFloor);
+        assertPublicationLease();
         initialPublication = await this.native.writeTextArtifact(
           relativePath,
           text,

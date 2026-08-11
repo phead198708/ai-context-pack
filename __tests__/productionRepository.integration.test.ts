@@ -54,6 +54,7 @@ const appendedIngestionId = '923e4567-e89b-42d3-a456-426614174000';
 const appendedItemId = 'a23e4567-e89b-42d3-a456-426614174000';
 const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
 const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
+const cleanupMutationOwnerId = 'c33e4567-e89b-42d3-a456-426614174000';
 const mainAppPackId = 'd23e4567-e89b-42d3-a456-426614174000';
 const mainAppIngestionId = 'e23e4567-e89b-42d3-a456-426614174000';
 const mainAppImageId = 'f23e4567-e89b-42d3-a456-426614174000';
@@ -167,6 +168,18 @@ describe('production repository against SQLite', () => {
   function dropV7OperationalLeaseColumns(): void {
     database.exec('ALTER TABLE cleanup_leases DROP COLUMN session_id');
     database.exec('ALTER TABLE cleanup_leases DROP COLUMN deadline_ms');
+  }
+
+  async function acquireCleanupMutationLease(): Promise<string> {
+    await repository.releaseCleanupLease(cleanupMutationOwnerId);
+    await expect(
+      repository.acquireCleanupLease(
+        cleanupMutationOwnerId,
+        '2026-08-11T00:00:00Z',
+        '2026-08-11T01:00:00Z',
+      ),
+    ).resolves.toBe(true);
+    return cleanupMutationOwnerId;
   }
 
   beforeEach(async () => {
@@ -373,7 +386,10 @@ describe('production repository against SQLite', () => {
       removedItemOriginalDisposition: 'release',
     });
     await expect(
-      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
     ).resolves.toBe(true);
 
     database.exec('ALTER TABLE import_items DROP COLUMN original_disposition');
@@ -437,7 +453,10 @@ describe('production repository against SQLite', () => {
       originalReleased: true,
     });
     await expect(
-      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
     ).resolves.toBe(true);
     expect((await repository.listImportDetails())[0]?.items[0]).toMatchObject({
       id: firstItemId,
@@ -471,7 +490,10 @@ describe('production repository against SQLite', () => {
       });
       if (cleanBeforeMigration)
         await expect(
-          repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+          repository.deleteArtifactRecordIfUnreferenced(
+            firstItemId,
+            await acquireCleanupMutationLease(),
+          ),
         ).resolves.toBe(true);
 
       database.exec(
@@ -500,7 +522,10 @@ describe('production repository against SQLite', () => {
       }
       if (!cleanBeforeMigration)
         await expect(
-          repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+          repository.deleteArtifactRecordIfUnreferenced(
+            firstItemId,
+            await acquireCleanupMutationLease(),
+          ),
         ).resolves.toBe(true);
     },
   );
@@ -579,7 +604,10 @@ describe('production repository against SQLite', () => {
     expect(preserved).toMatchObject({ id: firstItemId, status: 'failed' });
     expect(preserved).not.toHaveProperty('originalReleased');
     await expect(
-      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
     ).resolves.toBe(false);
   });
 
@@ -613,7 +641,10 @@ describe('production repository against SQLite', () => {
     expect(preserved).toMatchObject({ id: firstItemId, status: 'copied' });
     expect(preserved).not.toHaveProperty('originalReleased');
     await expect(
-      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
     ).resolves.toBe(false);
   });
 
@@ -732,7 +763,10 @@ describe('production repository against SQLite', () => {
       secondItemId,
     );
     await expect(
-      repository.deleteArtifactRecordIfUnreferenced(firstItemId),
+      repository.deleteArtifactRecordIfUnreferenced(
+        firstItemId,
+        await acquireCleanupMutationLease(),
+      ),
     ).resolves.toBe(true);
     expect(await repository.listArtifactRecords()).toEqual(
       expect.not.arrayContaining([
@@ -860,6 +894,7 @@ describe('production repository against SQLite', () => {
       expect(
         await repository.deleteArtifactRecordIfUnreferenced(
           candidate.artifactId,
+          await acquireCleanupMutationLease(),
         ),
       ).toBe(true);
     expect(await repository.listArtifactRecords()).toEqual([]);
@@ -939,27 +974,34 @@ describe('production repository against SQLite', () => {
   });
 
   test('marks only quarantine records covered by the native mtime cutoff', async () => {
-    await repository.recordQuarantine({
-      id: oldQuarantineId,
-      anonymousId: firstItemId,
-      reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
-      byteCount: 4,
-      createdAt: '2026-08-01T00:00:00Z',
-      purgeAfter: '2026-08-08T00:00:00Z',
-    });
-    await repository.recordQuarantine({
-      id: recentQuarantineId,
-      anonymousId: secondItemId,
-      reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
-      byteCount: 8,
-      createdAt: '2026-08-05T00:00:00Z',
-      purgeAfter: '2026-08-12T00:00:00Z',
-    });
+    await repository.recordQuarantine(
+      {
+        id: oldQuarantineId,
+        anonymousId: firstItemId,
+        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+        byteCount: 4,
+        createdAt: '2026-08-01T00:00:00Z',
+        purgeAfter: '2026-08-08T00:00:00Z',
+      },
+      await acquireCleanupMutationLease(),
+    );
+    await repository.recordQuarantine(
+      {
+        id: recentQuarantineId,
+        anonymousId: secondItemId,
+        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+        byteCount: 8,
+        createdAt: '2026-08-05T00:00:00Z',
+        purgeAfter: '2026-08-12T00:00:00Z',
+      },
+      await acquireCleanupMutationLease(),
+    );
 
     await expect(
       repository.markQuarantinePurgedBefore(
         '2026-08-03T00:00:00Z',
         '2026-08-10T00:00:00Z',
+        await acquireCleanupMutationLease(),
       ),
     ).resolves.toBe(1);
     await expect(repository.getStorageUsage()).resolves.toMatchObject({

@@ -34,6 +34,7 @@ const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const packId = '223e4567-e89b-42d3-a456-426614174000';
 const itemId = '323e4567-e89b-42d3-a456-426614174000';
 const secondItemId = '423e4567-e89b-42d3-a456-426614174000';
+const cleanupMutationOwnerId = '523e4567-e89b-42d3-a456-426614174000';
 const fingerprint = 'a'.repeat(64);
 
 function deferred<T>() {
@@ -564,9 +565,11 @@ describe('persistence and dual-Inbox recovery spike', () => {
     files.files.add(orphanPath);
     files.files.add(orphanPartialPath);
 
-    const result = await new ReferenceAwareCleanup(repository, files).run(
-      '2026-08-03T00:00:00Z',
-    );
+    const result = await new ReferenceAwareCleanup(
+      repository,
+      files,
+      cleanupMutationOwnerId,
+    ).run('2026-08-03T00:00:00Z');
     expect(result).toEqual({ deleted: 0, quarantined: 2 });
     expect(files.removed).toEqual([]);
     expect(files.files).toContain(candidatePath);
@@ -592,7 +595,9 @@ describe('persistence and dual-Inbox recovery spike', () => {
     files.files.add(recoveringPartialPath);
 
     await expect(
-      new ReferenceAwareCleanup(repository, files).run('2026-08-03T00:00:00Z'),
+      new ReferenceAwareCleanup(repository, files, cleanupMutationOwnerId).run(
+        '2026-08-03T00:00:00Z',
+      ),
     ).resolves.toEqual({ deleted: 0, quarantined: 0 });
     expect(files.files).toEqual(
       new Set([recentPath, recoveringPath, recoveringPartialPath]),
@@ -609,6 +614,7 @@ describe('persistence and dual-Inbox recovery spike', () => {
       new ReferenceAwareCleanup(
         repository,
         files,
+        cleanupMutationOwnerId,
         repository,
         () => '2026-08-03T00:00:00Z',
         1_000,

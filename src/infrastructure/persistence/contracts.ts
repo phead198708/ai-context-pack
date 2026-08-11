@@ -281,11 +281,15 @@ export interface QuarantineRecordInput {
 }
 
 export interface QuarantineRepository {
-  recordQuarantine(input: QuarantineRecordInput): Promise<void>;
+  recordQuarantine(
+    input: QuarantineRecordInput,
+    cleanupLeaseOwnerId: string,
+  ): Promise<void>;
   /** Marks records quarantined at or before the native mtime cutoff. */
   markQuarantinePurgedBefore(
     quarantinedBefore: string,
     purgedAt: string,
+    cleanupLeaseOwnerId: string,
   ): Promise<number>;
 }
 
@@ -339,7 +343,10 @@ export interface PersistenceRepository {
   listCleanupCandidates(
     olderThan: string,
   ): Promise<readonly CleanupCandidate[]>;
-  deleteArtifactRecordIfUnreferenced(artifactId: string): Promise<boolean>;
+  deleteArtifactRecordIfUnreferenced(
+    artifactId: string,
+    cleanupLeaseOwnerId: string,
+  ): Promise<boolean>;
 }
 
 export interface ProductionPersistenceRepository

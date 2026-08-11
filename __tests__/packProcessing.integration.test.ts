@@ -124,6 +124,46 @@ class DelayedExclusiveConnection {
   }
 }
 
+class RunObservingConnection {
+  constructor(
+    private readonly delegate: NodeSqlConnection,
+    private readonly afterRun: (source: string) => void,
+  ) {}
+
+  exec(source: string) {
+    return this.delegate.exec(source);
+  }
+
+  run(source: string, params: readonly SqlValue[] = []) {
+    return this.delegate.run(source, params);
+  }
+
+  first<T>(source: string, params: readonly SqlValue[] = []) {
+    return this.delegate.first<T>(source, params);
+  }
+
+  all<T>(source: string, params: readonly SqlValue[] = []) {
+    return this.delegate.all<T>(source, params);
+  }
+
+  exclusive<T>(
+    task: (transaction: NodeSqlConnection) => Promise<T>,
+  ): Promise<T> {
+    return this.delegate.exclusive(transaction =>
+      task({
+        exec: source => transaction.exec(source),
+        run: async (source, params = []) => {
+          const result = await transaction.run(source, params);
+          this.afterRun(source);
+          return result;
+        },
+        first: (source, params = []) => transaction.first(source, params),
+        all: (source, params = []) => transaction.all(source, params),
+      } as NodeSqlConnection),
+    );
+  }
+}
+
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const itemId = '223e4567-e89b-42d3-a456-426614174000';
 const ingestionId = '323e4567-e89b-42d3-a456-426614174000';
@@ -1047,6 +1087,260 @@ test('checkpoint, completion, and registration observe expiry inside their queue
   });
 });
 
+test('settlement and failure roll back when ownership expires after their final awaited mutation', async () => {
+  const run = await persistAndClaim({
+    id: '253e4567-e89b-42d3-a456-426614174000',
+    packId,
+    itemId,
+    stage: 'extract',
+    status: 'queued',
+    startedAt: now,
+    updatedAt: now,
+    claimVersion: 0,
+  });
+  const artifact: Artifact = {
+    id: run.id,
+    itemId,
+    kind: 'ocr-text',
+    relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+    mediaType: 'text/plain',
+    byteCount: 4,
+    sha256: '8'.repeat(64),
+    processorVersion: {
+      processor: 'fixture-extraction',
+      version: '1',
+      contractVersion: 1,
+    },
+    createdAt: now,
+    immutable: true,
+  };
+  const publicationOwner = '353e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLeaseForPipelineRun(
+      run.id,
+      run.claimVersion,
+      publicationOwner,
+      now,
+      '2026-08-11T00:01:00Z',
+    ),
+  ).resolves.toBe(true);
+  await expect(
+    repository.checkpointPipelineRunArtifact({
+      runId: run.id,
+      claimVersion: run.claimVersion,
+      updatedAt: now,
+      artifact,
+      publicationLeaseOwnerId: publicationOwner,
+    }),
+  ).resolves.toBe(true);
+
+  let expireAfterPackUpdate = true;
+  const observingRepository = new ExpoSqlitePersistenceRepository(
+    new RunObservingConnection(new NodeSqlConnection(database), source => {
+      if (
+        expireAfterPackUpdate &&
+        source.includes('UPDATE packs SET updated_at')
+      ) {
+        operationalMilliseconds = 60_000;
+        expireAfterPackUpdate = false;
+      }
+    }) as never,
+    undefined,
+    false,
+    {
+      sessionId: operationalSessionId,
+      nowMilliseconds: () => operationalMilliseconds,
+    },
+  );
+  await observingRepository.initialize();
+  await expect(
+    observingRepository.completePipelineRun({
+      runId: run.id,
+      claimVersion: run.claimVersion,
+      updatedAt: now,
+      artifact,
+      publicationLeaseOwnerId: publicationOwner,
+    }),
+  ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+  expect(await repository.listArtifactRecords()).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ id: run.id })]),
+  );
+  expect(
+    database
+      .prepare('SELECT status FROM pipeline_runs WHERE id = ?')
+      .get(run.id),
+  ).toEqual({ status: 'running' });
+
+  operationalMilliseconds = 60_001;
+  const renewed = await repository.renewPipelineRunClaim(
+    run.id,
+    run.claimVersion,
+    '2026-08-11T00:01:00Z',
+    '2026-08-11T00:01:00Z',
+    '2026-08-11T00:02:00Z',
+  );
+  expect(renewed).toBe(true);
+  const failureRepository = new ExpoSqlitePersistenceRepository(
+    new RunObservingConnection(new NodeSqlConnection(database), source => {
+      if (source.includes("UPDATE packs SET state = 'failed'"))
+        operationalMilliseconds = 120_001;
+    }) as never,
+    undefined,
+    false,
+    {
+      sessionId: operationalSessionId,
+      nowMilliseconds: () => operationalMilliseconds,
+    },
+  );
+  await failureRepository.initialize();
+  await expect(
+    failureRepository.failPipelineRun({
+      runId: run.id,
+      claimVersion: run.claimVersion,
+      updatedAt: '2026-08-11T00:01:00Z',
+      errorCode: 'PIPELINE_STAGE_FAILED',
+    }),
+  ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+  expect(
+    database
+      .prepare('SELECT status FROM pipeline_runs WHERE id = ?')
+      .get(run.id),
+  ).toEqual({ status: 'running' });
+  expect(
+    database.prepare('SELECT state FROM packs WHERE id = ?').get(packId),
+  ).toEqual({ state: 'processing' });
+});
+
+test('queued cleanup database mutations reject an expired lease before committing', async () => {
+  const delayedConnection = new DelayedExclusiveConnection(
+    new NodeSqlConnection(database),
+  );
+  const delayedRepository = new ExpoSqlitePersistenceRepository(
+    delayedConnection as never,
+    undefined,
+    false,
+    {
+      sessionId: operationalSessionId,
+      nowMilliseconds: () => operationalMilliseconds,
+    },
+  );
+  await delayedRepository.initialize();
+  const publicationOwner = '553e4567-e89b-42d3-a456-426614174000';
+  const artifactId = '653e4567-e89b-42d3-a456-426614174000';
+  const artifact: Artifact = {
+    id: artifactId,
+    itemId,
+    kind: 'ocr-text',
+    relativePath: ownedDerivedPath(packId, artifactId, 'txt'),
+    mediaType: 'text/plain',
+    byteCount: 4,
+    sha256: '7'.repeat(64),
+    processorVersion: {
+      processor: 'fixture-publication',
+      version: '1',
+      contractVersion: 1,
+    },
+    createdAt: now,
+    immutable: true,
+  };
+  await expect(
+    repository.acquireCleanupLease(
+      publicationOwner,
+      now,
+      '2026-08-11T00:01:00Z',
+    ),
+  ).resolves.toBe(true);
+  await repository.registerPublishedArtifact({
+    packId,
+    artifact,
+    publicationLeaseOwnerId: publicationOwner,
+  });
+  await repository.releaseCleanupLease(publicationOwner);
+
+  const delayPastLease = async <T>(
+    ownerId: string,
+    mutation: () => Promise<T>,
+  ): Promise<void> => {
+    const observedAt = operationalMilliseconds;
+    await expect(
+      repository.acquireCleanupLease(
+        ownerId,
+        new Date(Date.parse(now) + observedAt).toISOString(),
+        new Date(Date.parse(now) + observedAt + 10).toISOString(),
+      ),
+    ).resolves.toBe(true);
+    const gate = delayedConnection.delayNextExclusive();
+    const pending = mutation();
+    await gate.entered.promise;
+    operationalMilliseconds = observedAt + 10;
+    gate.release.resolve();
+    await expect(pending).rejects.toMatchObject({
+      code: 'PERSISTENCE_CONFLICT',
+    });
+  };
+
+  const deleteOwner = '753e4567-e89b-42d3-a456-426614174000';
+  await delayPastLease(deleteOwner, () =>
+    delayedRepository.deleteArtifactRecordIfUnreferenced(
+      artifactId,
+      deleteOwner,
+    ),
+  );
+  expect(await repository.listArtifactRecords()).toEqual(
+    expect.arrayContaining([expect.objectContaining({ id: artifactId })]),
+  );
+
+  const quarantineOwner = '853e4567-e89b-42d3-a456-426614174000';
+  await delayPastLease(quarantineOwner, () =>
+    delayedRepository.recordQuarantine(
+      {
+        id: '953e4567-e89b-42d3-a456-426614174000',
+        anonymousId: artifactId,
+        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+        byteCount: 4,
+        createdAt: now,
+        purgeAfter: '2026-08-18T00:00:00Z',
+      },
+      quarantineOwner,
+    ),
+  );
+  await expect(repository.getStorageUsage()).resolves.toMatchObject({
+    quarantineCount: 0,
+  });
+
+  const recordOwner = 'a53e4567-e89b-42d3-a456-426614174000';
+  await expect(
+    repository.acquireCleanupLease(
+      recordOwner,
+      '2026-08-11T00:00:00.020Z',
+      '2026-08-11T00:00:01.020Z',
+    ),
+  ).resolves.toBe(true);
+  await repository.recordQuarantine(
+    {
+      id: 'b53e4567-e89b-42d3-a456-426614174000',
+      anonymousId: artifactId,
+      reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+      byteCount: 4,
+      createdAt: now,
+      purgeAfter: '2026-08-18T00:00:00Z',
+    },
+    recordOwner,
+  );
+  await repository.releaseCleanupLease(recordOwner);
+  const purgeOwner = 'c53e4567-e89b-42d3-a456-426614174000';
+  await delayPastLease(purgeOwner, () =>
+    delayedRepository.markQuarantinePurgedBefore(
+      '2026-08-12T00:00:00Z',
+      '2026-08-12T00:00:00Z',
+      purgeOwner,
+    ),
+  );
+  await expect(repository.getStorageUsage()).resolves.toMatchObject({
+    quarantineCount: 1,
+  });
+});
+
 test('publication checkpoints are exact-claim idempotent and reject descriptor changes', async () => {
   const run: PersistedPipelineRun = {
     id: '493e4567-e89b-42d3-a456-426614174000',
@@ -1713,17 +2007,21 @@ test('completion settlement rejection is diagnosed without converting successful
     worker.artifact(run).relativePath,
   );
   const quarantineCheckpoint = jest.fn();
-  await new ReferenceAwareCleanup(repository, {
-    listOwnedFiles: jest.fn().mockResolvedValue([
-      {
-        relativePath: worker.artifact(run).relativePath,
-        byteCount: worker.artifact(run).byteCount,
-      },
-    ]),
-    removeOwnedFile: jest.fn(),
-    quarantineOwnedFile: quarantineCheckpoint,
-    purgeQuarantine: jest.fn(),
-  }).run('2026-08-10T00:00:00Z');
+  await new ReferenceAwareCleanup(
+    repository,
+    {
+      listOwnedFiles: jest.fn().mockResolvedValue([
+        {
+          relativePath: worker.artifact(run).relativePath,
+          byteCount: worker.artifact(run).byteCount,
+        },
+      ]),
+      removeOwnedFile: jest.fn(),
+      quarantineOwnedFile: quarantineCheckpoint,
+      purgeQuarantine: jest.fn(),
+    },
+    'e73e4567-e89b-42d3-a456-426614174000',
+  ).run('2026-08-10T00:00:00Z');
   expect(quarantineCheckpoint).not.toHaveBeenCalled();
 
   const verifyArtifact = jest.fn(
@@ -2538,6 +2836,74 @@ test('cancellation keeps the cleanup lease until an in-flight native publication
     repository.acquireCleanupLease(otherOwner, now, '2026-08-11T00:01:00Z'),
   ).resolves.toBe(true);
   await repository.releaseCleanupLease(otherOwner);
+});
+
+test('publication rechecks its local cleanup fence after awaited claim renewal and before native write', async () => {
+  jest.useFakeTimers();
+  const performanceNow = jest.spyOn(
+    (
+      globalThis as unknown as {
+        readonly performance: { now(): number };
+      }
+    ).performance,
+    'now',
+  );
+  try {
+    let publicationMonotonicMs = 0;
+    performanceNow.mockImplementation(() => publicationMonotonicMs);
+    const run: PersistedPipelineRun = {
+      id: 'a63e4567-e89b-42d3-a456-426614174000',
+      packId,
+      itemId,
+      stage: 'extract',
+      status: 'queued',
+      startedAt: now,
+      updatedAt: now,
+      claimVersion: 0,
+    };
+    const claimed = await persistAndClaim(run);
+    const secondRenewalStarted = deferred<void>();
+    const secondRenewal = deferred<boolean>();
+    const realRenew = repository.renewPipelineRunClaim.bind(repository);
+    let renewalCount = 0;
+    jest
+      .spyOn(repository, 'renewPipelineRunClaim')
+      .mockImplementation(async (...args) => {
+        renewalCount += 1;
+        if (renewalCount === 2) {
+          secondRenewalStarted.resolve();
+          return secondRenewal.promise;
+        }
+        return realRenew(...args);
+      });
+    const writeTextArtifact = jest.fn().mockResolvedValue({
+      relativePath: ownedDerivedPath(packId, run.id, 'txt'),
+      byteCount: 18,
+      sha256: 'd'.repeat(64),
+      created: true,
+    });
+    const handle = new NativeExtractionStageWorker(
+      async () => repository,
+      imagePublicationNative(writeTextArtifact, jest.fn()),
+      () => now,
+      10,
+    ).start(claimed);
+
+    await secondRenewalStarted.promise;
+    publicationMonotonicMs = 10;
+    secondRenewal.resolve(true);
+
+    await expect(handle.result).rejects.toMatchObject({
+      code: 'PERSISTENCE_CONFLICT',
+    });
+    expect(writeTextArtifact).not.toHaveBeenCalled();
+    await expect(handle.finalize?.()).rejects.toMatchObject({
+      code: 'PERSISTENCE_CONFLICT',
+    });
+  } finally {
+    performanceNow.mockRestore();
+    jest.useRealTimers();
+  }
 });
 
 test('publication renews its cleanup fence across lease expiry until native write joins', async () => {

@@ -1032,6 +1032,16 @@ export class ExpoSqlitePersistenceRepository
           encoded,
         ],
       );
+      if (
+        result.changes === 1 &&
+        (!this.pipelineClaimIsLive(run, this.operationalNow()) ||
+          !(await cleanupLeaseOwnerMatches(
+            transaction,
+            input.publicationLeaseOwnerId,
+            this.operationalClock,
+          )))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
       return result.changes === 1;
     });
   }
@@ -1157,6 +1167,18 @@ export class ExpoSqlitePersistenceRepository
          WHERE id = ? AND deleted_at IS NULL`,
         [settledAt, run.pack_id],
       );
+      if (!this.pipelineClaimIsLive(run, this.operationalNow()))
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      if (
+        stage === 'extract' &&
+        (publicationOwnerId === undefined ||
+          !(await cleanupLeaseOwnerMatches(
+            transaction,
+            publicationOwnerId,
+            this.operationalClock,
+          )))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
       return true;
     });
   }
@@ -1222,6 +1244,8 @@ export class ExpoSqlitePersistenceRepository
          WHERE id = ? AND deleted_at IS NULL`,
         [settledAt, run.pack_id],
       );
+      if (!this.pipelineClaimIsLive(run, this.operationalNow()))
+        throw new DomainError('PERSISTENCE_CONFLICT');
       return true;
     });
   }
@@ -1499,7 +1523,19 @@ export class ExpoSqlitePersistenceRepository
         ))
       )
         throw new DomainError('PERSISTENCE_CONFLICT');
-      return registerPublishedArtifactInTransaction(transaction, input);
+      const result = await registerPublishedArtifactInTransaction(
+        transaction,
+        input,
+      );
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          input.publicationLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      return result;
     });
   }
 
@@ -1614,10 +1650,23 @@ export class ExpoSqlitePersistenceRepository
     );
   }
 
-  async recordQuarantine(input: QuarantineRecordInput): Promise<void> {
+  async recordQuarantine(
+    input: QuarantineRecordInput,
+    cleanupLeaseOwnerId: string,
+  ): Promise<void> {
     validateQuarantineRecord(input);
-    await this.connection.run(
-      `INSERT INTO quarantine_records
+    requireCanonicalId(cleanupLeaseOwnerId);
+    await this.connection.exclusive(async transaction => {
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          cleanupLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      await transaction.run(
+        `INSERT INTO quarantine_records
         (id, anonymous_id, reason_code, byte_count, created_at, purge_after, purged_at)
        VALUES (?, ?, ?, ?, ?, ?, NULL)
        ON CONFLICT(id) DO UPDATE SET
@@ -1627,29 +1676,58 @@ export class ExpoSqlitePersistenceRepository
          created_at = excluded.created_at,
          purge_after = excluded.purge_after,
          purged_at = NULL`,
-      [
-        input.id,
-        input.anonymousId,
-        input.reasonCode,
-        input.byteCount,
-        input.createdAt,
-        input.purgeAfter,
-      ],
-    );
+        [
+          input.id,
+          input.anonymousId,
+          input.reasonCode,
+          input.byteCount,
+          input.createdAt,
+          input.purgeAfter,
+        ],
+      );
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          cleanupLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+    });
   }
 
   async markQuarantinePurgedBefore(
     quarantinedBefore: string,
     purgedAt: string,
+    cleanupLeaseOwnerId: string,
   ): Promise<number> {
     requireIsoDateTime(quarantinedBefore);
     requireIsoDateTime(purgedAt);
-    const result = await this.connection.run(
-      `UPDATE quarantine_records SET purged_at = ?
-       WHERE purged_at IS NULL AND created_at <= ?`,
-      [purgedAt, quarantinedBefore],
-    );
-    return result.changes;
+    requireCanonicalId(cleanupLeaseOwnerId);
+    return this.connection.exclusive(async transaction => {
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          cleanupLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const result = await transaction.run(
+        `UPDATE quarantine_records SET purged_at = ?
+         WHERE purged_at IS NULL AND created_at <= ?`,
+        [purgedAt, quarantinedBefore],
+      );
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          cleanupLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      return result.changes;
+    });
   }
 
   async getStorageUsage(): Promise<StorageUsageSummary> {
@@ -1986,18 +2064,44 @@ export class ExpoSqlitePersistenceRepository
 
   async deleteArtifactRecordIfUnreferenced(
     artifactId: string,
+    cleanupLeaseOwnerId: string,
   ): Promise<boolean> {
     requireCanonicalId(artifactId);
+    requireCanonicalId(cleanupLeaseOwnerId);
     return this.connection.exclusive(async transaction => {
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          cleanupLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
       const reference = await transaction.first<{ found: number }>(
         'SELECT 1 AS found FROM artifact_references WHERE artifact_id = ? LIMIT 1',
         [artifactId],
       );
       if (reference) return false;
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          cleanupLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
       const result = await transaction.run(
         'DELETE FROM artifacts WHERE id = ?',
         [artifactId],
       );
+      if (
+        !(await cleanupLeaseOwnerMatches(
+          transaction,
+          cleanupLeaseOwnerId,
+          this.operationalClock,
+        ))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
       return result.changes === 1;
     });
   }
@@ -2711,7 +2815,6 @@ async function cleanupLeaseOwnerMatches(
   ownerId: string,
   operationalClock: OperationalLeaseClock,
 ): Promise<boolean> {
-  const observedAt = observeOperationalMilliseconds(operationalClock);
   const lease = await transaction.first<{
     owner_id: string;
     session_id: string | null;
@@ -2720,6 +2823,7 @@ async function cleanupLeaseOwnerMatches(
     `SELECT owner_id, session_id, deadline_ms FROM cleanup_leases
      WHERE name = 'artifact-cleanup'`,
   );
+  const observedAt = observeOperationalMilliseconds(operationalClock);
   return (
     lease !== null &&
     lease.owner_id === ownerId &&

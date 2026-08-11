@@ -172,11 +172,14 @@ export class ReferenceAwareCleanup {
   constructor(
     private readonly repository: PersistenceRepository,
     private readonly files: OwnedArtifactFileStore,
+    private readonly cleanupLeaseOwnerId: string,
     private readonly quarantine?: QuarantineRepository,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly quarantineRetentionMs = 7 * 24 * 60 * 60 * 1_000,
     private readonly assertLease: () => void = () => undefined,
-  ) {}
+  ) {
+    requireIdentifier(cleanupLeaseOwnerId);
+  }
 
   async run(olderThan: string): Promise<{
     readonly deleted: number;
@@ -193,6 +196,7 @@ export class ReferenceAwareCleanup {
       this.assertLease();
       const removed = await this.repository.deleteArtifactRecordIfUnreferenced(
         candidate.artifactId,
+        this.cleanupLeaseOwnerId,
       );
       this.assertLease();
       if (!removed) continue;
@@ -221,16 +225,19 @@ export class ReferenceAwareCleanup {
       this.assertLease();
       if (!result) continue;
       const createdAt = this.now();
-      await this.quarantine?.recordQuarantine({
-        id: result.quarantineId,
-        anonymousId: result.anonymousId,
-        reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
-        byteCount: result.byteCount,
-        createdAt,
-        purgeAfter: new Date(
-          Date.parse(createdAt) + this.quarantineRetentionMs,
-        ).toISOString(),
-      });
+      await this.quarantine?.recordQuarantine(
+        {
+          id: result.quarantineId,
+          anonymousId: result.anonymousId,
+          reasonCode: 'STORAGE_DIVERGENCE_DETECTED',
+          byteCount: result.byteCount,
+          createdAt,
+          purgeAfter: new Date(
+            Date.parse(createdAt) + this.quarantineRetentionMs,
+          ).toISOString(),
+        },
+        this.cleanupLeaseOwnerId,
+      );
       this.assertLease();
       quarantined += 1;
     }
@@ -300,6 +307,7 @@ export class ScheduledReferenceAwareCleanup {
       const cleanup = await new ReferenceAwareCleanup(
         this.repository,
         this.files,
+        leaseOwnerId,
         this.repository,
         this.now,
         this.quarantineRetentionMs,
@@ -313,6 +321,7 @@ export class ScheduledReferenceAwareCleanup {
       const marked = await this.repository.markQuarantinePurgedBefore(
         quarantineCutoff,
         acquiredAt,
+        leaseOwnerId,
       );
       heartbeat.assertOwned();
       if (marked !== purged.purgedCount) {
