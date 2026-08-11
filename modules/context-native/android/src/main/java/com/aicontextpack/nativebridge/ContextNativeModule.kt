@@ -336,7 +336,10 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         context.registerComponentCallbacks(this@ContextNativeModule)
         callbackContext = context
         Thread(
-          { InboxArtifactHandoff.runStartupMaintenance(context.filesDir) },
+          {
+            InboxArtifactHandoff.runStartupMaintenance(context.filesDir)
+            ImageHashSnapshotStore.runStartupMaintenance(context)
+          },
           "ai-context-pack-tombstone-sweep",
         ).start()
       }

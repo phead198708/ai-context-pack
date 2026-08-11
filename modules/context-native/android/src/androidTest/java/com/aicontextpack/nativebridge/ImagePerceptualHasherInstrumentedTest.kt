@@ -100,6 +100,12 @@ class ImagePerceptualHasherInstrumentedTest {
         fixtures.getValue("animated-gif"),
         65_536,
       ),
+      "suffixed-apng" to (fixtures.getValue("animated-apng") + byteArrayOf(0)),
+      "suffixed-gif" to (fixtures.getValue("animated-gif") + byteArrayOf(0)),
+      "mismatched-apng" to replacePngAnimationFrameCount(
+        fixtures.getValue("animated-apng"),
+        3,
+      ),
     )
     for ((name, bytes) in padded) {
       val file = File(context.cacheDir, "$name.bin")
@@ -142,6 +148,21 @@ class ImagePerceptualHasherInstrumentedTest {
       (crc ushr 8).toByte(),
       crc.toByte(),
     )
+  }
+
+  private fun replacePngAnimationFrameCount(bytes: ByteArray, frameCount: Int): ByteArray {
+    val result = bytes.copyOf()
+    val offset = findPngChunk(result, "acTL")
+    result[offset + 8] = (frameCount ushr 24).toByte()
+    result[offset + 9] = (frameCount ushr 16).toByte()
+    result[offset + 10] = (frameCount ushr 8).toByte()
+    result[offset + 11] = frameCount.toByte()
+    val crc = CRC32().apply { update(result, offset + 4, 12) }.value
+    result[offset + 16] = (crc ushr 24).toByte()
+    result[offset + 17] = (crc ushr 16).toByte()
+    result[offset + 18] = (crc ushr 8).toByte()
+    result[offset + 19] = crc.toByte()
+    return result
   }
 
   private fun insertGifCommentExtensions(bytes: ByteArray, count: Int): ByteArray {

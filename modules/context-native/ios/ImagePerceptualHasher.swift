@@ -240,6 +240,80 @@ final class ImageHashScheduler: @unchecked Sendable {
   }
 }
 
+enum ImageHashSnapshotStore {
+  static let directoryName = "ImageHashSnapshots"
+  static let staleAfter: TimeInterval = 60 * 60
+
+  static func prepare(fileManager: FileManager = .default) throws -> URL {
+    let directory = fileManager.temporaryDirectory.appendingPathComponent(
+      directoryName,
+      isDirectory: true
+    )
+    try fileManager.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    guard values.isDirectory == true, values.isSymbolicLink != true else {
+      throw ImagePerceptualHashError.resourceLimit
+    }
+    try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+    return directory
+  }
+
+  static func runStartupMaintenance(
+    now: Date = Date(),
+    fileManager: FileManager = .default
+  ) {
+    guard let directory = try? prepare(fileManager: fileManager) else { return }
+    _ = try? purgeStale(
+      in: directory,
+      olderThan: now.addingTimeInterval(-staleAfter),
+      fileManager: fileManager
+    )
+  }
+
+  @discardableResult
+  static func purgeStale(
+    in directory: URL,
+    olderThan cutoff: Date,
+    fileManager: FileManager = .default
+  ) throws -> Int {
+    let candidates = try fileManager.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: [
+        .contentModificationDateKey,
+        .isRegularFileKey,
+        .isSymbolicLinkKey,
+      ],
+      options: [.skipsHiddenFiles]
+    )
+    var removed = 0
+    for candidate in candidates {
+      guard candidate.lastPathComponent.hasPrefix("snapshot-"),
+            candidate.pathExtension == "tmp" else { continue }
+      let values = try candidate.resourceValues(forKeys: [
+        .contentModificationDateKey,
+        .isRegularFileKey,
+        .isSymbolicLinkKey,
+      ])
+      guard values.isRegularFile == true, values.isSymbolicLink != true,
+            let modifiedAt = values.contentModificationDate,
+            modifiedAt < cutoff else { continue }
+      try fileManager.removeItem(at: candidate)
+      removed += 1
+    }
+    return removed
+  }
+
+  static func createURL(fileManager: FileManager = .default) throws -> URL {
+    try prepare(fileManager: fileManager).appendingPathComponent(
+      "snapshot-\(UUID().uuidString.lowercased()).tmp"
+    )
+  }
+}
+
 final class ImmutableImageSnapshot {
   let url: URL
 
@@ -268,9 +342,12 @@ final class ImmutableImageSnapshot {
       throw ImagePerceptualHashError.integrityFailure
     }
 
-    let snapshotURL = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "aicp-image-hash-\(UUID().uuidString.lowercased()).snapshot"
-    )
+    let snapshotURL: URL
+    do {
+      snapshotURL = try ImageHashSnapshotStore.createURL()
+    } catch {
+      throw ImagePerceptualHashError.resourceLimit
+    }
     let destination = Darwin.open(
       snapshotURL.path,
       O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
@@ -317,6 +394,95 @@ final class ImmutableImageSnapshot {
   }
 }
 
+private final class CancellableImageDataProviderContext: @unchecked Sendable {
+  let descriptor: Int32
+  let byteCount: Int64
+  let cancellation: ImageHashCancellationToken
+  let readHook: ((off_t) -> Void)?
+
+  init(
+    descriptor: Int32,
+    byteCount: Int64,
+    cancellation: ImageHashCancellationToken,
+    readHook: ((off_t) -> Void)?
+  ) {
+    self.descriptor = descriptor
+    self.byteCount = byteCount
+    self.cancellation = cancellation
+    self.readHook = readHook
+  }
+
+  deinit { Darwin.close(descriptor) }
+}
+
+private let imageProviderGetBytes: CGDataProviderGetBytesAtPositionCallback = {
+  info, buffer, position, requestedCount in
+  guard let info, position >= 0 else { return 0 }
+  let context = Unmanaged<CancellableImageDataProviderContext>
+    .fromOpaque(info).takeUnretainedValue()
+  guard !context.cancellation.isCancelled else { return 0 }
+  context.readHook?(position)
+  guard !context.cancellation.isCancelled,
+        Int64(position) < context.byteCount else { return 0 }
+  let remaining = context.byteCount - Int64(position)
+  let boundedCount = min(requestedCount, 64 * 1_024, Int(remaining))
+  guard boundedCount > 0 else { return 0 }
+  let count = Darwin.pread(
+    context.descriptor,
+    buffer,
+    boundedCount,
+    position
+  )
+  return count > 0 ? count : 0
+}
+
+private let imageProviderRelease: CGDataProviderReleaseInfoCallback = { info in
+  guard let info else { return }
+  Unmanaged<CancellableImageDataProviderContext>.fromOpaque(info).release()
+}
+
+enum CancellableImageDataProvider {
+  static func create(
+    url: URL,
+    byteCount: Int64,
+    cancellation: ImageHashCancellationToken,
+    readHook: ((off_t) -> Void)? = nil
+  ) throws -> CGDataProvider {
+    let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw ImagePerceptualHashError.integrityFailure }
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0,
+          metadata.st_mode & S_IFMT == S_IFREG,
+          metadata.st_size == byteCount else {
+      Darwin.close(descriptor)
+      throw ImagePerceptualHashError.integrityFailure
+    }
+    let context = CancellableImageDataProviderContext(
+      descriptor: descriptor,
+      byteCount: byteCount,
+      cancellation: cancellation,
+      readHook: readHook
+    )
+    let info = Unmanaged.passRetained(context).toOpaque()
+    var callbacks = CGDataProviderDirectCallbacks(
+      version: 0,
+      getBytePointer: nil,
+      releaseBytePointer: nil,
+      getBytesAtPosition: imageProviderGetBytes,
+      releaseInfo: imageProviderRelease
+    )
+    guard let provider = CGDataProvider(
+      directInfo: info,
+      size: off_t(byteCount),
+      callbacks: &callbacks
+    ) else {
+      Unmanaged<CancellableImageDataProviderContext>.fromOpaque(info).release()
+      throw ImagePerceptualHashError.resourceLimit
+    }
+    return provider
+  }
+}
+
 enum ImagePerceptualHasher {
   static let maximumSourceBytes: Int64 = 52_428_800
   // v1 decodes the bounded original once so both platforms sample identical
@@ -330,7 +496,8 @@ enum ImagePerceptualHasher {
     expectedByteCount: Int64,
     expectedSHA256: String,
     cancellation: ImageHashCancellationToken,
-    sourceMutationHook: ((String) throws -> Void)? = nil
+    sourceMutationHook: ((String) throws -> Void)? = nil,
+    providerReadHook: ((off_t) -> Void)? = nil
   ) throws -> [String: Any] {
     let started = ContinuousClock.now
     try cancellation.check()
@@ -341,8 +508,18 @@ enum ImagePerceptualHasher {
       cancellation: cancellation
     )
     try sourceMutationHook?("snapshot-ready")
-    guard let source = CGImageSourceCreateWithURL(snapshot.url as CFURL, nil),
-          acceptsFrameCount(CGImageSourceGetCount(source)) else {
+    let provider = try CancellableImageDataProvider.create(
+      url: snapshot.url,
+      byteCount: expectedByteCount,
+      cancellation: cancellation,
+      readHook: providerReadHook
+    )
+    guard let source = CGImageSourceCreateWithDataProvider(provider, nil) else {
+      try cancellation.check()
+      throw ImagePerceptualHashError.invalidImage
+    }
+    guard acceptsFrameCount(CGImageSourceGetCount(source)) else {
+      try cancellation.check()
       throw ImagePerceptualHashError.invalidImage
     }
     try cancellation.check()
@@ -367,6 +544,7 @@ enum ImagePerceptualHasher {
       0,
       thumbnailOptions as CFDictionary
     ) else {
+      try cancellation.check()
       throw ImagePerceptualHashError.invalidImage
     }
     try cancellation.check()

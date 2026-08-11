@@ -247,6 +247,46 @@ test('analysis cancellation interrupts an active native perceptual hash by run I
   await handle.finalize?.();
 });
 
+test('analysis cancellation interrupts near-limit newline-dense normalization before native work', async () => {
+  const repo = repository();
+  const adapter = native();
+  const maximumText = 'a\n'.repeat(8 * 1_024 * 1_024);
+  repo.listArtifactRecords.mockResolvedValue([
+    original,
+    { ...extracted, byteCount: maximumText.length },
+  ]);
+  adapter.readPlainTextFile.mockResolvedValueOnce({
+    schemaVersion: 1,
+    text: maximumText,
+    byteCount: maximumText.length,
+    encoding: 'utf-8',
+    revision: '1',
+  });
+  const worker = new NativeDuplicateAnalysisStageWorker(
+    async () => repo,
+    adapter,
+  );
+  const handle = worker.start(run());
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (adapter.readPlainTextFile.mock.calls.length > 0) break;
+    await Promise.resolve();
+  }
+  expect(adapter.readPlainTextFile).toHaveBeenCalledTimes(1);
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+
+  await handle.cancel();
+
+  await expect(handle.result).rejects.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  await expect(handle.analysis).rejects.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  expect(adapter.hashImagePerceptually).not.toHaveBeenCalled();
+  expect(adapter.writeTextArtifact).not.toHaveBeenCalled();
+  await handle.finalize?.();
+});
+
 test('analysis worker fails closed when extracted text bytes diverge from the verified artifact', async () => {
   const repo = repository();
   const adapter = native();

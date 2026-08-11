@@ -168,6 +168,53 @@ internal class ImageHashScheduledWork(
   }
 }
 
+internal object ImageHashSnapshotStore {
+  private const val directoryName = "ImageHashSnapshots"
+  private const val prefix = "snapshot-"
+  private const val suffix = ".tmp"
+  const val staleAfterMs = 60 * 60 * 1_000L
+
+  fun prepare(context: Context): File {
+    val directory = File(context.cacheDir, directoryName)
+    if ((!directory.exists() && !directory.mkdirs()) || !directory.isDirectory) {
+      throw NativeException("RESOURCE_MEMORY_PRESSURE")
+    }
+    runCatching { Os.chmod(directory.path, OsConstants.S_IRWXU) }
+      .getOrElse { throw NativeException("RESOURCE_MEMORY_PRESSURE") }
+    return directory
+  }
+
+  fun runStartupMaintenance(context: Context, nowEpochMs: Long = System.currentTimeMillis()) {
+    val directory = runCatching { prepare(context) }.getOrNull() ?: return
+    purgeStale(directory, nowEpochMs - staleAfterMs)
+  }
+
+  internal fun purgeStale(directory: File, olderThanEpochMs: Long): Int {
+    if (!directory.isDirectory) return 0
+    var removed = 0
+    for (candidate in directory.listFiles().orEmpty()) {
+      if (
+        !candidate.name.startsWith(prefix) ||
+        !candidate.name.endsWith(suffix) ||
+        !candidate.isFile ||
+        runCatching { candidate.canonicalFile.parentFile != directory.canonicalFile }
+          .getOrDefault(true) ||
+        candidate.lastModified() >= olderThanEpochMs
+      ) continue
+      if (candidate.delete()) removed += 1
+    }
+    return removed
+  }
+
+  fun create(context: Context): File = try {
+    File.createTempFile(prefix, suffix, prepare(context))
+  } catch (_: NativeException) {
+    throw NativeException("RESOURCE_MEMORY_PRESSURE")
+  } catch (_: Exception) {
+    throw NativeException("RESOURCE_MEMORY_PRESSURE")
+  }
+}
+
 internal class ImmutableImageSnapshot private constructor(val file: File) : Closeable {
   override fun close() { file.delete() }
 
@@ -193,7 +240,7 @@ internal class ImmutableImageSnapshot private constructor(val file: File) : Clos
         throw NativeException("ARTIFACT_INTEGRITY_FAILED")
       }
       val snapshot = try {
-        File.createTempFile("aicp-image-hash-", ".snapshot", context.cacheDir)
+        ImageHashSnapshotStore.create(context)
       } catch (_: Exception) {
         Os.close(sourceFd)
         throw NativeException("RESOURCE_MEMORY_PRESSURE")
@@ -480,9 +527,11 @@ internal object ImagePerceptualHasher {
     cancellation: ImageHashCancellationToken,
   ): Boolean {
     cancellation.throwIfCancelled()
+    val sourceLength = java.io.File(path).length()
+    if (sourceLength !in 1..maximumSourceBytes) return true
     when (
       java.io.File(path).inputStream().buffered().use { input ->
-        inspectPngFrames(input, maximumSourceBytes, cancellation)
+        inspectPngFrames(input, sourceLength, cancellation)
       }
     ) {
       ContainerFrameInspection.ANIMATED,
@@ -493,7 +542,7 @@ internal object ImagePerceptualHasher {
     }
     when (
       java.io.File(path).inputStream().buffered().use { input ->
-        inspectGifFrames(input, maximumSourceBytes, cancellation)
+        inspectGifFrames(input, sourceLength, cancellation)
       }
     ) {
       ContainerFrameInspection.ANIMATED,
@@ -564,7 +613,10 @@ internal object ImagePerceptualHasher {
     }
     var sawHeader = false
     var sawImageData = false
-    var sawAnimationControl = false
+    var declaredAnimationFrames: Long? = null
+    var animationFrameControls = 0L
+    var nextAnimationSequence = 0L
+    var currentAnimationFrameHasData = false
     while (true) {
       val length = reader.readUnsignedInt() ?: return ContainerFrameInspection.INVALID
       val type = reader.readBytes(4) ?: return ContainerFrameInspection.INVALID
@@ -576,13 +628,27 @@ internal object ImagePerceptualHasher {
         return ContainerFrameInspection.INVALID
       }
       if (typeName == "IHDR" && sawHeader) return ContainerFrameInspection.INVALID
-      if (typeName == "acTL" && (length != 8L || sawAnimationControl || sawImageData)) {
+      if (
+        typeName == "acTL" &&
+        (length != 8L || declaredAnimationFrames != null || sawImageData)
+      ) {
+        return ContainerFrameInspection.INVALID
+      }
+      if (typeName == "fcTL" && (length != 26L || declaredAnimationFrames == null)) {
+        return ContainerFrameInspection.INVALID
+      }
+      if (typeName == "fdAT" && (length < 4L || declaredAnimationFrames == null)) {
         return ContainerFrameInspection.INVALID
       }
       if (typeName == "IEND" && length != 0L) return ContainerFrameInspection.INVALID
 
       val crc = CRC32().apply { update(type) }
-      val animationData = if (typeName == "acTL") ByteArray(8) else null
+      val animationData = when (typeName) {
+        "acTL" -> ByteArray(8)
+        "fcTL" -> ByteArray(26)
+        "fdAT" -> ByteArray(4)
+        else -> null
+      }
       if (!reader.readPayload(length, crc, animationData)) {
         return ContainerFrameInspection.INVALID
       }
@@ -591,17 +657,55 @@ internal object ImagePerceptualHasher {
 
       when (typeName) {
         "IHDR" -> sawHeader = true
-        "IDAT" -> sawImageData = true
+        "IDAT" -> {
+          sawImageData = true
+          if (animationFrameControls == 1L) currentAnimationFrameHasData = true
+        }
         "acTL" -> {
-          sawAnimationControl = true
           val frameCount = unsignedInt(animationData!!, 0)
           if (frameCount == 0L) return ContainerFrameInspection.INVALID
-          if (frameCount > 1L) return ContainerFrameInspection.ANIMATED
+          declaredAnimationFrames = frameCount
         }
-        "IEND" -> return if (sawHeader) {
-          ContainerFrameInspection.SINGLE
-        } else {
-          ContainerFrameInspection.INVALID
+        "fcTL" -> {
+          if (animationFrameControls > 0L && !currentAnimationFrameHasData) {
+            return ContainerFrameInspection.INVALID
+          }
+          if (unsignedInt(animationData!!, 0) != nextAnimationSequence) {
+            return ContainerFrameInspection.INVALID
+          }
+          nextAnimationSequence += 1
+          animationFrameControls += 1
+          currentAnimationFrameHasData = false
+          if (animationFrameControls > declaredAnimationFrames!!) {
+            return ContainerFrameInspection.INVALID
+          }
+        }
+        "fdAT" -> {
+          if (
+            animationFrameControls == 0L ||
+            unsignedInt(animationData!!, 0) != nextAnimationSequence
+          ) {
+            return ContainerFrameInspection.INVALID
+          }
+          nextAnimationSequence += 1
+          currentAnimationFrameHasData = true
+        }
+        "IEND" -> {
+          if (!sawHeader || !sawImageData || !reader.isAtExactEof()) {
+            return ContainerFrameInspection.INVALID
+          }
+          val declared = declaredAnimationFrames
+          if (
+            declared != null &&
+            (animationFrameControls != declared || !currentAnimationFrameHasData)
+          ) {
+            return ContainerFrameInspection.INVALID
+          }
+          return if (declared != null && declared > 1L) {
+            ContainerFrameInspection.ANIMATED
+          } else {
+            ContainerFrameInspection.SINGLE
+          }
         }
       }
     }
@@ -635,17 +739,21 @@ internal object ImagePerceptualHasher {
             return ContainerFrameInspection.INVALID
           }
           frameCount += 1
-          if (frameCount > 1) return ContainerFrameInspection.ANIMATED
         }
         0x21 -> {
           if (reader.readByte() == null || !skipGifSubBlocks(reader)) {
             return ContainerFrameInspection.INVALID
           }
         }
-        0x3b -> return if (frameCount == 1) {
-          ContainerFrameInspection.SINGLE
-        } else {
-          ContainerFrameInspection.INVALID
+        0x3b -> {
+          if (!reader.isAtExactEof() || frameCount == 0) {
+            return ContainerFrameInspection.INVALID
+          }
+          return if (frameCount > 1) {
+            ContainerFrameInspection.ANIMATED
+          } else {
+            ContainerFrameInspection.SINGLE
+          }
         }
         else -> return ContainerFrameInspection.INVALID
       }
@@ -728,7 +836,7 @@ private class BoundedContainerReader(
     if (
       byteCount < 0 ||
       byteCount > remainingBytes ||
-      (capture != null && capture.size.toLong() != byteCount)
+      (capture != null && capture.size.toLong() > byteCount)
     ) {
       return false
     }
@@ -741,8 +849,11 @@ private class BoundedContainerReader(
       if (count <= 0) return false
       crc.update(transferBuffer, 0, count)
       capture?.let {
-        transferBuffer.copyInto(it, captured, 0, count)
-        captured += count
+        if (captured < it.size) {
+          val capturedCount = minOf(count, it.size - captured)
+          transferBuffer.copyInto(it, captured, 0, capturedCount)
+          captured += capturedCount
+        }
       }
       consumedBytes += count
       remaining -= count
@@ -762,5 +873,13 @@ private class BoundedContainerReader(
       remaining -= count
     }
     return true
+  }
+
+  fun isAtExactEof(): Boolean {
+    cancellation.throwIfCancelled()
+    val value = input.read()
+    if (value < 0) return true
+    consumedBytes += 1
+    return false
   }
 }

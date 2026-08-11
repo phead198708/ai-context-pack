@@ -20,6 +20,23 @@ private final class LockedCounter: @unchecked Sendable {
   }
 }
 
+private final class LockedErrorBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: Error?
+
+  func set(_ error: Error) {
+    lock.lock()
+    stored = error
+    lock.unlock()
+  }
+
+  var value: Error? {
+    lock.lock()
+    defer { lock.unlock() }
+    return stored
+  }
+}
+
 final class ImagePerceptualHasherTests: XCTestCase {
   func testDifferenceHashUsesCanonicalRowMajorBitOrder() {
     var pixels = [UInt8](repeating: 0, count: 9 * 8)
@@ -75,6 +92,19 @@ final class ImagePerceptualHasherTests: XCTestCase {
     ]
 
     for data in padded {
+      let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+      XCTAssertFalse(ImagePerceptualHasher.acceptsFrameCount(CGImageSourceGetCount(source)))
+    }
+
+    let malformedVariants = [
+      try XCTUnwrap(values["animated-apng"]) + Data([0]),
+      try XCTUnwrap(values["animated-gif"]) + Data([0]),
+      try replacePNGAnimationFrameCount(
+        try XCTUnwrap(values["animated-apng"]),
+        frameCount: 3
+      ),
+    ]
+    for data in malformedVariants {
       let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
       XCTAssertFalse(ImagePerceptualHasher.acceptsFrameCount(CGImageSourceGetCount(source)))
     }
@@ -267,6 +297,96 @@ final class ImagePerceptualHasherTests: XCTestCase {
     XCTAssertEqual(scheduler.scheduledWorkCount, 0)
   }
 
+  func testSnapshotStartupMaintenancePurgesOnlyStaleOwnedFiles() throws {
+    let fileManager = FileManager.default
+    let directory = fileManager.temporaryDirectory.appendingPathComponent(
+      "image-hash-snapshot-test-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: directory) }
+    let stale = directory.appendingPathComponent("snapshot-stale.tmp")
+    let current = directory.appendingPathComponent("snapshot-current.tmp")
+    let unrelated = directory.appendingPathComponent("unrelated.tmp")
+    try Data("stale synthetic bytes".utf8).write(to: stale)
+    try Data("current synthetic bytes".utf8).write(to: current)
+    try Data("unrelated".utf8).write(to: unrelated)
+    try fileManager.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: 1)],
+      ofItemAtPath: stale.path
+    )
+    try fileManager.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: 9)],
+      ofItemAtPath: current.path
+    )
+    try fileManager.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: 1)],
+      ofItemAtPath: unrelated.path
+    )
+
+    XCTAssertEqual(
+      try ImageHashSnapshotStore.purgeStale(
+        in: directory,
+        olderThan: Date(timeIntervalSince1970: 5)
+      ),
+      1
+    )
+    XCTAssertFalse(fileManager.fileExists(atPath: stale.path))
+    XCTAssertTrue(fileManager.fileExists(atPath: current.path))
+    XCTAssertTrue(fileManager.fileExists(atPath: unrelated.path))
+  }
+
+  func testCancellableDataProviderStopsSupplyingSnapshotBytes() throws {
+    let url = fixtureURL("ocr-english.png")
+    let byteCount = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber
+    let token = ImageHashCancellationToken()
+    let provider = try CancellableImageDataProvider.create(
+      url: url,
+      byteCount: try XCTUnwrap(byteCount).int64Value,
+      cancellation: token
+    )
+    token.cancel()
+    XCTAssertNil(provider.data)
+  }
+
+  func testCancellationInterruptsTheSynchronousImageIOReadBoundary() throws {
+    let url = fixtureURL("ocr-english.png")
+    let data = try Data(contentsOf: url)
+    let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    let token = ImageHashCancellationToken()
+    let readStarted = DispatchSemaphore(value: 0)
+    let releaseRead = DispatchSemaphore(value: 0)
+    let completed = expectation(description: "hash cancellation completed")
+    let captured = LockedErrorBox()
+
+    DispatchQueue.global(qos: .utility).async {
+      do {
+        _ = try ImagePerceptualHasher.hash(
+          fileURL: url,
+          expectedByteCount: Int64(data.count),
+          expectedSHA256: digest,
+          cancellation: token,
+          providerReadHook: { _ in
+            readStarted.signal()
+            _ = releaseRead.wait(timeout: .now() + 2)
+          }
+        )
+      } catch {
+        captured.set(error)
+      }
+      completed.fulfill()
+    }
+
+    XCTAssertEqual(readStarted.wait(timeout: .now() + 2), .success)
+    token.cancel()
+    releaseRead.signal()
+    wait(for: [completed], timeout: 2)
+    XCTAssertEqual(
+      (captured.value as? ImagePerceptualHashError)?.stableCode,
+      "PIPELINE_STAGE_FAILED"
+    )
+  }
+
   private func fixtureURL(_ name: String) -> URL {
     let tests = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let repository = tests.deletingLastPathComponent().deletingLastPathComponent()
@@ -274,5 +394,45 @@ final class ImagePerceptualHasherTests: XCTestCase {
     return repository.appendingPathComponent(
       name.contains("/") ? "fixtures/\(name)" : "fixtures/media/\(name)"
     )
+  }
+
+  private func replacePNGAnimationFrameCount(
+    _ data: Data,
+    frameCount: UInt32
+  ) throws -> Data {
+    let typeRange = try XCTUnwrap(data.range(of: Data("acTL".utf8)))
+    let chunkOffset = typeRange.lowerBound - 4
+    var result = data
+    result.replaceSubrange(
+      (chunkOffset + 8)..<(chunkOffset + 12),
+      with: [
+        UInt8((frameCount >> 24) & 0xff),
+        UInt8((frameCount >> 16) & 0xff),
+        UInt8((frameCount >> 8) & 0xff),
+        UInt8(frameCount & 0xff),
+      ]
+    )
+    let crc = crc32(result[(chunkOffset + 4)..<(chunkOffset + 16)])
+    result.replaceSubrange(
+      (chunkOffset + 16)..<(chunkOffset + 20),
+      with: [
+        UInt8((crc >> 24) & 0xff),
+        UInt8((crc >> 16) & 0xff),
+        UInt8((crc >> 8) & 0xff),
+        UInt8(crc & 0xff),
+      ]
+    )
+    return result
+  }
+
+  private func crc32(_ bytes: Data.SubSequence) -> UInt32 {
+    var crc: UInt32 = 0xffff_ffff
+    for byte in bytes {
+      crc ^= UInt32(byte)
+      for _ in 0..<8 {
+        crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xedb8_8320 : crc >> 1
+      }
+    }
+    return crc ^ 0xffff_ffff
   }
 }

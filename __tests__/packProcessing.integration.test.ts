@@ -1551,6 +1551,23 @@ test('analyze settlement atomically registers normalized text and versioned anal
       publicationLeaseObservedAt: now,
     }),
   ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
+  await expect(
+    repository.completePipelineRun({
+      runId: run.id,
+      claimVersion: claimed.claimVersion,
+      updatedAt: now,
+      artifact,
+      analysis: {
+        ...analysis,
+        textFingerprint: {
+          ...analysis.textFingerprint,
+          shingleCount: 1_000,
+        },
+      },
+      publicationLeaseOwnerId: owner,
+      publicationLeaseObservedAt: now,
+    }),
+  ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
   const analysisWithoutImageFingerprint = { ...analysis };
   delete (
     analysisWithoutImageFingerprint as {

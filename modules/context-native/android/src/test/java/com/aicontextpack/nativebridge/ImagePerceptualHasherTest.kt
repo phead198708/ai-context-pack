@@ -151,6 +151,29 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
+  fun recognizedContainersRequireExactEofAndCompleteApngControls() {
+    val values = animationFixtures()
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectPngFrames(
+        values.getValue("animated-apng") + byteArrayOf(0),
+      ),
+    )
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectGifFrames(
+        values.getValue("animated-gif") + byteArrayOf(0),
+      ),
+    )
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectPngFrames(
+        replacePngAnimationFrameCount(values.getValue("animated-apng"), 3),
+      ),
+    )
+  }
+
+  @Test
   fun scheduledWorkRemovesQueuedCancellationAndJoinsActiveCancellation() {
     val executor = java.util.concurrent.ThreadPoolExecutor(
       1,
@@ -190,6 +213,35 @@ class ImagePerceptualHasherTest {
     assertTrue(first.cancelAndWait())
     executor.shutdown()
     assertTrue(executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS))
+  }
+
+  @Test
+  fun startupMaintenancePurgesOnlyStaleOwnedSnapshots() {
+    val directory = java.io.File(
+      System.getProperty("java.io.tmpdir"),
+      "image-hash-snapshot-test-${java.util.UUID.randomUUID()}",
+    )
+    assertTrue(directory.mkdirs())
+    try {
+      val stale = java.io.File(directory, "snapshot-stale.tmp").apply {
+        writeText("private synthetic bytes")
+        setLastModified(1_000)
+      }
+      val current = java.io.File(directory, "snapshot-current.tmp").apply {
+        writeText("active synthetic bytes")
+        setLastModified(9_000)
+      }
+      val unrelated = java.io.File(directory, "unrelated.tmp").apply {
+        writeText("unrelated")
+        setLastModified(1_000)
+      }
+      assertEquals(1, ImageHashSnapshotStore.purgeStale(directory, 5_000))
+      assertFalse(stale.exists())
+      assertTrue(current.exists())
+      assertTrue(unrelated.exists())
+    } finally {
+      directory.deleteRecursively()
+    }
   }
 
 
@@ -232,6 +284,21 @@ class ImagePerceptualHasherTest {
       (crc ushr 8).toByte(),
       crc.toByte(),
     )
+  }
+
+  private fun replacePngAnimationFrameCount(bytes: ByteArray, frameCount: Int): ByteArray {
+    val result = bytes.copyOf()
+    val offset = findPngChunk(result, "acTL")
+    result[offset + 8] = (frameCount ushr 24).toByte()
+    result[offset + 9] = (frameCount ushr 16).toByte()
+    result[offset + 10] = (frameCount ushr 8).toByte()
+    result[offset + 11] = frameCount.toByte()
+    val crc = CRC32().apply { update(result, offset + 4, 12) }.value
+    result[offset + 16] = (crc ushr 24).toByte()
+    result[offset + 17] = (crc ushr 16).toByte()
+    result[offset + 18] = (crc ushr 8).toByte()
+    result[offset + 19] = crc.toByte()
+    return result
   }
 
   private fun insertGifCommentExtensions(bytes: ByteArray, count: Int): ByteArray {

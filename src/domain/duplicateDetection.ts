@@ -60,6 +60,14 @@ export interface TextFingerprintWorkOptionsV1 {
   readonly yieldEveryCodePoints?: number;
 }
 
+export interface ContentNormalizationWorkOptionsV1 {
+  /** Checked before work, after every host yield, and before publication. */
+  readonly isCancelled?: () => boolean;
+  /** Injectable for deterministic tests; production yields to the host timer queue. */
+  readonly yieldControl?: () => Promise<void>;
+  readonly yieldEveryCodeUnits?: number;
+}
+
 export interface ImagePerceptualHashV1 {
   readonly schemaVersion: typeof IMAGE_PERCEPTUAL_HASH_SCHEMA_VERSION;
   readonly algorithm: 'dhash-64-v1';
@@ -175,7 +183,11 @@ export function normalizeContentV1(source: string): NormalizedContentV1 {
   const lines = value.split('\n');
   const classificationLines = classificationValue.split('\n');
   const fenced = classificationLines.some(line => fenceLine.test(line));
-  const codeSignals = classificationLines.filter(isCodeSignalLine).length;
+  const codeSignals = classificationLines.filter(
+    line =>
+      line.length > MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS ||
+      isCodeSignalLine(line),
+  ).length;
   const meaningfulLines = classificationLines.filter(
     line => line.trim().length > 0,
   ).length;
@@ -190,12 +202,16 @@ export function normalizeContentV1(source: string): NormalizedContentV1 {
     ? 'code'
     : 'prose';
 
-  const normalized =
+  const normalizedCandidate =
     contentKind === 'code'
       ? value
       : fenced
       ? normalizeMixedFencedContent(lines, warnings)
       : normalizeProseLines(lines, warnings);
+  const normalized =
+    contentKind === 'prose' && !lineHasNonWhitespace(normalizedCandidate)
+      ? ''
+      : normalizedCandidate;
   return {
     schemaVersion: CONTENT_NORMALIZATION_SCHEMA_VERSION,
     normalizationVersion: 'text-normalization-v1',
@@ -203,6 +219,117 @@ export function normalizeContentV1(source: string): NormalizedContentV1 {
     text: normalized,
     characterCount: normalized.length,
     utf8ByteCount: utf8ByteCount(normalized),
+    warnings: [...warnings].sort(),
+  };
+}
+
+/**
+ * Produces the v1 normalization contract without retaining line arrays. The
+ * source and final normalized string are the only size-proportional values;
+ * classification and prose folding retain at most one bounded line/chunk and
+ * yield cooperatively between chunks.
+ */
+export async function normalizeContentAsyncV1(
+  source: string,
+  options: ContentNormalizationWorkOptionsV1 = {},
+): Promise<NormalizedContentV1> {
+  if (typeof source !== 'string') throw new DomainError('SCHEMA_INVALID');
+  const work = new CooperativeTextWorkController(options);
+  const hasCarriageReturn = await assertValidUnicodeScalarStringAsync(
+    source,
+    work,
+  );
+  const warnings = new Set<ContentNormalizationWarningV1>();
+  if (hasCarriageReturn) warnings.add('LINE_ENDINGS_NORMALIZED');
+
+  let fenced = false;
+  let fence:
+    | { readonly character: string; readonly length: number }
+    | undefined;
+  let proseOutsideFences = false;
+  let codeSignals = 0;
+  let meaningfulLines = 0;
+  let lineIndex = 0;
+  for (const line of canonicalSourceLines(source)) {
+    const classifiedLine =
+      lineIndex === 0 && line.startsWith('\uFEFF') ? line.slice(1) : line;
+    const longLine =
+      classifiedLine.length > MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS;
+    const meaningful = longLine || lineHasNonWhitespace(classifiedLine);
+    const marker = !longLine ? classifiedLine.match(fenceLine)?.[1] : undefined;
+    if (!fence && marker) {
+      fenced = true;
+      fence = { character: marker[0]!, length: marker.length };
+    } else if (fence && isClosingFenceLine(classifiedLine, fence)) {
+      fence = undefined;
+    } else if (!fence && meaningful) {
+      proseOutsideFences = true;
+    }
+    if (meaningful) meaningfulLines += 1;
+    if (longLine || isCodeSignalLine(classifiedLine)) codeSignals += 1;
+    lineIndex += 1;
+    await work.advance(line.length + 1);
+  }
+  const codeLike =
+    fenced ||
+    (codeSignals > 0 && codeSignals / Math.max(meaningfulLines, 1) >= 0.34);
+  const contentKind: NormalizedContentKindV1 = fenced
+    ? proseOutsideFences
+      ? 'mixed'
+      : 'code'
+    : codeLike
+    ? 'code'
+    : 'prose';
+
+  const writer = new IncrementalLineWriter(warnings, work);
+  if (contentKind === 'code') {
+    for (const line of canonicalSourceLines(source))
+      await writer.writeLine(line, false);
+  } else if (contentKind === 'prose') {
+    const prose = new IncrementalProseNormalizer(writer, warnings);
+    let sourceLineIndex = 0;
+    for (const line of canonicalSourceLines(source)) {
+      await prose.push(line, sourceLineIndex === 0);
+      sourceLineIndex += 1;
+    }
+    await prose.flush();
+  } else {
+    let activeFence:
+      | { readonly character: string; readonly length: number }
+      | undefined;
+    let prose = new IncrementalProseNormalizer(writer, warnings);
+    let proseLineIndex = 0;
+    for (const line of canonicalSourceLines(source)) {
+      const marker = line.match(fenceLine)?.[1];
+      if (!activeFence && marker) {
+        await prose.flush();
+        activeFence = { character: marker[0]!, length: marker.length };
+        await writer.writeLine(line, false);
+      } else if (activeFence && isClosingFenceLine(line, activeFence)) {
+        await writer.writeLine(line, false);
+        activeFence = undefined;
+        prose = new IncrementalProseNormalizer(writer, warnings);
+        proseLineIndex = 0;
+      } else if (activeFence) await writer.writeLine(line, false);
+      else {
+        await prose.push(line, proseLineIndex === 0);
+        proseLineIndex += 1;
+      }
+    }
+    await prose.flush();
+  }
+  work.assertActive();
+  const built = writer.finish();
+  const normalized =
+    contentKind === 'prose' && !lineHasNonWhitespace(built) ? '' : built;
+  work.assertActive();
+  return {
+    schemaVersion: CONTENT_NORMALIZATION_SCHEMA_VERSION,
+    normalizationVersion: 'text-normalization-v1',
+    contentKind,
+    text: normalized,
+    characterCount: normalized.length,
+    utf8ByteCount: await utf8ByteCountAsync(normalized, work),
     warnings: [...warnings].sort(),
   };
 }
@@ -595,7 +722,8 @@ function duplicateAnalysisCountsAreConsistent(
     return normalizedByteCount === 0 && fingerprint.shingleCount === 0;
   return (
     normalizedByteCount >= normalizedCharacterCount &&
-    fingerprint.shingleCount > 0
+    fingerprint.shingleCount >= 1 &&
+    fingerprint.shingleCount <= Math.max(1, normalizedCharacterCount - 4)
   );
 }
 
@@ -860,6 +988,239 @@ function normalizeProseLines(
   return collapseBlankLines(rejoined.join('\n'), warnings);
 }
 
+const MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS = 32 * 1_024;
+const NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS = 64 * 1_024;
+
+class CooperativeTextWorkController {
+  private readonly yieldEvery: number;
+  private pendingCodeUnits = 0;
+
+  constructor(private readonly options: ContentNormalizationWorkOptionsV1) {
+    this.yieldEvery = options.yieldEveryCodeUnits ?? 32_768;
+    if (!Number.isSafeInteger(this.yieldEvery) || this.yieldEvery <= 0)
+      throw new DomainError('SCHEMA_INVALID');
+    this.assertActive();
+  }
+
+  assertActive(): void {
+    if (this.options.isCancelled?.())
+      throw new DomainError('PIPELINE_STAGE_FAILED');
+  }
+
+  async advance(codeUnits: number): Promise<void> {
+    this.pendingCodeUnits += codeUnits;
+    if (this.pendingCodeUnits < this.yieldEvery) return;
+    this.pendingCodeUnits %= this.yieldEvery;
+    await (this.options.yieldControl ?? yieldTextFingerprintWorkToHost)();
+    this.assertActive();
+  }
+}
+
+class ChunkedStringBuilder {
+  private readonly chunks: string[] = [];
+  private readonly fragments: string[] = [];
+  private fragmentLength = 0;
+
+  append(value: string): void {
+    if (value.length === 0) return;
+    this.fragments.push(value);
+    this.fragmentLength += value.length;
+    if (this.fragmentLength >= NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS)
+      this.flush();
+  }
+
+  finish(): string {
+    this.flush();
+    return this.chunks.join('');
+  }
+
+  private flush(): void {
+    if (this.fragments.length === 0) return;
+    this.chunks.push(this.fragments.join(''));
+    this.fragments.length = 0;
+    this.fragmentLength = 0;
+  }
+}
+
+class IncrementalLineWriter {
+  private readonly output = new ChunkedStringBuilder();
+  private hasLine = false;
+  private trailingNewlines = 0;
+
+  constructor(
+    private readonly warnings: Set<ContentNormalizationWarningV1>,
+    private readonly work: CooperativeTextWorkController,
+  ) {}
+
+  async writeLine(
+    line: string,
+    collapseBlankSeparators: boolean,
+  ): Promise<void> {
+    if (this.hasLine) {
+      if (collapseBlankSeparators && this.trailingNewlines >= 2) {
+        this.warnings.add('REPEATED_BLANK_LINES_COLLAPSED');
+      } else {
+        this.output.append('\n');
+        this.trailingNewlines += 1;
+      }
+    }
+    this.hasLine = true;
+    for (
+      let offset = 0;
+      offset < line.length;
+      offset += NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS
+    ) {
+      const chunk = line.slice(
+        offset,
+        offset + NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS,
+      );
+      this.output.append(chunk);
+      this.trailingNewlines = 0;
+      await this.work.advance(chunk.length);
+    }
+    if (line.length === 0) await this.work.advance(1);
+  }
+
+  finish(): string {
+    return this.output.finish();
+  }
+}
+
+class IncrementalProseNormalizer {
+  private pending: string | undefined;
+
+  constructor(
+    private readonly writer: IncrementalLineWriter,
+    private readonly warnings: Set<ContentNormalizationWarningV1>,
+  ) {}
+
+  async push(line: string, firstSourceLine: boolean): Promise<void> {
+    const normalized = normalizeSingleProseLine(
+      line,
+      firstSourceLine,
+      this.warnings,
+    );
+    if (
+      this.pending?.endsWith('-') &&
+      normalized.length > 0 &&
+      /^\p{Ll}/u.test(normalized)
+    ) {
+      this.pending = `${this.pending.slice(0, -1)}${normalized}`;
+      this.warnings.add('WRAPPED_WORD_REJOINED');
+      return;
+    }
+    if (this.pending !== undefined)
+      await this.writer.writeLine(this.pending, true);
+    this.pending = normalized;
+  }
+
+  async flush(): Promise<void> {
+    if (this.pending === undefined) return;
+    await this.writer.writeLine(this.pending, true);
+    this.pending = undefined;
+  }
+}
+
+function normalizeSingleProseLine(
+  line: string,
+  firstSourceLine: boolean,
+  warnings: Set<ContentNormalizationWarningV1>,
+): string {
+  // A single giant line cannot be Unicode-normalized cooperatively by the JS
+  // runtime. Conservatively preserve it as semantic content; the classifier
+  // also treats such a line as code-like so ordinary all-prose inputs take the
+  // byte-preserving path.
+  if (line.length > MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS) return line;
+  let prepared = line;
+  if (firstSourceLine && prepared.startsWith('\uFEFF')) {
+    prepared = prepared.slice(1);
+    warnings.add('OCR_ARTIFACT_REMOVED');
+  }
+  const safe = prepared.replace(unsafeControl, '\uFFFD');
+  if (safe !== prepared) warnings.add('OCR_ARTIFACT_REMOVED');
+  const compatibility = safe.normalize('NFKC');
+  if (compatibility !== safe) warnings.add('UNICODE_NORMALIZED');
+  const artifactsRemoved = compatibility
+    .replace(ocrArtifact, '')
+    .replace(/\u00A0/g, ' ');
+  if (artifactsRemoved !== compatibility) warnings.add('OCR_ARTIFACT_REMOVED');
+  const compact = artifactsRemoved.replace(/[\t ]+/g, ' ').trim();
+  if (compact !== artifactsRemoved) warnings.add('PROSE_WHITESPACE_NORMALIZED');
+  return compact;
+}
+
+function* canonicalSourceLines(source: string): Generator<string> {
+  let start = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const unit = source.charCodeAt(index);
+    if (unit !== 0x0a && unit !== 0x0d) continue;
+    yield source.slice(start, index);
+    if (unit === 0x0d && source.charCodeAt(index + 1) === 0x0a) index += 1;
+    start = index + 1;
+  }
+  yield source.slice(start);
+}
+
+function lineHasNonWhitespace(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1)
+    if (!/\s/u.test(value[index]!)) return true;
+  return false;
+}
+
+async function assertValidUnicodeScalarStringAsync(
+  source: string,
+  work: CooperativeTextWorkController,
+): Promise<boolean> {
+  let sinceCheckpoint = 0;
+  let hasCarriageReturn = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const unit = source.charCodeAt(index);
+    if (unit === 0x0d) hasCarriageReturn = true;
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const low = source.charCodeAt(index + 1);
+      if (!(low >= 0xdc00 && low <= 0xdfff))
+        throw new DomainError('SCHEMA_INVALID');
+      index += 1;
+      sinceCheckpoint += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff)
+      throw new DomainError('SCHEMA_INVALID');
+    sinceCheckpoint += 1;
+    if (sinceCheckpoint >= 32_768) {
+      await work.advance(sinceCheckpoint);
+      sinceCheckpoint = 0;
+    }
+  }
+  if (sinceCheckpoint > 0) await work.advance(sinceCheckpoint);
+  work.assertActive();
+  return hasCarriageReturn;
+}
+
+async function utf8ByteCountAsync(
+  value: string,
+  work: CooperativeTextWorkController,
+): Promise<number> {
+  let byteCount = 0;
+  let sinceCheckpoint = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit <= 0x7f) byteCount += 1;
+    else if (unit <= 0x7ff) byteCount += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff && index + 1 < value.length) {
+      byteCount += 4;
+      index += 1;
+      sinceCheckpoint += 1;
+    } else byteCount += 3;
+    sinceCheckpoint += 1;
+    if (sinceCheckpoint >= 32_768) {
+      await work.advance(sinceCheckpoint);
+      sinceCheckpoint = 0;
+    }
+  }
+  if (sinceCheckpoint > 0) await work.advance(sinceCheckpoint);
+  work.assertActive();
+  return byteCount;
+}
+
 function collapseBlankLines(
   value: string,
   warnings: Set<ContentNormalizationWarningV1>,
@@ -884,14 +1245,14 @@ function isCodeSignalLine(line: string): boolean {
 }
 
 function isCallExpressionSignalLine(line: string): boolean {
-  return /^\s*(?:(?:await|return|throw|new)\s+)?[A-Za-z_$][\w$]*(?:(?:\.|\?\.)[A-Za-z_$][\w$]*)*\s*\(.*\)\s*;?\s*$/.test(
+  return /^\s*(?:(?:await|return|yield|raise)\s+|throw\s+(?:new\s+)?|new\s+)?[A-Za-z_$][\w$]*(?:(?:\.|\?\.)[A-Za-z_$][\w$]*)*\s*\(.*\)\s*;?\s*$/.test(
     line,
   );
 }
 
 function isAssignmentSignalLine(line: string): boolean {
   return (
-    /^\s*(?:export\s+)?[A-Za-z_$][\w.$[\]'-]*\s*(?:=|\+=|-=|\*=|\/=|%=|\?\?=|&&=|\|\|=|<<=|>>=|>>>=|\*\*=)\s*\S/.test(
+    /^\s*(?:export\s+)?[A-Za-z_$][\w.$[\]'-]*\s*(?:=|\+=|-=|\*=|\/=|\/{2}=|%=|&=|\|=|\^=|@=|:=|\?\?=|&&=|\|\|=|<<=|>>=|>>>=|\*\*=)\s*\S/.test(
       line,
     ) ||
     /^\s*[A-Za-z_][\w.-]*\s*:\s*(?:["'[{]|[-+]?\d|true\b|false\b|null\b)/i.test(

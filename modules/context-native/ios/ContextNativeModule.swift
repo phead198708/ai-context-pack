@@ -41,6 +41,9 @@ public final class ContextNativeModule: Module {
       ) { [weak self] _ in
         self?.ocrProcessor.setMemoryPressure(true)
       }
+      DispatchQueue.global(qos: .utility).async {
+        ImageHashSnapshotStore.runStartupMaintenance()
+      }
       guard let container = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: appGroupIdentifier
       ) else { return }

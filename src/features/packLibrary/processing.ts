@@ -7,7 +7,7 @@ import {
 import type { Artifact } from '../../domain/models';
 import {
   fingerprintNormalizedTextAsyncV1,
-  normalizeContentV1,
+  normalizeContentAsyncV1,
   type DuplicateAnalysisItemV1,
   type ImagePerceptualHashV1,
   type NormalizedContentV1,
@@ -957,7 +957,9 @@ export class NativeDuplicateAnalysisStageWorker implements PackStageWorker {
       );
       if (source.byteCount !== extracted.byteCount)
         throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
-      normalized = normalizeContentV1(source.text);
+      normalized = await normalizeContentAsyncV1(source.text, {
+        isCancelled: () => cancelled,
+      });
       if (item.sourceType === 'image') {
         if (
           !this.native.hashImagePerceptually ||

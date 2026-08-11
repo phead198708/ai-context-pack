@@ -10,6 +10,7 @@ import {
   isDuplicateDecisionV1,
   isImagePerceptualHashV1,
   isNormalizedContentV1,
+  normalizeContentAsyncV1,
   normalizeContentV1,
   normalizedTextSimilarityV1,
   type DuplicateAnalysisItemV1,
@@ -206,6 +207,12 @@ describe('Issue #13 versioned content normalization', () => {
     for (const [oneSpace, twoSpaces] of [
       ['print("a b")', 'print("a  b")'],
       ['value += "a b"', 'value += "a  b"'],
+      ['mask &= lookup["a b"]', 'mask &= lookup["a  b"]'],
+      ['flags |= lookup["a b"]', 'flags |= lookup["a  b"]'],
+      ['value ^= lookup["a b"]', 'value ^= lookup["a  b"]'],
+      ['value //= lookup["a b"]', 'value //= lookup["a  b"]'],
+      ['matrix @= lookup["a b"]', 'matrix @= lookup["a  b"]'],
+      ['throw new Error("a b")', 'throw new Error("a  b")'],
     ] as const) {
       const normalizedOne = normalizeContentV1(oneSpace);
       const normalizedTwo = normalizeContentV1(twoSpaces);
@@ -227,6 +234,67 @@ describe('Issue #13 versioned content normalization', () => {
         futureField: true,
       }),
     ).toBe(false);
+  });
+
+  it('normalizes maximum-size newline-dense text with bounded yields and cancellation', async () => {
+    const maximumBytes = 16 * 1_024 * 1_024;
+    const seed = 'synthetic newline-dense row\n';
+    const maximumDerivedText = seed
+      .repeat(Math.ceil(maximumBytes / seed.length))
+      .slice(0, maximumBytes);
+    let yields = 0;
+    const normalized = await normalizeContentAsyncV1(maximumDerivedText, {
+      yieldEveryCodeUnits: 32_768,
+      yieldControl: () => {
+        yields += 1;
+        return Promise.resolve();
+      },
+    });
+    expect(normalized).toMatchObject({
+      contentKind: 'prose',
+      characterCount: maximumBytes,
+      utf8ByteCount: maximumBytes,
+    });
+    expect(yields).toBeGreaterThan(1_000);
+
+    let cancelled = false;
+    await expect(
+      normalizeContentAsyncV1('synthetic line\n'.repeat(65_536), {
+        yieldEveryCodeUnits: 4_096,
+        isCancelled: () => cancelled,
+        yieldControl: () => {
+          cancelled = true;
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+  });
+
+  it('bounds giant single-line work by preserving it as semantic code', async () => {
+    const giantLine = `Synthetic${'  prose'.repeat(8_192)}`;
+    const sync = normalizeContentV1(giantLine);
+    const async = await normalizeContentAsyncV1(giantLine, {
+      yieldControl: () => Promise.resolve(),
+    });
+
+    expect(async).toEqual(sync);
+    expect(async).toMatchObject({
+      contentKind: 'code',
+      text: giantLine,
+      warnings: [],
+    });
+  });
+
+  it('keeps async normalization identical for prose, code, and mixed input', async () => {
+    for (const source of [
+      'Caf\u0065\u0301\r\nwrapped hy-\r\nphen',
+      'mask &= lookup["a  b"]\r\nthrow new Error("c  d")',
+      'Intro  prose\n```ts\nconst value = "a  b";\n```\nDone.',
+    ]) {
+      expect(await normalizeContentAsyncV1(source)).toEqual(
+        normalizeContentV1(source),
+      );
+    }
   });
 });
 
@@ -528,6 +596,16 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
         textFingerprint: {
           ...valid.textFingerprint,
           shingleCount: 0,
+          hashes: [],
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isDuplicateAnalysisItemV1({
+        ...valid,
+        textFingerprint: {
+          ...valid.textFingerprint,
+          shingleCount: 0,
         },
       }),
     ).toBe(false);
@@ -554,6 +632,24 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
         normalizedCharacterCount: 1,
       }),
     ).toBe(false);
+    expect(
+      isDuplicateAnalysisItemV1({
+        ...valid,
+        normalizedByteCount: 1,
+        normalizedCharacterCount: 1,
+        textFingerprint: {
+          ...valid.textFingerprint,
+          shingleCount: 1_000,
+        },
+      }),
+    ).toBe(false);
+    expect(isDuplicateAnalysisItemV1(analysis(0, 'a'))).toBe(true);
+    const whitespace = normalizeContentV1('\n\n');
+    expect(whitespace).toMatchObject({
+      text: '',
+      characterCount: 0,
+      utf8ByteCount: 0,
+    });
     expect(
       buildDuplicateSuggestionsV1([
         analysis(0, 'payment failed on screen one with code 1001'),
