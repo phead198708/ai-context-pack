@@ -349,15 +349,18 @@ export async function fingerprintNormalizedTextAsyncV1(
   normalized: NormalizedContentV1,
   options: TextFingerprintWorkOptionsV1 = {},
 ): Promise<NormalizedTextFingerprintV1> {
-  if (!isNormalizedContentV1(normalized))
-    throw new DomainError('SCHEMA_INVALID');
   const yieldEvery = options.yieldEveryCodePoints ?? 32_768;
   if (!Number.isSafeInteger(yieldEvery) || yieldEvery <= 0)
     throw new DomainError('SCHEMA_INVALID');
+  const validated = await validateNormalizedContentForFingerprintAsyncV1(
+    normalized,
+    options,
+    yieldEvery,
+  );
   assertFingerprintWorkActive(options);
   const accumulator = new TextFingerprintAccumulatorV1();
   let visited = 0;
-  for (const codePoint of similarityCodePoints(normalized)) {
+  for (const codePoint of similarityCodePoints(validated)) {
     accumulator.append(codePoint);
     visited += 1;
     if (visited % yieldEvery !== 0) continue;
@@ -554,6 +557,16 @@ export function calculateDuplicateSavingsV1(
 export function isNormalizedContentV1(
   value: unknown,
 ): value is NormalizedContentV1 {
+  if (!isNormalizedContentShapeV1(value)) return false;
+  return (
+    isValidUnicodeScalarString(value.text) &&
+    value.utf8ByteCount === utf8ByteCount(value.text)
+  );
+}
+
+function isNormalizedContentShapeV1(
+  value: unknown,
+): value is NormalizedContentV1 {
   if (!isRecord(value)) return false;
   const warnings = value.warnings;
   return (
@@ -572,9 +585,8 @@ export function isNormalizedContentV1(
       value.contentKind === 'code' ||
       value.contentKind === 'mixed') &&
     typeof value.text === 'string' &&
-    isValidUnicodeScalarString(value.text) &&
     value.characterCount === value.text.length &&
-    value.utf8ByteCount === utf8ByteCount(value.text) &&
+    isNonNegativeInteger(value.utf8ByteCount) &&
     Array.isArray(warnings) &&
     warnings.every(isNormalizationWarning) &&
     new Set(warnings).size === warnings.length
@@ -1028,6 +1040,10 @@ class ChunkedStringBuilder {
       this.flush();
   }
 
+  isEmpty(): boolean {
+    return this.chunks.length === 0 && this.fragments.length === 0;
+  }
+
   endsWith(character: string): boolean {
     const fragment = this.fragments.at(-1);
     if (fragment) return fragment.endsWith(character);
@@ -1047,6 +1063,12 @@ class ChunkedStringBuilder {
     if (!chunk) return;
     this.chunks[this.chunks.length - 1] = chunk.slice(0, -1);
     if (this.chunks.at(-1)?.length === 0) this.chunks.pop();
+  }
+
+  drainTo(target: ChunkedStringBuilder): void {
+    this.flush();
+    for (const chunk of this.chunks) target.append(chunk);
+    this.chunks.length = 0;
   }
 
   finish(): string {
@@ -1184,7 +1206,8 @@ async function normalizeLongProseLineAsync(
     warnings.add('OCR_ARTIFACT_REMOVED');
   }
   const output = new ChunkedStringBuilder();
-  let firstSegment = true;
+  const pendingTrailingWhitespace = new ChunkedStringBuilder();
+  let hasContent = false;
   for (const segment of normalizationSafeSegments(prepared)) {
     const safe = segment.replace(unsafeControl, '\uFFFD');
     if (safe !== segment) warnings.add('OCR_ARTIFACT_REMOVED');
@@ -1198,21 +1221,35 @@ async function normalizeLongProseLineAsync(
     let compact = artifactsRemoved.replace(/[\t ]+/g, ' ');
     if (compact !== artifactsRemoved)
       warnings.add('PROSE_WHITESPACE_NORMALIZED');
-    if (firstSegment && compact.startsWith(' ')) {
-      compact = compact.slice(1);
-      warnings.add('PROSE_WHITESPACE_NORMALIZED');
-    } else if (output.endsWith(' ') && compact.startsWith(' ')) {
+    if (!hasContent) {
+      const leadingTrimmed = compact.replace(/^\s+/u, '');
+      if (leadingTrimmed !== compact)
+        warnings.add('PROSE_WHITESPACE_NORMALIZED');
+      compact = leadingTrimmed;
+    }
+    if (
+      (pendingTrailingWhitespace.endsWith(' ') ||
+        (pendingTrailingWhitespace.isEmpty() && output.endsWith(' '))) &&
+      compact.startsWith(' ')
+    ) {
       compact = compact.slice(1);
       warnings.add('PROSE_WHITESPACE_NORMALIZED');
     }
-    output.append(compact);
-    firstSegment = false;
+    const trailingWhitespace = compact.match(/\s+$/u)?.[0] ?? '';
+    const body =
+      trailingWhitespace.length === 0
+        ? compact
+        : compact.slice(0, -trailingWhitespace.length);
+    if (body.length > 0) {
+      pendingTrailingWhitespace.drainTo(output);
+      output.append(body);
+      hasContent = true;
+    }
+    pendingTrailingWhitespace.append(trailingWhitespace);
     await work.advance(segment.length);
   }
-  if (output.endsWith(' ')) {
-    output.removeLastCodeUnit();
+  if (!pendingTrailingWhitespace.isEmpty())
     warnings.add('PROSE_WHITESPACE_NORMALIZED');
-  }
   return output.finish();
 }
 
@@ -1389,6 +1426,40 @@ async function utf8ByteCountAsync(
   return byteCount;
 }
 
+async function validateNormalizedContentForFingerprintAsyncV1(
+  value: unknown,
+  options: TextFingerprintWorkOptionsV1,
+  yieldEvery: number,
+): Promise<NormalizedContentV1> {
+  if (!isNormalizedContentShapeV1(value))
+    throw new DomainError('SCHEMA_INVALID');
+  assertFingerprintWorkActive(options);
+  let byteCount = 0;
+  let visited = 0;
+  for (let index = 0; index < value.text.length; index += 1) {
+    const unit = value.text.charCodeAt(index);
+    if (unit <= 0x7f) byteCount += 1;
+    else if (unit <= 0x7ff) byteCount += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const low = value.text.charCodeAt(index + 1);
+      if (!(low >= 0xdc00 && low <= 0xdfff))
+        throw new DomainError('SCHEMA_INVALID');
+      byteCount += 4;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff)
+      throw new DomainError('SCHEMA_INVALID');
+    else byteCount += 3;
+    visited += 1;
+    if (visited % yieldEvery !== 0) continue;
+    await (options.yieldControl ?? yieldTextFingerprintWorkToHost)();
+    assertFingerprintWorkActive(options);
+  }
+  assertFingerprintWorkActive(options);
+  if (byteCount !== value.utf8ByteCount)
+    throw new DomainError('SCHEMA_INVALID');
+  return value;
+}
+
 function collapseBlankLines(
   value: string,
   warnings: Set<ContentNormalizationWarningV1>,
@@ -1420,6 +1491,16 @@ async function isCodeSignalLineBounded(
     return isCodeSignalLine(line);
   const prefix = line.slice(0, NORMALIZATION_SEGMENT_CODE_UNITS);
   if (isCodeSignalLine(prefix)) return true;
+  if (!lineHasNonWhitespace(prefix)) {
+    const contentStart = await skipLineCharacters(
+      line,
+      0,
+      isWhitespaceCharacter,
+      work,
+    );
+    if (contentStart === line.length) return false;
+    if (contentStart > 0) return true;
+  }
   const suffix = line.slice(-256);
   if (/[;{}]\s*$/.test(suffix)) return true;
   if (
@@ -1628,25 +1709,23 @@ function isAssignmentSignalLine(line: string): boolean {
 function* similarityCodePoints(
   normalized: NormalizedContentV1,
 ): Generator<string> {
-  const value =
-    normalized.contentKind === 'prose'
-      ? normalized.text.toLowerCase()
-      : normalized.text;
-  if (normalized.contentKind !== 'prose') {
-    yield* value;
-    return;
-  }
   let emitted = false;
   let pendingWhitespace = false;
-  for (const codePoint of value) {
-    if (/^\s$/u.test(codePoint)) {
-      if (emitted) pendingWhitespace = true;
-      continue;
+  for (const sourceCodePoint of normalized.text) {
+    const folded =
+      normalized.contentKind === 'prose'
+        ? sourceCodePoint.toLowerCase()
+        : sourceCodePoint;
+    for (const codePoint of folded) {
+      if (normalized.contentKind === 'prose' && /^\s$/u.test(codePoint)) {
+        if (emitted) pendingWhitespace = true;
+        continue;
+      }
+      if (pendingWhitespace) yield ' ';
+      yield codePoint;
+      emitted = true;
+      pendingWhitespace = false;
     }
-    if (pendingWhitespace) yield ' ';
-    yield codePoint;
-    emitted = true;
-    pendingWhitespace = false;
   }
 }
 

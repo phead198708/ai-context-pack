@@ -345,6 +345,28 @@ describe('Issue #13 versioned content normalization', () => {
     expect(async).toEqual(sync);
   });
 
+  it('preserves indentation whose first token falls beyond the bounded prefix', async () => {
+    const source = `${' '.repeat(32 * 1_024 + 257)}syntheticToken`;
+    const sync = normalizeContentV1(source);
+    const async = await normalizeContentAsyncV1(source);
+
+    expect(sync).toMatchObject({ contentKind: 'code', text: source });
+    expect(async).toEqual(sync);
+  });
+
+  it('matches full trim semantics at long-prose outer boundaries', async () => {
+    const longLine = `\u1680${'synthetic prose '.repeat(2_500)}\u2028`;
+    const source = `${longLine}\nsecond line\nthird line\nfourth line`;
+    const sync = normalizeContentV1(source);
+    const async = await normalizeContentAsyncV1(source);
+
+    expect(sync.contentKind).toBe('prose');
+    expect(async).toEqual(sync);
+    expect(async.text.startsWith('synthetic prose')).toBe(true);
+    expect(async.text).not.toContain('\u1680');
+    expect(async.text).not.toContain('\u2028');
+  });
+
   it('preserves Unicode normalization across a long-line segment boundary', async () => {
     const source = `${'a'.repeat(32 * 1_024 - 1)}e\u0301  synthetic`;
 
@@ -423,17 +445,49 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
     expect(streamed).toEqual(fingerprintNormalizedTextV1(normalized));
     expect(yields).toBeGreaterThan(100);
 
+    const validationYields = Math.floor(normalized.characterCount / 64);
+    let cancellationYields = 0;
     let cancelled = false;
     await expect(
       fingerprintNormalizedTextAsyncV1(normalized, {
         yieldEveryCodePoints: 64,
         isCancelled: () => cancelled,
         yieldControl: () => {
+          cancellationYields += 1;
+          if (cancellationYields === validationYields + 1) cancelled = true;
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+    expect(cancellationYields).toBe(validationYields + 1);
+  });
+
+  it('checks cancellation during maximum-size fingerprint validation', async () => {
+    const text = 'A'.repeat(16 * 1_024 * 1_024);
+    const normalized = {
+      schemaVersion: 1,
+      normalizationVersion: 'text-normalization-v1',
+      contentKind: 'prose',
+      text,
+      characterCount: text.length,
+      utf8ByteCount: text.length,
+      warnings: [],
+    } as const;
+    let yields = 0;
+    let cancelled = false;
+
+    await expect(
+      fingerprintNormalizedTextAsyncV1(normalized, {
+        yieldEveryCodePoints: 32_768,
+        isCancelled: () => cancelled,
+        yieldControl: () => {
+          yields += 1;
           cancelled = true;
           return Promise.resolve();
         },
       }),
     ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+    expect(yields).toBe(1);
   });
 
   it('meets the versioned synthetic corpus precision and recall gates', () => {
