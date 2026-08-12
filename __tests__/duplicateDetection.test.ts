@@ -336,6 +336,15 @@ describe('Issue #13 versioned content normalization', () => {
     expect(async).toEqual(sync);
   });
 
+  it('preserves a call whose opening marker falls beyond the bounded prefix', async () => {
+    const source = `foo${' '.repeat(32 * 1_024 + 257)}("a  b")`;
+    const sync = normalizeContentV1(source);
+    const async = await normalizeContentAsyncV1(source);
+
+    expect(sync).toMatchObject({ contentKind: 'code', text: source });
+    expect(async).toEqual(sync);
+  });
+
   it('preserves Unicode normalization across a long-line segment boundary', async () => {
     const source = `${'a'.repeat(32 * 1_024 - 1)}e\u0301  synthetic`;
 

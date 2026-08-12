@@ -1429,7 +1429,80 @@ async function isCodeSignalLineBounded(
     /\)\s*;?\s*$/.test(suffix)
   )
     return true;
+  if (await isLongCallExpressionSignalLine(line, suffix, work)) return true;
   return isLongAssignmentSignalLine(line, work);
+}
+
+async function isLongCallExpressionSignalLine(
+  line: string,
+  suffix: string,
+  work: CooperativeTextWorkController,
+): Promise<boolean> {
+  if (!/\)\s*;?\s*$/.test(suffix)) return false;
+  let index = await skipLineCharacters(line, 0, isWhitespaceCharacter, work);
+  for (const prefix of ['await', 'return', 'yield', 'raise'] as const) {
+    if (
+      line.startsWith(prefix, index) &&
+      isWhitespaceCharacter(line[index + prefix.length] ?? '')
+    ) {
+      index = await skipLineCharacters(
+        line,
+        index + prefix.length,
+        isWhitespaceCharacter,
+        work,
+      );
+      break;
+    }
+  }
+  if (
+    line.startsWith('throw', index) &&
+    isWhitespaceCharacter(line[index + 'throw'.length] ?? '')
+  ) {
+    index = await skipLineCharacters(
+      line,
+      index + 'throw'.length,
+      isWhitespaceCharacter,
+      work,
+    );
+    if (
+      line.startsWith('new', index) &&
+      isWhitespaceCharacter(line[index + 'new'.length] ?? '')
+    )
+      index = await skipLineCharacters(
+        line,
+        index + 'new'.length,
+        isWhitespaceCharacter,
+        work,
+      );
+  } else if (
+    line.startsWith('new', index) &&
+    isWhitespaceCharacter(line[index + 'new'.length] ?? '')
+  )
+    index = await skipLineCharacters(
+      line,
+      index + 'new'.length,
+      isWhitespaceCharacter,
+      work,
+    );
+  if (!/[A-Za-z_$]/.test(line[index] ?? '')) return false;
+  index = await skipLineCharacters(
+    line,
+    index + 1,
+    isIdentifierCharacter,
+    work,
+  );
+  while (line[index] === '.' || line.startsWith('?.', index)) {
+    index += line[index] === '.' ? 1 : 2;
+    if (!/[A-Za-z_$]/.test(line[index] ?? '')) return false;
+    index = await skipLineCharacters(
+      line,
+      index + 1,
+      isIdentifierCharacter,
+      work,
+    );
+  }
+  index = await skipLineCharacters(line, index, isWhitespaceCharacter, work);
+  return line[index] === '(';
 }
 
 const assignmentOperators = [
@@ -1525,6 +1598,10 @@ function isWhitespaceCharacter(value: string): boolean {
 
 function isAssignmentTargetCharacter(value: string): boolean {
   return /[\w.$[\]'-]/.test(value);
+}
+
+function isIdentifierCharacter(value: string): boolean {
+  return /[\w$]/.test(value);
 }
 
 function fenceMarkerForLine(line: string): string | undefined {

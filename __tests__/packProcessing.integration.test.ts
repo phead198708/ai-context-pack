@@ -559,6 +559,7 @@ test('a replacement coordinator resumes a queued run after restart', async () =>
     readonly packId: string;
     readonly itemId: string;
     readonly stage: 'import' | 'extract' | 'analyze' | 'review' | 'package';
+    readonly outcome: 'completed' | 'failed';
   }[] = [];
   const replacement = new DurablePackProcessingCoordinator(
     async () => repository,
@@ -578,7 +579,54 @@ test('a replacement coordinator resumes a queued run after restart', async () =>
   expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
     'extracted',
   );
-  expect(recoveredCompletions).toEqual([{ packId, itemId, stage: 'extract' }]);
+  expect(recoveredCompletions).toEqual([
+    { packId, itemId, stage: 'extract', outcome: 'completed' },
+  ]);
+});
+
+test('a recovered stage failure refreshes the library after durable failure settlement', async () => {
+  const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
+    launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    paused,
+  ).retryItem(packId, itemId);
+
+  const worker = new DeferredWorker();
+  const recoveredSettlements: {
+    readonly packId: string;
+    readonly itemId: string;
+    readonly stage: 'import' | 'extract' | 'analyze' | 'review' | 'package';
+    readonly outcome: 'completed' | 'failed';
+  }[] = [];
+  const replacement = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    undefined,
+    undefined,
+    undefined,
+    settlement => recoveredSettlements.push(settlement),
+  );
+  await replacement.recover();
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  worker.results.get(run.id)!.reject(new DomainError('PIPELINE_STAGE_FAILED'));
+  await replacement.waitForIdle();
+
+  expect((await repository.findPackGraph(packId))?.items[0]).toMatchObject({
+    state: 'failed',
+    retryStage: 'extract',
+  });
+  expect(recoveredSettlements).toEqual([
+    { packId, itemId, stage: 'extract', outcome: 'failed' },
+  ]);
 });
 
 test('the durable claim token permits only one coordinator to execute a queued run', async () => {

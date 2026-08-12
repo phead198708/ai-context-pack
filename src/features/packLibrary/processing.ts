@@ -58,6 +58,7 @@ export interface RecoveredPackProcessingCompletion {
   readonly packId: string;
   readonly itemId: string;
   readonly stage: StartPipelineRunInput['stage'];
+  readonly outcome: 'completed' | 'failed';
 }
 
 interface ClaimHeartbeat {
@@ -233,12 +234,21 @@ export class DurablePackProcessingCoordinator
           }
           try {
             heartbeat.assertOwned();
-            await repository.failPipelineRun({
+            const failed = await repository.failPipelineRun({
               runId: run.id,
               claimVersion,
               updatedAt: this.timestamp(packCreatedAt),
               errorCode: processingErrorCode(error),
             });
+            heartbeat.assertOwned();
+            if (!failed) throw new DomainError('PERSISTENCE_CONFLICT');
+            if (run.status === 'recovering')
+              this.publishRecoveredCompletion({
+                packId: run.packId,
+                itemId: run.itemId,
+                stage: run.stage,
+                outcome: 'failed',
+              });
           } catch (settlementError) {
             await this.reportUnexpectedFailure(
               run,
@@ -324,6 +334,7 @@ export class DurablePackProcessingCoordinator
               packId: run.packId,
               itemId: run.itemId,
               stage: run.stage,
+              outcome: 'completed',
             });
         } catch (settlementError) {
           await this.reportUnexpectedFailure(

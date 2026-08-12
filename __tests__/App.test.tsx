@@ -366,6 +366,7 @@ describe('App interactions', () => {
         packId: newerPackId,
         itemId: eventId,
         stage: 'analyze',
+        outcome: 'completed',
       });
       await flushWorkflow();
     });
