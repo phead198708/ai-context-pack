@@ -172,7 +172,8 @@ internal object ImageHashSnapshotStore {
   private const val directoryName = "ImageHashSnapshots"
   private const val prefix = "snapshot-"
   private const val suffix = ".tmp"
-  const val staleAfterMs = 60 * 60 * 1_000L
+  internal val currentProcessPrefix =
+    "$prefix${UUID.randomUUID().toString().replace("-", "")}-"
 
   fun prepare(context: Context): File {
     val directory = File(context.cacheDir, directoryName)
@@ -184,22 +185,27 @@ internal object ImageHashSnapshotStore {
     return directory
   }
 
-  fun runStartupMaintenance(context: Context, nowEpochMs: Long = System.currentTimeMillis()) {
+  fun runStartupMaintenance(context: Context) {
     val directory = runCatching { prepare(context) }.getOrNull() ?: return
-    purgeStale(directory, nowEpochMs - staleAfterMs)
+    purgeInherited(directory)
   }
 
-  internal fun purgeStale(directory: File, olderThanEpochMs: Long): Int {
+  internal fun purgeInherited(
+    directory: File,
+    preservingPrefix: String = currentProcessPrefix,
+  ): Int {
     if (!directory.isDirectory) return 0
     var removed = 0
+    val canonicalDirectory = runCatching { directory.canonicalFile }.getOrNull() ?: return 0
     for (candidate in directory.listFiles().orEmpty()) {
       if (
         !candidate.name.startsWith(prefix) ||
         !candidate.name.endsWith(suffix) ||
+        candidate.name.startsWith(preservingPrefix) ||
         !candidate.isFile ||
-        runCatching { candidate.canonicalFile.parentFile != directory.canonicalFile }
-          .getOrDefault(true) ||
-        candidate.lastModified() >= olderThanEpochMs
+        runCatching {
+          candidate.canonicalFile != File(canonicalDirectory, candidate.name)
+        }.getOrDefault(true)
       ) continue
       if (candidate.delete()) removed += 1
     }
@@ -207,7 +213,7 @@ internal object ImageHashSnapshotStore {
   }
 
   fun create(context: Context): File = try {
-    File.createTempFile(prefix, suffix, prepare(context))
+    File.createTempFile(currentProcessPrefix, suffix, prepare(context))
   } catch (_: NativeException) {
     throw NativeException("RESOURCE_MEMORY_PRESSURE")
   } catch (_: Exception) {

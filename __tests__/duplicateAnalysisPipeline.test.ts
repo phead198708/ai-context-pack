@@ -227,7 +227,7 @@ test('analysis cancellation interrupts an active native perceptual hash by run I
     adapter,
   );
   const handle = worker.start(run());
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     if (hashImagePerceptually.mock.calls.length > 0) break;
     await Promise.resolve();
   }

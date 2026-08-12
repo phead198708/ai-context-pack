@@ -183,11 +183,7 @@ export function normalizeContentV1(source: string): NormalizedContentV1 {
   const lines = value.split('\n');
   const classificationLines = classificationValue.split('\n');
   const fenced = classificationLines.some(line => fenceLine.test(line));
-  const codeSignals = classificationLines.filter(
-    line =>
-      line.length > MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS ||
-      isCodeSignalLine(line),
-  ).length;
+  const codeSignals = classificationLines.filter(isCodeSignalLine).length;
   const meaningfulLines = classificationLines.filter(
     line => line.trim().length > 0,
   ).length;
@@ -253,10 +249,8 @@ export async function normalizeContentAsyncV1(
   for (const line of canonicalSourceLines(source)) {
     const classifiedLine =
       lineIndex === 0 && line.startsWith('\uFEFF') ? line.slice(1) : line;
-    const longLine =
-      classifiedLine.length > MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS;
-    const meaningful = longLine || lineHasNonWhitespace(classifiedLine);
-    const marker = !longLine ? classifiedLine.match(fenceLine)?.[1] : undefined;
+    const meaningful = lineHasNonWhitespace(classifiedLine);
+    const marker = fenceMarkerForLine(classifiedLine);
     if (!fence && marker) {
       fenced = true;
       fence = { character: marker[0]!, length: marker.length };
@@ -266,7 +260,7 @@ export async function normalizeContentAsyncV1(
       proseOutsideFences = true;
     }
     if (meaningful) meaningfulLines += 1;
-    if (longLine || isCodeSignalLine(classifiedLine)) codeSignals += 1;
+    if (isCodeSignalLineBounded(classifiedLine)) codeSignals += 1;
     lineIndex += 1;
     await work.advance(line.length + 1);
   }
@@ -286,7 +280,7 @@ export async function normalizeContentAsyncV1(
     for (const line of canonicalSourceLines(source))
       await writer.writeLine(line, false);
   } else if (contentKind === 'prose') {
-    const prose = new IncrementalProseNormalizer(writer, warnings);
+    const prose = new IncrementalProseNormalizer(writer, warnings, work);
     let sourceLineIndex = 0;
     for (const line of canonicalSourceLines(source)) {
       await prose.push(line, sourceLineIndex === 0);
@@ -297,10 +291,10 @@ export async function normalizeContentAsyncV1(
     let activeFence:
       | { readonly character: string; readonly length: number }
       | undefined;
-    let prose = new IncrementalProseNormalizer(writer, warnings);
+    let prose = new IncrementalProseNormalizer(writer, warnings, work);
     let proseLineIndex = 0;
     for (const line of canonicalSourceLines(source)) {
-      const marker = line.match(fenceLine)?.[1];
+      const marker = fenceMarkerForLine(line);
       if (!activeFence && marker) {
         await prose.flush();
         activeFence = { character: marker[0]!, length: marker.length };
@@ -308,7 +302,7 @@ export async function normalizeContentAsyncV1(
       } else if (activeFence && isClosingFenceLine(line, activeFence)) {
         await writer.writeLine(line, false);
         activeFence = undefined;
-        prose = new IncrementalProseNormalizer(writer, warnings);
+        prose = new IncrementalProseNormalizer(writer, warnings, work);
         proseLineIndex = 0;
       } else if (activeFence) await writer.writeLine(line, false);
       else {
@@ -976,19 +970,23 @@ function normalizeProseLines(
     return compact;
   });
   const rejoined: string[] = [];
-  for (let index = 0; index < normalized.length; index += 1) {
-    const line = normalized[index]!;
-    const next = normalized[index + 1];
-    if (line.endsWith('-') && next && /^\p{Ll}/u.test(next)) {
-      rejoined.push(`${line.slice(0, -1)}${next}`);
+  let pending: ChunkedStringBuilder | undefined;
+  for (const line of normalized) {
+    if (pending?.endsWith('-') && line.length > 0 && /^\p{Ll}/u.test(line)) {
+      pending.removeLastCodeUnit();
+      pending.append(line);
       warnings.add('WRAPPED_WORD_REJOINED');
-      index += 1;
-    } else rejoined.push(line);
+      continue;
+    }
+    if (pending !== undefined) rejoined.push(pending.finish());
+    pending = new ChunkedStringBuilder();
+    pending.append(line);
   }
+  if (pending !== undefined) rejoined.push(pending.finish());
   return collapseBlankLines(rejoined.join('\n'), warnings);
 }
 
-const MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS = 32 * 1_024;
+const NORMALIZATION_SEGMENT_CODE_UNITS = 32 * 1_024;
 const NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS = 64 * 1_024;
 
 class CooperativeTextWorkController {
@@ -1027,6 +1025,27 @@ class ChunkedStringBuilder {
     this.fragmentLength += value.length;
     if (this.fragmentLength >= NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS)
       this.flush();
+  }
+
+  endsWith(character: string): boolean {
+    const fragment = this.fragments.at(-1);
+    if (fragment) return fragment.endsWith(character);
+    return this.chunks.at(-1)?.endsWith(character) ?? false;
+  }
+
+  removeLastCodeUnit(): void {
+    const fragments = this.fragments;
+    const fragment = fragments.at(-1);
+    if (fragment) {
+      fragments[fragments.length - 1] = fragment.slice(0, -1);
+      this.fragmentLength -= 1;
+      if (fragments.at(-1)?.length === 0) fragments.pop();
+      return;
+    }
+    const chunk = this.chunks.at(-1);
+    if (!chunk) return;
+    this.chunks[this.chunks.length - 1] = chunk.slice(0, -1);
+    if (this.chunks.at(-1)?.length === 0) this.chunks.pop();
   }
 
   finish(): string {
@@ -1087,36 +1106,44 @@ class IncrementalLineWriter {
 }
 
 class IncrementalProseNormalizer {
-  private pending: string | undefined;
+  private pending: ChunkedStringBuilder | undefined;
 
   constructor(
     private readonly writer: IncrementalLineWriter,
     private readonly warnings: Set<ContentNormalizationWarningV1>,
+    private readonly work: CooperativeTextWorkController,
   ) {}
 
   async push(line: string, firstSourceLine: boolean): Promise<void> {
-    const normalized = normalizeSingleProseLine(
-      line,
-      firstSourceLine,
-      this.warnings,
-    );
+    await this.work.advance(line.length + 1);
+    const normalized =
+      line.length <= NORMALIZATION_SEGMENT_CODE_UNITS
+        ? normalizeSingleProseLine(line, firstSourceLine, this.warnings)
+        : await normalizeLongProseLineAsync(
+            line,
+            firstSourceLine,
+            this.warnings,
+            this.work,
+          );
     if (
       this.pending?.endsWith('-') &&
       normalized.length > 0 &&
       /^\p{Ll}/u.test(normalized)
     ) {
-      this.pending = `${this.pending.slice(0, -1)}${normalized}`;
+      this.pending.removeLastCodeUnit();
+      this.pending.append(normalized);
       this.warnings.add('WRAPPED_WORD_REJOINED');
       return;
     }
     if (this.pending !== undefined)
-      await this.writer.writeLine(this.pending, true);
-    this.pending = normalized;
+      await this.writer.writeLine(this.pending.finish(), true);
+    this.pending = new ChunkedStringBuilder();
+    this.pending.append(normalized);
   }
 
   async flush(): Promise<void> {
     if (this.pending === undefined) return;
-    await this.writer.writeLine(this.pending, true);
+    await this.writer.writeLine(this.pending.finish(), true);
     this.pending = undefined;
   }
 }
@@ -1126,11 +1153,6 @@ function normalizeSingleProseLine(
   firstSourceLine: boolean,
   warnings: Set<ContentNormalizationWarningV1>,
 ): string {
-  // A single giant line cannot be Unicode-normalized cooperatively by the JS
-  // runtime. Conservatively preserve it as semantic content; the classifier
-  // also treats such a line as code-like so ordinary all-prose inputs take the
-  // byte-preserving path.
-  if (line.length > MAXIMUM_SYNCHRONOUS_PROSE_LINE_CODE_UNITS) return line;
   let prepared = line;
   if (firstSourceLine && prepared.startsWith('\uFEFF')) {
     prepared = prepared.slice(1);
@@ -1147,6 +1169,120 @@ function normalizeSingleProseLine(
   const compact = artifactsRemoved.replace(/[\t ]+/g, ' ').trim();
   if (compact !== artifactsRemoved) warnings.add('PROSE_WHITESPACE_NORMALIZED');
   return compact;
+}
+
+async function normalizeLongProseLineAsync(
+  line: string,
+  firstSourceLine: boolean,
+  warnings: Set<ContentNormalizationWarningV1>,
+  work: CooperativeTextWorkController,
+): Promise<string> {
+  let prepared = line;
+  if (firstSourceLine && prepared.startsWith('\uFEFF')) {
+    prepared = prepared.slice(1);
+    warnings.add('OCR_ARTIFACT_REMOVED');
+  }
+  const output = new ChunkedStringBuilder();
+  let firstSegment = true;
+  for (const segment of normalizationSafeSegments(prepared)) {
+    const safe = segment.replace(unsafeControl, '\uFFFD');
+    if (safe !== segment) warnings.add('OCR_ARTIFACT_REMOVED');
+    const compatibility = safe.normalize('NFKC');
+    if (compatibility !== safe) warnings.add('UNICODE_NORMALIZED');
+    const artifactsRemoved = compatibility
+      .replace(ocrArtifact, '')
+      .replace(/\u00A0/g, ' ');
+    if (artifactsRemoved !== compatibility)
+      warnings.add('OCR_ARTIFACT_REMOVED');
+    let compact = artifactsRemoved.replace(/[\t ]+/g, ' ');
+    if (compact !== artifactsRemoved)
+      warnings.add('PROSE_WHITESPACE_NORMALIZED');
+    if (firstSegment && compact.startsWith(' ')) {
+      compact = compact.slice(1);
+      warnings.add('PROSE_WHITESPACE_NORMALIZED');
+    } else if (output.endsWith(' ') && compact.startsWith(' ')) {
+      compact = compact.slice(1);
+      warnings.add('PROSE_WHITESPACE_NORMALIZED');
+    }
+    output.append(compact);
+    firstSegment = false;
+    await work.advance(segment.length);
+  }
+  if (output.endsWith(' ')) {
+    output.removeLastCodeUnit();
+    warnings.add('PROSE_WHITESPACE_NORMALIZED');
+  }
+  return output.finish();
+}
+
+function* normalizationSafeSegments(value: string): Generator<string> {
+  let start = 0;
+  while (value.length - start > NORMALIZATION_SEGMENT_CODE_UNITS) {
+    let end = start + NORMALIZATION_SEGMENT_CODE_UNITS;
+    if (isLowSurrogate(value.charCodeAt(end))) end += 1;
+    const maximumEnd = Math.min(
+      value.length,
+      start + NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS,
+    );
+    while (end < maximumEnd && !isNormalizationBoundary(value, end))
+      end += codePointLengthAt(value, end);
+    if (end >= maximumEnd && !isNormalizationBoundary(value, end))
+      throw new DomainError('RESOURCE_MEMORY_PRESSURE');
+    yield value.slice(start, end);
+    start = end;
+  }
+  yield value.slice(start);
+}
+
+function isNormalizationBoundary(value: string, index: number): boolean {
+  if (index <= 0 || index >= value.length) return true;
+  const right = codePointStringAt(value, index);
+  if (/^\p{M}$/u.test(right)) return false;
+  const leftIndex = previousCodePointIndex(value, index);
+  const left = value.codePointAt(leftIndex)!;
+  const rightValue = value.codePointAt(index)!;
+  if (isHangulLeadingJamo(left) && isHangulVowelJamo(rightValue)) return false;
+  if (
+    (isHangulVowelJamo(left) || isHangulSyllableWithoutTail(left)) &&
+    isHangulTrailingJamo(rightValue)
+  )
+    return false;
+  return true;
+}
+
+function codePointLengthAt(value: string, index: number): number {
+  return (value.codePointAt(index) ?? 0) > 0xffff ? 2 : 1;
+}
+
+function codePointStringAt(value: string, index: number): string {
+  const codePoint = value.codePointAt(index);
+  return codePoint === undefined ? '' : String.fromCodePoint(codePoint);
+}
+
+function previousCodePointIndex(value: string, index: number): number {
+  return index > 1 && isLowSurrogate(value.charCodeAt(index - 1))
+    ? index - 2
+    : index - 1;
+}
+
+function isLowSurrogate(value: number): boolean {
+  return value >= 0xdc00 && value <= 0xdfff;
+}
+
+function isHangulLeadingJamo(value: number): boolean {
+  return value >= 0x1100 && value <= 0x115f;
+}
+
+function isHangulVowelJamo(value: number): boolean {
+  return value >= 0x1160 && value <= 0x11a7;
+}
+
+function isHangulTrailingJamo(value: number): boolean {
+  return value >= 0x11a8 && value <= 0x11ff;
+}
+
+function isHangulSyllableWithoutTail(value: number): boolean {
+  return value >= 0xac00 && value <= 0xd7a3 && (value - 0xac00) % 28 === 0;
 }
 
 function* canonicalSourceLines(source: string): Generator<string> {
@@ -1242,6 +1378,24 @@ function isCodeSignalLine(line: string): boolean {
       line,
     )
   );
+}
+
+function isCodeSignalLineBounded(line: string): boolean {
+  if (line.length <= NORMALIZATION_SEGMENT_CODE_UNITS)
+    return isCodeSignalLine(line);
+  const prefix = line.slice(0, NORMALIZATION_SEGMENT_CODE_UNITS);
+  if (isCodeSignalLine(prefix)) return true;
+  const suffix = line.slice(-256);
+  if (/[;{}]\s*$/.test(suffix)) return true;
+  return (
+    /^\s*(?:(?:await|return|yield|raise)\s+|throw\s+(?:new\s+)?|new\s+)?[A-Za-z_$][\w$]*(?:(?:\.|\?\.)[A-Za-z_$][\w$]*)*\s*\(/.test(
+      prefix,
+    ) && /\)\s*;?\s*$/.test(suffix)
+  );
+}
+
+function fenceMarkerForLine(line: string): string | undefined {
+  return line.slice(0, NORMALIZATION_SEGMENT_CODE_UNITS).match(fenceLine)?.[1];
 }
 
 function isCallExpressionSignalLine(line: string): boolean {

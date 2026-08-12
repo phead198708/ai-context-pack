@@ -242,7 +242,8 @@ final class ImageHashScheduler: @unchecked Sendable {
 
 enum ImageHashSnapshotStore {
   static let directoryName = "ImageHashSnapshots"
-  static let staleAfter: TimeInterval = 60 * 60
+  static let currentProcessPrefix =
+    "snapshot-\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))-"
 
   static func prepare(fileManager: FileManager = .default) throws -> URL {
     let directory = fileManager.temporaryDirectory.appendingPathComponent(
@@ -263,27 +264,24 @@ enum ImageHashSnapshotStore {
   }
 
   static func runStartupMaintenance(
-    now: Date = Date(),
     fileManager: FileManager = .default
   ) {
     guard let directory = try? prepare(fileManager: fileManager) else { return }
-    _ = try? purgeStale(
+    _ = try? purgeInherited(
       in: directory,
-      olderThan: now.addingTimeInterval(-staleAfter),
       fileManager: fileManager
     )
   }
 
   @discardableResult
-  static func purgeStale(
+  static func purgeInherited(
     in directory: URL,
-    olderThan cutoff: Date,
+    preservingPrefix: String = currentProcessPrefix,
     fileManager: FileManager = .default
   ) throws -> Int {
     let candidates = try fileManager.contentsOfDirectory(
       at: directory,
       includingPropertiesForKeys: [
-        .contentModificationDateKey,
         .isRegularFileKey,
         .isSymbolicLinkKey,
       ],
@@ -292,15 +290,13 @@ enum ImageHashSnapshotStore {
     var removed = 0
     for candidate in candidates {
       guard candidate.lastPathComponent.hasPrefix("snapshot-"),
-            candidate.pathExtension == "tmp" else { continue }
+            candidate.pathExtension == "tmp",
+            !candidate.lastPathComponent.hasPrefix(preservingPrefix) else { continue }
       let values = try candidate.resourceValues(forKeys: [
-        .contentModificationDateKey,
         .isRegularFileKey,
         .isSymbolicLinkKey,
       ])
-      guard values.isRegularFile == true, values.isSymbolicLink != true,
-            let modifiedAt = values.contentModificationDate,
-            modifiedAt < cutoff else { continue }
+      guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
       try fileManager.removeItem(at: candidate)
       removed += 1
     }
@@ -309,7 +305,7 @@ enum ImageHashSnapshotStore {
 
   static func createURL(fileManager: FileManager = .default) throws -> URL {
     try prepare(fileManager: fileManager).appendingPathComponent(
-      "snapshot-\(UUID().uuidString.lowercased()).tmp"
+      "\(currentProcessPrefix)\(UUID().uuidString.lowercased()).tmp"
     )
   }
 }

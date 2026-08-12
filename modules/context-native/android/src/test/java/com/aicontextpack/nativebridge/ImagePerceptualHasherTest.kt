@@ -216,29 +216,39 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
-  fun startupMaintenancePurgesOnlyStaleOwnedSnapshots() {
+  fun startupMaintenancePurgesEveryInheritedSnapshotAndPreservesCurrentProcessFiles() {
     val directory = java.io.File(
       System.getProperty("java.io.tmpdir"),
       "image-hash-snapshot-test-${java.util.UUID.randomUUID()}",
     )
     assertTrue(directory.mkdirs())
     try {
-      val stale = java.io.File(directory, "snapshot-stale.tmp").apply {
+      val inherited = java.io.File(directory, "snapshot-inherited.tmp").apply {
         writeText("private synthetic bytes")
-        setLastModified(1_000)
       }
-      val current = java.io.File(directory, "snapshot-current.tmp").apply {
+      val currentPrefix = "snapshot-currentprocess-"
+      val current = java.io.File(directory, "${currentPrefix}active.tmp").apply {
         writeText("active synthetic bytes")
-        setLastModified(9_000)
       }
       val unrelated = java.io.File(directory, "unrelated.tmp").apply {
         writeText("unrelated")
-        setLastModified(1_000)
       }
-      assertEquals(1, ImageHashSnapshotStore.purgeStale(directory, 5_000))
-      assertFalse(stale.exists())
+      val outside = java.io.File(directory.parentFile, "snapshot-outside-${java.util.UUID.randomUUID()}.tmp").apply {
+        writeText("outside synthetic bytes")
+      }
+      val symlink = java.io.File(directory, "snapshot-inherited-link.tmp")
+      java.nio.file.Files.createSymbolicLink(symlink.toPath(), outside.toPath())
+      assertEquals(
+        1,
+        ImageHashSnapshotStore.purgeInherited(directory, currentPrefix),
+      )
+      assertFalse(inherited.exists())
       assertTrue(current.exists())
       assertTrue(unrelated.exists())
+      assertTrue(java.nio.file.Files.isSymbolicLink(symlink.toPath()))
+      assertTrue(outside.exists())
+      symlink.delete()
+      outside.delete()
     } finally {
       directory.deleteRecursively()
     }

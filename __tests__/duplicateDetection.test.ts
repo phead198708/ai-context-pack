@@ -270,24 +270,86 @@ describe('Issue #13 versioned content normalization', () => {
     ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
   });
 
-  it('bounds giant single-line work by preserving it as semantic code', async () => {
-    const giantLine = `Synthetic${'  prose'.repeat(8_192)}`;
+  it('normalizes giant single-line prose cooperatively without changing its semantic kind', async () => {
+    const giantLine = `Caf\u0065\u0301\u200B${'  synthetic prose'.repeat(
+      8_192,
+    )}  `;
     const sync = normalizeContentV1(giantLine);
+    let yields = 0;
     const async = await normalizeContentAsyncV1(giantLine, {
-      yieldControl: () => Promise.resolve(),
+      yieldEveryCodeUnits: 4_096,
+      yieldControl: () => {
+        yields += 1;
+        return Promise.resolve();
+      },
     });
 
     expect(async).toEqual(sync);
     expect(async).toMatchObject({
-      contentKind: 'code',
-      text: giantLine,
-      warnings: [],
+      contentKind: 'prose',
+      warnings: expect.arrayContaining([
+        'OCR_ARTIFACT_REMOVED',
+        'PROSE_WHITESPACE_NORMALIZED',
+        'UNICODE_NORMALIZED',
+      ]),
     });
+    expect(async.text.startsWith('Café synthetic prose')).toBe(true);
+    expect(async.text).not.toContain('  ');
+    expect(yields).toBeGreaterThan(10);
+  });
+
+  it('preserves Unicode normalization across a long-line segment boundary', async () => {
+    const source = `${'a'.repeat(32 * 1_024 - 1)}e\u0301  synthetic`;
+
+    expect(await normalizeContentAsyncV1(source)).toEqual(
+      normalizeContentV1(source),
+    );
+    expect(
+      (await normalizeContentAsyncV1(source)).text.endsWith('é synthetic'),
+    ).toBe(true);
+  });
+
+  it('keeps wrapped-line chains linear and cancellable during incremental joining', async () => {
+    const repetitions = Math.floor((16 * 1_024 * 1_024) / 3);
+    const source = 'a-\n'.repeat(repetitions);
+    let completionYields = 0;
+    const completed = await normalizeContentAsyncV1(source, {
+      yieldEveryCodeUnits: 32_768,
+      yieldControl: () => {
+        completionYields += 1;
+        return Promise.resolve();
+      },
+    });
+    expect(completed).toMatchObject({
+      contentKind: 'prose',
+      characterCount: repetitions + 2,
+      warnings: expect.arrayContaining(['WRAPPED_WORD_REJOINED']),
+    });
+    expect(completed.text.startsWith('a'.repeat(1_024))).toBe(true);
+    expect(completed.text.endsWith('-\n')).toBe(true);
+    expect(completionYields).toBeGreaterThan(1_000);
+
+    let yields = 0;
+    let cancelled = false;
+
+    await expect(
+      normalizeContentAsyncV1(source, {
+        yieldEveryCodeUnits: 1_024,
+        isCancelled: () => cancelled,
+        yieldControl: () => {
+          yields += 1;
+          if (yields === 1_070) cancelled = true;
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+    expect(yields).toBe(1_070);
   });
 
   it('keeps async normalization identical for prose, code, and mixed input', async () => {
     for (const source of [
       'Caf\u0065\u0301\r\nwrapped hy-\r\nphen',
+      'a-\na-\na-\na-',
       'mask &= lookup["a  b"]\r\nthrow new Error("c  d")',
       'Intro  prose\n```ts\nconst value = "a  b";\n```\nDone.',
     ]) {

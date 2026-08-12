@@ -297,7 +297,7 @@ final class ImagePerceptualHasherTests: XCTestCase {
     XCTAssertEqual(scheduler.scheduledWorkCount, 0)
   }
 
-  func testSnapshotStartupMaintenancePurgesOnlyStaleOwnedFiles() throws {
+  func testSnapshotStartupMaintenancePurgesInheritedFilesAndPreservesCurrentProcess() throws {
     let fileManager = FileManager.default
     let directory = fileManager.temporaryDirectory.appendingPathComponent(
       "image-hash-snapshot-test-\(UUID().uuidString)",
@@ -305,35 +305,36 @@ final class ImagePerceptualHasherTests: XCTestCase {
     )
     try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? fileManager.removeItem(at: directory) }
-    let stale = directory.appendingPathComponent("snapshot-stale.tmp")
-    let current = directory.appendingPathComponent("snapshot-current.tmp")
+    let inherited = directory.appendingPathComponent("snapshot-inherited.tmp")
+    let currentPrefix = "snapshot-currentprocess-"
+    let current = directory.appendingPathComponent("\(currentPrefix)active.tmp")
     let unrelated = directory.appendingPathComponent("unrelated.tmp")
-    try Data("stale synthetic bytes".utf8).write(to: stale)
+    let outside = fileManager.temporaryDirectory.appendingPathComponent(
+      "snapshot-outside-\(UUID().uuidString).tmp"
+    )
+    let symlink = directory.appendingPathComponent("snapshot-inherited-link.tmp")
+    try Data("inherited synthetic bytes".utf8).write(to: inherited)
     try Data("current synthetic bytes".utf8).write(to: current)
     try Data("unrelated".utf8).write(to: unrelated)
-    try fileManager.setAttributes(
-      [.modificationDate: Date(timeIntervalSince1970: 1)],
-      ofItemAtPath: stale.path
-    )
-    try fileManager.setAttributes(
-      [.modificationDate: Date(timeIntervalSince1970: 9)],
-      ofItemAtPath: current.path
-    )
-    try fileManager.setAttributes(
-      [.modificationDate: Date(timeIntervalSince1970: 1)],
-      ofItemAtPath: unrelated.path
-    )
+    try Data("outside synthetic bytes".utf8).write(to: outside)
+    defer { try? fileManager.removeItem(at: outside) }
+    try fileManager.createSymbolicLink(at: symlink, withDestinationURL: outside)
 
     XCTAssertEqual(
-      try ImageHashSnapshotStore.purgeStale(
+      try ImageHashSnapshotStore.purgeInherited(
         in: directory,
-        olderThan: Date(timeIntervalSince1970: 5)
+        preservingPrefix: currentPrefix
       ),
       1
     )
-    XCTAssertFalse(fileManager.fileExists(atPath: stale.path))
+    XCTAssertFalse(fileManager.fileExists(atPath: inherited.path))
     XCTAssertTrue(fileManager.fileExists(atPath: current.path))
     XCTAssertTrue(fileManager.fileExists(atPath: unrelated.path))
+    XCTAssertEqual(
+      try symlink.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink,
+      true
+    )
+    XCTAssertTrue(fileManager.fileExists(atPath: outside.path))
   }
 
   func testCancellableDataProviderStopsSupplyingSnapshotBytes() throws {
