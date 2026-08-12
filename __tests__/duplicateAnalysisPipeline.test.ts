@@ -313,6 +313,43 @@ test('analysis worker fails closed when extracted text bytes diverge from the ve
   expect(adapter.writeTextArtifact).not.toHaveBeenCalled();
 });
 
+test('analysis worker observes a dependent rejection before the coordinator awaits it', async () => {
+  const repo = repository();
+  const adapter = native();
+  adapter.readPlainTextFile.mockResolvedValueOnce({
+    schemaVersion: 1,
+    text: extractedText,
+    byteCount: 79,
+    encoding: 'utf-8',
+    revision: '1',
+  });
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const worker = new NativeDuplicateAnalysisStageWorker(
+      async () => repo,
+      adapter,
+    );
+    const handle = worker.start(run());
+
+    await expect(handle.result).rejects.toMatchObject({
+      code: 'ARTIFACT_INTEGRITY_FAILED',
+    });
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+
+    expect(unhandled).toEqual([]);
+    await expect(handle.analysis).rejects.toMatchObject({
+      code: 'ARTIFACT_INTEGRITY_FAILED',
+    });
+    await handle.finalize?.();
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
 test('analysis recovery binds a normalized checkpoint to its exact persisted content', async () => {
   const repo = repository();
   const adapter = native();

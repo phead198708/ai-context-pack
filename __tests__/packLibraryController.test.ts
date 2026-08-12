@@ -11,6 +11,7 @@ import type { PackProcessingScheduler } from '../src/features/packLibrary/proces
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const firstId = '223e4567-e89b-42d3-a456-426614174000';
 const secondId = '323e4567-e89b-42d3-a456-426614174000';
+const thirdId = '423e4567-e89b-42d3-a456-426614174000';
 
 function fixture(): PersistedPackGraph {
   const pack: ContextPack = {
@@ -444,6 +445,61 @@ test('preferred duplicate choice excludes peers without deleting originals', asy
     }),
   ]);
   expect(repo.saves).toHaveLength(0);
+});
+
+test('preferred duplicate choice leaves non-adjacent members of a suggestion chain unchanged', async () => {
+  const base = fixture();
+  const thirdItem: ContextItem = {
+    ...base.items[0]!,
+    id: thirdId,
+    originalSha256: '3'.repeat(64),
+    originalRelativePath: `Packs/${packId}/originals/${thirdId}.bin`,
+    artifactIds: [thirdId],
+    sortIndex: 2,
+  };
+  const repo = repository({
+    ...base,
+    pack: {
+      ...base.pack,
+      orderedItemIds: [...base.pack.orderedItemIds, thirdId],
+    },
+    items: [...base.items, thirdItem],
+  });
+  const suggestion = (leftItemId: string, rightItemId: string) => ({
+    schemaVersion: 1 as const,
+    key: `exact-binary:${leftItemId}:${rightItemId}`,
+    packId,
+    leftItemId,
+    rightItemId,
+    reason: 'exact-binary' as const,
+    confidence: 1,
+    expectedBytesSaved: 10,
+    expectedCharactersSaved: 0,
+  });
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: null,
+    analyses: [],
+    suggestions: [suggestion(firstId, secondId), suggestion(secondId, thirdId)],
+    decisions: [],
+  });
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:06Z',
+  );
+
+  await controller.reviewDuplicateGroup(packId, [thirdId, secondId, firstId], {
+    kind: 'preferred',
+    itemId: firstId,
+  });
+
+  expect(repo.value.saveDuplicateDecisions).toHaveBeenCalledWith(packId, [
+    expect.objectContaining({ itemId: secondId, choice: 'exclude' }),
+    expect.objectContaining({ itemId: firstId, choice: 'preferred' }),
+  ]);
+  expect(repo.value.saveDuplicateDecisions).not.toHaveBeenCalledWith(
+    packId,
+    expect.arrayContaining([expect.objectContaining({ itemId: thirdId })]),
+  );
 });
 
 test('restores a durable duplicate choice without requiring a current suggestion group', async () => {

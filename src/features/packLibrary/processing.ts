@@ -1153,6 +1153,11 @@ export class NativeDuplicateAnalysisStageWorker implements PackStageWorker {
         analyzedAt,
       };
     })();
+    // The coordinator settles result before it awaits this dependent branch.
+    // Observe rejection immediately so React Native never reports the same
+    // analysis failure as a second unhandled rejection; callers still receive
+    // the original rejected promise.
+    analysis.catch(() => undefined);
     return {
       result,
       analysis,

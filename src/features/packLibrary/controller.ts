@@ -347,17 +347,33 @@ export class PackLibraryController {
           decidedAt,
         };
       };
+      const preferredCoverageIds = new Set(
+        action.kind === 'preferred'
+          ? matching.suggestions.flatMap(suggestion => {
+              if (suggestion.leftItemId === action.itemId)
+                return [suggestion.rightItemId];
+              if (suggestion.rightItemId === action.itemId)
+                return [suggestion.leftItemId];
+              return [];
+            })
+          : [],
+      );
       const decisions =
         action.kind === 'keep-all'
           ? groupItemIds.map(itemId => createDecision(itemId, 'keep'))
           : action.kind === 'exclude'
           ? [createDecision(action.itemId, 'exclude')]
-          : groupItemIds.map(itemId =>
-              createDecision(
-                itemId,
-                itemId === action.itemId ? 'preferred' : 'exclude',
-              ),
-            );
+          : groupItemIds
+              .filter(
+                itemId =>
+                  itemId === action.itemId || preferredCoverageIds.has(itemId),
+              )
+              .map(itemId =>
+                createDecision(
+                  itemId,
+                  itemId === action.itemId ? 'preferred' : 'exclude',
+                ),
+              );
       await repository.saveDuplicateDecisions(packId, decisions);
     });
   }
