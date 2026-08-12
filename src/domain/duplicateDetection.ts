@@ -251,11 +251,14 @@ export async function normalizeContentAsyncV1(
     const classifiedLine =
       lineIndex === 0 && line.startsWith('\uFEFF') ? line.slice(1) : line;
     const meaningful = scanned.hasNonWhitespace;
-    const marker = fenceMarkerForLine(classifiedLine);
+    const marker = await fenceDescriptorForLineBounded(classifiedLine, work);
     if (!fence && marker) {
       fenced = true;
-      fence = { character: marker[0]!, length: marker.length };
-    } else if (fence && isClosingFenceLine(classifiedLine, fence)) {
+      fence = marker;
+    } else if (
+      fence &&
+      (await isClosingFenceLineBounded(classifiedLine, fence, work))
+    ) {
       fence = undefined;
     } else if (!fence && meaningful) {
       proseOutsideFences = true;
@@ -295,12 +298,15 @@ export async function normalizeContentAsyncV1(
     let proseLineIndex = 0;
     for await (const scanned of canonicalSourceLinesAsync(source, work)) {
       const line = scanned.value;
-      const marker = fenceMarkerForLine(line);
+      const marker = await fenceDescriptorForLineBounded(line, work);
       if (!activeFence && marker) {
         await prose.flush();
-        activeFence = { character: marker[0]!, length: marker.length };
+        activeFence = marker;
         await writer.writeLine(line, false);
-      } else if (activeFence && isClosingFenceLine(line, activeFence)) {
+      } else if (
+        activeFence &&
+        (await isClosingFenceLineBounded(line, activeFence, work))
+      ) {
         await writer.writeLine(line, false);
         activeFence = undefined;
         prose = new IncrementalProseNormalizer(writer, warnings, work);
@@ -360,7 +366,11 @@ export async function fingerprintNormalizedTextAsyncV1(
   assertFingerprintWorkActive(options);
   const accumulator = new TextFingerprintAccumulatorV1();
   let visited = 0;
-  for (const codePoint of similarityCodePoints(validated)) {
+  for await (const codePoint of similarityCodePointsAsync(
+    validated,
+    options,
+    yieldEvery,
+  )) {
     accumulator.append(codePoint);
     visited += 1;
     if (visited % yieldEvery !== 0) continue;
@@ -1503,6 +1513,7 @@ async function isCodeSignalLineBounded(
   }
   const suffix = line.slice(-256);
   if (/[;{}]\s*$/.test(suffix)) return true;
+  if (await hasNamespaceSignalLineBounded(line, work)) return true;
   if (
     /^\s*(?:(?:await|return|yield|raise)\s+|throw\s+(?:new\s+)?|new\s+)?[A-Za-z_$][\w$]*(?:(?:\.|\?\.)[A-Za-z_$][\w$]*)*\s*\(/.test(
       prefix,
@@ -1685,8 +1696,56 @@ function isIdentifierCharacter(value: string): boolean {
   return /[\w$]/.test(value);
 }
 
-function fenceMarkerForLine(line: string): string | undefined {
-  return line.slice(0, NORMALIZATION_SEGMENT_CODE_UNITS).match(fenceLine)?.[1];
+async function hasNamespaceSignalLineBounded(
+  line: string,
+  work: CooperativeTextWorkController,
+): Promise<boolean> {
+  let checkpoint = 0;
+  for (let index = 0; index < line.length - 1; index += 1) {
+    if (line[index] === ':' && line[index + 1] === ':') return true;
+    if (index - checkpoint < NORMALIZATION_SEGMENT_CODE_UNITS) continue;
+    await work.advance(index - checkpoint);
+    checkpoint = index;
+  }
+  if (line.length > checkpoint) await work.advance(line.length - checkpoint);
+  return false;
+}
+
+async function fenceDescriptorForLineBounded(
+  line: string,
+  work: CooperativeTextWorkController,
+): Promise<
+  { readonly character: string; readonly length: number } | undefined
+> {
+  const start = await skipLineCharacters(line, 0, isWhitespaceCharacter, work);
+  const character = line[start];
+  if (character !== '`' && character !== '~') return undefined;
+  const end = await skipLineCharacters(
+    line,
+    start,
+    value => value === character,
+    work,
+  );
+  return end - start >= 3 ? { character, length: end - start } : undefined;
+}
+
+async function isClosingFenceLineBounded(
+  line: string,
+  fence: { readonly character: string; readonly length: number },
+  work: CooperativeTextWorkController,
+): Promise<boolean> {
+  const start = await skipLineCharacters(line, 0, isWhitespaceCharacter, work);
+  const end = await skipLineCharacters(
+    line,
+    start,
+    value => value === fence.character,
+    work,
+  );
+  if (end - start < fence.length) return false;
+  return (
+    (await skipLineCharacters(line, end, isWhitespaceCharacter, work)) ===
+    line.length
+  );
 }
 
 function isCallExpressionSignalLine(line: string): boolean {
@@ -1711,10 +1770,21 @@ function* similarityCodePoints(
 ): Generator<string> {
   let emitted = false;
   let pendingWhitespace = false;
-  for (const sourceCodePoint of normalized.text) {
+  let precededByCased = false;
+  for (
+    let index = 0;
+    index < normalized.text.length;
+    index += codePointLengthAt(normalized.text, index)
+  ) {
+    const sourceCodePoint = codePointStringAt(normalized.text, index);
     const folded =
       normalized.contentKind === 'prose'
-        ? sourceCodePoint.toLowerCase()
+        ? lowercaseCodePointWithContext(
+            normalized.text,
+            index,
+            sourceCodePoint,
+            precededByCased,
+          )
         : sourceCodePoint;
     for (const codePoint of folded) {
       if (normalized.contentKind === 'prose' && /^\s$/u.test(codePoint)) {
@@ -1726,7 +1796,125 @@ function* similarityCodePoints(
       emitted = true;
       pendingWhitespace = false;
     }
+    precededByCased = updateCasedContext(precededByCased, sourceCodePoint);
   }
+}
+
+async function* similarityCodePointsAsync(
+  normalized: NormalizedContentV1,
+  options: TextFingerprintWorkOptionsV1,
+  yieldEvery: number,
+): AsyncGenerator<string> {
+  let emitted = false;
+  let pendingWhitespace = false;
+  let precededByCased = false;
+  for (
+    let index = 0;
+    index < normalized.text.length;
+    index += codePointLengthAt(normalized.text, index)
+  ) {
+    const sourceCodePoint = codePointStringAt(normalized.text, index);
+    const folded =
+      normalized.contentKind === 'prose'
+        ? await lowercaseCodePointWithContextAsync(
+            normalized.text,
+            index,
+            sourceCodePoint,
+            precededByCased,
+            options,
+            yieldEvery,
+          )
+        : sourceCodePoint;
+    for (const codePoint of folded) {
+      if (normalized.contentKind === 'prose' && /^\s$/u.test(codePoint)) {
+        if (emitted) pendingWhitespace = true;
+        continue;
+      }
+      if (pendingWhitespace) yield ' ';
+      yield codePoint;
+      emitted = true;
+      pendingWhitespace = false;
+    }
+    precededByCased = updateCasedContext(precededByCased, sourceCodePoint);
+  }
+}
+
+function lowercaseCodePointWithContext(
+  value: string,
+  index: number,
+  codePoint: string,
+  precededByCased: boolean,
+): string {
+  if (codePoint !== '\u03A3' || !precededByCased)
+    return codePoint.toLowerCase();
+  return hasFollowingCasedCharacter(value, index + codePoint.length)
+    ? '\u03C3'
+    : '\u03C2';
+}
+
+async function lowercaseCodePointWithContextAsync(
+  value: string,
+  index: number,
+  codePoint: string,
+  precededByCased: boolean,
+  options: TextFingerprintWorkOptionsV1,
+  yieldEvery: number,
+): Promise<string> {
+  if (codePoint !== '\u03A3' || !precededByCased)
+    return codePoint.toLowerCase();
+  return (await hasFollowingCasedCharacterAsync(
+    value,
+    index + codePoint.length,
+    options,
+    yieldEvery,
+  ))
+    ? '\u03C3'
+    : '\u03C2';
+}
+
+function hasFollowingCasedCharacter(value: string, start: number): boolean {
+  for (
+    let index = start;
+    index < value.length;
+    index += codePointLengthAt(value, index)
+  ) {
+    const codePoint = codePointStringAt(value, index);
+    if (/^\p{Case_Ignorable}$/u.test(codePoint)) continue;
+    return /^\p{Cased}$/u.test(codePoint);
+  }
+  return false;
+}
+
+async function hasFollowingCasedCharacterAsync(
+  value: string,
+  start: number,
+  options: TextFingerprintWorkOptionsV1,
+  yieldEvery: number,
+): Promise<boolean> {
+  let visited = 0;
+  for (
+    let index = start;
+    index < value.length;
+    index += codePointLengthAt(value, index)
+  ) {
+    const codePoint = codePointStringAt(value, index);
+    if (!/^\p{Case_Ignorable}$/u.test(codePoint))
+      return /^\p{Cased}$/u.test(codePoint);
+    visited += codePoint.length;
+    if (visited < yieldEvery) continue;
+    visited %= yieldEvery;
+    await (options.yieldControl ?? yieldTextFingerprintWorkToHost)();
+    assertFingerprintWorkActive(options);
+  }
+  return false;
+}
+
+function updateCasedContext(
+  precededByCased: boolean,
+  codePoint: string,
+): boolean {
+  if (/^\p{Case_Ignorable}$/u.test(codePoint)) return precededByCased;
+  return /^\p{Cased}$/u.test(codePoint);
 }
 
 class TextFingerprintAccumulatorV1 {

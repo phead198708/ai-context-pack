@@ -367,6 +367,25 @@ describe('Issue #13 versioned content normalization', () => {
     expect(async.text).not.toContain('\u2028');
   });
 
+  it('recognizes namespace syntax whose separator falls beyond the prefix', async () => {
+    const source = `${'identifier'.repeat(4_097)}::method("a  b")`;
+    const sync = normalizeContentV1(source);
+    const async = await normalizeContentAsyncV1(source);
+
+    expect(sync).toMatchObject({ contentKind: 'code', text: source });
+    expect(async).toEqual(sync);
+  });
+
+  it('tracks fenced regions whose markers follow long indentation', async () => {
+    const indentation = ' '.repeat(32 * 1_024 + 257);
+    const source = `Intro prose\n${indentation}\`\`\`ts\nconst value = "a  b";\n${indentation}\`\`\`\nDone prose`;
+    const sync = normalizeContentV1(source);
+    const async = await normalizeContentAsyncV1(source);
+
+    expect(sync).toMatchObject({ contentKind: 'mixed', text: source });
+    expect(async).toEqual(sync);
+  });
+
   it('preserves Unicode normalization across a long-line segment boundary', async () => {
     const source = `${'a'.repeat(32 * 1_024 - 1)}e\u0301  synthetic`;
 
@@ -488,6 +507,40 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
       }),
     ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
     expect(yields).toBe(1);
+  });
+
+  it('preserves full-context Unicode casing without whole-input allocation', async () => {
+    const uppercase = normalizeContentV1('ΟΣ ΟΣ synthetic context repeated');
+    const lowercase = normalizeContentV1('ος ος synthetic context repeated');
+
+    expect(fingerprintNormalizedTextV1(uppercase)).toEqual(
+      fingerprintNormalizedTextV1(lowercase),
+    );
+    expect(await fingerprintNormalizedTextAsyncV1(uppercase)).toEqual(
+      fingerprintNormalizedTextV1(uppercase),
+    );
+  });
+
+  it('checks cancellation while finding final-sigma context', async () => {
+    const source = `ΟΣ${"'".repeat(32 * 1_024)}Α synthetic context`;
+    const normalized = normalizeContentV1(source);
+    let yields = 0;
+    let cancelled = false;
+
+    await expect(
+      fingerprintNormalizedTextAsyncV1(normalized, {
+        yieldEveryCodePoints: 32 * 1_024,
+        isCancelled: () => cancelled,
+        yieldControl: () => {
+          yields += 1;
+          // The first yield validates the contract; the second occurs while
+          // scanning the case-ignorable lookahead after capital sigma.
+          if (yields === 2) cancelled = true;
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+    expect(yields).toBe(2);
   });
 
   it('meets the versioned synthetic corpus precision and recall gates', () => {
