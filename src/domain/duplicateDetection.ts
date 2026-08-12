@@ -246,10 +246,11 @@ export async function normalizeContentAsyncV1(
   let codeSignals = 0;
   let meaningfulLines = 0;
   let lineIndex = 0;
-  for (const line of canonicalSourceLines(source)) {
+  for await (const scanned of canonicalSourceLinesAsync(source, work)) {
+    const line = scanned.value;
     const classifiedLine =
       lineIndex === 0 && line.startsWith('\uFEFF') ? line.slice(1) : line;
-    const meaningful = lineHasNonWhitespace(classifiedLine);
+    const meaningful = scanned.hasNonWhitespace;
     const marker = fenceMarkerForLine(classifiedLine);
     if (!fence && marker) {
       fenced = true;
@@ -260,9 +261,8 @@ export async function normalizeContentAsyncV1(
       proseOutsideFences = true;
     }
     if (meaningful) meaningfulLines += 1;
-    if (isCodeSignalLineBounded(classifiedLine)) codeSignals += 1;
+    if (await isCodeSignalLineBounded(classifiedLine, work)) codeSignals += 1;
     lineIndex += 1;
-    await work.advance(line.length + 1);
   }
   const codeLike =
     fenced ||
@@ -277,13 +277,13 @@ export async function normalizeContentAsyncV1(
 
   const writer = new IncrementalLineWriter(warnings, work);
   if (contentKind === 'code') {
-    for (const line of canonicalSourceLines(source))
-      await writer.writeLine(line, false);
+    for await (const line of canonicalSourceLinesAsync(source, work))
+      await writer.writeLine(line.value, false);
   } else if (contentKind === 'prose') {
     const prose = new IncrementalProseNormalizer(writer, warnings, work);
     let sourceLineIndex = 0;
-    for (const line of canonicalSourceLines(source)) {
-      await prose.push(line, sourceLineIndex === 0);
+    for await (const line of canonicalSourceLinesAsync(source, work)) {
+      await prose.push(line.value, sourceLineIndex === 0);
       sourceLineIndex += 1;
     }
     await prose.flush();
@@ -293,7 +293,8 @@ export async function normalizeContentAsyncV1(
       | undefined;
     let prose = new IncrementalProseNormalizer(writer, warnings, work);
     let proseLineIndex = 0;
-    for (const line of canonicalSourceLines(source)) {
+    for await (const scanned of canonicalSourceLinesAsync(source, work)) {
+      const line = scanned.value;
       const marker = fenceMarkerForLine(line);
       if (!activeFence && marker) {
         await prose.flush();
@@ -1285,16 +1286,47 @@ function isHangulSyllableWithoutTail(value: number): boolean {
   return value >= 0xac00 && value <= 0xd7a3 && (value - 0xac00) % 28 === 0;
 }
 
-function* canonicalSourceLines(source: string): Generator<string> {
+interface CanonicalSourceLineScan {
+  readonly value: string;
+  readonly hasNonWhitespace: boolean;
+}
+
+/** Scans even a newline-free maximum-size source in cancellable chunks. */
+async function* canonicalSourceLinesAsync(
+  source: string,
+  work: CooperativeTextWorkController,
+): AsyncGenerator<CanonicalSourceLineScan> {
   let start = 0;
+  let sinceCheckpoint = 0;
+  let hasNonWhitespace = false;
   for (let index = 0; index < source.length; index += 1) {
     const unit = source.charCodeAt(index);
-    if (unit !== 0x0a && unit !== 0x0d) continue;
-    yield source.slice(start, index);
-    if (unit === 0x0d && source.charCodeAt(index + 1) === 0x0a) index += 1;
+    if (unit !== 0x0a && unit !== 0x0d) {
+      if (!(index === 0 && unit === 0xfeff) && !/\s/u.test(source[index]!))
+        hasNonWhitespace = true;
+      sinceCheckpoint += 1;
+      if (sinceCheckpoint >= NORMALIZATION_SEGMENT_CODE_UNITS) {
+        await work.advance(sinceCheckpoint);
+        sinceCheckpoint = 0;
+      }
+      continue;
+    }
+    const lineEnd = index;
+    sinceCheckpoint += 1;
+    if (unit === 0x0d && source.charCodeAt(index + 1) === 0x0a) {
+      index += 1;
+      sinceCheckpoint += 1;
+    }
+    if (sinceCheckpoint > 0) {
+      await work.advance(sinceCheckpoint);
+      sinceCheckpoint = 0;
+    }
+    yield { value: source.slice(start, lineEnd), hasNonWhitespace };
     start = index + 1;
+    hasNonWhitespace = false;
   }
-  yield source.slice(start);
+  if (sinceCheckpoint > 0) await work.advance(sinceCheckpoint);
+  yield { value: source.slice(start), hasNonWhitespace };
 }
 
 function lineHasNonWhitespace(value: string): boolean {
@@ -1380,18 +1412,119 @@ function isCodeSignalLine(line: string): boolean {
   );
 }
 
-function isCodeSignalLineBounded(line: string): boolean {
+async function isCodeSignalLineBounded(
+  line: string,
+  work: CooperativeTextWorkController,
+): Promise<boolean> {
   if (line.length <= NORMALIZATION_SEGMENT_CODE_UNITS)
     return isCodeSignalLine(line);
   const prefix = line.slice(0, NORMALIZATION_SEGMENT_CODE_UNITS);
   if (isCodeSignalLine(prefix)) return true;
   const suffix = line.slice(-256);
   if (/[;{}]\s*$/.test(suffix)) return true;
-  return (
+  if (
     /^\s*(?:(?:await|return|yield|raise)\s+|throw\s+(?:new\s+)?|new\s+)?[A-Za-z_$][\w$]*(?:(?:\.|\?\.)[A-Za-z_$][\w$]*)*\s*\(/.test(
       prefix,
-    ) && /\)\s*;?\s*$/.test(suffix)
+    ) &&
+    /\)\s*;?\s*$/.test(suffix)
+  )
+    return true;
+  return isLongAssignmentSignalLine(line, work);
+}
+
+const assignmentOperators = [
+  '>>>=',
+  '**=',
+  '??=',
+  '&&=',
+  '||=',
+  '<<=',
+  '>>=',
+  '//=',
+  '+=',
+  '-=',
+  '*=',
+  '/=',
+  '%=',
+  '&=',
+  '|=',
+  '^=',
+  '@=',
+  ':=',
+  '=',
+] as const;
+
+async function isLongAssignmentSignalLine(
+  line: string,
+  work: CooperativeTextWorkController,
+): Promise<boolean> {
+  let index = await skipLineCharacters(line, 0, isWhitespaceCharacter, work);
+  if (
+    line.startsWith('export', index) &&
+    isWhitespaceCharacter(line[index + 'export'.length] ?? '')
+  )
+    index = await skipLineCharacters(
+      line,
+      index + 'export'.length,
+      isWhitespaceCharacter,
+      work,
+    );
+  if (!/[A-Za-z_$]/.test(line[index] ?? '')) return false;
+  index = await skipLineCharacters(
+    line,
+    index + 1,
+    isAssignmentTargetCharacter,
+    work,
   );
+  index = await skipLineCharacters(line, index, isWhitespaceCharacter, work);
+  if (line[index] === ':') {
+    index = await skipLineCharacters(
+      line,
+      index + 1,
+      isWhitespaceCharacter,
+      work,
+    );
+    const structured = line.slice(index, index + 5);
+    return /^(?:["'[{]|[-+]?\d|true\b|false\b|null\b)/i.test(structured);
+  }
+  const operator = assignmentOperators.find(candidate =>
+    line.startsWith(candidate, index),
+  );
+  if (!operator) return false;
+  index = await skipLineCharacters(
+    line,
+    index + operator.length,
+    isWhitespaceCharacter,
+    work,
+  );
+  return index < line.length;
+}
+
+async function skipLineCharacters(
+  line: string,
+  start: number,
+  predicate: (value: string) => boolean,
+  work: CooperativeTextWorkController,
+): Promise<number> {
+  let index = start;
+  let checkpoint = start;
+  while (index < line.length && predicate(line[index]!)) {
+    index += 1;
+    if (index - checkpoint >= NORMALIZATION_SEGMENT_CODE_UNITS) {
+      await work.advance(index - checkpoint);
+      checkpoint = index;
+    }
+  }
+  if (index > checkpoint) await work.advance(index - checkpoint);
+  return index;
+}
+
+function isWhitespaceCharacter(value: string): boolean {
+  return value.length > 0 && /\s/u.test(value);
+}
+
+function isAssignmentTargetCharacter(value: string): boolean {
+  return /[\w.$[\]'-]/.test(value);
 }
 
 function fenceMarkerForLine(line: string): string | undefined {

@@ -54,6 +54,12 @@ export interface PackProcessingScheduler {
   recover(): Promise<void>;
 }
 
+export interface RecoveredPackProcessingCompletion {
+  readonly packId: string;
+  readonly itemId: string;
+  readonly stage: StartPipelineRunInput['stage'];
+}
+
 interface ClaimHeartbeat {
   readonly failure: Promise<never>;
   assertOwned(): void;
@@ -83,6 +89,9 @@ export class DurablePackProcessingCoordinator
       readonly code: DomainErrorCode;
     }) => void,
     private readonly monotonicNow: () => number = monotonicNowMilliseconds,
+    private readonly onRecoveredCompletion?: (
+      input: RecoveredPackProcessingCompletion,
+    ) => void,
   ) {
     if (!Number.isSafeInteger(claimLeaseMs) || claimLeaseMs <= 0)
       throw new DomainError('SCHEMA_INVALID');
@@ -310,6 +319,12 @@ export class DurablePackProcessingCoordinator
           });
           heartbeat.assertOwned();
           if (!completed) throw new DomainError('PERSISTENCE_CONFLICT');
+          if (run.status === 'recovering')
+            this.publishRecoveredCompletion({
+              packId: run.packId,
+              itemId: run.itemId,
+              stage: run.stage,
+            });
         } catch (settlementError) {
           await this.reportUnexpectedFailure(
             run,
@@ -349,6 +364,16 @@ export class DurablePackProcessingCoordinator
     const valueEpoch = Date.parse(value);
     if (!Number.isFinite(valueEpoch)) throw new DomainError('SCHEMA_INVALID');
     return latestTimestamp([value, ...minimums]);
+  }
+
+  private publishRecoveredCompletion(
+    input: RecoveredPackProcessingCompletion,
+  ): void {
+    try {
+      this.onRecoveredCompletion?.(input);
+    } catch {
+      // A presentation observer cannot invalidate durable settlement.
+    }
   }
 
   private startClaimHeartbeat(

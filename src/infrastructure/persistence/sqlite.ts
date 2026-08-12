@@ -2455,6 +2455,10 @@ export class ExpoSqlitePersistenceRepository
       throw new DomainError('DEVELOPMENT_RESET_FORBIDDEN');
     await this.connection.exclusive(transaction =>
       transaction.exec(`
+        DROP TABLE IF EXISTS duplicate_suggestions;
+        DROP TABLE IF EXISTS duplicate_decisions;
+        DROP TABLE IF EXISTS duplicate_analysis_items;
+        DROP TABLE IF EXISTS duplicate_analysis_manifests;
         DROP TABLE IF EXISTS cleanup_leases;
         DROP TABLE IF EXISTS quarantine_records;
         DROP TABLE IF EXISTS recovery_diagnostics;

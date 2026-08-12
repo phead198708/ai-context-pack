@@ -9,6 +9,7 @@ import type {
 } from '../src/domain/models';
 import { ownedDerivedPath } from '../src/infrastructure/persistence/ownedPaths';
 import { ExpoSqlitePersistenceRepository } from '../src/infrastructure/persistence/sqlite';
+import { DEVELOPMENT_RESET_CONFIRMATION } from '../src/infrastructure/persistence/contracts';
 import {
   DUPLICATE_DETECTOR_CONFIG_V1,
   buildDuplicateSuggestionsV1,
@@ -300,6 +301,38 @@ describe('production repository against SQLite', () => {
       1,
     );
     expect((await repository.findPackGraph(packId))?.revision).toBe(3);
+  });
+
+  test('development reset drops v8 duplicate tables before replaying every migration', async () => {
+    const resettable = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+      undefined,
+      true,
+    );
+    await resettable.initialize();
+
+    await expect(
+      resettable.resetForDevelopment(DEVELOPMENT_RESET_CONFIRMATION),
+    ).resolves.toBeUndefined();
+
+    expect(database.prepare('PRAGMA user_version').get()).toMatchObject({
+      user_version: 8,
+    });
+    expect(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name LIKE 'duplicate_%'
+           ORDER BY name`,
+        )
+        .all(),
+    ).toEqual([
+      { name: 'duplicate_analysis_items' },
+      { name: 'duplicate_analysis_manifests' },
+      { name: 'duplicate_decisions' },
+      { name: 'duplicate_suggestions' },
+    ]);
+    await expect(resettable.listPackGraphs()).resolves.toEqual([]);
   });
 
   test('persists an exact terminal retry stage across repository restart', async () => {

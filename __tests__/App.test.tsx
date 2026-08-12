@@ -24,6 +24,7 @@ import type { MainAppPicker } from '../src/infrastructure/mainAppPickers';
 import { mainAppPicker } from '../src/infrastructure/mainAppPickers';
 import {
   packLibraryController,
+  subscribeRecoveredPackProcessingCompletions,
   subscribePackProcessingFailures,
 } from '../src/features/packLibrary/runtime';
 import {
@@ -83,6 +84,7 @@ jest.mock('../src/infrastructure/mainAppPickers', () => ({
 }));
 jest.mock('../src/features/packLibrary/runtime', () => ({
   subscribePackProcessingFailures: jest.fn(),
+  subscribeRecoveredPackProcessingCompletions: jest.fn(),
   packLibraryController: {
     load: jest.fn().mockResolvedValue({
       sections: {
@@ -125,6 +127,10 @@ const mockPackLibraryController = packLibraryController as jest.Mocked<
 const mockSubscribePackProcessingFailures =
   subscribePackProcessingFailures as jest.MockedFunction<
     typeof subscribePackProcessingFailures
+  >;
+const mockSubscribeRecoveredPackProcessingCompletions =
+  subscribeRecoveredPackProcessingCompletions as jest.MockedFunction<
+    typeof subscribeRecoveredPackProcessingCompletions
   >;
 const ingestionId = '123e4567-e89b-42d3-a456-426614174000';
 const eventId = '223e4567-e89b-42d3-a456-426614174000';
@@ -188,6 +194,10 @@ let processingFailureListener:
   | Parameters<typeof subscribePackProcessingFailures>[0]
   | undefined;
 let processingFailureUnsubscribe: jest.Mock;
+let processingCompletionListener:
+  | Parameters<typeof subscribeRecoveredPackProcessingCompletions>[0]
+  | undefined;
+let processingCompletionUnsubscribe: jest.Mock;
 let hardwareBack:
   | Parameters<typeof BackHandler.addEventListener>[1]
   | undefined;
@@ -245,6 +255,8 @@ describe('App interactions', () => {
     hardwareBack = undefined;
     processingFailureListener = undefined;
     processingFailureUnsubscribe = jest.fn();
+    processingCompletionListener = undefined;
+    processingCompletionUnsubscribe = jest.fn();
     appStateRemove = jest.fn();
     inboxRemove = jest.fn();
     openPackRemove = jest.fn();
@@ -301,6 +313,12 @@ describe('App interactions', () => {
       processingFailureListener = listener;
       return processingFailureUnsubscribe;
     });
+    mockSubscribeRecoveredPackProcessingCompletions.mockImplementation(
+      listener => {
+        processingCompletionListener = listener;
+        return processingCompletionUnsubscribe;
+      },
+    );
   });
 
   afterEach(() => jest.restoreAllMocks());
@@ -335,7 +353,28 @@ describe('App interactions', () => {
     expect(openPackRemove).toHaveBeenCalledTimes(1);
     expect(backRemove).toHaveBeenCalledTimes(1);
     expect(processingFailureUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(processingCompletionUnsubscribe).toHaveBeenCalledTimes(1);
   }, 15_000);
+
+  test('reloads an open Pack after recovered analysis settles durably', async () => {
+    const renderer = await renderApp();
+    await press(control(renderer, 'tab', 'detail'));
+    const initialLoads = mockPackLibraryController.load.mock.calls.length;
+
+    await act(async () => {
+      processingCompletionListener?.({
+        packId: newerPackId,
+        itemId: eventId,
+        stage: 'analyze',
+      });
+      await flushWorkflow();
+    });
+
+    expect(mockPackLibraryController.load.mock.calls.length).toBeGreaterThan(
+      initialLoads,
+    );
+    act(() => renderer.unmount());
+  });
 
   test('shows a metadata integrity error and Retry terminates after quarantine', async () => {
     mockNative.getPendingShareEvents

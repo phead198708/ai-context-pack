@@ -298,6 +298,44 @@ describe('Issue #13 versioned content normalization', () => {
     expect(yields).toBeGreaterThan(10);
   });
 
+  it('checks cancellation while scanning a maximum-size line before classification', async () => {
+    const source = ' '.repeat(16 * 1_024 * 1_024);
+    let yields = 0;
+    let cancelled = false;
+
+    await expect(
+      normalizeContentAsyncV1(source, {
+        yieldEveryCodeUnits: 32_768,
+        isCancelled: () => cancelled,
+        yieldControl: () => {
+          yields += 1;
+          // The first 512 yields validate Unicode. This cancellation must be
+          // observed by the following cooperative line-boundary scan.
+          if (yields === 513) cancelled = true;
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+    expect(yields).toBe(513);
+  });
+
+  it('ignores a leading BOM consistently when its first line has no content', async () => {
+    const source = '\uFEFF   \nSynthetic  prose';
+
+    expect(await normalizeContentAsyncV1(source)).toEqual(
+      normalizeContentV1(source),
+    );
+  });
+
+  it('preserves an assignment whose operator falls beyond the bounded prefix', async () => {
+    const source = `value${' '.repeat(32 * 1_024 + 257)}= "a  b"`;
+    const sync = normalizeContentV1(source);
+    const async = await normalizeContentAsyncV1(source);
+
+    expect(sync).toMatchObject({ contentKind: 'code', text: source });
+    expect(async).toEqual(sync);
+  });
+
   it('preserves Unicode normalization across a long-line segment boundary', async () => {
     const source = `${'a'.repeat(32 * 1_024 - 1)}e\u0301  synthetic`;
 

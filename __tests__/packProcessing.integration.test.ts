@@ -555,10 +555,19 @@ test('a replacement coordinator resumes a queued run after restart', async () =>
   ]);
 
   const worker = new DeferredWorker();
+  const recoveredCompletions: {
+    readonly packId: string;
+    readonly itemId: string;
+    readonly stage: 'import' | 'extract' | 'analyze' | 'review' | 'package';
+  }[] = [];
   const replacement = new DurablePackProcessingCoordinator(
     async () => repository,
     worker,
     () => now,
+    undefined,
+    undefined,
+    undefined,
+    completion => recoveredCompletions.push(completion),
   );
   await replacement.recover();
   await waitFor(() => worker.starts.length === 1);
@@ -569,6 +578,7 @@ test('a replacement coordinator resumes a queued run after restart', async () =>
   expect((await repository.findPackGraph(packId))?.items[0]?.state).toBe(
     'extracted',
   );
+  expect(recoveredCompletions).toEqual([{ packId, itemId, stage: 'extract' }]);
 });
 
 test('the durable claim token permits only one coordinator to execute a queued run', async () => {
