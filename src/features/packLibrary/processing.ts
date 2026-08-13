@@ -314,18 +314,45 @@ export class DurablePackProcessingCoordinator
         let analysis: DuplicateAnalysisItemV1 | undefined;
         if (handle.analysis) {
           try {
-            analysis = await Promise.race([
-              handle.analysis,
+            const analysisSettlement = handle.analysis.then(
+              value => ({ status: 'fulfilled' as const, value }),
+              error => ({ status: 'rejected' as const, error }),
+            );
+            const settlement = await Promise.race([
+              analysisSettlement,
               heartbeat.failure,
               ...(handle.fence ? [handle.fence] : []),
             ]);
             heartbeat.assertOwned();
-          } catch (analysisError) {
-            if (
-              processingErrorCode(analysisError) === 'PIPELINE_STAGE_FAILED' &&
-              (await this.isDurablyCancelled(repository, run.id))
-            )
+            if (settlement.status === 'rejected') {
+              if (
+                processingErrorCode(settlement.error) ===
+                  'PIPELINE_STAGE_FAILED' &&
+                (await this.isDurablyCancelled(repository, run.id))
+              )
+                return;
+              const failed = await repository.failPipelineRun({
+                runId: run.id,
+                claimVersion,
+                updatedAt: this.timestamp(packCreatedAt),
+                errorCode: processingErrorCode(settlement.error),
+              });
+              heartbeat.assertOwned();
+              if (!failed) {
+                if (await this.isDurablyCancelled(repository, run.id)) return;
+                throw new DomainError('PERSISTENCE_CONFLICT');
+              }
+              if (run.status === 'recovering')
+                this.publishRecoveredCompletion({
+                  packId: run.packId,
+                  itemId: run.itemId,
+                  stage: run.stage,
+                  outcome: 'failed',
+                });
               return;
+            }
+            analysis = settlement.value;
+          } catch (analysisError) {
             await this.reportUnexpectedFailure(
               run,
               analysisError,

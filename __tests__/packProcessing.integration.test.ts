@@ -690,6 +690,63 @@ test('analyze cancellation after artifact checkpoint ignores a late fingerprint 
   expect(await repository.listRecoveryDiagnostics()).toEqual([]);
 });
 
+test('analysis failure after artifact checkpoint settles the durable run as failed', async () => {
+  const initial = (await repository.findPackGraph(packId))!;
+  await repository.savePackGraph({
+    pack: { ...initial.pack, state: 'processing', updatedAt: now },
+    items: initial.items.map(item => {
+      const extracted = { ...item, state: 'extracted' as const };
+      delete extracted.retryStage;
+      return extracted;
+    }),
+    expectedRevision: initial.revision,
+  });
+  const worker = new DeferredAnalyzeWorker();
+  const onUnexpectedFailure = jest.fn();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    undefined,
+    onUnexpectedFailure,
+  );
+  const controller = new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  );
+
+  const analyze = controller.analyzePack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  await waitFor(
+    () =>
+      (
+        database
+          .prepare(
+            'SELECT published_artifact_json FROM pipeline_runs WHERE id = ?',
+          )
+          .get(run.id) as { readonly published_artifact_json?: string | null }
+      )?.published_artifact_json !== null,
+  );
+  worker.analyses
+    .get(run.id)!
+    .reject(new DomainError('RESOURCE_MEMORY_PRESSURE'));
+  await expect(analyze).resolves.toBe(1);
+
+  expect((await repository.findPackGraph(packId))?.items[0]).toMatchObject({
+    state: 'failed',
+    retryStage: 'analyze',
+  });
+  expect(
+    database
+      .prepare('SELECT status, error_code FROM pipeline_runs WHERE id = ?')
+      .get(run.id),
+  ).toEqual({ status: 'failed', error_code: 'RESOURCE_MEMORY_PRESSURE' });
+  expect(onUnexpectedFailure).not.toHaveBeenCalled();
+  expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+});
+
 test('analyze cancellation still reports a publication finalization failure', async () => {
   const initial = (await repository.findPackGraph(packId))!;
   await repository.savePackGraph({
