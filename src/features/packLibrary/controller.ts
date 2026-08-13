@@ -360,26 +360,13 @@ export class PackLibraryController {
             })
           : [],
       );
-      // Before provenance existed, a Preferred action wrote its group rows with
-      // one timestamp. A source-less exclusion from any other timestamp is
-      // ambiguous: it may be older group history or a later standalone privacy
-      // choice. Preserve that ambiguity rather than silently restoring content
-      // the user may have explicitly excluded.
-      const legacyPreferredDecisionTimes = new Set(
-        groupItemIds.flatMap(itemId => {
-          const prior = priorById.get(itemId);
-          return prior?.choice === 'preferred' && prior.source === undefined
-            ? [prior.decidedAt]
-            : [];
-        }),
-      );
+      // V1 source-less exclusions have no reliable action identifier: timestamp
+      // resolution and rollback clamping can make separate actions identical.
+      // Preserve every ambiguous row as a standalone privacy choice. Only rows
+      // carrying explicit preferred-group provenance may be restored together.
       const wasPreferredGroupDecision = (
         decision: DuplicateDecisionV1 | undefined,
-      ): boolean =>
-        decision?.source === 'preferred-group' ||
-        (decision !== undefined &&
-          decision.source === undefined &&
-          legacyPreferredDecisionTimes.has(decision.decidedAt));
+      ): boolean => decision?.source === 'preferred-group';
       const decisions =
         action.kind === 'keep-all'
           ? groupItemIds.map(itemId => createDecision(itemId, 'keep'))

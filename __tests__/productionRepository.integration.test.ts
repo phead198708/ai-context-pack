@@ -1567,7 +1567,7 @@ describe('production repository against SQLite', () => {
     });
   });
 
-  test('preserves an ambiguous source-less exclusion after restart', async () => {
+  test('preserves a same-timestamp ambiguous source-less exclusion after restart', async () => {
     await repository.commitImport({
       packId,
       manifest: {
@@ -1728,7 +1728,7 @@ describe('production repository against SQLite', () => {
         itemId: thirdItemId,
         choice: 'exclude' as const,
         baselineInclusionMode: baseline,
-        decidedAt: '2026-08-05T00:00:05Z',
+        decidedAt: '2026-08-05T00:00:06Z',
       },
     ];
     for (const decision of legacy)
@@ -1779,7 +1779,7 @@ describe('production repository against SQLite', () => {
         expect.objectContaining({
           itemId: thirdItemId,
           choice: 'exclude',
-          decidedAt: '2026-08-05T00:00:05Z',
+          decidedAt: '2026-08-05T00:00:06Z',
         }),
       ]),
     });

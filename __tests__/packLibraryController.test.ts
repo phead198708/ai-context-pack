@@ -574,6 +574,7 @@ test('switching preferred restores stale group exclusions but preserves standalo
         itemId: firstId,
         choice: 'exclude',
         baselineInclusionMode: 'original',
+        source: 'preferred-group',
         decidedAt: '2026-08-10T00:00:05Z',
       },
       {
@@ -582,6 +583,7 @@ test('switching preferred restores stale group exclusions but preserves standalo
         itemId: secondId,
         choice: 'preferred',
         baselineInclusionMode: 'original',
+        source: 'preferred-group',
         decidedAt: '2026-08-10T00:00:05Z',
       },
       {
@@ -590,6 +592,7 @@ test('switching preferred restores stale group exclusions but preserves standalo
         itemId: thirdId,
         choice: 'exclude',
         baselineInclusionMode: 'original',
+        source: 'preferred-group',
         decidedAt: '2026-08-10T00:00:05Z',
       },
     ],
@@ -649,7 +652,7 @@ test('switching preferred restores stale group exclusions but preserves standalo
   );
 });
 
-test('preserves ambiguous source-less exclusions from another decision generation', async () => {
+test('preserves ambiguous source-less exclusions even at the preferred timestamp', async () => {
   const base = fixture();
   const thirdItem: ContextItem = {
     ...base.items[0]!,
@@ -706,7 +709,7 @@ test('preserves ambiguous source-less exclusions from another decision generatio
         itemId: thirdId,
         choice: 'exclude',
         baselineInclusionMode: 'original',
-        decidedAt: '2026-08-10T00:00:05Z',
+        decidedAt: '2026-08-10T00:00:06Z',
       },
     ],
   });
@@ -729,7 +732,7 @@ test('preserves ambiguous source-less exclusions from another decision generatio
     expect.objectContaining({
       itemId: secondId,
       choice: 'exclude',
-      source: 'preferred-group',
+      source: 'standalone',
     }),
   ]);
   expect(repo.value.saveDuplicateDecisions).not.toHaveBeenCalledWith(

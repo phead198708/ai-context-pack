@@ -407,6 +407,20 @@ describe('Issue #13 versioned content normalization', () => {
     );
   });
 
+  it('strips a leading BOM before reconstructing mixed fenced regions', async () => {
+    const source = '\uFEFF```text\n  x  y\n```\na  b';
+    const expected = {
+      contentKind: 'mixed' as const,
+      text: '```text\n  x  y\n```\na b',
+      warnings: ['PROSE_WHITESPACE_NORMALIZED', 'UNICODE_NORMALIZED'],
+    };
+
+    expect(normalizeContentV1(source)).toMatchObject(expected);
+    expect(await normalizeContentAsyncV1(source)).toEqual(
+      normalizeContentV1(source),
+    );
+  });
+
   it('preserves an assignment whose operator falls beyond the bounded prefix', async () => {
     const source = `value${' '.repeat(32 * 1_024 + 257)}= "a  b"`;
     const sync = normalizeContentV1(source);

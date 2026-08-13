@@ -308,8 +308,13 @@ export async function normalizeContentAsyncV1(
       | undefined;
     let prose = new IncrementalProseNormalizer(writer, warnings, work);
     let proseLineIndex = 0;
+    let sourceLineIndex = 0;
     for await (const scanned of canonicalSourceLinesAsync(source, work)) {
-      const line = scanned.value;
+      const line =
+        sourceLineIndex === 0 && scanned.value.startsWith('\uFEFF')
+          ? scanned.value.slice(1)
+          : scanned.value;
+      if (line !== scanned.value) warnings.add('UNICODE_NORMALIZED');
       const marker = await fenceDescriptorForLineBounded(line, work);
       if (!activeFence && marker) {
         await prose.flush();
@@ -328,6 +333,7 @@ export async function normalizeContentAsyncV1(
         await prose.push(line, proseLineIndex === 0);
         proseLineIndex += 1;
       }
+      sourceLineIndex += 1;
     }
     await prose.flush();
   }
@@ -956,7 +962,13 @@ function normalizeMixedFencedContent(
     appendOutput(normalizeProseLines(prose, warnings));
     prose = [];
   };
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const sourceLine = lines[index]!;
+    const line =
+      index === 0 && sourceLine.startsWith('\uFEFF')
+        ? sourceLine.slice(1)
+        : sourceLine;
+    if (line !== sourceLine) warnings.add('UNICODE_NORMALIZED');
     const marker = line.match(fenceLine)?.[1];
     if (!fence && marker) {
       flushProse();
