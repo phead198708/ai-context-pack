@@ -555,6 +555,88 @@ test('executes and atomically settles the exact durable retry run', async () => 
   expect(await repository.listRunnablePipelineRuns()).toEqual([]);
 });
 
+test('Pack retry starts only the failed analysis sibling at its durable checkpoint', async () => {
+  const siblingItemId = 'd13e4567-e89b-42d3-a456-426614174000';
+  const siblingIngestionId = 'e13e4567-e89b-42d3-a456-426614174000';
+  await seedSingleItem(packId, siblingItemId, siblingIngestionId, 'image/png');
+  let graph = (await repository.findPackGraph(packId))!;
+  const failedExtractItems = graph.items.map(item => ({
+    ...item,
+    state: 'failed' as const,
+    retryStage: 'extract' as const,
+  }));
+  await repository.savePackGraph({
+    pack: {
+      ...graph.pack,
+      state: 'failed',
+      updatedAt: now,
+      orderedItemIds: failedExtractItems.map(item => item.id),
+    },
+    items: failedExtractItems,
+    expectedRevision: graph.revision,
+  });
+  const worker = new DeferredWorker();
+  const extractScheduler = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+  );
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    extractScheduler,
+  ).retryPack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const firstRun = worker.starts[0]!;
+  worker.results.get(firstRun.id)!.resolve(worker.artifact(firstRun));
+  await waitFor(() => worker.starts.length === 2);
+  const secondRun = worker.starts[1]!;
+  worker.results.get(secondRun.id)!.resolve(worker.artifact(secondRun));
+  await extractScheduler.waitForIdle();
+  graph = (await repository.findPackGraph(packId))!;
+  const analyzedSiblingItems = graph.items.map(item =>
+    item.id === siblingItemId
+      ? { ...item, state: 'analyzed' as const }
+      : { ...item, state: 'failed' as const, retryStage: 'analyze' as const },
+  );
+  await repository.savePackGraph({
+    pack: {
+      ...graph.pack,
+      state: 'failed',
+      updatedAt: now,
+      orderedItemIds: analyzedSiblingItems.map(item => item.id),
+    },
+    items: analyzedSiblingItems,
+    expectedRevision: graph.revision,
+  });
+  const analyzeScheduler = {
+    supports: jest.fn(stage => stage === 'analyze'),
+    launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+
+  await expect(
+    new PackLibraryController(
+      async () => repository,
+      () => now,
+      analyzeScheduler,
+    ).retryPack(packId),
+  ).resolves.toEqual([expect.objectContaining({ itemId, stage: 'analyze' })]);
+
+  const retried = (await repository.findPackGraph(packId))!;
+  expect(retried.items.find(item => item.id === siblingItemId)?.state).toBe(
+    'analyzed',
+  );
+  expect(retried.items.find(item => item.id === itemId)?.state).toBe(
+    'extracted',
+  );
+  expect(await repository.listRunnablePipelineRuns()).toEqual([
+    expect.objectContaining({ itemId, stage: 'analyze' }),
+  ]);
+});
+
 test('cancellation rejects a late native success and keeps the durable checkpoint', async () => {
   const worker = new DeferredWorker();
   const onUnexpectedFailure = jest.fn();

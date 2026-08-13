@@ -70,6 +70,16 @@ function original(itemId: string): PersistedArtifactRecord {
   };
 }
 
+function extracted(itemId: string): PersistedArtifactRecord {
+  return {
+    ...original(itemId),
+    id: `extracted-${itemId}`,
+    kind: 'ocr-text',
+    relativePath: `Packs/${packId}/derived/extracted-${itemId}.txt`,
+    mediaType: 'text/plain',
+  };
+}
+
 function repository(graph = fixture()) {
   const saves: SavePackGraphInput[] = [];
   const value = {
@@ -879,6 +889,46 @@ test('Pack retry resumes item checkpoints while retaining immutable originals', 
       }),
     ]),
   );
+});
+
+test('Pack retry does not repeat a successful sibling stage', async () => {
+  const graph = fixture();
+  const analyzed = {
+    ...graph.items[0]!,
+    state: 'analyzed' as const,
+  };
+  const failed = {
+    ...graph.items[1]!,
+    state: 'failed' as const,
+    retryStage: 'analyze' as const,
+  };
+  const repo = repository({ ...graph, items: [analyzed, failed] });
+  (repo.value.listArtifactRecords as jest.Mock).mockResolvedValue([
+    original(firstId),
+    extracted(firstId),
+    original(secondId),
+    extracted(secondId),
+  ]);
+  const processing: jest.Mocked<PackProcessingScheduler> = {
+    ...scheduler(),
+    supports: jest.fn(stage => stage === 'analyze'),
+  };
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:03Z',
+    processing,
+  );
+
+  await expect(controller.retryPack(packId)).resolves.toEqual([
+    expect.objectContaining({ itemId: secondId, stage: 'analyze' }),
+  ]);
+  expect(repo.saves[0]?.items).toEqual([
+    expect.objectContaining({ id: firstId, state: 'analyzed' }),
+    expect.objectContaining({ id: secondId, state: 'extracted' }),
+  ]);
+  expect(repo.saves[0]?.startedPipelineRuns).toEqual([
+    expect.objectContaining({ itemId: secondId, stage: 'analyze' }),
+  ]);
 });
 
 test('Pack retry reactivates an export-level failure when every item is packaged', async () => {

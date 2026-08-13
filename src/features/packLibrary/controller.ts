@@ -221,6 +221,7 @@ export class PackLibraryController {
           artifacts.filter(value => value.itemId === item.id),
         );
         if (
+          item.state === stateAtRetryCheckpoint(plan.stage) &&
           plan.stage !== 'import' &&
           (!this.processing || this.processing.supports(plan.stage))
         )
