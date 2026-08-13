@@ -2903,6 +2903,9 @@ async function replaceContextItems(
       ],
     );
   }
+  // Item deletion cascades analysis/suggestion/decision rows, but the manifest
+  // has no item FK. Rebuild it in this same graph transaction after all retained
+  // items are materialized so readers never observe stale counts or candidates.
   if (removedItem)
     await refreshDuplicateAnalysisForPackInTransaction(transaction, packId);
 }

@@ -360,27 +360,26 @@ export class PackLibraryController {
             })
           : [],
       );
-      // V1 decisions written before provenance existed cannot reliably retain
-      // multi-generation timestamps after a preferred representative changes.
-      // A surviving source-less Preferred decision identifies that legacy group
-      // history without conflating source-less standalone exclusions in groups
-      // that never had a Preferred representative. New decisions always persist
-      // explicit provenance.
-      const hasLegacyPreferredDecision = groupItemIds.some(itemId => {
-        const decision = priorById.get(itemId);
-        return (
-          decision !== undefined &&
-          decision.source === undefined &&
-          decision.choice === 'preferred'
-        );
-      });
+      // Before provenance existed, a Preferred action wrote its group rows with
+      // one timestamp. A source-less exclusion from any other timestamp is
+      // ambiguous: it may be older group history or a later standalone privacy
+      // choice. Preserve that ambiguity rather than silently restoring content
+      // the user may have explicitly excluded.
+      const legacyPreferredDecisionTimes = new Set(
+        groupItemIds.flatMap(itemId => {
+          const prior = priorById.get(itemId);
+          return prior?.choice === 'preferred' && prior.source === undefined
+            ? [prior.decidedAt]
+            : [];
+        }),
+      );
       const wasPreferredGroupDecision = (
         decision: DuplicateDecisionV1 | undefined,
       ): boolean =>
         decision?.source === 'preferred-group' ||
-        (hasLegacyPreferredDecision &&
-          decision !== undefined &&
-          decision.source === undefined);
+        (decision !== undefined &&
+          decision.source === undefined &&
+          legacyPreferredDecisionTimes.has(decision.decidedAt));
       const decisions =
         action.kind === 'keep-all'
           ? groupItemIds.map(itemId => createDecision(itemId, 'keep'))

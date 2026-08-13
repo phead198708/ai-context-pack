@@ -649,7 +649,7 @@ test('switching preferred restores stale group exclusions but preserves standalo
   );
 });
 
-test('migrates multi-generation source-less preferred history as one group', async () => {
+test('preserves ambiguous source-less exclusions from another decision generation', async () => {
   const base = fixture();
   const thirdItem: ContextItem = {
     ...base.items[0]!,
@@ -731,12 +731,11 @@ test('migrates multi-generation source-less preferred history as one group', asy
       choice: 'exclude',
       source: 'preferred-group',
     }),
-    expect.objectContaining({
-      itemId: thirdId,
-      choice: 'keep',
-      source: 'preferred-group',
-    }),
   ]);
+  expect(repo.value.saveDuplicateDecisions).not.toHaveBeenCalledWith(
+    packId,
+    expect.arrayContaining([expect.objectContaining({ itemId: thirdId })]),
+  );
 });
 
 test('restores a durable duplicate choice without requiring a current suggestion group', async () => {

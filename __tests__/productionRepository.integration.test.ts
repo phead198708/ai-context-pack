@@ -1567,7 +1567,7 @@ describe('production repository against SQLite', () => {
     });
   });
 
-  test('reconciles multi-generation source-less preferred history after restart', async () => {
+  test('preserves an ambiguous source-less exclusion after restart', async () => {
     await repository.commitImport({
       packId,
       manifest: {
@@ -1772,14 +1772,14 @@ describe('production repository against SQLite', () => {
     ).toEqual([
       { id: firstItemId, inclusionMode: 'both' },
       { id: secondItemId, inclusionMode: 'excluded' },
-      { id: thirdItemId, inclusionMode: 'both' },
+      { id: thirdItemId, inclusionMode: 'excluded' },
     ]);
     expect(await repository.findDuplicateAnalysis(packId)).toMatchObject({
       decisions: expect.arrayContaining([
         expect.objectContaining({
           itemId: thirdItemId,
-          choice: 'keep',
-          source: 'preferred-group',
+          choice: 'exclude',
+          decidedAt: '2026-08-05T00:00:05Z',
         }),
       ]),
     });
