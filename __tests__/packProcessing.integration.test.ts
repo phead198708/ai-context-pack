@@ -310,7 +310,9 @@ class DeferredAnalyzeWorker implements PackStageWorker {
     string,
     ReturnType<typeof deferred<DuplicateAnalysisItemV1>>
   >();
+  readonly fences = new Map<string, ReturnType<typeof deferred<never>>>();
   rejectFinalization = false;
+  finalizationWaitsForAnalysis = false;
 
   supports(stage: PersistedPipelineRun['stage']): boolean {
     return stage === 'analyze';
@@ -338,7 +340,9 @@ class DeferredAnalyzeWorker implements PackStageWorker {
       immutable: true,
     };
     const analysis = deferred<DuplicateAnalysisItemV1>();
+    const fence = deferred<never>();
     this.analyses.set(run.id, analysis);
+    this.fences.set(run.id, fence);
     return {
       result: repository
         .acquireCleanupLeaseForPipelineRun(
@@ -353,13 +357,20 @@ class DeferredAnalyzeWorker implements PackStageWorker {
           return artifact;
         }),
       analysis: analysis.promise,
+      fence: fence.promise,
       publicationLeaseOwnerId: run.id,
       cancel: async () => {
         this.cancellations.push(run.id);
+        if (this.finalizationWaitsForAnalysis)
+          this.analyses
+            .get(run.id)
+            ?.reject(new DomainError('PIPELINE_STAGE_FAILED'));
       },
       finalize: async () => {
         if (this.rejectFinalization)
           throw new DomainError('PERSISTENCE_CONFLICT');
+        if (this.finalizationWaitsForAnalysis)
+          await this.analyses.get(run.id)?.promise.catch(() => undefined);
         await repository.releaseCleanupLease(run.id);
       },
     };
@@ -745,6 +756,48 @@ test('analysis failure after artifact checkpoint settles the durable run as fail
   ).toEqual({ status: 'failed', error_code: 'RESOURCE_MEMORY_PRESSURE' });
   expect(onUnexpectedFailure).not.toHaveBeenCalled();
   expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+});
+
+test('analysis ownership loss cancels work before finalization', async () => {
+  const initial = (await repository.findPackGraph(packId))!;
+  await repository.savePackGraph({
+    pack: { ...initial.pack, state: 'processing', updatedAt: now },
+    items: initial.items.map(item => {
+      const extracted = { ...item, state: 'extracted' as const };
+      delete extracted.retryStage;
+      return extracted;
+    }),
+    expectedRevision: initial.revision,
+  });
+  const worker = new DeferredAnalyzeWorker();
+  worker.finalizationWaitsForAnalysis = true;
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+  );
+  const analyze = new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).analyzePack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  await waitFor(
+    () =>
+      (
+        database
+          .prepare(
+            'SELECT published_artifact_json FROM pipeline_runs WHERE id = ?',
+          )
+          .get(run.id) as { readonly published_artifact_json?: string | null }
+      )?.published_artifact_json !== null,
+  );
+  worker.fences.get(run.id)!.reject(new DomainError('PERSISTENCE_CONFLICT'));
+  await expect(analyze).resolves.toBe(1);
+  await coordinator.waitForIdle();
+
+  expect(worker.cancellations).toContain(run.id);
 });
 
 test('analyze cancellation still reports a publication finalization failure', async () => {

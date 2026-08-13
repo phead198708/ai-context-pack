@@ -3,11 +3,7 @@ package com.aicontextpack.nativebridge
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.ImageDecoder
-import android.graphics.Movie
-import android.graphics.drawable.AnimatedImageDrawable
 import android.media.ExifInterface
-import android.os.Build
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
@@ -221,8 +217,13 @@ internal object ImageHashSnapshotStore {
   }
 }
 
-internal class ImmutableImageSnapshot private constructor(val file: File) : Closeable {
-  override fun close() { file.delete() }
+internal class ImmutableImageSnapshot internal constructor(
+  val file: File,
+  private val remove: (File) -> Boolean = { candidate -> candidate.delete() },
+) : Closeable {
+  override fun close() {
+    if (file.exists() && !remove(file)) throw NativeException("RESOURCE_MEMORY_PRESSURE")
+  }
 
   companion object {
     fun create(
@@ -252,6 +253,7 @@ internal class ImmutableImageSnapshot private constructor(val file: File) : Clos
         throw NativeException("RESOURCE_MEMORY_PRESSURE")
       }
       var keep = false
+      var failure: NativeException? = null
       try {
         val stat = Os.fstat(sourceFd)
         if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_size != expectedByteCount) {
@@ -292,12 +294,19 @@ internal class ImmutableImageSnapshot private constructor(val file: File) : Clos
         keep = true
         return ImmutableImageSnapshot(snapshot)
       } catch (error: NativeException) {
+        failure = error
         throw error
       } catch (_: Exception) {
-        throw NativeException("ARTIFACT_INTEGRITY_FAILED")
+        val error = NativeException("ARTIFACT_INTEGRITY_FAILED")
+        failure = error
+        throw error
       } finally {
         Os.close(sourceFd)
-        if (!keep) snapshot.delete()
+        if (!keep && snapshot.exists() && !snapshot.delete()) {
+          val cleanupError = NativeException("RESOURCE_MEMORY_PRESSURE")
+          failure?.let { cleanupError.addSuppressed(it) }
+          throw cleanupError
+        }
       }
     }
   }
@@ -557,31 +566,19 @@ internal object ImagePerceptualHasher {
       ContainerFrameInspection.SINGLE -> return false
       ContainerFrameInspection.NOT_RECOGNIZED -> Unit
     }
-    if (runCatching { Movie.decodeFile(path)?.duration() ?: 0 }.getOrDefault(0) > 0) {
-      return true
-    }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-      val drawable = try {
-        ImageDecoder.decodeDrawable(ImageDecoder.createSource(java.io.File(path))) {
-          decoder, info, _ ->
-          decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-          decoder.setTargetSize(
-            maxOf(1, minOf(info.size.width, sampleWidth)),
-            maxOf(1, minOf(info.size.height, sampleHeight)),
-          )
-        }
-      } catch (_: Exception) {
-        null
+    when (
+      java.io.File(path).inputStream().buffered().use { input ->
+        inspectWebPFrames(input, sourceLength, cancellation)
       }
-      if (drawable is AnimatedImageDrawable) {
-        drawable.stop()
-        return true
-      }
+    ) {
+      ContainerFrameInspection.ANIMATED,
+      ContainerFrameInspection.INVALID,
+      -> return true
+      ContainerFrameInspection.SINGLE -> return false
+      ContainerFrameInspection.NOT_RECOGNIZED -> Unit
     }
-    val header = java.io.File(path).inputStream().use { input ->
-      ByteArray(32).also { bytes -> input.read(bytes) }
-    }
-    return isAnimatedWebPHeader(header)
+    cancellation.throwIfCancelled()
+    return false
   }
 
   internal fun isAnimatedWebPHeader(header: ByteArray): Boolean =
@@ -606,6 +603,18 @@ internal object ImagePerceptualHasher {
     ByteArrayInputStream(bytes).use { input ->
       inspectGifFrames(input, bytes.size.toLong(), ImageHashCancellationToken())
     }
+
+  internal fun inspectWebPFrames(bytes: ByteArray): ContainerFrameInspection =
+    ByteArrayInputStream(bytes).use { input ->
+      inspectWebPFrames(input, bytes.size.toLong(), ImageHashCancellationToken())
+    }
+
+  internal fun inspectWebPFrames(
+    bytes: ByteArray,
+    cancellation: ImageHashCancellationToken,
+  ): ContainerFrameInspection = ByteArrayInputStream(bytes).use { input ->
+    inspectWebPFrames(input, bytes.size.toLong(), cancellation)
+  }
 
   private fun inspectPngFrames(
     input: InputStream,
@@ -766,6 +775,69 @@ internal object ImagePerceptualHasher {
     }
   }
 
+  internal fun inspectWebPFrames(
+    input: InputStream,
+    maximumBytes: Long,
+    cancellation: ImageHashCancellationToken,
+  ): ContainerFrameInspection {
+    val reader = BoundedContainerReader(input, maximumBytes, cancellation)
+    val riff = reader.readBytes(4) ?: return ContainerFrameInspection.NOT_RECOGNIZED
+    if (String(riff, Charsets.US_ASCII) != "RIFF") {
+      return ContainerFrameInspection.NOT_RECOGNIZED
+    }
+    val declaredSize = reader.readUnsignedLittleEndianInt()
+      ?: return ContainerFrameInspection.INVALID
+    val webp = reader.readBytes(4) ?: return ContainerFrameInspection.INVALID
+    if (
+      String(webp, Charsets.US_ASCII) != "WEBP" ||
+      declaredSize < 4L ||
+      declaredSize + 8L != maximumBytes
+    ) {
+      return ContainerFrameInspection.INVALID
+    }
+    var imagePayloadCount = 0
+    var sawExtendedHeader = false
+    var sawAnimationSignal = false
+    while (reader.remainingBytes > 0L) {
+      if (reader.remainingBytes < 8L) return ContainerFrameInspection.INVALID
+      val type = reader.readBytes(4) ?: return ContainerFrameInspection.INVALID
+      val typeName = String(type, Charsets.US_ASCII)
+      val length = reader.readUnsignedLittleEndianInt()
+        ?: return ContainerFrameInspection.INVALID
+      val padding = length and 1L
+      if (length > reader.remainingBytes - padding) {
+        return ContainerFrameInspection.INVALID
+      }
+      val capture = if (typeName == "VP8X") ByteArray(1) else null
+      if (!reader.readPrefixAndSkip(length, capture)) {
+        return ContainerFrameInspection.INVALID
+      }
+      if (padding == 1L && reader.readByte() == null) {
+        return ContainerFrameInspection.INVALID
+      }
+      when (typeName) {
+        "VP8 ", "VP8L" -> {
+          imagePayloadCount += 1
+          if (imagePayloadCount > 1) return ContainerFrameInspection.INVALID
+        }
+        "VP8X" -> {
+          if (length != 10L || sawExtendedHeader || imagePayloadCount > 0) {
+            return ContainerFrameInspection.INVALID
+          }
+          sawExtendedHeader = true
+          sawAnimationSignal = (capture!![0].toInt() and 0x02) != 0
+        }
+        "ANIM", "ANMF" -> sawAnimationSignal = true
+      }
+    }
+    if (!reader.isAtExactEof()) return ContainerFrameInspection.INVALID
+    return when {
+      sawAnimationSignal -> ContainerFrameInspection.ANIMATED
+      imagePayloadCount == 1 -> ContainerFrameInspection.SINGLE
+      else -> ContainerFrameInspection.INVALID
+    }
+  }
+
   private fun skipGifSubBlocks(reader: BoundedContainerReader): Boolean {
     while (true) {
       val length = reader.readByte() ?: return false
@@ -836,6 +908,29 @@ private class BoundedContainerReader(
       ((bytes[1].toLong() and 0xffL) shl 16) or
       ((bytes[2].toLong() and 0xffL) shl 8) or
       (bytes[3].toLong() and 0xffL)
+  }
+
+  fun readUnsignedLittleEndianInt(): Long? {
+    val bytes = readBytes(4) ?: return null
+    return (bytes[0].toLong() and 0xffL) or
+      ((bytes[1].toLong() and 0xffL) shl 8) or
+      ((bytes[2].toLong() and 0xffL) shl 16) or
+      ((bytes[3].toLong() and 0xffL) shl 24)
+  }
+
+  fun readPrefixAndSkip(byteCount: Long, capture: ByteArray?): Boolean {
+    if (
+      byteCount < 0L ||
+      byteCount > remainingBytes ||
+      (capture != null && capture.size.toLong() > byteCount)
+    ) {
+      return false
+    }
+    if (capture != null) {
+      val prefix = readBytes(capture.size) ?: return false
+      prefix.copyInto(capture)
+    }
+    return skipExactly(byteCount - (capture?.size ?: 0))
   }
 
   fun readPayload(byteCount: Long, crc: CRC32, capture: ByteArray?): Boolean {

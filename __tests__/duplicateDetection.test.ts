@@ -839,6 +839,16 @@ describe('Issue #13 deterministic duplicate suggestions', () => {
     ).toEqual([[ITEM_IDS[0], ITEM_IDS[1], 'near-image']]);
   });
 
+  it('applies the text minimum to Unicode code points rather than UTF-16 units', () => {
+    const shortAstral = '😀'.repeat(10);
+    expect(
+      buildDuplicateSuggestionsV1([
+        analysis(0, shortAstral),
+        analysis(1, shortAstral),
+      ]),
+    ).toEqual([]);
+  });
+
   it('meets the accepted synthetic similar-text precision and recall threshold', () => {
     const positivePairs = [
       [

@@ -12,6 +12,23 @@ import org.junit.Test
 
 class ImagePerceptualHasherTest {
   @Test
+  fun snapshotCloseReportsDeletionFailure() {
+    val directory = kotlin.io.path.createTempDirectory("image-hash-close-test").toFile()
+    val snapshotFile = java.io.File(directory, "snapshot.tmp").apply {
+      writeText("synthetic")
+    }
+    try {
+      val error = assertThrows(NativeException::class.java) {
+        ImmutableImageSnapshot(snapshotFile) { false }.close()
+      }
+      assertEquals("RESOURCE_MEMORY_PRESSURE", error.code)
+      assertTrue(snapshotFile.exists())
+    } finally {
+      directory.deleteRecursively()
+    }
+  }
+
+  @Test
   fun differenceHashUsesCanonicalRowMajorBitOrder() {
     val descending = IntArray(9 * 8) { index -> 9 - index % 9 }
     assertEquals("ffffffffffffffff", ImagePerceptualHasher.differenceHash(descending))
@@ -120,6 +137,39 @@ class ImagePerceptualHasherTest {
     assertTrue(
       ImagePerceptualHasher.isAnimatedWebPHeader(values.getValue("animated-webp")),
     )
+    assertEquals(
+      ContainerFrameInspection.ANIMATED,
+      ImagePerceptualHasher.inspectWebPFrames(values.getValue("animated-webp")),
+    )
+  }
+
+  @Test
+  fun boundedWebPInspectionIsCooperativelyCancellable() {
+    val fixture = paddedStaticWebP(128 * 1_024)
+    val token = ImageHashCancellationToken()
+    val input = object : java.io.ByteArrayInputStream(fixture) {
+      override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val count = super.read(buffer, offset, minOf(length, 1_024))
+        if (pos > 8 * 1_024) token.cancel()
+        return count
+      }
+    }
+    assertThrows(NativeException::class.java) {
+      ImagePerceptualHasher.inspectWebPFrames(input, fixture.size.toLong(), token)
+    }
+  }
+
+  @Test
+  fun staticWebPRequiresOneImagePayloadAndExactEof() {
+    val fixture = paddedStaticWebP(128)
+    assertEquals(
+      ContainerFrameInspection.SINGLE,
+      ImagePerceptualHasher.inspectWebPFrames(fixture),
+    )
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectWebPFrames(fixture + byteArrayOf(0)),
+    )
   }
 
   @Test
@@ -163,6 +213,12 @@ class ImagePerceptualHasherTest {
       ContainerFrameInspection.INVALID,
       ImagePerceptualHasher.inspectGifFrames(
         values.getValue("animated-gif") + byteArrayOf(0),
+      ),
+    )
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectWebPFrames(
+        values.getValue("animated-webp") + byteArrayOf(0),
       ),
     )
     assertEquals(
@@ -263,6 +319,19 @@ class ImagePerceptualHasherTest {
       val (name, encoded) = line.split('\t', limit = 2)
       name to java.util.Base64.getDecoder().decode(encoded)
     }
+  }
+
+  private fun paddedStaticWebP(paddingBytes: Int): ByteArray {
+    fun littleEndian(value: Int) = byteArrayOf(
+      value.toByte(),
+      (value ushr 8).toByte(),
+      (value ushr 16).toByte(),
+      (value ushr 24).toByte(),
+    )
+    val junk = "JUNK".toByteArray() + littleEndian(paddingBytes) + ByteArray(paddingBytes)
+    val image = "VP8 ".toByteArray() + littleEndian(2) + byteArrayOf(0, 0)
+    val body = "WEBP".toByteArray() + junk + image
+    return "RIFF".toByteArray() + littleEndian(body.size) + body
   }
 
   private fun insertPrivatePngChunks(bytes: ByteArray, count: Int): ByteArray {

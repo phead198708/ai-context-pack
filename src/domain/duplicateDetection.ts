@@ -908,8 +908,10 @@ function duplicateCandidate(
   }
   if (
     reason === undefined &&
-    Math.min(left.normalizedCharacterCount, right.normalizedCharacterCount) >=
-      DUPLICATE_DETECTOR_CONFIG_V1.minimumTextCharacters
+    Math.min(
+      left.textFingerprint.similarityCharacterCount,
+      right.textFingerprint.similarityCharacterCount,
+    ) >= DUPLICATE_DETECTOR_CONFIG_V1.minimumTextCharacters
   ) {
     const similarity = normalizedTextSimilarityV1(
       left.textFingerprint,
