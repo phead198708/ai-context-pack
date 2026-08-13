@@ -53,6 +53,58 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
+  fun snapshotMetadataFailureCannotHideCleanupFailure() {
+    val directory = kotlin.io.path.createTempDirectory("image-hash-metadata-test").toFile()
+    val snapshotFile = java.io.File(
+      directory,
+      "${ImageHashSnapshotStore.currentProcessPrefix}metadata.tmp",
+    ).apply {
+      writeText("synthetic")
+    }
+    try {
+      val error = assertThrows(NativeException::class.java) {
+        ImmutableImageSnapshot(
+          snapshotFile,
+          remove = { false },
+          classify = { SnapshotPathState.UNVERIFIED },
+        ).close()
+      }
+      assertEquals("RESOURCE_MEMORY_PRESSURE", error.code)
+      assertTrue(snapshotFile.exists())
+      assertEquals(1, ImageHashSnapshotStore.retryCurrentProcessOrphans())
+      assertFalse(snapshotFile.exists())
+    } finally {
+      directory.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun snapshotMetadataExceptionCannotHideCleanupFailure() {
+    val directory = kotlin.io.path.createTempDirectory("image-hash-metadata-throw-test").toFile()
+    val snapshotFile = java.io.File(
+      directory,
+      "${ImageHashSnapshotStore.currentProcessPrefix}metadata-throw.tmp",
+    ).apply {
+      writeText("synthetic")
+    }
+    try {
+      val error = assertThrows(NativeException::class.java) {
+        ImmutableImageSnapshot(
+          snapshotFile,
+          classify = { throw SecurityException("synthetic") },
+          remove = { false },
+        ).close()
+      }
+      assertEquals("RESOURCE_MEMORY_PRESSURE", error.code)
+      assertTrue(snapshotFile.exists())
+      assertEquals(1, ImageHashSnapshotStore.retryCurrentProcessOrphans())
+      assertFalse(snapshotFile.exists())
+    } finally {
+      directory.deleteRecursively()
+    }
+  }
+
+  @Test
   fun differenceHashUsesCanonicalRowMajorBitOrder() {
     val descending = IntArray(9 * 8) { index -> 9 - index % 9 }
     assertEquals("ffffffffffffffff", ImagePerceptualHasher.differenceHash(descending))

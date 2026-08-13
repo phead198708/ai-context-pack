@@ -1179,6 +1179,18 @@ describe('production repository against SQLite', () => {
     database
       .prepare('UPDATE context_items SET inclusion_mode = ? WHERE id = ?')
       .run('excluded', secondItemId);
+    database
+      .prepare('INSERT INTO packs (id, created_at) VALUES (?, ?)')
+      .run(emptyPackId, createdAt);
+    database
+      .prepare('UPDATE duplicate_decisions SET pack_id = ? WHERE item_id = ?')
+      .run(emptyPackId, secondItemId);
+    await expect(repository.findPackGraph(packId)).rejects.toMatchObject({
+      code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
+    database
+      .prepare('UPDATE duplicate_decisions SET pack_id = ? WHERE item_id = ?')
+      .run(packId, secondItemId);
     await repository.replaceDuplicateAnalysis({
       manifest: {
         schemaVersion: 1,

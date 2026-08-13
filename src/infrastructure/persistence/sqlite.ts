@@ -2640,6 +2640,7 @@ interface ContextItemRow {
   readonly state: string;
   readonly retry_stage: string | null;
   readonly inclusion_mode: string;
+  readonly duplicate_decision_pack_id: string | null;
   readonly duplicate_decision_json: string | null;
   readonly sort_index: number;
 }
@@ -2738,10 +2739,11 @@ async function loadContextItems(
        item.original_display_name, item.original_sha256,
        item.original_relative_path, item.state, item.retry_stage,
        item.inclusion_mode, item.sort_index,
+       decision.pack_id AS duplicate_decision_pack_id,
        decision.payload_json AS duplicate_decision_json
      FROM context_items item
      LEFT JOIN duplicate_decisions decision
-       ON decision.item_id = item.id AND decision.pack_id = item.pack_id
+       ON decision.item_id = item.id
      WHERE item.pack_id = ? ORDER BY item.sort_index, item.id`,
     [packId],
   );
@@ -2784,6 +2786,7 @@ async function loadContextItems(
             isDuplicateDecisionV1,
           );
           if (
+            row.duplicate_decision_pack_id !== packId ||
             decision.packId !== packId ||
             decision.itemId !== item.id ||
             duplicateDecisionInclusionMode(decision) !== item.inclusionMode
@@ -2872,14 +2875,16 @@ async function replaceContextItems(
       original_sha256: string | null;
       original_relative_path: string | null;
       inclusion_mode: string;
+      duplicate_decision_pack_id: string | null;
       duplicate_decision_json: string | null;
     }>(
       `SELECT item.pack_id, item.source_type, item.media_type,
          item.original_sha256, item.original_relative_path, item.inclusion_mode,
+         decision.pack_id AS duplicate_decision_pack_id,
          decision.payload_json AS duplicate_decision_json
        FROM context_items item
        LEFT JOIN duplicate_decisions decision
-         ON decision.item_id = item.id AND decision.pack_id = item.pack_id
+         ON decision.item_id = item.id
        WHERE item.id = ?`,
       [item.id],
     );
@@ -2898,7 +2903,11 @@ async function replaceContextItems(
       const decision = decodePersisted(() =>
         decodeStoredJson(encodedDecision, isDuplicateDecisionV1),
       );
-      if (decision.packId !== packId || decision.itemId !== item.id)
+      if (
+        existingItem.duplicate_decision_pack_id !== packId ||
+        decision.packId !== packId ||
+        decision.itemId !== item.id
+      )
         throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
       const expectedInclusionMode = duplicateDecisionInclusionMode(decision);
       if (inclusionMode(existingItem.inclusion_mode) !== expectedInclusionMode)

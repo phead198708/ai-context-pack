@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
 import android.os.SystemClock
+import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import java.io.ByteArrayInputStream
@@ -200,12 +201,32 @@ internal object ImageHashSnapshotStore {
     val candidates = synchronized(this) { currentProcessOrphans.toList() }
     var removed = 0
     for (candidate in candidates) {
-      if (!candidate.exists() || candidate.delete()) {
+      if (deleteSnapshot(candidate)) {
         synchronized(this) { currentProcessOrphans.remove(candidate) }
         removed += 1
       }
     }
     return removed
+  }
+
+  internal fun deleteSnapshot(
+    candidate: File,
+    remove: (File) -> Boolean = { file -> file.delete() },
+    classify: (File) -> SnapshotPathState = ::classifySnapshotPath,
+  ): Boolean {
+    if (runCatching { remove(candidate) }.getOrDefault(false)) return true
+    return runCatching { classify(candidate) }
+      .getOrDefault(SnapshotPathState.UNVERIFIED) == SnapshotPathState.ABSENT
+  }
+
+  internal fun classifySnapshotPath(candidate: File): SnapshotPathState = try {
+    Os.lstat(candidate.path)
+    SnapshotPathState.PRESENT
+  } catch (error: ErrnoException) {
+    if (error.errno == OsConstants.ENOENT) SnapshotPathState.ABSENT
+    else SnapshotPathState.UNVERIFIED
+  } catch (_: Exception) {
+    SnapshotPathState.UNVERIFIED
   }
 
   internal fun purgeInherited(
@@ -243,10 +264,11 @@ internal object ImageHashSnapshotStore {
 
 internal class ImmutableImageSnapshot internal constructor(
   val file: File,
+  private val classify: (File) -> SnapshotPathState = ImageHashSnapshotStore::classifySnapshotPath,
   private val remove: (File) -> Boolean = { candidate -> candidate.delete() },
 ) : Closeable {
   override fun close() {
-    if (file.exists() && !remove(file)) {
+    if (!ImageHashSnapshotStore.deleteSnapshot(file, remove, classify)) {
       ImageHashSnapshotStore.registerCurrentProcessOrphan(file)
       throw NativeException("RESOURCE_MEMORY_PRESSURE")
     }
@@ -337,7 +359,7 @@ internal class ImmutableImageSnapshot internal constructor(
         throw error
       } finally {
         Os.close(sourceFd)
-        if (!keep && snapshot.exists() && !snapshot.delete()) {
+        if (!keep && !ImageHashSnapshotStore.deleteSnapshot(snapshot)) {
           ImageHashSnapshotStore.registerCurrentProcessOrphan(snapshot)
           val cleanupError = NativeException("RESOURCE_MEMORY_PRESSURE")
           failure?.let { cleanupError.addSuppressed(it) }
@@ -346,6 +368,12 @@ internal class ImmutableImageSnapshot internal constructor(
       }
     }
   }
+}
+
+internal enum class SnapshotPathState {
+  PRESENT,
+  ABSENT,
+  UNVERIFIED,
 }
 
 private fun isCanonicalImageHashTaskId(value: String): Boolean {
