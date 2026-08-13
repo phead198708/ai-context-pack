@@ -309,7 +309,14 @@ export class DurablePackProcessingCoordinator
             }
           } catch (checkpointError) {
             await cancelCheckpointWork();
-            await heartbeat.stop();
+            const heartbeatFailure = await heartbeat.stop();
+            if (
+              (heartbeatFailure !== undefined ||
+                processingErrorCode(checkpointError) ===
+                  'PERSISTENCE_CONFLICT') &&
+              (await this.isDurablyCancelled(repository, run.id))
+            )
+              return;
             await this.reportUnexpectedFailure(
               run,
               checkpointError,

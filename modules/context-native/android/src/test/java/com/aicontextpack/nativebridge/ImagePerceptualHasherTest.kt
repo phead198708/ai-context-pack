@@ -60,8 +60,16 @@ class ImagePerceptualHasherTest {
     assertTrue(bytecode.contains("BitmapRegionDecoder"))
     assertTrue(bytecode.contains("decodeRegion"))
     assertTrue(bytecode.contains("CancellableBoundedInputStream"))
+    assertTrue(bytecode.contains("inSampleSize"))
     assertTrue(ImagePerceptualHasher.maximumDecodeRegionPixels < ImagePerceptualHasher.maximumPixelCount)
     assertTrue(ImagePerceptualHasher.maximumFallbackDecodePixels < ImagePerceptualHasher.maximumPixelCount)
+  }
+
+  @Test
+  fun fallbackSamplingBoundsEveryAcceptedSourceSize() {
+    assertEquals(1, ImagePerceptualHasher.fallbackSampleSize(1_000, 1_000))
+    assertEquals(2, ImagePerceptualHasher.fallbackSampleSize(1_200, 1_000))
+    assertEquals(4, ImagePerceptualHasher.fallbackSampleSize(4_000, 4_000))
   }
 
   @Test

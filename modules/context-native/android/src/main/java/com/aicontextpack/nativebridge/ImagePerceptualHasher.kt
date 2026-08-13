@@ -410,6 +410,7 @@ internal object ImagePerceptualHasher {
     fullDecodeReadHook: ((Long) -> Unit)? = null,
     regionDecodedHook: (() -> Unit)? = null,
     maximumRegionPixels: Long = maximumDecodeRegionPixels,
+    forceFallbackDecode: Boolean = false,
   ): Map<String, Any> {
     val started = SystemClock.elapsedRealtimeNanos()
     cancellation.throwIfCancelled()
@@ -454,6 +455,7 @@ internal object ImagePerceptualHasher {
         fullDecodeReadHook,
         regionDecodedHook,
         maximumRegionPixels,
+        forceFallbackDecode,
       )
       sourceMutationHook?.invoke("decode-complete")
       cancellation.throwIfCancelled()
@@ -522,6 +524,7 @@ internal object ImagePerceptualHasher {
     readHook: ((Long) -> Unit)?,
     regionDecodedHook: (() -> Unit)?,
     maximumRegionPixels: Long,
+    forceFallbackDecode: Boolean,
   ): IntArray {
     require(maximumRegionPixels in 1..maximumPixelCount)
     val swapsAxes = orientation in setOf(
@@ -534,11 +537,9 @@ internal object ImagePerceptualHasher {
     val orientedHeight = if (swapsAxes) width else height
     val totals = LongArray(sampleWidth * sampleHeight)
     val counts = LongArray(sampleWidth * sampleHeight)
-    val decoder = tryCreateRegionDecoder(file, expectedByteCount, cancellation, readHook)
+    val decoder = if (forceFallbackDecode) null else
+      tryCreateRegionDecoder(file, expectedByteCount, cancellation, readHook)
     if (decoder == null) {
-      if (width.toLong() * height.toLong() > maximumFallbackDecodePixels) {
-        throw NativeException("RESOURCE_MEMORY_PRESSURE")
-      }
       return decodeAndSampleBoundedFallback(
         file,
         expectedByteCount,
@@ -644,18 +645,12 @@ internal object ImagePerceptualHasher {
     readHook: ((Long) -> Unit)?,
     decodedHook: (() -> Unit)?,
   ): IntArray {
-    val swapsAxes = orientation in setOf(
-      ExifInterface.ORIENTATION_TRANSPOSE,
-      ExifInterface.ORIENTATION_ROTATE_90,
-      ExifInterface.ORIENTATION_TRANSVERSE,
-      ExifInterface.ORIENTATION_ROTATE_270,
-    )
-    val orientedWidth = if (swapsAxes) height else width
-    val orientedHeight = if (swapsAxes) width else height
     val totals = LongArray(sampleWidth * sampleHeight)
     val counts = LongArray(sampleWidth * sampleHeight)
+    val fallbackSampleSize = fallbackSampleSize(width, height)
     val options = BitmapFactory.Options().apply {
-      inSampleSize = 1
+      inSampleSize = fallbackSampleSize
+      inScaled = false
       inPreferredConfig = Bitmap.Config.ARGB_8888
     }
     val bitmap = try {
@@ -678,18 +673,29 @@ internal object ImagePerceptualHasher {
     try {
       decodedHook?.invoke()
       cancellation.throwIfCancelled()
-      if (bitmap.width != width || bitmap.height != height) {
+      if (
+        bitmap.width <= 0 || bitmap.height <= 0 ||
+        bitmap.width.toLong() * bitmap.height.toLong() > maximumFallbackDecodePixels
+      ) {
         throw NativeException("PROCESSOR_OUTPUT_INVALID")
       }
+      val decodedSwapsAxes = orientation in setOf(
+        ExifInterface.ORIENTATION_TRANSPOSE,
+        ExifInterface.ORIENTATION_ROTATE_90,
+        ExifInterface.ORIENTATION_TRANSVERSE,
+        ExifInterface.ORIENTATION_ROTATE_270,
+      )
+      val decodedOrientedWidth = if (decodedSwapsAxes) bitmap.height else bitmap.width
+      val decodedOrientedHeight = if (decodedSwapsAxes) bitmap.width else bitmap.height
       accumulateRegion(
         bitmap,
         0,
         0,
-        width,
-        height,
+        bitmap.width,
+        bitmap.height,
         orientation,
-        orientedWidth,
-        orientedHeight,
+        decodedOrientedWidth,
+        decodedOrientedHeight,
         totals,
         counts,
         cancellation,
@@ -699,6 +705,21 @@ internal object ImagePerceptualHasher {
     }
     return averagedSamples(totals, counts)
   }
+
+  internal fun fallbackSampleSize(width: Int, height: Int): Int {
+    require(width > 0 && height > 0)
+    var sampleSize = 1
+    while (
+      ceilDiv(width, sampleSize).toLong() *
+        ceilDiv(height, sampleSize).toLong() > maximumFallbackDecodePixels
+    ) {
+      sampleSize = sampleSize shl 1
+    }
+    return sampleSize
+  }
+
+  private fun ceilDiv(value: Int, divisor: Int): Int =
+    ((value.toLong() + divisor - 1L) / divisor).toInt()
 
   private fun accumulateRegion(
     bitmap: Bitmap,

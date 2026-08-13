@@ -2,6 +2,10 @@ package com.aicontextpack.nativebridge
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -118,6 +122,51 @@ class ImagePerceptualHasherInstrumentedTest {
 
       assertEquals("000000a810000000", value["hash"] as String)
       org.junit.Assert.assertTrue(decodedRegions > 1)
+    }
+  }
+
+  @Test
+  fun largeImageFallbackRemainsWithinTheAcceptedPixelContract() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val file = File(context.cacheDir, "image-hash-large-fallback.png")
+    val bitmap = Bitmap.createBitmap(1_200, 1_000, Bitmap.Config.ARGB_8888)
+    try {
+      val canvas = Canvas(bitmap)
+      canvas.drawColor(Color.WHITE)
+      canvas.drawRect(600f, 0f, 1_200f, 1_000f, Paint().apply { color = Color.BLACK })
+      file.outputStream().use { output ->
+        org.junit.Assert.assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+      }
+    } finally {
+      bitmap.recycle()
+    }
+    try {
+      val digest = file.inputStream().use { input ->
+        MessageDigest.getInstance("SHA-256").digest(input.readBytes())
+          .joinToString("") { "%02x".format(it) }
+      }
+      var fallbackDecodes = 0
+
+      val regionValue = ImagePerceptualHasher.hash(
+        context,
+        file.toURI().toString(),
+        file.length(),
+        digest,
+      )
+      val fallbackValue = ImagePerceptualHasher.hash(
+        context,
+        file.toURI().toString(),
+        file.length(),
+        digest,
+        regionDecodedHook = { fallbackDecodes += 1 },
+        forceFallbackDecode = true,
+      )
+
+      assertEquals(regionValue["hash"], fallbackValue["hash"])
+      assertEquals(16, (fallbackValue["hash"] as String).length)
+      assertEquals(1, fallbackDecodes)
+    } finally {
+      file.delete()
     }
   }
 

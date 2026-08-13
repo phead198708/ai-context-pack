@@ -44,9 +44,10 @@ computing the 9×8 hash. iOS decodes one orientation-normalized source at a time
 (at most about 64 MiB of RGBA pixels). Android decodes fixed regions of at most
 one million pixels, checks cancellation between regions and rows, and never
 retains the complete decoded bitmap for region-decodable formats. Formats that
-require Android's whole-image fallback are capped at one million pixels and
-use bounded cancellable source reads. The v0.1 Pack item cap bounds pairwise
-candidate comparison.
+require Android's whole-image fallback are decoded with a power-of-two sample
+size that caps the retained bitmap at one million pixels while preserving the
+accepted 16-million-source-pixel contract, and use bounded cancellable source
+reads. The v0.1 Pack item cap bounds pairwise candidate comparison.
 
 ## Synthetic acceptance measurements
 
