@@ -270,6 +270,17 @@ describe('Issue #13 versioned content normalization', () => {
     ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
   });
 
+  it('fails closed before NFKC compatibility expansion exceeds the derived-text bound', async () => {
+    const source = '\uFDFA'.repeat(Math.floor(16_777_216 / 33) + 1);
+
+    expect(() => normalizeContentV1(source)).toThrow(
+      'RESOURCE_MEMORY_PRESSURE',
+    );
+    await expect(normalizeContentAsyncV1(source)).rejects.toMatchObject({
+      code: 'RESOURCE_MEMORY_PRESSURE',
+    });
+  });
+
   it('normalizes giant single-line prose cooperatively without changing its semantic kind', async () => {
     const giantLine = `Caf\u0065\u0301\u200B${'  synthetic prose'.repeat(
       8_192,
@@ -345,6 +356,30 @@ describe('Issue #13 versioned content normalization', () => {
     expect(async).toEqual(sync);
   });
 
+  it('classifies long code signals without treating chunk edges as line endings', async () => {
+    const signals = [
+      (position: number) => `${'A'.repeat(position)} => "a  b"`,
+      (position: number) => `${'A'.repeat(position)}::method("a  b")`,
+      (position: number) => `value${' '.repeat(position)}= "a  b"`,
+      (position: number) => `foo${' '.repeat(position)}("a  b")`,
+      (position: number) => `${'a'.repeat(position)}: TRUE`,
+      (position: number) => `${'a'.repeat(position)}; continuing  prose`,
+    ] as const;
+    for (const position of [
+      32 * 1_024 - 1,
+      32 * 1_024,
+      32 * 1_024 + 1,
+      64 * 1_024 - 1,
+      64 * 1_024,
+      64 * 1_024 + 1,
+    ]) {
+      for (const source of signals.map(signal => signal(position)))
+        expect(await normalizeContentAsyncV1(source)).toEqual(
+          normalizeContentV1(source),
+        );
+    }
+  });
+
   it('preserves indentation whose first token falls beyond the bounded prefix', async () => {
     const source = `${' '.repeat(32 * 1_024 + 257)}syntheticToken`;
     const sync = normalizeContentV1(source);
@@ -395,6 +430,22 @@ describe('Issue #13 versioned content normalization', () => {
     expect(
       (await normalizeContentAsyncV1(source)).text.endsWith('é synthetic'),
     ).toBe(true);
+  });
+
+  it('preserves halfwidth Japanese compatibility pairs across every segment boundary', async () => {
+    for (const [pair, expected] of [
+      ['\uFF76\uFF9E', '\u30AC'],
+      ['\uFF8A\uFF9F', '\u30D1'],
+    ] as const) {
+      for (const boundary of [32 * 1_024, 2 * 32 * 1_024]) {
+        const source = `${'a'.repeat(boundary - 1)}${pair} synthetic`;
+        const normalized = await normalizeContentAsyncV1(source);
+
+        expect(normalized).toEqual(normalizeContentV1(source));
+        expect(normalized.text).toContain(expected);
+        expect(normalized.text.normalize('NFKC')).toBe(normalized.text);
+      }
+    }
   });
 
   it('keeps wrapped-line chains linear and cancellable during incremental joining', async () => {
@@ -449,6 +500,22 @@ describe('Issue #13 versioned content normalization', () => {
 });
 
 describe('Issue #13 deterministic duplicate suggestions', () => {
+  it('persists the case-folded similarity length for Unicode expansions', async () => {
+    const normalized = normalizeContentV1('İstanbul');
+    const sync = fingerprintNormalizedTextV1(normalized);
+    const streamed = await fingerprintNormalizedTextAsyncV1(normalized);
+    const value = analysis(0, 'İstanbul');
+
+    expect(normalized.characterCount).toBe(8);
+    expect(sync).toMatchObject({
+      similarityCharacterCount: 9,
+      shingleCount: 5,
+    });
+    expect(streamed).toEqual(sync);
+    expect(value.textFingerprint).toEqual(sync);
+    expect(isDuplicateAnalysisItemV1(value)).toBe(true);
+  });
+
   it('streams large fingerprints with parity, cooperative yields, and cancellation', async () => {
     const normalized = normalizeContentV1(
       'Repeated synthetic context for bounded fingerprint work. '.repeat(4_096),

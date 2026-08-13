@@ -567,6 +567,7 @@ test('keeps a stranded durable choice visible after its suggestion group disappe
           algorithm: 'bottom-k-fnv1a32-5gram-v1',
           shingleSize: 5,
           sampleSize: 128,
+          similarityCharacterCount: 5,
           shingleCount: 1,
           hashes: ['12345678'],
         },
