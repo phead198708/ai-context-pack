@@ -38,11 +38,15 @@ No action deletes originals; decisions only update reversible inclusion modes.
 All processing is on-device and file-URI based. SQLite stores fingerprints,
 hashes, counts, versions, and internal IDs—not extracted text, image pixels,
 provider URIs, display names, or binary buffers. Native image decoding rejects
-files over 50 MiB or 16 million source pixels. The v1 hasher decodes one
-orientation-normalized source at a time (at most about 64 MiB of RGBA pixels)
-and uses integer box averages over identical source-coordinate partitions on
-both platforms before computing the 9×8 hash. The v0.1 Pack item cap bounds
-pairwise candidate comparison.
+files over 50 MiB or 16 million source pixels. The v1 hasher uses integer box
+averages over identical source-coordinate partitions on both platforms before
+computing the 9×8 hash. iOS decodes one orientation-normalized source at a time
+(at most about 64 MiB of RGBA pixels). Android decodes fixed regions of at most
+one million pixels, checks cancellation between regions and rows, and never
+retains the complete decoded bitmap for region-decodable formats. Formats that
+require Android's whole-image fallback are capped at one million pixels and
+use bounded cancellable source reads. The v0.1 Pack item cap bounds pairwise
+candidate comparison.
 
 ## Synthetic acceptance measurements
 

@@ -3,6 +3,8 @@ package com.aicontextpack.nativebridge
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Rect
 import android.media.ExifInterface
 import android.os.SystemClock
 import android.system.ErrnoException
@@ -395,6 +397,8 @@ internal object ImagePerceptualHasher {
   // v1 retains one bounded decoded bitmap plus one scanline. It never creates an
   // orientation copy or a full-image IntArray.
   const val maximumPixelCount = 16_000_000L
+  internal const val maximumDecodeRegionPixels = 1_000_000L
+  internal const val maximumFallbackDecodePixels = 1_000_000L
 
   fun hash(
     context: Context,
@@ -403,6 +407,9 @@ internal object ImagePerceptualHasher {
     expectedSha256: String,
     cancellation: ImageHashCancellationToken = ImageHashCancellationToken(),
     sourceMutationHook: ((String) -> Unit)? = null,
+    fullDecodeReadHook: ((Long) -> Unit)? = null,
+    regionDecodedHook: (() -> Unit)? = null,
+    maximumRegionPixels: Long = maximumDecodeRegionPixels,
   ): Map<String, Any> {
     val started = SystemClock.elapsedRealtimeNanos()
     cancellation.throwIfCancelled()
@@ -437,28 +444,17 @@ internal object ImagePerceptualHasher {
         throw NativeException("PROCESSOR_OUTPUT_INVALID")
       }
       if (pixelCount > maximumPixelCount) throw NativeException("RESOURCE_MEMORY_PRESSURE")
-      val decodeOptions = BitmapFactory.Options().apply {
-        inSampleSize = 1
-        inPreferredConfig = Bitmap.Config.ARGB_8888
-      }
-      cancellation.attachDecode(decodeOptions)
-      val decoded = try {
-        BitmapFactory.decodeFile(file.path, decodeOptions)
-          ?: throw NativeException(
-            if (Thread.currentThread().isInterrupted) "PIPELINE_STAGE_FAILED"
-            else "PROCESSOR_OUTPUT_INVALID",
-          )
-      } catch (_: OutOfMemoryError) {
-        throw NativeException("RESOURCE_MEMORY_PRESSURE")
-      } finally {
-        cancellation.detachDecode(decodeOptions)
-      }
-      val luminance = try {
-        cancellation.throwIfCancelled()
-        sampleLuminance(decoded, orientation, cancellation)
-      } finally {
-        decoded.recycle()
-      }
+      val luminance = decodeAndSampleRegions(
+        file,
+        expectedByteCount,
+        bounds.outWidth,
+        bounds.outHeight,
+        orientation,
+        cancellation,
+        fullDecodeReadHook,
+        regionDecodedHook,
+        maximumRegionPixels,
+      )
       sourceMutationHook?.invoke("decode-complete")
       cancellation.throwIfCancelled()
       mapOf(
@@ -516,13 +512,18 @@ internal object ImagePerceptualHasher {
     else -> Pair(x, y)
   }
 
-  private fun sampleLuminance(
-    bitmap: Bitmap,
+  private fun decodeAndSampleRegions(
+    file: File,
+    expectedByteCount: Long,
+    width: Int,
+    height: Int,
     orientation: Int,
     cancellation: ImageHashCancellationToken,
+    readHook: ((Long) -> Unit)?,
+    regionDecodedHook: (() -> Unit)?,
+    maximumRegionPixels: Long,
   ): IntArray {
-    val width = bitmap.width
-    val height = bitmap.height
+    require(maximumRegionPixels in 1..maximumPixelCount)
     val swapsAxes = orientation in setOf(
       ExifInterface.ORIENTATION_TRANSPOSE,
       ExifInterface.ORIENTATION_ROTATE_90,
@@ -531,14 +532,199 @@ internal object ImagePerceptualHasher {
     )
     val orientedWidth = if (swapsAxes) height else width
     val orientedHeight = if (swapsAxes) width else height
-    val rowPixels = IntArray(width)
     val totals = LongArray(sampleWidth * sampleHeight)
     val counts = LongArray(sampleWidth * sampleHeight)
-    for (y in 0 until height) {
+    val decoder = tryCreateRegionDecoder(file, expectedByteCount, cancellation, readHook)
+    if (decoder == null) {
+      if (width.toLong() * height.toLong() > maximumFallbackDecodePixels) {
+        throw NativeException("RESOURCE_MEMORY_PRESSURE")
+      }
+      return decodeAndSampleBoundedFallback(
+        file,
+        expectedByteCount,
+        width,
+        height,
+        orientation,
+        cancellation,
+        readHook,
+        regionDecodedHook,
+      )
+    }
+    try {
       cancellation.throwIfCancelled()
-      bitmap.getPixels(rowPixels, 0, width, 0, y, width, 1)
-      for (x in 0 until width) {
-        val (orientedX, orientedY) = orientedCoordinate(x, y, width, height, orientation)
+      if (decoder.width != width || decoder.height != height) {
+        throw NativeException("PROCESSOR_OUTPUT_INVALID")
+      }
+      val regionWidth = minOf(width.toLong(), maximumRegionPixels).toInt()
+      val regionHeight = maxOf(1, (maximumRegionPixels / regionWidth).toInt())
+      var top = 0
+      while (top < height) {
+        val bottom = minOf(height, top + regionHeight)
+        var left = 0
+        while (left < width) {
+          cancellation.throwIfCancelled()
+          val right = minOf(width, left + regionWidth)
+          val options = BitmapFactory.Options().apply {
+            inSampleSize = 1
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+          }
+          val bitmap = try {
+            decoder.decodeRegion(Rect(left, top, right, bottom), options)
+              ?: throw NativeException("PROCESSOR_OUTPUT_INVALID")
+          } catch (error: NativeException) {
+            throw error
+          } catch (_: OutOfMemoryError) {
+            throw NativeException("RESOURCE_MEMORY_PRESSURE")
+          } catch (_: Exception) {
+            cancellation.throwIfCancelled()
+            throw NativeException("PROCESSOR_OUTPUT_INVALID")
+          }
+          try {
+            regionDecodedHook?.invoke()
+            cancellation.throwIfCancelled()
+            accumulateRegion(
+              bitmap,
+              left,
+              top,
+              width,
+              height,
+              orientation,
+              orientedWidth,
+              orientedHeight,
+              totals,
+              counts,
+              cancellation,
+            )
+          } finally {
+            bitmap.recycle()
+          }
+          left = right
+        }
+        top = bottom
+      }
+    } finally {
+      decoder.recycle()
+    }
+    return averagedSamples(totals, counts)
+  }
+
+  private fun tryCreateRegionDecoder(
+    file: File,
+    expectedByteCount: Long,
+    cancellation: ImageHashCancellationToken,
+    readHook: ((Long) -> Unit)?,
+  ): BitmapRegionDecoder? = try {
+    file.inputStream().use { source ->
+      CancellableBoundedInputStream(
+        source,
+        expectedByteCount,
+        cancellation,
+        readHook,
+      ).use { input ->
+        @Suppress("DEPRECATION")
+        BitmapRegionDecoder.newInstance(input, false)
+      }
+    }
+  } catch (error: NativeException) {
+    throw error
+  } catch (_: OutOfMemoryError) {
+    throw NativeException("RESOURCE_MEMORY_PRESSURE")
+  } catch (_: Exception) {
+    cancellation.throwIfCancelled()
+    null
+  }
+
+  private fun decodeAndSampleBoundedFallback(
+    file: File,
+    expectedByteCount: Long,
+    width: Int,
+    height: Int,
+    orientation: Int,
+    cancellation: ImageHashCancellationToken,
+    readHook: ((Long) -> Unit)?,
+    decodedHook: (() -> Unit)?,
+  ): IntArray {
+    val swapsAxes = orientation in setOf(
+      ExifInterface.ORIENTATION_TRANSPOSE,
+      ExifInterface.ORIENTATION_ROTATE_90,
+      ExifInterface.ORIENTATION_TRANSVERSE,
+      ExifInterface.ORIENTATION_ROTATE_270,
+    )
+    val orientedWidth = if (swapsAxes) height else width
+    val orientedHeight = if (swapsAxes) width else height
+    val totals = LongArray(sampleWidth * sampleHeight)
+    val counts = LongArray(sampleWidth * sampleHeight)
+    val options = BitmapFactory.Options().apply {
+      inSampleSize = 1
+      inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val bitmap = try {
+      file.inputStream().use { source ->
+        CancellableBoundedInputStream(
+          source,
+          expectedByteCount,
+          cancellation,
+          readHook,
+        ).use { input -> BitmapFactory.decodeStream(input, null, options) }
+      } ?: throw NativeException("PROCESSOR_OUTPUT_INVALID")
+    } catch (error: NativeException) {
+      throw error
+    } catch (_: OutOfMemoryError) {
+      throw NativeException("RESOURCE_MEMORY_PRESSURE")
+    } catch (_: Exception) {
+      cancellation.throwIfCancelled()
+      throw NativeException("PROCESSOR_OUTPUT_INVALID")
+    }
+    try {
+      decodedHook?.invoke()
+      cancellation.throwIfCancelled()
+      if (bitmap.width != width || bitmap.height != height) {
+        throw NativeException("PROCESSOR_OUTPUT_INVALID")
+      }
+      accumulateRegion(
+        bitmap,
+        0,
+        0,
+        width,
+        height,
+        orientation,
+        orientedWidth,
+        orientedHeight,
+        totals,
+        counts,
+        cancellation,
+      )
+    } finally {
+      bitmap.recycle()
+    }
+    return averagedSamples(totals, counts)
+  }
+
+  private fun accumulateRegion(
+    bitmap: Bitmap,
+    left: Int,
+    top: Int,
+    sourceWidth: Int,
+    sourceHeight: Int,
+    orientation: Int,
+    orientedWidth: Int,
+    orientedHeight: Int,
+    totals: LongArray,
+    counts: LongArray,
+    cancellation: ImageHashCancellationToken,
+  ) {
+    val rowPixels = IntArray(bitmap.width)
+    for (localY in 0 until bitmap.height) {
+      cancellation.throwIfCancelled()
+      bitmap.getPixels(rowPixels, 0, bitmap.width, 0, localY, bitmap.width, 1)
+      for (localX in 0 until bitmap.width) {
+        val (orientedX, orientedY) = orientedCoordinate(
+          left + localX,
+          top + localY,
+          sourceWidth,
+          sourceHeight,
+          orientation,
+        )
         accumulateSample(
           totals,
           counts,
@@ -546,11 +732,10 @@ internal object ImagePerceptualHasher {
           orientedY,
           orientedWidth,
           orientedHeight,
-          luminanceOverWhite(rowPixels[x]),
+          luminanceOverWhite(rowPixels[localX]),
         )
       }
     }
-    return averagedSamples(totals, counts)
   }
 
   private fun accumulateSample(
@@ -1271,7 +1456,9 @@ internal class CancellableBoundedInputStream(
   source: InputStream,
   maximumBytes: Long,
   private val cancellation: ImageHashCancellationToken,
+  private val readHook: ((Long) -> Unit)? = null,
 ) : FilterInputStream(source) {
+  private val maximumReadBytes = 64 * 1_024
   private val skipBuffer = ByteArray(16 * 1_024)
   private var remaining = maximumBytes
 
@@ -1283,7 +1470,10 @@ internal class CancellableBoundedInputStream(
     cancellation.throwIfCancelled()
     if (remaining == 0L) return -1
     val value = super.read()
-    if (value >= 0) remaining -= 1
+    if (value >= 0) {
+      remaining -= 1
+      readHook?.invoke(1)
+    }
     return value
   }
 
@@ -1291,9 +1481,12 @@ internal class CancellableBoundedInputStream(
     if (length == 0) return 0
     cancellation.throwIfCancelled()
     if (remaining == 0L) return -1
-    val boundedLength = minOf(length.toLong(), remaining).toInt()
+    val boundedLength = minOf(length.toLong(), remaining, maximumReadBytes.toLong()).toInt()
     val count = super.read(target, offset, boundedLength)
-    if (count > 0) remaining -= count
+    if (count > 0) {
+      remaining -= count
+      readHook?.invoke(count.toLong())
+    }
     return count
   }
 

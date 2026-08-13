@@ -47,6 +47,24 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
+  fun fullBitmapDecodeDoesNotUseTheUncancellablePathApi() {
+    val classBytes = checkNotNull(
+      ImagePerceptualHasher::class.java.classLoader
+        ?.getResourceAsStream(
+          "com/aicontextpack/nativebridge/ImagePerceptualHasher.class",
+        ),
+    ).use { it.readBytes() }
+    val bytecode = classBytes.toString(Charsets.ISO_8859_1)
+
+    assertFalse(bytecode.contains("decodeFile"))
+    assertTrue(bytecode.contains("BitmapRegionDecoder"))
+    assertTrue(bytecode.contains("decodeRegion"))
+    assertTrue(bytecode.contains("CancellableBoundedInputStream"))
+    assertTrue(ImagePerceptualHasher.maximumDecodeRegionPixels < ImagePerceptualHasher.maximumPixelCount)
+    assertTrue(ImagePerceptualHasher.maximumFallbackDecodePixels < ImagePerceptualHasher.maximumPixelCount)
+  }
+
+  @Test
   fun snapshotCloseReportsDeletionFailure() {
     val directory = kotlin.io.path.createTempDirectory("image-hash-close-test").toFile()
     val snapshotFile = java.io.File(directory, "snapshot.tmp").apply {

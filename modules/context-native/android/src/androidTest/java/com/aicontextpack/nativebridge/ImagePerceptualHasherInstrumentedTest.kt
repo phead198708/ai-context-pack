@@ -64,6 +64,64 @@ class ImagePerceptualHasherInstrumentedTest {
   }
 
   @Test
+  fun fullBitmapDecodeObservesStreamCancellation() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val file = File(context.cacheDir, "image-hash-cancel.png")
+    val original = InstrumentationRegistry.getInstrumentation().context.assets
+      .open("ocr-english.png").use { it.readBytes() }
+    val bytes = insertStaticPngPadding(original, 512 * 1_024)
+    file.writeBytes(bytes)
+    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+      .joinToString("") { "%02x".format(it) }
+    val cancellation = ImageHashCancellationToken()
+    var observedDecodeBytes = 0L
+
+    val error = org.junit.Assert.assertThrows(NativeException::class.java) {
+      ImagePerceptualHasher.hash(
+        context,
+        file.toURI().toString(),
+        bytes.size.toLong(),
+        digest,
+        cancellation,
+        fullDecodeReadHook = { count ->
+          observedDecodeBytes += count
+        },
+        regionDecodedHook = { cancellation.cancel() },
+        maximumRegionPixels = 1_024,
+      )
+    }
+
+    assertEquals("PIPELINE_STAGE_FAILED", error.code)
+    org.junit.Assert.assertTrue(observedDecodeBytes > 0)
+  }
+
+  @Test
+  fun forcedRegionBoundariesPreserveTheCrossPlatformGolden() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    for (name in listOf("ocr-english.png", "ocr-rotated.jpg")) {
+      val file = File(context.cacheDir, "image-hash-region-$name")
+      val bytes = InstrumentationRegistry.getInstrumentation().context.assets
+        .open(name).use { it.readBytes() }
+      file.writeBytes(bytes)
+      val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+      var decodedRegions = 0
+
+      val value = ImagePerceptualHasher.hash(
+        context,
+        file.toURI().toString(),
+        bytes.size.toLong(),
+        digest,
+        regionDecodedHook = { decodedRegions += 1 },
+        maximumRegionPixels = 1_024,
+      )
+
+      assertEquals("000000a810000000", value["hash"] as String)
+      org.junit.Assert.assertTrue(decodedRegions > 1)
+    }
+  }
+
+  @Test
   fun sharedAnimatedFixturesFailTheSameSingleFramePolicy() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val lines = InstrumentationRegistry.getInstrumentation().context.assets
@@ -128,6 +186,16 @@ class ImagePerceptualHasherInstrumentedTest {
     return output.toByteArray()
   }
 
+  private fun insertStaticPngPadding(bytes: ByteArray, paddingBytes: Int): ByteArray {
+    val imageDataOffset = findPngChunk(bytes, "IDAT")
+    val padding = pngChunk("vpAg", ByteArray(paddingBytes))
+    val output = ByteArrayOutputStream(bytes.size + padding.size)
+    output.write(bytes, 0, imageDataOffset)
+    output.write(padding)
+    output.write(bytes, imageDataOffset, bytes.size - imageDataOffset)
+    return output.toByteArray()
+  }
+
   private fun findPngChunk(bytes: ByteArray, expectedType: String): Int {
     var offset = 8
     while (offset + 12 <= bytes.size) {
@@ -139,10 +207,19 @@ class ImagePerceptualHasherInstrumentedTest {
     throw AssertionError("missing PNG chunk")
   }
 
-  private fun pngChunk(typeName: String): ByteArray {
+  private fun pngChunk(typeName: String, payload: ByteArray = ByteArray(0)): ByteArray {
     val type = typeName.toByteArray(Charsets.US_ASCII)
-    val crc = CRC32().apply { update(type) }.value
-    return byteArrayOf(0, 0, 0, 0) + type + byteArrayOf(
+    val crc = CRC32().apply {
+      update(type)
+      update(payload)
+    }.value
+    val length = payload.size
+    return byteArrayOf(
+      (length ushr 24).toByte(),
+      (length ushr 16).toByte(),
+      (length ushr 8).toByte(),
+      length.toByte(),
+    ) + type + payload + byteArrayOf(
       (crc ushr 24).toByte(),
       (crc ushr 16).toByte(),
       (crc ushr 8).toByte(),
