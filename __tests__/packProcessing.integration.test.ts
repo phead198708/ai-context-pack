@@ -310,6 +310,7 @@ class DeferredAnalyzeWorker implements PackStageWorker {
     string,
     ReturnType<typeof deferred<DuplicateAnalysisItemV1>>
   >();
+  rejectFinalization = false;
 
   supports(stage: PersistedPipelineRun['stage']): boolean {
     return stage === 'analyze';
@@ -356,7 +357,11 @@ class DeferredAnalyzeWorker implements PackStageWorker {
       cancel: async () => {
         this.cancellations.push(run.id);
       },
-      finalize: async () => repository.releaseCleanupLease(run.id),
+      finalize: async () => {
+        if (this.rejectFinalization)
+          throw new DomainError('PERSISTENCE_CONFLICT');
+        await repository.releaseCleanupLease(run.id);
+      },
     };
   }
 
@@ -683,6 +688,66 @@ test('analyze cancellation after artifact checkpoint ignores a late fingerprint 
   );
   expect(onUnexpectedFailure).not.toHaveBeenCalled();
   expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+});
+
+test('analyze cancellation still reports a publication finalization failure', async () => {
+  const initial = (await repository.findPackGraph(packId))!;
+  await repository.savePackGraph({
+    pack: { ...initial.pack, state: 'processing', updatedAt: now },
+    items: initial.items.map(item => {
+      const extracted = { ...item, state: 'extracted' as const };
+      delete extracted.retryStage;
+      return extracted;
+    }),
+    expectedRevision: initial.revision,
+  });
+  const worker = new DeferredAnalyzeWorker();
+  worker.rejectFinalization = true;
+  const onUnexpectedFailure = jest.fn();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    undefined,
+    onUnexpectedFailure,
+  );
+  const controller = new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  );
+
+  const analyze = controller.analyzePack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  await waitFor(
+    () =>
+      (
+        database
+          .prepare(
+            'SELECT published_artifact_json FROM pipeline_runs WHERE id = ?',
+          )
+          .get(run.id) as { readonly published_artifact_json?: string | null }
+      )?.published_artifact_json !== null,
+  );
+  await controller.cancelProcessing(packId);
+  worker.analyses.get(run.id)!.resolve(worker.analysis(run));
+  await expect(analyze).resolves.toBe(1);
+
+  expect(onUnexpectedFailure).toHaveBeenCalledTimes(1);
+  expect(onUnexpectedFailure).toHaveBeenCalledWith({
+    runId: run.id,
+    code: 'PERSISTENCE_CONFLICT',
+  });
+  expect(await repository.listRecoveryDiagnostics()).toEqual([
+    expect.objectContaining({
+      id: run.id,
+      scope: 'pipeline',
+      anonymousId: run.id,
+      code: 'PERSISTENCE_CONFLICT',
+      phase: 'coordinator-execution',
+    }),
+  ]);
 });
 
 test('a replacement coordinator resumes a queued run after restart', async () => {
