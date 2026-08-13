@@ -528,6 +528,7 @@ enum ImagePerceptualHasher {
   // v1 decodes the bounded original once so both platforms sample identical
   // source coordinates. This limit caps the RGBA working set at about 64 MiB.
   static let maximumPixelCount = 16_000_000
+  static let maximumWholeImageFallbackPixelCount = 1_000_000
   static let sampleWidth = 9
   static let sampleHeight = 8
 
@@ -574,8 +575,9 @@ enum ImagePerceptualHasher {
         throw ImagePerceptualHashError.invalidImage
       }
       let pixelCount = width.int64Value.multipliedReportingOverflow(by: height.int64Value)
+      let typeIdentifier = CGImageSourceGetType(source) as String?
       guard !pixelCount.overflow, pixelCount.partialValue > 0,
-            pixelCount.partialValue <= Int64(maximumPixelCount) else {
+            pixelCount.partialValue <= Int64(maximumPixelCount(for: typeIdentifier)) else {
         throw ImagePerceptualHashError.resourceLimit
       }
       let thumbnailOptions: [CFString: Any] = [
@@ -624,6 +626,15 @@ enum ImagePerceptualHasher {
   }
 
   static func acceptsFrameCount(_ count: Int) -> Bool { count == 1 }
+
+  static func maximumPixelCount(for typeIdentifier: String?) -> Int {
+    switch typeIdentifier {
+    case "public.jpeg", "public.png", "org.webmproject.webp":
+      return maximumPixelCount
+    default:
+      return maximumWholeImageFallbackPixelCount
+    }
+  }
 
   static func sampleLuminance(
     image: CGImage,

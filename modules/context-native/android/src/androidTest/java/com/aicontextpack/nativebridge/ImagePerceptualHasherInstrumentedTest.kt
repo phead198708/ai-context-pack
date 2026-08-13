@@ -126,14 +126,18 @@ class ImagePerceptualHasherInstrumentedTest {
   }
 
   @Test
-  fun largeImageFallbackRemainsWithinTheAcceptedPixelContract() {
+  fun largeImageFallbackRejectsInsteadOfChangingSourcePixelAverages() {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val file = File(context.cacheDir, "image-hash-large-fallback.png")
     val bitmap = Bitmap.createBitmap(1_200, 1_000, Bitmap.Config.ARGB_8888)
     try {
       val canvas = Canvas(bitmap)
       canvas.drawColor(Color.WHITE)
-      canvas.drawRect(600f, 0f, 1_200f, 1_000f, Paint().apply { color = Color.BLACK })
+      val paint = Paint().apply { color = Color.BLACK }
+      for (x in 1 until 1_200 step 3) {
+        canvas.drawRect(x.toFloat(), 0f, (x + 1).toFloat(), 1_000f, paint)
+      }
+      canvas.drawRect(601f, 0f, 608f, 1_000f, paint)
       file.outputStream().use { output ->
         org.junit.Assert.assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
       }
@@ -145,26 +149,22 @@ class ImagePerceptualHasherInstrumentedTest {
         MessageDigest.getInstance("SHA-256").digest(input.readBytes())
           .joinToString("") { "%02x".format(it) }
       }
-      var fallbackDecodes = 0
-
-      val regionValue = ImagePerceptualHasher.hash(
+      ImagePerceptualHasher.hash(
         context,
         file.toURI().toString(),
         file.length(),
         digest,
       )
-      val fallbackValue = ImagePerceptualHasher.hash(
-        context,
-        file.toURI().toString(),
-        file.length(),
-        digest,
-        regionDecodedHook = { fallbackDecodes += 1 },
-        forceFallbackDecode = true,
-      )
-
-      assertEquals(regionValue["hash"], fallbackValue["hash"])
-      assertEquals(16, (fallbackValue["hash"] as String).length)
-      assertEquals(1, fallbackDecodes)
+      val error = org.junit.Assert.assertThrows(NativeException::class.java) {
+        ImagePerceptualHasher.hash(
+          context,
+          file.toURI().toString(),
+          file.length(),
+          digest,
+          forceFallbackDecode = true,
+        )
+      }
+      assertEquals("RESOURCE_MEMORY_PRESSURE", error.code)
     } finally {
       file.delete()
     }

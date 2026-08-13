@@ -58,6 +58,39 @@ final class ImagePerceptualHasherTests: XCTestCase {
     XCTAssertFalse(ImagePerceptualHasher.acceptsFrameCount(2))
   }
 
+  func testLargeImageContractMatchesAndroidRegionDecodeFormats() {
+    for type in ["public.jpeg", "public.png", "org.webmproject.webp"] {
+      XCTAssertEqual(
+        ImagePerceptualHasher.maximumPixelCount(for: type),
+        ImagePerceptualHasher.maximumPixelCount
+      )
+    }
+    for type in [
+      "com.compuserve.gif", "com.microsoft.bmp", "public.tiff",
+      "public.heic", "public.heif", "public.avif", nil,
+    ] as [String?] {
+      XCTAssertEqual(
+        ImagePerceptualHasher.maximumPixelCount(for: type),
+        ImagePerceptualHasher.maximumWholeImageFallbackPixelCount
+      )
+    }
+  }
+
+  func testFixtureTypeIdentifiersUseTheLargeRegionDecodeContract() throws {
+    for name in ["ocr-english.png", "ocr-rotated.jpg"] {
+      guard let source = CGImageSourceCreateWithURL(fixtureURL(name) as CFURL, nil) else {
+        XCTFail("fixture must open: \(name)")
+        continue
+      }
+      let typeIdentifier = CGImageSourceGetType(source) as String?
+      XCTAssertEqual(
+        ImagePerceptualHasher.maximumPixelCount(for: typeIdentifier),
+        ImagePerceptualHasher.maximumPixelCount,
+        "unexpected ImageIO type for \(name): \(typeIdentifier ?? "nil")"
+      )
+    }
+  }
+
   func testSnapshotCloseSurfacesDeletionFailureAndRetriesFromDeinit() throws {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(
       "image-hash-cleanup-\(UUID().uuidString).tmp"

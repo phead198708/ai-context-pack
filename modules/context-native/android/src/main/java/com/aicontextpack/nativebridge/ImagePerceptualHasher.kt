@@ -394,6 +394,7 @@ internal object ImagePerceptualHasher {
     "hvc1", "hev1", "av01", "jpeg", "j2k1", "j2k2", "grid", "iovl", "iden",
   )
   private val bmffPreludeBoxTypes = setOf("free", "skip", "wide", "uuid")
+  private val pngSignature = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
   // v1 retains one bounded decoded bitmap plus one scanline. It never creates an
   // orientation copy or a full-image IntArray.
   const val maximumPixelCount = 16_000_000L
@@ -445,6 +446,12 @@ internal object ImagePerceptualHasher {
         throw NativeException("PROCESSOR_OUTPUT_INVALID")
       }
       if (pixelCount > maximumPixelCount) throw NativeException("RESOURCE_MEMORY_PRESSURE")
+      if (
+        pixelCount > maximumFallbackDecodePixels &&
+        !supportsLargeRegionDecode(file, expectedByteCount, cancellation)
+      ) {
+        throw NativeException("RESOURCE_MEMORY_PRESSURE")
+      }
       val luminance = decodeAndSampleRegions(
         file,
         expectedByteCount,
@@ -540,6 +547,7 @@ internal object ImagePerceptualHasher {
     val decoder = if (forceFallbackDecode) null else
       tryCreateRegionDecoder(file, expectedByteCount, cancellation, readHook)
     if (decoder == null) {
+      validateFallbackPixelCount(width, height)
       return decodeAndSampleBoundedFallback(
         file,
         expectedByteCount,
@@ -647,9 +655,8 @@ internal object ImagePerceptualHasher {
   ): IntArray {
     val totals = LongArray(sampleWidth * sampleHeight)
     val counts = LongArray(sampleWidth * sampleHeight)
-    val fallbackSampleSize = fallbackSampleSize(width, height)
     val options = BitmapFactory.Options().apply {
-      inSampleSize = fallbackSampleSize
+      inSampleSize = 1
       inScaled = false
       inPreferredConfig = Bitmap.Config.ARGB_8888
     }
@@ -706,20 +713,46 @@ internal object ImagePerceptualHasher {
     return averagedSamples(totals, counts)
   }
 
-  internal fun fallbackSampleSize(width: Int, height: Int): Int {
+  internal fun validateFallbackPixelCount(width: Int, height: Int) {
     require(width > 0 && height > 0)
-    var sampleSize = 1
-    while (
-      ceilDiv(width, sampleSize).toLong() *
-        ceilDiv(height, sampleSize).toLong() > maximumFallbackDecodePixels
-    ) {
-      sampleSize = sampleSize shl 1
+    if (width.toLong() * height.toLong() > maximumFallbackDecodePixels) {
+      throw NativeException("RESOURCE_MEMORY_PRESSURE")
     }
-    return sampleSize
   }
 
-  private fun ceilDiv(value: Int, divisor: Int): Int =
-    ((value.toLong() + divisor - 1L) / divisor).toInt()
+  private fun supportsLargeRegionDecode(
+    file: File,
+    expectedByteCount: Long,
+    cancellation: ImageHashCancellationToken,
+  ): Boolean {
+    val header = ByteArray(12)
+    val count = file.inputStream().use { source ->
+      CancellableBoundedInputStream(source, expectedByteCount, cancellation).use { input ->
+        var offset = 0
+        while (offset < header.size) {
+          val read = input.read(header, offset, header.size - offset)
+          if (read < 0) break
+          offset += read
+        }
+        offset
+      }
+    }
+    cancellation.throwIfCancelled()
+    return (count >= 3 &&
+      header[0] == 0xff.toByte() &&
+      header[1] == 0xd8.toByte() &&
+      header[2] == 0xff.toByte()) ||
+      (count >= 8 && pngSignature.indices.all { header[it] == pngSignature[it] }) ||
+      (count >= 12 &&
+        header[0] == 'R'.code.toByte() &&
+        header[1] == 'I'.code.toByte() &&
+        header[2] == 'F'.code.toByte() &&
+        header[3] == 'F'.code.toByte() &&
+        header[8] == 'W'.code.toByte() &&
+        header[9] == 'E'.code.toByte() &&
+        header[10] == 'B'.code.toByte() &&
+        header[11] == 'P'.code.toByte())
+  }
 
   private fun accumulateRegion(
     bitmap: Bitmap,
@@ -1204,7 +1237,7 @@ internal object ImagePerceptualHasher {
   ): ContainerFrameInspection {
     val reader = BoundedContainerReader(input, maximumBytes, cancellation)
     val signature = reader.readBytes(8) ?: return ContainerFrameInspection.NOT_RECOGNIZED
-    if (!signature.contentEquals(byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10))) {
+    if (!signature.contentEquals(pngSignature)) {
       return ContainerFrameInspection.NOT_RECOGNIZED
     }
     var sawHeader = false
