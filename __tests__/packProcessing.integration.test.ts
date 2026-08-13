@@ -2415,6 +2415,64 @@ test('durable cancellation suppresses an in-flight heartbeat renewal failure', a
   }
 });
 
+test('item removal during pre-claim lookup suppresses conflict and retry', async () => {
+  const paused = {
+    supports: jest.fn(stage => stage === 'extract'),
+    launch: jest.fn(),
+    waitForIdle: jest.fn().mockResolvedValue(undefined),
+    cancel: jest.fn().mockResolvedValue(undefined),
+    recover: jest.fn().mockResolvedValue(undefined),
+  };
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    paused,
+  ).retryItem(packId, itemId);
+
+  const worker = new DeferredWorker();
+  const lookupStarted = deferred<void>();
+  const lookupRelease = deferred<void>();
+  const realFindPackGraph = repository.findPackGraph.bind(repository);
+  let lookupCount = 0;
+  jest.spyOn(repository, 'findPackGraph').mockImplementation(async pack => {
+    lookupCount += 1;
+    if (lookupCount === 1) {
+      lookupStarted.resolve();
+      await lookupRelease.promise;
+    }
+    return realFindPackGraph(pack);
+  });
+  const onUnexpectedFailure = jest.fn();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    undefined,
+    onUnexpectedFailure,
+  );
+  await coordinator.recover();
+  await lookupStarted.promise;
+  const current = (await realFindPackGraph(packId))!;
+  const removal = repository.savePackGraph({
+    pack: {
+      ...current.pack,
+      orderedItemIds: [],
+      updatedAt: '2026-08-11T00:00:01Z',
+    },
+    items: [],
+    expectedRevision: current.revision,
+    removedItemOriginalDisposition: 'preserve',
+  });
+  lookupRelease.resolve();
+  await removal;
+  await coordinator.waitForIdle();
+
+  expect(worker.starts).toEqual([]);
+  expect(onUnexpectedFailure).not.toHaveBeenCalled();
+  expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+  expect((await repository.findPackGraph(packId))?.items).toEqual([]);
+});
+
 test('a suspended expired claimant cannot checkpoint or settle a late worker success before its delayed timer runs', async () => {
   jest.useFakeTimers();
   try {

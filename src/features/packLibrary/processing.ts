@@ -181,6 +181,12 @@ export class DurablePackProcessingCoordinator
         handle = this.worker.start(claimedRun);
         heartbeat = this.startClaimHeartbeat(repository, claimedRun, claimAt);
       } catch (error) {
+        if (
+          repository &&
+          claimVersion === null &&
+          (await this.isDurablyCancelled(repository, run.id))
+        )
+          return;
         await this.reportUnexpectedFailure(
           run,
           error,

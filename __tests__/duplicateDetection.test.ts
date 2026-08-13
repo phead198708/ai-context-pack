@@ -237,6 +237,16 @@ describe('Issue #13 versioned content normalization', () => {
     ).toBe(false);
   });
 
+  it('preserves a non-BMP scalar across the bounded output chunk boundary', async () => {
+    const source = `${'a'.repeat(64 * 1_024 - 1)}😀  prose`;
+    const sync = normalizeContentV1(source);
+    const async = await normalizeContentAsyncV1(source);
+
+    expect(async).toEqual(sync);
+    expect(sync.text).toBe(`${'a'.repeat(64 * 1_024 - 1)}😀 prose`);
+    expect(sync.characterCount).toBe(64 * 1_024 + 7);
+  });
+
   it('normalizes maximum-size newline-dense text with bounded yields and cancellation', async () => {
     const maximumBytes = 16 * 1_024 * 1_024;
     const seed = 'synthetic newline-dense row\n';

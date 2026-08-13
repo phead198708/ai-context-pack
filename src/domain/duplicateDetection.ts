@@ -1186,15 +1186,7 @@ class IncrementalLineWriter {
       }
     }
     this.hasLine = true;
-    for (
-      let offset = 0;
-      offset < line.length;
-      offset += NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS
-    ) {
-      const chunk = line.slice(
-        offset,
-        offset + NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS,
-      );
+    for (const chunk of boundedOutputChunks(line)) {
       this.appendBounded(chunk);
       this.trailingNewlines = 0;
       await this.work.advance(chunk.length);
@@ -1224,14 +1216,7 @@ class SynchronousLineWriter {
       }
     }
     this.hasLine = true;
-    for (
-      let offset = 0;
-      offset < line.length;
-      offset += NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS
-    )
-      this.output.append(
-        line.slice(offset, offset + NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS),
-      );
+    for (const chunk of boundedOutputChunks(line)) this.output.append(chunk);
     if (line.length > 0) this.trailingNewlines = 0;
   }
 

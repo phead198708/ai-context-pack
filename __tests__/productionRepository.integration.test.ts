@@ -17,6 +17,7 @@ import {
   normalizeContentV1,
   type DuplicateAnalysisItemV1,
 } from '../src/domain/duplicateDetection';
+import { PackLibraryController } from '../src/features/packLibrary/controller';
 
 type SqlValue = string | number | null;
 interface NodeStatement {
@@ -61,6 +62,9 @@ const exportId = '723e4567-e89b-42d3-a456-426614174000';
 const emptyPackId = '823e4567-e89b-42d3-a456-426614174000';
 const appendedIngestionId = '923e4567-e89b-42d3-a456-426614174000';
 const appendedItemId = 'a23e4567-e89b-42d3-a456-426614174000';
+const thirdIngestionId = 'a33e4567-e89b-42d3-a456-426614174000';
+const thirdItemId = 'a43e4567-e89b-42d3-a456-426614174000';
+const thirdDerivedId = 'a53e4567-e89b-42d3-a456-426614174000';
 const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
 const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
 const cleanupMutationOwnerId = 'c33e4567-e89b-42d3-a456-426614174000';
@@ -1560,6 +1564,224 @@ describe('production repository against SQLite', () => {
       analyses: [],
       suggestions: [],
       decisions: [],
+    });
+  });
+
+  test('reconciles multi-generation source-less preferred history after restart', async () => {
+    await repository.commitImport({
+      packId,
+      manifest: {
+        schemaVersion: 1,
+        ingestionId: thirdIngestionId,
+        createdAt: '2026-08-05T00:00:01Z',
+        source: 'main-app-picker',
+        status: 'complete',
+        items: [
+          {
+            id: thirdItemId,
+            order: 0,
+            mediaType: 'text/plain',
+            status: 'copied',
+            byteCount: 12,
+            relativePath: `${thirdItemId}.bin`,
+            sha256: '3'.repeat(64),
+          },
+        ],
+      },
+      manifestFingerprint: '3'.repeat(64),
+      artifacts: [
+        {
+          id: thirdItemId,
+          itemId: thirdItemId,
+          relativePath: `Packs/${packId}/originals/${thirdItemId}.bin`,
+          mediaType: 'text/plain',
+          byteCount: 12,
+          sha256: '3'.repeat(64),
+        },
+      ],
+    });
+    const normalized = normalizeContentV1(
+      'Synthetic repeated context long enough for deterministic duplicate analysis.',
+    );
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-05T00:00:01Z',
+        '2026-08-05T00:01:01Z',
+      ),
+    ).resolves.toBe(true);
+    const artifactInputs = [
+      { id: derivedId, itemId: firstItemId, sha256: 'd'.repeat(64) },
+      { id: secondDerivedId, itemId: secondItemId, sha256: 'e'.repeat(64) },
+      { id: thirdDerivedId, itemId: thirdItemId, sha256: 'f'.repeat(64) },
+    ] as const;
+    for (const artifact of artifactInputs)
+      await repository.registerPublishedArtifact({
+        packId,
+        publicationLeaseOwnerId: exportId,
+        artifact: {
+          id: artifact.id,
+          itemId: artifact.itemId,
+          kind: 'normalized-text',
+          relativePath: ownedDerivedPath(packId, artifact.id, 'txt'),
+          mediaType: 'text/plain',
+          byteCount: normalized.utf8ByteCount,
+          sha256: artifact.sha256,
+          processorVersion: {
+            processor: 'shared-content-normalization',
+            version: 'text-normalization-v1',
+            contractVersion: 1,
+          },
+          createdAt: '2026-08-05T00:00:02Z',
+          immutable: true,
+        },
+      });
+    await repository.releaseCleanupLease(exportId);
+    const fingerprintSets = [
+      [...Array.from({ length: 46 }, (_, value) => value), 50, 51, 52, 53],
+      Array.from({ length: 50 }, (_, value) => value),
+      [...Array.from({ length: 46 }, (_, value) => value + 4), 54, 55, 56, 57],
+    ] as const;
+    const analyses: readonly DuplicateAnalysisItemV1[] = artifactInputs.map(
+      (artifact, index) => ({
+        schemaVersion: 1,
+        packId,
+        itemId: artifact.itemId,
+        originalSha256: ['a', 'b', '3'][index]!.repeat(64),
+        originalByteCount: [4, 8, 12][index]!,
+        normalizedArtifactId: artifact.id,
+        normalizedSha256: artifact.sha256,
+        normalizedByteCount: normalized.utf8ByteCount,
+        normalizedCharacterCount: normalized.characterCount,
+        contentKind: normalized.contentKind,
+        textFingerprint: {
+          schemaVersion: 1,
+          algorithm: 'bottom-k-fnv1a32-5gram-v1',
+          shingleSize: 5,
+          sampleSize: 128,
+          similarityCharacterCount: normalized.characterCount,
+          shingleCount: normalized.characterCount - 4,
+          hashes: fingerprintSets[index]!.map(value =>
+            value.toString(16).padStart(8, '0'),
+          ),
+        },
+        ...(index === 0
+          ? {
+              imageFingerprint: {
+                schemaVersion: 1 as const,
+                algorithm: 'dhash-64-v1' as const,
+                hash: '0123456789abcdef',
+                sampleWidth: 9 as const,
+                sampleHeight: 8 as const,
+                orientationApplied: true as const,
+                durationMs: 0,
+                revision: '1' as const,
+              },
+            }
+          : {}),
+        analyzedAt: `2026-08-05T00:00:0${index + 2}Z`,
+      }),
+    );
+    const chainSuggestions = buildDuplicateSuggestionsV1(analyses);
+    expect(
+      chainSuggestions.map(suggestion => [
+        suggestion.leftItemId,
+        suggestion.rightItemId,
+      ]),
+    ).toEqual([
+      [firstItemId, secondItemId],
+      [secondItemId, thirdItemId],
+    ]);
+    await repository.replaceDuplicateAnalysis({
+      manifest: {
+        schemaVersion: 1,
+        packId,
+        config: DUPLICATE_DETECTOR_CONFIG_V1,
+        analyzedAt: '2026-08-05T00:00:04Z',
+        itemCount: 3,
+        suggestionCount: chainSuggestions.length,
+      },
+      analyses,
+      suggestions: chainSuggestions,
+    });
+    const baseline = 'both' as const;
+    const legacy = [
+      {
+        schemaVersion: 1 as const,
+        packId,
+        itemId: firstItemId,
+        choice: 'preferred' as const,
+        baselineInclusionMode: baseline,
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+      {
+        schemaVersion: 1 as const,
+        packId,
+        itemId: secondItemId,
+        choice: 'exclude' as const,
+        baselineInclusionMode: baseline,
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+      {
+        schemaVersion: 1 as const,
+        packId,
+        itemId: thirdItemId,
+        choice: 'exclude' as const,
+        baselineInclusionMode: baseline,
+        decidedAt: '2026-08-05T00:00:05Z',
+      },
+    ];
+    for (const decision of legacy)
+      database
+        .prepare(
+          `INSERT INTO duplicate_decisions
+             (item_id, pack_id, payload_json, decided_at) VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          decision.itemId,
+          packId,
+          JSON.stringify(decision),
+          decision.decidedAt,
+        );
+    database.exec(
+      `UPDATE context_items SET inclusion_mode = 'excluded'
+       WHERE id IN ('${secondItemId}', '${thirdItemId}')`,
+    );
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-05T00:00:07Z',
+    );
+    await controller.reviewDuplicateGroup(
+      packId,
+      [firstItemId, secondItemId, thirdItemId],
+      { kind: 'preferred', itemId: firstItemId },
+    );
+
+    expect(
+      (await repository.findPackGraph(packId))?.items.map(item => ({
+        id: item.id,
+        inclusionMode: item.inclusionMode,
+      })),
+    ).toEqual([
+      { id: firstItemId, inclusionMode: 'both' },
+      { id: secondItemId, inclusionMode: 'excluded' },
+      { id: thirdItemId, inclusionMode: 'both' },
+    ]);
+    expect(await repository.findDuplicateAnalysis(packId)).toMatchObject({
+      decisions: expect.arrayContaining([
+        expect.objectContaining({
+          itemId: thirdItemId,
+          choice: 'keep',
+          source: 'preferred-group',
+        }),
+      ]),
     });
   });
 
