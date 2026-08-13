@@ -256,6 +256,40 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
+  fun bmffCompatibleBrandsUseConstantMemoryNearTheSourceLimit() {
+    val fileTypeSize = (ImagePerceptualHasher.maximumSourceBytes - 8L).toInt()
+    val header = byteArrayOf(
+      (fileTypeSize ushr 24).toByte(),
+      (fileTypeSize ushr 16).toByte(),
+      (fileTypeSize ushr 8).toByte(),
+      fileTypeSize.toByte(),
+    ) + "ftyp".toByteArray(Charsets.US_ASCII) +
+      "heic".toByteArray(Charsets.US_ASCII) + byteArrayOf(0, 0, 0, 0)
+    val input = object : java.io.InputStream() {
+      private var offset = 0L
+
+      override fun read(): Int {
+        if (offset >= fileTypeSize) return -1
+        val value = if (offset < header.size) {
+          header[offset.toInt()].toInt() and 0xff
+        } else {
+          val payloadOffset = offset - header.size
+          val brandIndex = payloadOffset / 4L
+          val shift = (3L - (payloadOffset % 4L)) * 8L
+          ((brandIndex ushr shift.toInt()) and 0xffL).toInt()
+        }
+        offset += 1
+        return value
+      }
+    }
+
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectBmffFrames(input, fileTypeSize.toLong(), ImageHashCancellationToken()),
+    )
+  }
+
+  @Test
   fun structurallyPaddedAnimationContainersCannotBypassLegacyLimits() {
     val values = animationFixtures()
     val paddedPng = insertPrivatePngChunks(

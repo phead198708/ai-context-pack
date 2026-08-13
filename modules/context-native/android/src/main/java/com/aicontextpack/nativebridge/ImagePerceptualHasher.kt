@@ -323,11 +323,13 @@ internal object ImagePerceptualHasher {
   const val sampleHeight = 8
   const val maximumSourceBytes = 52_428_800L
   private const val maximumBmffItems = 4_096
-  private val bmffImageBrands = setOf(
+  private val bmffImageBrandCodes = setOf(
     "mif1", "msf1", "heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs",
     "avif", "avis", "avio", "MA1A", "MA1B",
-  )
-  private val bmffSequenceBrands = setOf("msf1", "hevc", "hevx", "hevm", "hevs", "avis")
+  ).mapTo(mutableSetOf(), ::fourCcCode)
+  private val bmffSequenceBrandCodes =
+    setOf("msf1", "hevc", "hevx", "hevm", "hevs", "avis")
+      .mapTo(mutableSetOf(), ::fourCcCode)
   private val bmffImageItemTypes = setOf(
     "hvc1", "hev1", "av01", "jpeg", "j2k1", "j2k2", "grid", "iovl", "iden",
   )
@@ -674,19 +676,21 @@ internal object ImagePerceptualHasher {
     if ((fileType.endOffset - reader.consumedBytes) < 8L) {
       return ContainerFrameInspection.INVALID
     }
-    val brands = mutableSetOf<String>()
-    brands += String(reader.readBytes(4) ?: return ContainerFrameInspection.INVALID, Charsets.US_ASCII)
-    if (!reader.skipExactly(4L)) return ContainerFrameInspection.INVALID
-    while (reader.consumedBytes < fileType.endOffset) {
-      if (fileType.endOffset - reader.consumedBytes < 4L) {
-        return ContainerFrameInspection.INVALID
-      }
-      brands += String(reader.readBytes(4) ?: return ContainerFrameInspection.INVALID, Charsets.US_ASCII)
+    var sawImageBrand = false
+    var sawSequenceBrand = false
+    fun observeBrand(brand: Long) {
+      if (brand in bmffImageBrandCodes) sawImageBrand = true
+      if (brand in bmffSequenceBrandCodes) sawSequenceBrand = true
     }
-    if (brands.none { it in bmffImageBrands }) {
+    observeBrand(reader.readUnsignedInt() ?: return ContainerFrameInspection.INVALID)
+    if (!reader.skipExactly(4L)) return ContainerFrameInspection.INVALID
+    if (!reader.scanFourCcCodes(fileType.endOffset, ::observeBrand)) {
+      return ContainerFrameInspection.INVALID
+    }
+    if (!sawImageBrand) {
       return ContainerFrameInspection.NOT_RECOGNIZED
     }
-    if (brands.any { it in bmffSequenceBrands }) {
+    if (sawSequenceBrand) {
       return ContainerFrameInspection.ANIMATED
     }
 
@@ -1160,6 +1164,13 @@ internal enum class ContainerFrameInspection {
   INVALID,
 }
 
+private fun fourCcCode(value: String): Long {
+  require(value.length == 4)
+  return value.fold(0L) { result, character ->
+    (result shl 8) or character.code.toLong()
+  }
+}
+
 private class BoundedContainerReader(
   private val input: InputStream,
   private val maximumBytes: Long,
@@ -1200,6 +1211,34 @@ private class BoundedContainerReader(
       ((bytes[1].toLong() and 0xffL) shl 16) or
       ((bytes[2].toLong() and 0xffL) shl 8) or
       (bytes[3].toLong() and 0xffL)
+  }
+
+  fun scanFourCcCodes(endOffset: Long, observe: (Long) -> Unit): Boolean {
+    val byteCount = endOffset - consumedBytes
+    if (byteCount < 0L || byteCount > remainingBytes || byteCount % 4L != 0L) return false
+    var remaining = byteCount
+    while (remaining > 0L) {
+      cancellation.throwIfCancelled()
+      val chunkSize = minOf(remaining, transferBuffer.size.toLong()).toInt()
+      var chunkOffset = 0
+      while (chunkOffset < chunkSize) {
+        cancellation.throwIfCancelled()
+        val count = input.read(transferBuffer, chunkOffset, chunkSize - chunkOffset)
+        if (count <= 0) return false
+        chunkOffset += count
+        consumedBytes += count
+      }
+      for (offset in 0 until chunkSize step 4) {
+        observe(
+          ((transferBuffer[offset].toLong() and 0xffL) shl 24) or
+            ((transferBuffer[offset + 1].toLong() and 0xffL) shl 16) or
+            ((transferBuffer[offset + 2].toLong() and 0xffL) shl 8) or
+            (transferBuffer[offset + 3].toLong() and 0xffL),
+        )
+      }
+      remaining -= chunkSize
+    }
+    return true
   }
 
   fun readUnsignedShort(): Int? {
