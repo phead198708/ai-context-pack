@@ -206,6 +206,7 @@ export class DurablePackProcessingCoordinator
           const heartbeatFailure = await heartbeat.stop();
           if (heartbeatFailure !== undefined) {
             await Promise.allSettled([handle.cancel()]);
+            if (await this.isDurablyCancelled(repository, run.id)) return;
             await this.reportUnexpectedFailure(
               run,
               heartbeatFailure,

@@ -2364,6 +2364,57 @@ test('a lost heartbeat cancels native work and surfaces a durable diagnostic wit
   }
 });
 
+test('durable cancellation suppresses an in-flight heartbeat renewal failure', async () => {
+  jest.useFakeTimers();
+  try {
+    const worker = new DeferredWorker();
+    const renewalStarted = deferred<void>();
+    const renewalRelease = deferred<void>();
+    const realRenew = repository.renewPipelineRunClaim.bind(repository);
+    jest
+      .spyOn(repository, 'renewPipelineRunClaim')
+      .mockImplementation(async (...args) => {
+        renewalStarted.resolve();
+        await renewalRelease.promise;
+        return realRenew(...args);
+      });
+    const onUnexpectedFailure = jest.fn();
+    const coordinator = new DurablePackProcessingCoordinator(
+      async () => repository,
+      worker,
+      () => now,
+      30,
+      onUnexpectedFailure,
+      () => operationalMilliseconds,
+    );
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => now,
+      coordinator,
+    );
+    await controller.retryItem(packId, itemId);
+    await flushPromises();
+    expect(worker.starts).toHaveLength(1);
+    const run = worker.starts[0]!;
+
+    operationalMilliseconds = 10;
+    jest.advanceTimersByTime(10);
+    await renewalStarted.promise;
+    await controller.cancelProcessing(packId);
+    renewalRelease.resolve();
+    await coordinator.waitForIdle();
+
+    expect(worker.cancellations).toEqual([run.id, run.id]);
+    expect(onUnexpectedFailure).not.toHaveBeenCalled();
+    expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+    expect((await repository.findPackGraph(packId))?.pack.state).toBe(
+      'cancelled',
+    );
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test('a suspended expired claimant cannot checkpoint or settle a late worker success before its delayed timer runs', async () => {
   jest.useFakeTimers();
   try {
