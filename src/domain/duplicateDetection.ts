@@ -1056,14 +1056,21 @@ class ChunkedStringBuilder {
 
   append(value: string): void {
     if (value.length === 0) return;
-    const appendedBytes = utf8ByteCount(value);
+    for (const chunk of boundedOutputChunks(value))
+      this.appendWithUtf8ByteCount(chunk, utf8ByteCount(chunk));
+  }
+
+  appendWithUtf8ByteCount(value: string, appendedBytes: number): void {
+    if (value.length === 0) return;
     if (this.byteCount + appendedBytes > DERIVED_TEXT_MAXIMUM_UTF8_BYTES)
       throw new DomainError('RESOURCE_MEMORY_PRESSURE');
     this.byteCount += appendedBytes;
-    this.fragments.push(value);
-    this.fragmentLength += value.length;
-    if (this.fragmentLength >= NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS)
-      this.flush();
+    for (const chunk of boundedOutputChunks(value)) {
+      this.fragments.push(chunk);
+      this.fragmentLength += chunk.length;
+      if (this.fragmentLength >= NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS)
+        this.flush();
+    }
   }
 
   isEmpty(): boolean {
@@ -1101,8 +1108,15 @@ class ChunkedStringBuilder {
   }
 
   finish(): string {
+    return this.finishWithUtf8ByteCount().text;
+  }
+
+  finishWithUtf8ByteCount(): {
+    readonly text: string;
+    readonly utf8ByteCount: number;
+  } {
     this.flush();
-    return this.chunks.join('');
+    return { text: this.chunks.join(''), utf8ByteCount: this.byteCount };
   }
 
   private flush(): void {
@@ -1110,6 +1124,19 @@ class ChunkedStringBuilder {
     this.chunks.push(this.fragments.join(''));
     this.fragments.length = 0;
     this.fragmentLength = 0;
+  }
+}
+
+function* boundedOutputChunks(value: string): Generator<string> {
+  let start = 0;
+  while (start < value.length) {
+    let end = Math.min(
+      value.length,
+      start + NORMALIZATION_OUTPUT_CHUNK_CODE_UNITS,
+    );
+    if (end < value.length && isLowSurrogate(value.charCodeAt(end))) end -= 1;
+    yield value.slice(start, end);
+    start = end;
   }
 }
 
@@ -1126,11 +1153,12 @@ class IncrementalLineWriter {
   ) {}
 
   private appendBounded(value: string): void {
-    const nextBytes = this.outputUtf8Bytes + utf8ByteCount(value);
+    const appendedBytes = utf8ByteCount(value);
+    const nextBytes = this.outputUtf8Bytes + appendedBytes;
     if (nextBytes > this.maximumUtf8Bytes)
       throw new DomainError('RESOURCE_MEMORY_PRESSURE');
     this.outputUtf8Bytes = nextBytes;
-    this.output.append(value);
+    this.output.appendWithUtf8ByteCount(value, appendedBytes);
   }
 
   async writeLine(
@@ -1213,7 +1241,9 @@ class IncrementalProseNormalizer {
     await this.work.advance(line.length + 1);
     const normalized =
       line.length <= NORMALIZATION_SEGMENT_CODE_UNITS
-        ? normalizeSingleProseLine(line, firstSourceLine, this.warnings)
+        ? normalizedProseLine(
+            normalizeSingleProseLine(line, firstSourceLine, this.warnings),
+          )
         : await normalizeLongProseLineAsync(
             line,
             firstSourceLine,
@@ -1222,18 +1252,24 @@ class IncrementalProseNormalizer {
           );
     if (
       this.pending?.endsWith('-') &&
-      normalized.length > 0 &&
-      /^\p{Ll}/u.test(normalized)
+      normalized.text.length > 0 &&
+      /^\p{Ll}/u.test(normalized.text)
     ) {
       this.pending.removeLastCodeUnit();
-      this.pending.append(normalized);
+      this.pending.appendWithUtf8ByteCount(
+        normalized.text,
+        normalized.utf8ByteCount,
+      );
       this.warnings.add('WRAPPED_WORD_REJOINED');
       return;
     }
     if (this.pending !== undefined)
       await this.writer.writeLine(this.pending.finish(), true);
     this.pending = new ChunkedStringBuilder();
-    this.pending.append(normalized);
+    this.pending.appendWithUtf8ByteCount(
+      normalized.text,
+      normalized.utf8ByteCount,
+    );
   }
 
   async flush(): Promise<void> {
@@ -1299,7 +1335,7 @@ async function normalizeLongProseLineAsync(
   firstSourceLine: boolean,
   warnings: Set<ContentNormalizationWarningV1>,
   work: CooperativeTextWorkController,
-): Promise<string> {
+): Promise<NormalizedProseLine> {
   let prepared = line;
   if (firstSourceLine && prepared.startsWith('\uFEFF')) {
     prepared = prepared.slice(1);
@@ -1321,7 +1357,16 @@ async function normalizeLongProseLineAsync(
   }
   if (!pendingTrailingWhitespace.isEmpty())
     warnings.add('PROSE_WHITESPACE_NORMALIZED');
-  return output.finish();
+  return output.finishWithUtf8ByteCount();
+}
+
+interface NormalizedProseLine {
+  readonly text: string;
+  readonly utf8ByteCount: number;
+}
+
+function normalizedProseLine(text: string): NormalizedProseLine {
+  return { text, utf8ByteCount: utf8ByteCount(text) };
 }
 
 function normalizeProseSegment(
@@ -1389,7 +1434,10 @@ function* normalizationSafeSegments(value: string): Generator<string> {
 function isNormalizationBoundary(value: string, index: number): boolean {
   if (index <= 0 || index >= value.length) return true;
   const right = codePointStringAt(value, index);
-  if (/^\p{M}$/u.test(right)) return false;
+  // NFKD exposes compatibility characters such as halfwidth voiced marks as
+  // non-starters. A boundary before any such decomposition would discard the
+  // earlier canonical starter needed for composition after reordering.
+  if (/^\p{M}/u.test(right.normalize('NFKD'))) return false;
   const leftIndex = previousCodePointIndex(value, index);
   const leftCharacter = codePointStringAt(value, leftIndex);
   if (
@@ -1775,51 +1823,11 @@ async function isLongCallExpressionSignalLine(
   contentStart: number,
   work: CooperativeTextWorkController,
 ): Promise<boolean> {
-  let index = contentStart;
-  for (const prefix of ['await', 'return', 'yield', 'raise'] as const) {
-    if (
-      line.startsWith(prefix, index) &&
-      isWhitespaceCharacter(line[index + prefix.length] ?? '')
-    ) {
-      index = await skipLineCharacters(
-        line,
-        index + prefix.length,
-        isWhitespaceCharacter,
-        work,
-      );
-      break;
-    }
-  }
-  if (
-    line.startsWith('throw', index) &&
-    isWhitespaceCharacter(line[index + 'throw'.length] ?? '')
-  ) {
-    index = await skipLineCharacters(
-      line,
-      index + 'throw'.length,
-      isWhitespaceCharacter,
-      work,
-    );
-    if (
-      line.startsWith('new', index) &&
-      isWhitespaceCharacter(line[index + 'new'.length] ?? '')
-    )
-      index = await skipLineCharacters(
-        line,
-        index + 'new'.length,
-        isWhitespaceCharacter,
-        work,
-      );
-  } else if (
-    line.startsWith('new', index) &&
-    isWhitespaceCharacter(line[index + 'new'.length] ?? '')
-  )
-    index = await skipLineCharacters(
-      line,
-      index + 'new'.length,
-      isWhitespaceCharacter,
-      work,
-    );
+  let index = await callExpressionIdentifierStartAsync(
+    line,
+    contentStart,
+    work,
+  );
   if (!isIdentifierStartCharacter(line[index] ?? '')) return false;
   index = await skipLineCharacters(
     line,
@@ -1988,9 +1996,148 @@ async function isClosingFenceLineBounded(
 }
 
 function isCallExpressionSignalLine(line: string): boolean {
-  return /^\s*(?:(?:await|return|yield|raise)\s+|throw\s+(?:new\s+)?|new\s+)?[A-Za-z_$][\w$]*(?:(?:\.|\?\.)[A-Za-z_$][\w$]*)*\s*\(.*\)\s*;?\s*$/.test(
+  let index = skipLineCharactersSync(line, 0, isWhitespaceCharacter);
+  index = callExpressionIdentifierStartSync(line, index);
+  if (!isIdentifierStartCharacter(line[index] ?? '')) return false;
+  index = skipLineCharactersSync(line, index + 1, isIdentifierCharacter);
+  while (line[index] === '.' || line.startsWith('?.', index)) {
+    index += line[index] === '.' ? 1 : 2;
+    if (!isIdentifierStartCharacter(line[index] ?? '')) return false;
+    index = skipLineCharactersSync(line, index + 1, isIdentifierCharacter);
+  }
+  index = skipLineCharactersSync(line, index, isWhitespaceCharacter);
+  if (line[index] !== '(') return false;
+  const terminal = callExpressionTerminalIndexSync(line);
+  if (terminal <= index || line[terminal] !== ')') return false;
+  return !containsRegexLineTerminatorSync(line, index + 1, terminal);
+}
+
+interface CallExpressionPrefix {
+  readonly length: number;
+  readonly allowsNew: boolean;
+}
+
+function callExpressionPrefixAt(
+  line: string,
+  index: number,
+): CallExpressionPrefix | undefined {
+  for (const prefix of ['await', 'return', 'yield', 'throw'] as const)
+    if (
+      line.startsWith(prefix, index) &&
+      isWhitespaceCharacter(line[index + prefix.length] ?? '')
+    )
+      return { length: prefix.length, allowsNew: true };
+  for (const prefix of ['raise', 'new'] as const)
+    if (
+      line.startsWith(prefix, index) &&
+      isWhitespaceCharacter(line[index + prefix.length] ?? '')
+    )
+      return { length: prefix.length, allowsNew: false };
+  return undefined;
+}
+
+function callExpressionIdentifierStartSync(
+  line: string,
+  start: number,
+): number {
+  const prefix = callExpressionPrefixAt(line, start);
+  if (!prefix) return start;
+  let index = skipLineCharactersSync(
     line,
+    start + prefix.length,
+    isWhitespaceCharacter,
   );
+  if (
+    prefix.allowsNew &&
+    line.startsWith('new', index) &&
+    isWhitespaceCharacter(line[index + 'new'.length] ?? '')
+  )
+    index = skipLineCharactersSync(
+      line,
+      index + 'new'.length,
+      isWhitespaceCharacter,
+    );
+  return index;
+}
+
+async function callExpressionIdentifierStartAsync(
+  line: string,
+  start: number,
+  work: CooperativeTextWorkController,
+): Promise<number> {
+  const prefix = callExpressionPrefixAt(line, start);
+  if (!prefix) return start;
+  let index = await skipLineCharacters(
+    line,
+    start + prefix.length,
+    isWhitespaceCharacter,
+    work,
+  );
+  if (
+    prefix.allowsNew &&
+    line.startsWith('new', index) &&
+    isWhitespaceCharacter(line[index + 'new'.length] ?? '')
+  )
+    index = await skipLineCharacters(
+      line,
+      index + 'new'.length,
+      isWhitespaceCharacter,
+      work,
+    );
+  return index;
+}
+
+function callExpressionTerminalIndexSync(line: string): number {
+  let index = skipLineCharactersBackwardSync(
+    line,
+    line.length,
+    isWhitespaceCharacter,
+  );
+  if (line[index - 1] === ';')
+    index = skipLineCharactersBackwardSync(
+      line,
+      index - 1,
+      isWhitespaceCharacter,
+    );
+  return index - 1;
+}
+
+function containsRegexLineTerminatorSync(
+  line: string,
+  start: number,
+  end: number,
+): boolean {
+  for (let index = start; index < end; index += 1) {
+    const value = line.charCodeAt(index);
+    if (
+      value === 0x0a ||
+      value === 0x0d ||
+      value === 0x2028 ||
+      value === 0x2029
+    )
+      return true;
+  }
+  return false;
+}
+
+function skipLineCharactersSync(
+  line: string,
+  start: number,
+  predicate: (value: string) => boolean,
+): number {
+  let index = start;
+  while (index < line.length && predicate(line[index]!)) index += 1;
+  return index;
+}
+
+function skipLineCharactersBackwardSync(
+  line: string,
+  start: number,
+  predicate: (value: string) => boolean,
+): number {
+  let index = start;
+  while (index > 0 && predicate(line[index - 1]!)) index -= 1;
+  return index;
 }
 
 function isAssignmentSignalLine(line: string): boolean {

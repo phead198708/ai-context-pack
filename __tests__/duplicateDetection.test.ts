@@ -17,6 +17,7 @@ import {
   type DuplicateDecisionV1,
   type ImagePerceptualHashV1,
 } from '../src/domain/duplicateDetection';
+import * as mainAppImport from '../src/domain/mainAppImport';
 
 const { readFileSync } = jest.requireActual<{
   readonly readFileSync: (path: string, encoding: 'utf8') => string;
@@ -309,6 +310,36 @@ describe('Issue #13 versioned content normalization', () => {
     expect(yields).toBeGreaterThan(10);
   });
 
+  it('bounds synchronous byte scans and remains cancellable after maximum-line normalization starts', async () => {
+    const originalUtf8ByteCount = mainAppImport.utf8ByteCount;
+    const scanLengths: number[] = [];
+    const byteCountSpy = jest
+      .spyOn(mainAppImport, 'utf8ByteCount')
+      .mockImplementation(value => {
+        scanLengths.push(value.length);
+        return originalUtf8ByteCount(value);
+      });
+    let cancelled = false;
+    try {
+      const maximumLine = `ordinary ${'a'.repeat(16 * 1_024 * 1_024 - 9)}`;
+      await expect(
+        normalizeContentAsyncV1(maximumLine, {
+          yieldEveryCodeUnits: 64 * 1_024,
+          isCancelled: () => cancelled,
+          yieldControl: () => {
+            if (scanLengths.length > 0) cancelled = true;
+            return Promise.resolve();
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+    } finally {
+      byteCountSpy.mockRestore();
+    }
+
+    expect(scanLengths.length).toBeGreaterThan(0);
+    expect(Math.max(...scanLengths)).toBeLessThanOrEqual(64 * 1_024);
+  });
+
   it('checks cancellation while scanning a maximum-size line before classification', async () => {
     const source = ' '.repeat(16 * 1_024 * 1_024);
     let yields = 0;
@@ -380,6 +411,31 @@ describe('Issue #13 versioned content normalization', () => {
     }
   });
 
+  it('preserves chained call prefixes across long-line chunk boundaries', async () => {
+    for (const position of [16, 32 * 1_024, 64 * 1_024]) {
+      for (const prefix of ['return', 'await', 'yield', 'throw']) {
+        const source = `${prefix} new Foo("${'a'.repeat(position)}  value")`;
+        const sync = normalizeContentV1(source);
+        const async = await normalizeContentAsyncV1(source);
+
+        expect(sync).toMatchObject({ contentKind: 'code', text: source });
+        expect(async).toEqual(sync);
+      }
+      for (const prefix of ['return', 'await', 'yield', 'raise']) {
+        const source = `${prefix} throw Foo("${'a'.repeat(position)}  value")`;
+        const sync = normalizeContentV1(source);
+        const async = await normalizeContentAsyncV1(source);
+
+        expect(sync).toMatchObject({ contentKind: 'prose' });
+        expect(async).toEqual(sync);
+      }
+      const invalidRaiseNew = `raise new Foo("${'a'.repeat(position)}  value")`;
+      expect(await normalizeContentAsyncV1(invalidRaiseNew)).toEqual(
+        normalizeContentV1(invalidRaiseNew),
+      );
+    }
+  });
+
   it('preserves indentation whose first token falls beyond the bounded prefix', async () => {
     const source = `${' '.repeat(32 * 1_024 + 257)}syntheticToken`;
     const sync = normalizeContentV1(source);
@@ -439,6 +495,22 @@ describe('Issue #13 versioned content normalization', () => {
     ] as const) {
       for (const boundary of [32 * 1_024, 2 * 32 * 1_024]) {
         const source = `${'a'.repeat(boundary - 1)}${pair} synthetic`;
+        const normalized = await normalizeContentAsyncV1(source);
+
+        expect(normalized).toEqual(normalizeContentV1(source));
+        expect(normalized.text).toContain(expected);
+        expect(normalized.text.normalize('NFKC')).toBe(normalized.text);
+      }
+    }
+  });
+
+  it('retains the canonical starter for compatibility marks after a low-CCC mark', async () => {
+    for (const [suffix, expected] of [
+      ['\u30AB\u0334\uFF9E', '\u30AC\u0334'],
+      ['\u30CF\u0334\uFF9F', '\u30D1\u0334'],
+    ] as const) {
+      for (const boundary of [32 * 1_024, 64 * 1_024]) {
+        const source = `${'a'.repeat(boundary - 2)}${suffix} synthetic`;
         const normalized = await normalizeContentAsyncV1(source);
 
         expect(normalized).toEqual(normalizeContentV1(source));
