@@ -800,6 +800,142 @@ test('analysis ownership loss cancels work before finalization', async () => {
   expect(worker.cancellations).toContain(run.id);
 });
 
+test('analysis checkpoint ownership loss cancels work before finalization', async () => {
+  const initial = (await repository.findPackGraph(packId))!;
+  await repository.savePackGraph({
+    pack: { ...initial.pack, state: 'processing', updatedAt: now },
+    items: initial.items.map(item => {
+      const extracted = { ...item, state: 'extracted' as const };
+      delete extracted.retryStage;
+      return extracted;
+    }),
+    expectedRevision: initial.revision,
+  });
+  const worker = new DeferredAnalyzeWorker();
+  worker.finalizationWaitsForAnalysis = true;
+  const checkpoint = jest
+    .spyOn(repository, 'checkpointPipelineRunArtifact')
+    .mockResolvedValueOnce(false);
+  const onUnexpectedFailure = jest.fn();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    undefined,
+    onUnexpectedFailure,
+  );
+  const analyze = new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).analyzePack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+
+  await expect(analyze).resolves.toBe(1);
+  await coordinator.waitForIdle();
+
+  expect(checkpoint).toHaveBeenCalledWith(
+    expect.objectContaining({ runId: run.id, claimVersion: run.claimVersion }),
+  );
+  expect(worker.cancellations).toEqual([run.id]);
+  expect(onUnexpectedFailure).toHaveBeenCalledWith({
+    runId: run.id,
+    code: 'PERSISTENCE_CONFLICT',
+  });
+  expect(await repository.listRecoveryDiagnostics()).toEqual([
+    expect.objectContaining({
+      id: run.id,
+      scope: 'pipeline',
+      anonymousId: run.id,
+      code: 'PERSISTENCE_CONFLICT',
+      phase: 'coordinator-execution',
+    }),
+  ]);
+});
+
+test('analysis checkpoint fence loss cancels work before finalization', async () => {
+  const initial = (await repository.findPackGraph(packId))!;
+  await repository.savePackGraph({
+    pack: { ...initial.pack, state: 'processing', updatedAt: now },
+    items: initial.items.map(item => {
+      const extracted = { ...item, state: 'extracted' as const };
+      delete extracted.retryStage;
+      return extracted;
+    }),
+    expectedRevision: initial.revision,
+  });
+  const worker = new DeferredAnalyzeWorker();
+  worker.finalizationWaitsForAnalysis = true;
+  const checkpointPending = deferred<boolean>();
+  const checkpoint = jest
+    .spyOn(repository, 'checkpointPipelineRunArtifact')
+    .mockReturnValueOnce(checkpointPending.promise);
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+  );
+  const analyze = new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).analyzePack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  await waitFor(() => checkpoint.mock.calls.length === 1);
+
+  worker.fences.get(run.id)!.reject(new DomainError('PERSISTENCE_CONFLICT'));
+  await expect(analyze).resolves.toBe(1);
+  await coordinator.waitForIdle();
+
+  expect(worker.cancellations).toEqual([run.id]);
+});
+
+test('durable cancellation during analysis checkpoint cancels fingerprinting', async () => {
+  const initial = (await repository.findPackGraph(packId))!;
+  await repository.savePackGraph({
+    pack: { ...initial.pack, state: 'processing', updatedAt: now },
+    items: initial.items.map(item => {
+      const extracted = { ...item, state: 'extracted' as const };
+      delete extracted.retryStage;
+      return extracted;
+    }),
+    expectedRevision: initial.revision,
+  });
+  const worker = new DeferredAnalyzeWorker();
+  worker.finalizationWaitsForAnalysis = true;
+  const checkpointPending = deferred<boolean>();
+  const checkpoint = jest
+    .spyOn(repository, 'checkpointPipelineRunArtifact')
+    .mockReturnValueOnce(checkpointPending.promise);
+  const onUnexpectedFailure = jest.fn();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    undefined,
+    onUnexpectedFailure,
+  );
+  const analyze = new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  ).analyzePack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  await waitFor(() => checkpoint.mock.calls.length === 1);
+
+  await repository.cancelPipelineRuns(packId, now);
+  checkpointPending.resolve(false);
+  await expect(analyze).resolves.toBe(1);
+  await coordinator.waitForIdle();
+
+  expect(worker.cancellations).toEqual([run.id]);
+  expect(onUnexpectedFailure).not.toHaveBeenCalled();
+  expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+});
+
 test('analyze cancellation still reports a publication finalization failure', async () => {
   const initial = (await repository.findPackGraph(packId))!;
   await repository.savePackGraph({

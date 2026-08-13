@@ -2640,6 +2640,7 @@ interface ContextItemRow {
   readonly state: string;
   readonly retry_stage: string | null;
   readonly inclusion_mode: string;
+  readonly duplicate_decision_json: string | null;
   readonly sort_index: number;
 }
 
@@ -2733,10 +2734,15 @@ async function loadContextItems(
   packId: string,
 ): Promise<readonly ContextItem[]> {
   const rows = await connection.all<ContextItemRow>(
-    `SELECT id, pack_id, source_type, media_type, original_display_name,
-       original_sha256, original_relative_path, state, retry_stage,
-       inclusion_mode, sort_index
-     FROM context_items WHERE pack_id = ? ORDER BY sort_index, id`,
+    `SELECT item.id, item.pack_id, item.source_type, item.media_type,
+       item.original_display_name, item.original_sha256,
+       item.original_relative_path, item.state, item.retry_stage,
+       item.inclusion_mode, item.sort_index,
+       decision.payload_json AS duplicate_decision_json
+     FROM context_items item
+     LEFT JOIN duplicate_decisions decision
+       ON decision.item_id = item.id AND decision.pack_id = item.pack_id
+     WHERE item.pack_id = ? ORDER BY item.sort_index, item.id`,
     [packId],
   );
   const items: ContextItem[] = [];
@@ -2772,6 +2778,18 @@ async function loadContextItems(
     };
     items.push(
       decodePersisted(() => {
+        if (row.duplicate_decision_json !== null) {
+          const decision = decodeStoredJson(
+            row.duplicate_decision_json,
+            isDuplicateDecisionV1,
+          );
+          if (
+            decision.packId !== packId ||
+            decision.itemId !== item.id ||
+            duplicateDecisionInclusionMode(decision) !== item.inclusionMode
+          )
+            throw new DomainError('SCHEMA_INVALID');
+        }
         assertContextItem(item);
         if (item.sortIndex !== items.length)
           throw new DomainError('SCHEMA_INVALID');
@@ -2853,9 +2871,16 @@ async function replaceContextItems(
       media_type: string;
       original_sha256: string | null;
       original_relative_path: string | null;
+      inclusion_mode: string;
+      duplicate_decision_json: string | null;
     }>(
-      `SELECT pack_id, source_type, media_type, original_sha256, original_relative_path
-       FROM context_items WHERE id = ?`,
+      `SELECT item.pack_id, item.source_type, item.media_type,
+         item.original_sha256, item.original_relative_path, item.inclusion_mode,
+         decision.payload_json AS duplicate_decision_json
+       FROM context_items item
+       LEFT JOIN duplicate_decisions decision
+         ON decision.item_id = item.id AND decision.pack_id = item.pack_id
+       WHERE item.id = ?`,
       [item.id],
     );
     if (
@@ -2868,6 +2893,19 @@ async function replaceContextItems(
           item.originalRelativePath)
     )
       throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+    if (existingItem && existingItem.duplicate_decision_json !== null) {
+      const encodedDecision = existingItem.duplicate_decision_json;
+      const decision = decodePersisted(() =>
+        decodeStoredJson(encodedDecision, isDuplicateDecisionV1),
+      );
+      if (decision.packId !== packId || decision.itemId !== item.id)
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const expectedInclusionMode = duplicateDecisionInclusionMode(decision);
+      if (inclusionMode(existingItem.inclusion_mode) !== expectedInclusionMode)
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      if (item.inclusionMode !== expectedInclusionMode)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+    }
     await assertItemRelationships(transaction, item);
     await transaction.run(
       `INSERT INTO context_items
@@ -3938,6 +3976,14 @@ function inclusionMode(value: string): ContextItem['inclusionMode'] {
   )
     return value;
   throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+}
+
+function duplicateDecisionInclusionMode(
+  decision: DuplicateDecisionV1,
+): ContextItem['inclusionMode'] {
+  return decision.choice === 'exclude'
+    ? 'excluded'
+    : decision.baselineInclusionMode;
 }
 
 function riskCategory(value: string): RiskFinding['category'] {

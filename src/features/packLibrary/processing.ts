@@ -278,6 +278,14 @@ export class DurablePackProcessingCoordinator
           return;
         }
         if (artifact) {
+          let checkpointCancellation: Promise<void> | undefined;
+          const cancelCheckpointWork = (): Promise<void> => {
+            if (checkpointCancellation) return checkpointCancellation;
+            checkpointCancellation = Promise.allSettled([handle.cancel()]).then(
+              () => undefined,
+            );
+            return checkpointCancellation;
+          };
           try {
             heartbeat.assertOwned();
             if (!handle.publicationLeaseOwnerId)
@@ -295,10 +303,12 @@ export class DurablePackProcessingCoordinator
             ]);
             heartbeat.assertOwned();
             if (!checkpointed) {
+              await cancelCheckpointWork();
               if (await this.isDurablyCancelled(repository, run.id)) return;
               throw new DomainError('PERSISTENCE_CONFLICT');
             }
           } catch (checkpointError) {
+            await cancelCheckpointWork();
             await heartbeat.stop();
             await this.reportUnexpectedFailure(
               run,

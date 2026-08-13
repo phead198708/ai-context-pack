@@ -1152,6 +1152,33 @@ describe('production repository against SQLite', () => {
         decidedAt: '2026-08-05T00:00:04Z',
       },
     ]);
+    const decidedGraph = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.savePackGraph({
+        pack: decidedGraph.pack,
+        items: decidedGraph.items.map(item =>
+          item.id === secondItemId
+            ? { ...item, inclusionMode: 'both' as const }
+            : item,
+        ),
+        expectedRevision: decidedGraph.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+    const preservedGraph = await repository.findPackGraph(packId);
+    expect(preservedGraph?.revision).toBe(decidedGraph.revision);
+    expect(
+      preservedGraph?.items.find(item => item.id === secondItemId)
+        ?.inclusionMode,
+    ).toBe('excluded');
+    database
+      .prepare('UPDATE context_items SET inclusion_mode = ? WHERE id = ?')
+      .run('both', secondItemId);
+    await expect(repository.findPackGraph(packId)).rejects.toMatchObject({
+      code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
+    database
+      .prepare('UPDATE context_items SET inclusion_mode = ? WHERE id = ?')
+      .run('excluded', secondItemId);
     await repository.replaceDuplicateAnalysis({
       manifest: {
         schemaVersion: 1,

@@ -170,6 +170,7 @@ internal object ImageHashSnapshotStore {
   private const val suffix = ".tmp"
   internal val currentProcessPrefix =
     "$prefix${UUID.randomUUID().toString().replace("-", "")}-"
+  private val currentProcessOrphans = mutableSetOf<File>()
 
   fun prepare(context: Context): File {
     val directory = File(context.cacheDir, directoryName)
@@ -184,6 +185,27 @@ internal object ImageHashSnapshotStore {
   fun runStartupMaintenance(context: Context) {
     val directory = runCatching { prepare(context) }.getOrNull() ?: return
     purgeInherited(directory)
+    retryCurrentProcessOrphans()
+  }
+
+  @Synchronized
+  internal fun registerCurrentProcessOrphan(candidate: File) {
+    if (
+      candidate.name.startsWith(currentProcessPrefix) &&
+      candidate.name.endsWith(suffix)
+    ) currentProcessOrphans += candidate
+  }
+
+  internal fun retryCurrentProcessOrphans(): Int {
+    val candidates = synchronized(this) { currentProcessOrphans.toList() }
+    var removed = 0
+    for (candidate in candidates) {
+      if (!candidate.exists() || candidate.delete()) {
+        synchronized(this) { currentProcessOrphans.remove(candidate) }
+        removed += 1
+      }
+    }
+    return removed
   }
 
   internal fun purgeInherited(
@@ -209,7 +231,9 @@ internal object ImageHashSnapshotStore {
   }
 
   fun create(context: Context): File = try {
-    File.createTempFile(currentProcessPrefix, suffix, prepare(context))
+    val directory = prepare(context)
+    retryCurrentProcessOrphans()
+    File.createTempFile(currentProcessPrefix, suffix, directory)
   } catch (_: NativeException) {
     throw NativeException("RESOURCE_MEMORY_PRESSURE")
   } catch (_: Exception) {
@@ -222,7 +246,18 @@ internal class ImmutableImageSnapshot internal constructor(
   private val remove: (File) -> Boolean = { candidate -> candidate.delete() },
 ) : Closeable {
   override fun close() {
-    if (file.exists() && !remove(file)) throw NativeException("RESOURCE_MEMORY_PRESSURE")
+    if (file.exists() && !remove(file)) {
+      ImageHashSnapshotStore.registerCurrentProcessOrphan(file)
+      throw NativeException("RESOURCE_MEMORY_PRESSURE")
+    }
+  }
+
+  internal fun <ResultValue> useDeleting(body: (File) -> ResultValue): ResultValue {
+    val result = runCatching { body(file) }
+    // A cleanup error wins over a processing error so private snapshot
+    // retention cannot be hidden behind the original failure.
+    close()
+    return result.getOrThrow()
   }
 
   companion object {
@@ -303,6 +338,7 @@ internal class ImmutableImageSnapshot internal constructor(
       } finally {
         Os.close(sourceFd)
         if (!keep && snapshot.exists() && !snapshot.delete()) {
+          ImageHashSnapshotStore.registerCurrentProcessOrphan(snapshot)
           val cleanupError = NativeException("RESOURCE_MEMORY_PRESSURE")
           failure?.let { cleanupError.addSuppressed(it) }
           throw cleanupError
@@ -323,13 +359,6 @@ internal object ImagePerceptualHasher {
   const val sampleHeight = 8
   const val maximumSourceBytes = 52_428_800L
   private const val maximumBmffItems = 4_096
-  private val bmffImageBrandCodes = setOf(
-    "mif1", "msf1", "heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs",
-    "avif", "avis", "avio", "MA1A", "MA1B",
-  ).mapTo(mutableSetOf(), ::fourCcCode)
-  private val bmffSequenceBrandCodes =
-    setOf("msf1", "hevc", "hevx", "hevm", "hevs", "avis")
-      .mapTo(mutableSetOf(), ::fourCcCode)
   private val bmffImageItemTypes = setOf(
     "hvc1", "hev1", "av01", "jpeg", "j2k1", "j2k2", "grid", "iovl", "iden",
   )
@@ -349,14 +378,13 @@ internal object ImagePerceptualHasher {
     val started = SystemClock.elapsedRealtimeNanos()
     cancellation.throwIfCancelled()
     val source = controlledSandboxFile(context, fileUri)
-    ImmutableImageSnapshot.create(
+    return ImmutableImageSnapshot.create(
       context,
       source,
       expectedByteCount,
       expectedSha256,
       cancellation,
-    ).use { snapshot ->
-      val file = snapshot.file
+    ).useDeleting { file ->
       sourceMutationHook?.invoke("snapshot-ready")
       cancellation.throwIfCancelled()
       if (violatesSingleFramePolicy(file.path, cancellation)) {
@@ -394,7 +422,7 @@ internal object ImagePerceptualHasher {
       }
       sourceMutationHook?.invoke("decode-complete")
       cancellation.throwIfCancelled()
-      return mapOf(
+      mapOf(
         "schemaVersion" to 1,
         "algorithm" to "dhash-64-v1",
         "hash" to differenceHash(luminance),
@@ -676,21 +704,19 @@ internal object ImagePerceptualHasher {
     if ((fileType.endOffset - reader.consumedBytes) < 8L) {
       return ContainerFrameInspection.INVALID
     }
-    var sawImageBrand = false
-    var sawSequenceBrand = false
-    fun observeBrand(brand: Long) {
-      if (brand in bmffImageBrandCodes) sawImageBrand = true
-      if (brand in bmffSequenceBrandCodes) sawSequenceBrand = true
-    }
-    observeBrand(reader.readUnsignedInt() ?: return ContainerFrameInspection.INVALID)
+    var brandFlags = bmffBrandFlags(
+      reader.readUnsignedInt() ?: return ContainerFrameInspection.INVALID,
+    )
     if (!reader.skipExactly(4L)) return ContainerFrameInspection.INVALID
-    if (!reader.scanFourCcCodes(fileType.endOffset, ::observeBrand)) {
+    val compatibleBrandFlags = reader.scanBmffBrandFlags(fileType.endOffset)
+    if (compatibleBrandFlags < 0) {
       return ContainerFrameInspection.INVALID
     }
-    if (!sawImageBrand) {
+    brandFlags = brandFlags or compatibleBrandFlags
+    if (brandFlags and BMFF_IMAGE_BRAND_FLAG == 0) {
       return ContainerFrameInspection.NOT_RECOGNIZED
     }
-    if (sawSequenceBrand) {
+    if (brandFlags and BMFF_SEQUENCE_BRAND_FLAG != 0) {
       return ContainerFrameInspection.ANIMATED
     }
 
@@ -1164,11 +1190,28 @@ internal enum class ContainerFrameInspection {
   INVALID,
 }
 
-private fun fourCcCode(value: String): Long {
-  require(value.length == 4)
-  return value.fold(0L) { result, character ->
-    (result shl 8) or character.code.toLong()
-  }
+private const val BMFF_IMAGE_BRAND_FLAG = 1
+private const val BMFF_SEQUENCE_BRAND_FLAG = 2
+
+private fun bmffBrandFlags(value: Long): Int = when (value) {
+  0x6d696631L, // mif1
+  0x68656963L, // heic
+  0x68656978L, // heix
+  0x6865696dL, // heim
+  0x68656973L, // heis
+  0x61766966L, // avif
+  0x6176696fL, // avio
+  0x4d413141L, // MA1A
+  0x4d413142L, // MA1B
+  -> BMFF_IMAGE_BRAND_FLAG
+  0x6d736631L, // msf1
+  0x68657663L, // hevc
+  0x68657678L, // hevx
+  0x6865766dL, // hevm
+  0x68657673L, // hevs
+  0x61766973L, // avis
+  -> BMFF_IMAGE_BRAND_FLAG or BMFF_SEQUENCE_BRAND_FLAG
+  else -> 0
 }
 
 private class BoundedContainerReader(
@@ -1213,9 +1256,10 @@ private class BoundedContainerReader(
       (bytes[3].toLong() and 0xffL)
   }
 
-  fun scanFourCcCodes(endOffset: Long, observe: (Long) -> Unit): Boolean {
+  fun scanBmffBrandFlags(endOffset: Long): Int {
     val byteCount = endOffset - consumedBytes
-    if (byteCount < 0L || byteCount > remainingBytes || byteCount % 4L != 0L) return false
+    if (byteCount < 0L || byteCount > remainingBytes || byteCount % 4L != 0L) return -1
+    var flags = 0
     var remaining = byteCount
     while (remaining > 0L) {
       cancellation.throwIfCancelled()
@@ -1224,21 +1268,21 @@ private class BoundedContainerReader(
       while (chunkOffset < chunkSize) {
         cancellation.throwIfCancelled()
         val count = input.read(transferBuffer, chunkOffset, chunkSize - chunkOffset)
-        if (count <= 0) return false
+        if (count <= 0) return -1
         chunkOffset += count
         consumedBytes += count
       }
       for (offset in 0 until chunkSize step 4) {
-        observe(
+        val code =
           ((transferBuffer[offset].toLong() and 0xffL) shl 24) or
             ((transferBuffer[offset + 1].toLong() and 0xffL) shl 16) or
             ((transferBuffer[offset + 2].toLong() and 0xffL) shl 8) or
-            (transferBuffer[offset + 3].toLong() and 0xffL),
-        )
+            (transferBuffer[offset + 3].toLong() and 0xffL)
+        flags = flags or bmffBrandFlags(code)
       }
       remaining -= chunkSize
     }
-    return true
+    return flags
   }
 
   fun readUnsignedShort(): Int? {

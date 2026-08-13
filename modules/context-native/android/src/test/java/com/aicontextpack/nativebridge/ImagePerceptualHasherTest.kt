@@ -29,6 +29,30 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
+  fun snapshotDeletionFailureWinsOverProcessingFailure() {
+    val directory = kotlin.io.path.createTempDirectory("image-hash-scope-test").toFile()
+    val snapshotFile = java.io.File(
+      directory,
+      "${ImageHashSnapshotStore.currentProcessPrefix}scope.tmp",
+    ).apply {
+      writeText("synthetic")
+    }
+    try {
+      val error = assertThrows(NativeException::class.java) {
+        ImmutableImageSnapshot(snapshotFile) { false }.useDeleting {
+          throw NativeException("PROCESSOR_OUTPUT_INVALID")
+        }
+      }
+      assertEquals("RESOURCE_MEMORY_PRESSURE", error.code)
+      assertTrue(snapshotFile.exists())
+      assertEquals(1, ImageHashSnapshotStore.retryCurrentProcessOrphans())
+      assertFalse(snapshotFile.exists())
+    } finally {
+      directory.deleteRecursively()
+    }
+  }
+
+  @Test
   fun differenceHashUsesCanonicalRowMajorBitOrder() {
     val descending = IntArray(9 * 8) { index -> 9 - index % 9 }
     assertEquals("ffffffffffffffff", ImagePerceptualHasher.differenceHash(descending))
@@ -287,6 +311,20 @@ class ImagePerceptualHasherTest {
       ContainerFrameInspection.INVALID,
       ImagePerceptualHasher.inspectBmffFrames(input, fileTypeSize.toLong(), ImageHashCancellationToken()),
     )
+  }
+
+  @Test
+  fun bmffCompatibleBrandHotPathDoesNotBoxPrimitiveFourCcValues() {
+    val classBytes = checkNotNull(
+      ImagePerceptualHasher::class.java.classLoader
+        ?.getResourceAsStream(
+          "com/aicontextpack/nativebridge/BoundedContainerReader.class",
+        ),
+    ).use { it.readBytes() }
+    val bytecode = classBytes.toString(Charsets.ISO_8859_1)
+
+    assertFalse(bytecode.contains("kotlin/jvm/functions/Function1"))
+    assertFalse(bytecode.contains("java/lang/Long.valueOf"))
   }
 
   @Test
