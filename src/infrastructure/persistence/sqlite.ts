@@ -1329,6 +1329,15 @@ export class ExpoSqlitePersistenceRepository
     return result.changes;
   }
 
+  async pipelineRunIsCancelled(runId: string): Promise<boolean> {
+    requireCanonicalId(runId);
+    const row = await this.connection.first<{ status: string }>(
+      'SELECT status FROM pipeline_runs WHERE id = ?',
+      [runId],
+    );
+    return row?.status === 'cancelled';
+  }
+
   async deletePack(
     packId: string,
     expectedRevision: number,

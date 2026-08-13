@@ -276,6 +276,9 @@ class RuntimeRepository implements ProductionPersistenceRepository {
   async replaceDuplicateAnalysis() {}
 
   async saveDuplicateDecisions() {}
+  async pipelineRunIsCancelled() {
+    return false;
+  }
   async restoreDuplicateDecision() {}
 
   async recordRecoveryDiagnostic(input: RecoveryDiagnosticInput) {

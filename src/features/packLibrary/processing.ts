@@ -479,6 +479,14 @@ export class DurablePackProcessingCoordinator
     packCreatedAt: string,
     settleRun = true,
   ): Promise<void> {
+    if (repository) {
+      try {
+        if (await repository.pipelineRunIsCancelled(run.id)) return;
+      } catch {
+        // A failed status read is not proof of an expected cancellation; keep
+        // the original recovery failure visible and durably diagnosable.
+      }
+    }
     const code = processingErrorCode(error);
     const occurredAt = this.timestamp(packCreatedAt);
     if (settleRun && repository && claimVersion !== null) {

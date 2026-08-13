@@ -130,6 +130,8 @@ export interface DuplicateDecisionV1 {
   readonly choice: DuplicateDecisionChoiceV1;
   /** Restored by Keep/Preferred so duplicate review remains reversible. */
   readonly baselineInclusionMode: InclusionMode;
+  /** Preferred-group exclusions are reconciled together; standalone choices survive. */
+  readonly source?: 'standalone' | 'preferred-group';
   readonly decidedAt: string;
 }
 
@@ -830,16 +832,23 @@ export function isDuplicateAnalysisManifestV1(
 export function isDuplicateDecisionV1(
   value: unknown,
 ): value is DuplicateDecisionV1 {
+  const decisionKeys = [
+    'schemaVersion',
+    'packId',
+    'itemId',
+    'choice',
+    'baselineInclusionMode',
+    ...(value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    'source' in value
+      ? ['source']
+      : []),
+    'decidedAt',
+  ];
   return (
     isRecord(value) &&
-    exactKeys(value, [
-      'schemaVersion',
-      'packId',
-      'itemId',
-      'choice',
-      'baselineInclusionMode',
-      'decidedAt',
-    ]) &&
+    exactKeys(value, decisionKeys) &&
     value.schemaVersion === 1 &&
     typeof value.packId === 'string' &&
     isCanonicalUuid(value.packId) &&
@@ -849,6 +858,9 @@ export function isDuplicateDecisionV1(
       value.choice === 'exclude' ||
       value.choice === 'preferred') &&
     isInclusionMode(value.baselineInclusionMode) &&
+    (value.source === undefined ||
+      value.source === 'standalone' ||
+      value.source === 'preferred-group') &&
     typeof value.decidedAt === 'string' &&
     isIsoDateTime(value.decidedAt)
   );
@@ -1241,8 +1253,9 @@ class IncrementalProseNormalizer {
     await this.work.advance(line.length + 1);
     const normalized =
       line.length <= NORMALIZATION_SEGMENT_CODE_UNITS
-        ? normalizedProseLine(
+        ? await normalizedProseLineAsync(
             normalizeSingleProseLine(line, firstSourceLine, this.warnings),
+            this.work,
           )
         : await normalizeLongProseLineAsync(
             line,
@@ -1365,8 +1378,16 @@ interface NormalizedProseLine {
   readonly utf8ByteCount: number;
 }
 
-function normalizedProseLine(text: string): NormalizedProseLine {
-  return { text, utf8ByteCount: utf8ByteCount(text) };
+async function normalizedProseLineAsync(
+  text: string,
+  work: CooperativeTextWorkController,
+): Promise<NormalizedProseLine> {
+  let byteCount = 0;
+  for (const chunk of boundedOutputChunks(text)) {
+    byteCount += utf8ByteCount(chunk);
+    await work.advance(chunk.length);
+  }
+  return { text, utf8ByteCount: byteCount };
 }
 
 function normalizeProseSegment(

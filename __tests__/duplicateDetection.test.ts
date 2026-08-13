@@ -340,6 +340,34 @@ describe('Issue #13 versioned content normalization', () => {
     expect(Math.max(...scanLengths)).toBeLessThanOrEqual(64 * 1_024);
   });
 
+  it('bounds UTF-8 scans and observes cancellation after short-source compatibility expansion', async () => {
+    const originalUtf8ByteCount = mainAppImport.utf8ByteCount;
+    const scanLengths: number[] = [];
+    const byteCountSpy = jest
+      .spyOn(mainAppImport, 'utf8ByteCount')
+      .mockImplementation(value => {
+        scanLengths.push(value.length);
+        return originalUtf8ByteCount(value);
+      });
+    let cancelled = false;
+    try {
+      await expect(
+        normalizeContentAsyncV1('\uFDFA'.repeat(32 * 1_024), {
+          yieldEveryCodeUnits: 64 * 1_024,
+          isCancelled: () => cancelled,
+          yieldControl: () => {
+            if (scanLengths.length > 0) cancelled = true;
+            return Promise.resolve();
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'PIPELINE_STAGE_FAILED' });
+    } finally {
+      byteCountSpy.mockRestore();
+    }
+    expect(scanLengths.length).toBeGreaterThan(0);
+    expect(Math.max(...scanLengths)).toBeLessThanOrEqual(64 * 1_024);
+  });
+
   it('checks cancellation while scanning a maximum-size line before classification', async () => {
     const source = ' '.repeat(16 * 1_024 * 1_024);
     let yields = 0;

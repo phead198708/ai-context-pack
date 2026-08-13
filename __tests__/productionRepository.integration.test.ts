@@ -1206,6 +1206,76 @@ describe('production repository against SQLite', () => {
         .get(secondItemId),
     ).toEqual({ updated_at: '2026-08-05T00:00:05Z' });
 
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: firstItemId,
+        choice: 'preferred',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondItemId,
+        choice: 'exclude',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+    ]);
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: firstItemId,
+        choice: 'exclude',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:07Z',
+      },
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondItemId,
+        choice: 'preferred',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:07Z',
+      },
+    ]);
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+    expect(await repository.findDuplicateAnalysis(packId)).toMatchObject({
+      decisions: expect.arrayContaining([
+        expect.objectContaining({
+          itemId: firstItemId,
+          choice: 'exclude',
+          source: 'preferred-group',
+        }),
+        expect.objectContaining({
+          itemId: secondItemId,
+          choice: 'preferred',
+          source: 'preferred-group',
+        }),
+      ]),
+    });
+    expect(
+      (await repository.findPackGraph(packId))?.items.map(item => ({
+        id: item.id,
+        inclusionMode: item.inclusionMode,
+      })),
+    ).toEqual([
+      { id: firstItemId, inclusionMode: 'excluded' },
+      { id: secondItemId, inclusionMode: 'both' },
+    ]);
+
     database
       .prepare(
         'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',

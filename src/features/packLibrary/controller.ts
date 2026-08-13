@@ -334,6 +334,7 @@ export class PackLibraryController {
       const createDecision = (
         itemId: string,
         choice: DuplicateDecisionChoiceV1,
+        source: DuplicateDecisionV1['source'] = 'standalone',
       ): DuplicateDecisionV1 => {
         const item = itemById.get(itemId);
         if (!item) throw new DomainError('PERSISTENCE_CONFLICT');
@@ -344,6 +345,7 @@ export class PackLibraryController {
           choice,
           baselineInclusionMode:
             priorById.get(itemId)?.baselineInclusionMode ?? item.inclusionMode,
+          source,
           decidedAt,
         };
       };
@@ -358,22 +360,47 @@ export class PackLibraryController {
             })
           : [],
       );
+      const legacyPreferredDecisionTimes = new Set(
+        groupItemIds.flatMap(itemId => {
+          const prior = priorById.get(itemId);
+          return prior?.choice === 'preferred' && prior.source === undefined
+            ? [prior.decidedAt]
+            : [];
+        }),
+      );
+      const wasPreferredGroupDecision = (
+        decision: DuplicateDecisionV1 | undefined,
+      ): boolean =>
+        decision?.source === 'preferred-group' ||
+        (decision !== undefined &&
+          decision.source === undefined &&
+          legacyPreferredDecisionTimes.has(decision.decidedAt));
       const decisions =
         action.kind === 'keep-all'
           ? groupItemIds.map(itemId => createDecision(itemId, 'keep'))
           : action.kind === 'exclude'
           ? [createDecision(action.itemId, 'exclude')]
-          : groupItemIds
-              .filter(
-                itemId =>
-                  itemId === action.itemId || preferredCoverageIds.has(itemId),
-              )
-              .map(itemId =>
-                createDecision(
-                  itemId,
-                  itemId === action.itemId ? 'preferred' : 'exclude',
-                ),
-              );
+          : groupItemIds.flatMap(itemId => {
+              if (itemId === action.itemId)
+                return [createDecision(itemId, 'preferred', 'preferred-group')];
+              if (preferredCoverageIds.has(itemId)) {
+                const prior = priorById.get(itemId);
+                return [
+                  createDecision(
+                    itemId,
+                    'exclude',
+                    prior?.choice === 'exclude' &&
+                      !wasPreferredGroupDecision(prior)
+                      ? 'standalone'
+                      : 'preferred-group',
+                  ),
+                ];
+              }
+              const prior = priorById.get(itemId);
+              return wasPreferredGroupDecision(prior)
+                ? [createDecision(itemId, 'keep', 'preferred-group')]
+                : [];
+            });
       await repository.saveDuplicateDecisions(packId, decisions);
     });
   }

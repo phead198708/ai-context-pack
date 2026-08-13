@@ -303,6 +303,94 @@ class DeferredWorker implements PackStageWorker {
   }
 }
 
+class DeferredAnalyzeWorker implements PackStageWorker {
+  readonly starts: PersistedPipelineRun[] = [];
+  readonly cancellations: string[] = [];
+  readonly analyses = new Map<
+    string,
+    ReturnType<typeof deferred<DuplicateAnalysisItemV1>>
+  >();
+
+  supports(stage: PersistedPipelineRun['stage']): boolean {
+    return stage === 'analyze';
+  }
+
+  start(run: PersistedPipelineRun): PackStageWorkHandle {
+    this.starts.push(run);
+    const normalized = normalizeContentV1(
+      'Synthetic delayed analysis long enough for a stable fingerprint.',
+    );
+    const artifact: Artifact = {
+      id: run.id,
+      itemId: run.itemId,
+      kind: 'normalized-text',
+      relativePath: ownedDerivedPath(run.packId, run.id, 'txt'),
+      mediaType: 'text/plain',
+      byteCount: normalized.utf8ByteCount,
+      sha256: 'd'.repeat(64),
+      processorVersion: {
+        processor: 'shared-content-normalization',
+        version: 'text-normalization-v1',
+        contractVersion: 1,
+      },
+      createdAt: run.startedAt,
+      immutable: true,
+    };
+    const analysis = deferred<DuplicateAnalysisItemV1>();
+    this.analyses.set(run.id, analysis);
+    return {
+      result: repository
+        .acquireCleanupLeaseForPipelineRun(
+          run.id,
+          run.claimVersion,
+          run.id,
+          now,
+          '2026-08-11T00:10:00Z',
+        )
+        .then(acquired => {
+          if (!acquired) throw new DomainError('PERSISTENCE_CONFLICT');
+          return artifact;
+        }),
+      analysis: analysis.promise,
+      publicationLeaseOwnerId: run.id,
+      cancel: async () => {
+        this.cancellations.push(run.id);
+      },
+      finalize: async () => repository.releaseCleanupLease(run.id),
+    };
+  }
+
+  analysis(run: PersistedPipelineRun): DuplicateAnalysisItemV1 {
+    const normalized = normalizeContentV1(
+      'Synthetic delayed analysis long enough for a stable fingerprint.',
+    );
+    return {
+      schemaVersion: 1,
+      packId: run.packId,
+      itemId: run.itemId,
+      originalSha256: 'a'.repeat(64),
+      originalByteCount: 4,
+      normalizedArtifactId: run.id,
+      normalizedSha256: 'd'.repeat(64),
+      normalizedByteCount: normalized.utf8ByteCount,
+      normalizedCharacterCount: normalized.characterCount,
+      contentKind: normalized.contentKind,
+      textFingerprint: fingerprintNormalizedTextV1(normalized),
+      imageFingerprint: {
+        schemaVersion: 1,
+        algorithm: 'dhash-64-v1',
+        hash: '0123456789abcdef',
+        sampleWidth: 9,
+        sampleHeight: 8,
+        orientationApplied: true,
+        durationMs: 0,
+        revision: '1',
+      },
+      analyzedAt: run.startedAt,
+    };
+  }
+}
+
 let database: NodeDatabase;
 let repository: ExpoSqlitePersistenceRepository;
 
@@ -453,10 +541,13 @@ test('executes and atomically settles the exact durable retry run', async () => 
 
 test('cancellation rejects a late native success and keeps the durable checkpoint', async () => {
   const worker = new DeferredWorker();
+  const onUnexpectedFailure = jest.fn();
   const coordinator = new DurablePackProcessingCoordinator(
     async () => repository,
     worker,
     () => now,
+    undefined,
+    onUnexpectedFailure,
   );
   const controller = new PackLibraryController(
     async () => repository,
@@ -479,6 +570,8 @@ test('cancellation rejects a late native success and keeps the durable checkpoin
     }),
   );
   expect(await repository.listArtifactRecords()).toHaveLength(1);
+  expect(onUnexpectedFailure).not.toHaveBeenCalled();
+  expect(await repository.listRecoveryDiagnostics()).toEqual([]);
 });
 
 test('durable cancellation remains successful when the native cancel request fails', async () => {
@@ -511,10 +604,13 @@ test('durable cancellation remains successful when the native cancel request fai
 
 test('removing an item cancels its durable run and rejects a late native success', async () => {
   const worker = new DeferredWorker();
+  const onUnexpectedFailure = jest.fn();
   const coordinator = new DurablePackProcessingCoordinator(
     async () => repository,
     worker,
     () => now,
+    undefined,
+    onUnexpectedFailure,
   );
   const controller = new PackLibraryController(
     async () => repository,
@@ -534,6 +630,59 @@ test('removing an item cancels its durable run and rejects a late native success
   expect(await repository.listArtifactRecords()).toEqual([
     expect.objectContaining({ id: itemId, kind: 'original' }),
   ]);
+  expect(onUnexpectedFailure).not.toHaveBeenCalled();
+  expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+});
+
+test('analyze cancellation after artifact checkpoint ignores a late fingerprint result', async () => {
+  const initial = (await repository.findPackGraph(packId))!;
+  await repository.savePackGraph({
+    pack: { ...initial.pack, state: 'processing', updatedAt: now },
+    items: initial.items.map(item => {
+      const extracted = { ...item, state: 'extracted' as const };
+      delete extracted.retryStage;
+      return extracted;
+    }),
+    expectedRevision: initial.revision,
+  });
+  const worker = new DeferredAnalyzeWorker();
+  const onUnexpectedFailure = jest.fn();
+  const coordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    worker,
+    () => now,
+    undefined,
+    onUnexpectedFailure,
+  );
+  const controller = new PackLibraryController(
+    async () => repository,
+    () => now,
+    coordinator,
+  );
+
+  const analyze = controller.analyzePack(packId);
+  await waitFor(() => worker.starts.length === 1);
+  const run = worker.starts[0]!;
+  await waitFor(
+    () =>
+      (
+        database
+          .prepare(
+            'SELECT published_artifact_json FROM pipeline_runs WHERE id = ?',
+          )
+          .get(run.id) as { readonly published_artifact_json?: string | null }
+      )?.published_artifact_json !== null,
+  );
+  await controller.cancelProcessing(packId);
+  worker.analyses.get(run.id)!.resolve(worker.analysis(run));
+  await expect(analyze).resolves.toBe(1);
+
+  expect(worker.cancellations).toEqual([run.id]);
+  expect((await repository.findPackGraph(packId))?.pack.state).toBe(
+    'cancelled',
+  );
+  expect(onUnexpectedFailure).not.toHaveBeenCalled();
+  expect(await repository.listRecoveryDiagnostics()).toEqual([]);
 });
 
 test('a replacement coordinator resumes a queued run after restart', async () => {

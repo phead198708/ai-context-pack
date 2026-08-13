@@ -255,6 +255,8 @@ export interface ContextPackRepository {
   ): Promise<boolean>;
   completePipelineRun(input: CompletePipelineRunInput): Promise<boolean>;
   failPipelineRun(input: FailPipelineRunInput): Promise<boolean>;
+  /** True only after a durable user/owner cancellation settled this exact run. */
+  pipelineRunIsCancelled(runId: string): Promise<boolean>;
   cancelPipelineRuns(packId: string, updatedAt: string): Promise<number>;
 }
 

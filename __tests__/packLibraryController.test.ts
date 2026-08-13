@@ -500,6 +500,154 @@ test('preferred duplicate choice leaves non-adjacent members of a suggestion cha
     packId,
     expect.arrayContaining([expect.objectContaining({ itemId: thirdId })]),
   );
+
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: null,
+    analyses: [],
+    suggestions: [suggestion(firstId, secondId), suggestion(secondId, thirdId)],
+    decisions: [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondId,
+        choice: 'exclude',
+        baselineInclusionMode: 'original',
+        source: 'standalone',
+        decidedAt: '2026-08-10T00:00:05Z',
+      },
+    ],
+  });
+  (repo.value.saveDuplicateDecisions as jest.Mock).mockClear();
+  await controller.reviewDuplicateGroup(packId, [firstId, secondId, thirdId], {
+    kind: 'preferred',
+    itemId: firstId,
+  });
+  expect(repo.value.saveDuplicateDecisions).toHaveBeenCalledWith(
+    packId,
+    expect.arrayContaining([
+      expect.objectContaining({
+        itemId: secondId,
+        choice: 'exclude',
+        source: 'standalone',
+      }),
+    ]),
+  );
+});
+
+test('switching preferred restores stale group exclusions but preserves standalone exclusions', async () => {
+  const base = fixture();
+  const thirdItem: ContextItem = {
+    ...base.items[0]!,
+    id: thirdId,
+    originalSha256: '3'.repeat(64),
+    originalRelativePath: `Packs/${packId}/originals/${thirdId}.bin`,
+    artifactIds: [thirdId],
+    inclusionMode: 'excluded',
+    sortIndex: 2,
+  };
+  const repo = repository({
+    ...base,
+    pack: {
+      ...base.pack,
+      orderedItemIds: [...base.pack.orderedItemIds, thirdId],
+    },
+    items: [...base.items, thirdItem],
+  });
+  const suggestion = (leftItemId: string, rightItemId: string) => ({
+    schemaVersion: 1 as const,
+    key: `exact-binary:${leftItemId}:${rightItemId}`,
+    packId,
+    leftItemId,
+    rightItemId,
+    reason: 'exact-binary' as const,
+    confidence: 1,
+    expectedBytesSaved: 10,
+    expectedCharactersSaved: 0,
+  });
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: null,
+    analyses: [],
+    suggestions: [suggestion(firstId, secondId), suggestion(secondId, thirdId)],
+    decisions: [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: firstId,
+        choice: 'exclude',
+        baselineInclusionMode: 'original',
+        decidedAt: '2026-08-10T00:00:05Z',
+      },
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondId,
+        choice: 'preferred',
+        baselineInclusionMode: 'original',
+        decidedAt: '2026-08-10T00:00:05Z',
+      },
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: thirdId,
+        choice: 'exclude',
+        baselineInclusionMode: 'original',
+        decidedAt: '2026-08-10T00:00:05Z',
+      },
+    ],
+  });
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:06Z',
+  );
+
+  await controller.reviewDuplicateGroup(packId, [firstId, secondId, thirdId], {
+    kind: 'preferred',
+    itemId: firstId,
+  });
+
+  expect(repo.value.saveDuplicateDecisions).toHaveBeenCalledWith(packId, [
+    expect.objectContaining({
+      itemId: firstId,
+      choice: 'preferred',
+      source: 'preferred-group',
+    }),
+    expect.objectContaining({
+      itemId: secondId,
+      choice: 'exclude',
+      source: 'preferred-group',
+    }),
+    expect.objectContaining({
+      itemId: thirdId,
+      choice: 'keep',
+      source: 'preferred-group',
+    }),
+  ]);
+
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: null,
+    analyses: [],
+    suggestions: [suggestion(firstId, secondId), suggestion(secondId, thirdId)],
+    decisions: [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: thirdId,
+        choice: 'exclude',
+        baselineInclusionMode: 'original',
+        source: 'standalone',
+        decidedAt: '2026-08-10T00:00:05Z',
+      },
+    ],
+  });
+  (repo.value.saveDuplicateDecisions as jest.Mock).mockClear();
+  await controller.reviewDuplicateGroup(packId, [firstId, secondId, thirdId], {
+    kind: 'preferred',
+    itemId: firstId,
+  });
+  expect(repo.value.saveDuplicateDecisions).not.toHaveBeenCalledWith(
+    packId,
+    expect.arrayContaining([expect.objectContaining({ itemId: thirdId })]),
+  );
 });
 
 test('restores a durable duplicate choice without requiring a current suggestion group', async () => {

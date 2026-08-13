@@ -504,6 +504,26 @@ describe('App interactions', () => {
     expect(processingFailureUnsubscribe).toHaveBeenCalledTimes(1);
   });
 
+  test('does not surface the recovery alert when processing completes without an unexpected failure', async () => {
+    const renderer = await renderApp();
+
+    await act(async () => {
+      processingCompletionListener?.({
+        packId: ingestionId,
+        itemId: eventId,
+        stage: 'extract',
+        outcome: 'completed',
+      });
+      await flushWorkflow();
+    });
+
+    expect(renderedText(renderer)).not.toContain(
+      'Processing recovery unavailable',
+    );
+    expect(renderedText(renderer)).not.toContain('PERSISTENCE_CONFLICT');
+    act(() => renderer.unmount());
+  });
+
   test('polls processing recovery while open and removes the timer on unmount', async () => {
     jest.useFakeTimers();
     try {
