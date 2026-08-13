@@ -1,5 +1,6 @@
 package com.aicontextpack.nativebridge
 
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.CRC32
 import org.junit.Assert.assertEquals
@@ -11,6 +12,40 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ImagePerceptualHasherTest {
+  @Test
+  fun metadataStreamCancellationInterruptsReadsAndSkips() {
+    val cancellation = ImageHashCancellationToken()
+    val input = CancellableBoundedInputStream(
+      ByteArrayInputStream(ByteArray(64 * 1_024)),
+      64L * 1_024,
+      cancellation,
+    )
+    assertEquals(8 * 1_024, input.skip(8L * 1_024))
+    cancellation.cancel()
+    assertEquals(
+      "PIPELINE_STAGE_FAILED",
+      assertThrows(NativeException::class.java) { input.read() }.code,
+    )
+    assertEquals(
+      "PIPELINE_STAGE_FAILED",
+      assertThrows(NativeException::class.java) { input.skip(8L * 1_024) }.code,
+    )
+  }
+
+  @Test
+  fun metadataStreamCannotReadPastTheVerifiedSnapshotLength() {
+    val source = ByteArray(32) { it.toByte() }
+    val input = CancellableBoundedInputStream(
+      ByteArrayInputStream(source),
+      8,
+      ImageHashCancellationToken(),
+    )
+    val observed = ByteArray(32)
+    assertEquals(8, input.read(observed))
+    assertEquals(-1, input.read(observed))
+    assertEquals(source.take(8), observed.take(8))
+  }
+
   @Test
   fun snapshotCloseReportsDeletionFailure() {
     val directory = kotlin.io.path.createTempDirectory("image-hash-close-test").toFile()

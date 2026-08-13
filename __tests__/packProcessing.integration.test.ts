@@ -936,6 +936,79 @@ test('durable cancellation during analysis checkpoint cancels fingerprinting', a
   expect(await repository.listRecoveryDiagnostics()).toEqual([]);
 });
 
+test('durable cancellation suppresses post-checkpoint heartbeat failure', async () => {
+  jest.useFakeTimers();
+  try {
+    const initial = (await repository.findPackGraph(packId))!;
+    await repository.savePackGraph({
+      pack: { ...initial.pack, state: 'processing', updatedAt: now },
+      items: initial.items.map(item => {
+        const extracted = { ...item, state: 'extracted' as const };
+        delete extracted.retryStage;
+        return extracted;
+      }),
+      expectedRevision: initial.revision,
+    });
+    const worker = new DeferredAnalyzeWorker();
+    const renewalStarted = deferred<void>();
+    const renewalRelease = deferred<void>();
+    jest
+      .spyOn(repository, 'renewPipelineRunClaim')
+      .mockImplementation(async () => {
+        renewalStarted.resolve();
+        await renewalRelease.promise;
+        return false;
+      });
+    const onUnexpectedFailure = jest.fn();
+    const coordinator = new DurablePackProcessingCoordinator(
+      async () => repository,
+      worker,
+      () => now,
+      30,
+      onUnexpectedFailure,
+      () => operationalMilliseconds,
+    );
+    const analyze = new PackLibraryController(
+      async () => repository,
+      () => now,
+      coordinator,
+    ).analyzePack(packId);
+    for (
+      let attempt = 0;
+      attempt < 100 && worker.starts.length === 0;
+      attempt += 1
+    ) {
+      await jest.advanceTimersByTimeAsync(0);
+    }
+    expect(worker.starts).toHaveLength(1);
+    const run = worker.starts[0]!;
+    await waitFor(
+      () =>
+        (
+          database
+            .prepare(
+              'SELECT published_artifact_json FROM pipeline_runs WHERE id = ?',
+            )
+            .get(run.id) as { readonly published_artifact_json?: string | null }
+        )?.published_artifact_json !== null,
+    );
+
+    operationalMilliseconds = 10;
+    jest.advanceTimersByTime(10);
+    await renewalStarted.promise;
+    await repository.cancelPipelineRuns(packId, now);
+    renewalRelease.resolve();
+    await expect(analyze).resolves.toBe(1);
+    await coordinator.waitForIdle();
+
+    expect(worker.cancellations).toEqual([run.id]);
+    expect(onUnexpectedFailure).not.toHaveBeenCalled();
+    expect(await repository.listRecoveryDiagnostics()).toEqual([]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test('analyze cancellation still reports a publication finalization failure', async () => {
   const initial = (await repository.findPackGraph(packId))!;
   await repository.savePackGraph({

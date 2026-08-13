@@ -364,6 +364,7 @@ export class DurablePackProcessingCoordinator
             analysis = settlement.value;
           } catch (analysisError) {
             await Promise.allSettled([handle.cancel()]);
+            if (await this.isDurablyCancelled(repository, run.id)) return;
             await this.reportUnexpectedFailure(
               run,
               analysisError,

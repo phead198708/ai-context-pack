@@ -10,6 +10,7 @@ import android.system.Os
 import android.system.OsConstants
 import java.io.ByteArrayInputStream
 import java.io.Closeable
+import java.io.FilterInputStream
 import java.io.File
 import java.io.InputStream
 import java.security.MessageDigest
@@ -418,9 +419,19 @@ internal object ImagePerceptualHasher {
       if (violatesSingleFramePolicy(file.path, cancellation)) {
         throw NativeException("PROCESSOR_OUTPUT_INVALID")
       }
-      val orientation = readOrientation(file.path)
+      val orientation = readOrientation(file, expectedByteCount, cancellation)
       val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-      BitmapFactory.decodeFile(file.path, bounds)
+      cancellation.attachDecode(bounds)
+      try {
+        file.inputStream().use { source ->
+          CancellableBoundedInputStream(source, expectedByteCount, cancellation).use { input ->
+            BitmapFactory.decodeStream(input, null, bounds)
+          }
+        }
+        cancellation.throwIfCancelled()
+      } finally {
+        cancellation.detachDecode(bounds)
+      }
       val pixelCount = bounds.outWidth.toLong() * bounds.outHeight.toLong()
       if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
         throw NativeException("PROCESSOR_OUTPUT_INVALID")
@@ -596,13 +607,27 @@ internal object ImagePerceptualHasher {
     return (299 * compositedRed + 587 * compositedGreen + 114 * compositedBlue) / 1_000
   }
 
-  private fun readOrientation(path: String): Int = try {
-    ExifInterface(path).getAttributeInt(
-      ExifInterface.TAG_ORIENTATION,
-      ExifInterface.ORIENTATION_NORMAL,
-    )
-  } catch (_: Exception) {
-    ExifInterface.ORIENTATION_NORMAL
+  private fun readOrientation(
+    file: File,
+    expectedByteCount: Long,
+    cancellation: ImageHashCancellationToken,
+  ): Int {
+    cancellation.throwIfCancelled()
+    return try {
+      file.inputStream().use { source ->
+        CancellableBoundedInputStream(source, expectedByteCount, cancellation).use { input ->
+          ExifInterface(input).getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL,
+          )
+        }
+      }.also { cancellation.throwIfCancelled() }
+    } catch (error: NativeException) {
+      throw error
+    } catch (_: Exception) {
+      cancellation.throwIfCancelled()
+      ExifInterface.ORIENTATION_NORMAL
+    }
   }
 
   private fun violatesSingleFramePolicy(
@@ -1240,6 +1265,54 @@ private fun bmffBrandFlags(value: Long): Int = when (value) {
   0x61766973L, // avis
   -> BMFF_IMAGE_BRAND_FLAG or BMFF_SEQUENCE_BRAND_FLAG
   else -> 0
+}
+
+internal class CancellableBoundedInputStream(
+  source: InputStream,
+  maximumBytes: Long,
+  private val cancellation: ImageHashCancellationToken,
+) : FilterInputStream(source) {
+  private val skipBuffer = ByteArray(16 * 1_024)
+  private var remaining = maximumBytes
+
+  init {
+    require(maximumBytes >= 0)
+  }
+
+  override fun read(): Int {
+    cancellation.throwIfCancelled()
+    if (remaining == 0L) return -1
+    val value = super.read()
+    if (value >= 0) remaining -= 1
+    return value
+  }
+
+  override fun read(target: ByteArray, offset: Int, length: Int): Int {
+    if (length == 0) return 0
+    cancellation.throwIfCancelled()
+    if (remaining == 0L) return -1
+    val boundedLength = minOf(length.toLong(), remaining).toInt()
+    val count = super.read(target, offset, boundedLength)
+    if (count > 0) remaining -= count
+    return count
+  }
+
+  override fun skip(byteCount: Long): Long {
+    if (byteCount <= 0L) return 0L
+    var skipped = 0L
+    val target = minOf(byteCount, remaining)
+    while (skipped < target) {
+      cancellation.throwIfCancelled()
+      val requested = minOf(skipBuffer.size.toLong(), target - skipped).toInt()
+      val count = read(skipBuffer, 0, requested)
+      if (count <= 0) break
+      skipped += count
+    }
+    return skipped
+  }
+
+  override fun available(): Int =
+    minOf(super.available().toLong(), remaining, Int.MAX_VALUE.toLong()).toInt()
 }
 
 private class BoundedContainerReader(
