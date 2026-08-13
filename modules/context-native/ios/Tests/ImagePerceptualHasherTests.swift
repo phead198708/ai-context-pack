@@ -58,6 +58,75 @@ final class ImagePerceptualHasherTests: XCTestCase {
     XCTAssertFalse(ImagePerceptualHasher.acceptsFrameCount(2))
   }
 
+  func testSnapshotCloseSurfacesDeletionFailureAndRetriesFromDeinit() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "image-hash-cleanup-\(UUID().uuidString).tmp"
+    )
+    try Data("synthetic private bytes".utf8).write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let attempts = LockedCounter()
+    var snapshot: ImmutableImageSnapshot? = ImmutableImageSnapshot(
+      url: url,
+      removeItem: { _ in
+        attempts.increment()
+        throw CocoaError(.fileWriteUnknown)
+      }
+    )
+    XCTAssertThrowsError(try snapshot?.close()) { error in
+      XCTAssertEqual((error as? ImagePerceptualHashError)?.stableCode, "RESOURCE_MEMORY_PRESSURE")
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+    snapshot = nil
+    XCTAssertEqual(attempts.value, 2)
+  }
+
+  func testSnapshotCreationSurfacesFailedCleanupAfterIntegrityFailure() throws {
+    let source = fixtureURL("ocr-english.png")
+    let data = try Data(contentsOf: source)
+    var retainedSnapshot: URL?
+    XCTAssertThrowsError(
+      try ImmutableImageSnapshot.create(
+        sourceURL: source,
+        expectedByteCount: Int64(data.count),
+        expectedSHA256: String(repeating: "0", count: 64),
+        cancellation: ImageHashCancellationToken(),
+        removeItem: { url in
+          retainedSnapshot = url
+          throw CocoaError(.fileWriteUnknown)
+        }
+      )
+    ) { error in
+      XCTAssertEqual((error as? ImagePerceptualHashError)?.stableCode, "RESOURCE_MEMORY_PRESSURE")
+    }
+    let snapshot = try XCTUnwrap(retainedSnapshot)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.path))
+    try FileManager.default.removeItem(at: snapshot)
+  }
+
+  func testHasherSurfacesSnapshotDeletionFailureAfterSuccessfulDecode() throws {
+    let source = fixtureURL("ocr-english.png")
+    let data = try Data(contentsOf: source)
+    let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    var retainedSnapshot: URL?
+    XCTAssertThrowsError(
+      try ImagePerceptualHasher.hash(
+        fileURL: source,
+        expectedByteCount: Int64(data.count),
+        expectedSHA256: digest,
+        cancellation: ImageHashCancellationToken(),
+        snapshotRemoveItem: { url in
+          retainedSnapshot = url
+          throw CocoaError(.fileWriteUnknown)
+        }
+      )
+    ) { error in
+      XCTAssertEqual((error as? ImagePerceptualHashError)?.stableCode, "RESOURCE_MEMORY_PRESSURE")
+    }
+    let snapshot = try XCTUnwrap(retainedSnapshot)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.path))
+    try FileManager.default.removeItem(at: snapshot)
+  }
+
   func testSharedAnimatedFixturesAreRejectedByGenericFrameCount() throws {
     let fixture = fixtureURL("contracts/image-animation-policy-v1.tsv")
     let lines = try String(contentsOf: fixture, encoding: .utf8).split(separator: "\n")

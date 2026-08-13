@@ -173,6 +173,89 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
+  fun bmffCollectionsAndSequencesCannotHideBehindTheDecodedPrimaryFrame() {
+    assertEquals(
+      ContainerFrameInspection.SINGLE,
+      ImagePerceptualHasher.inspectBmffFrames(bmffImage(primary = 1, imageItems = listOf(1))),
+    )
+    assertEquals(
+      ContainerFrameInspection.ANIMATED,
+      ImagePerceptualHasher.inspectBmffFrames(bmffImage(primary = 1, imageItems = listOf(1, 2))),
+    )
+    assertEquals(
+      ContainerFrameInspection.ANIMATED,
+      ImagePerceptualHasher.inspectBmffFrames(bmffFileType("avis")),
+    )
+  }
+
+  @Test
+  fun bmffThumbnailAndGridInputsDoNotBecomeIndependentFrames() {
+    assertEquals(
+      ContainerFrameInspection.SINGLE,
+      ImagePerceptualHasher.inspectBmffFrames(
+        bmffImage(
+          primary = 1,
+          imageItems = listOf(1, 2),
+          references = listOf(Triple("thmb", 2, listOf(1))),
+        ),
+      ),
+    )
+    assertEquals(
+      ContainerFrameInspection.SINGLE,
+      ImagePerceptualHasher.inspectBmffFrames(
+        bmffImage(
+          primary = 1,
+          imageItems = listOf(1, 2, 3),
+          itemTypes = mapOf(1 to "grid"),
+          references = listOf(Triple("dimg", 1, listOf(2, 3))),
+        ),
+      ),
+    )
+  }
+
+  @Test
+  fun bmffInspectionAllowsBoundedPreludeBoxesButRejectsAmbiguousMetadata() {
+    val still = bmffImage(primary = 1, imageItems = listOf(1))
+    assertEquals(
+      ContainerFrameInspection.SINGLE,
+      ImagePerceptualHasher.inspectBmffFrames(bmffBox("free", ByteArray(64)) + still),
+    )
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectBmffFrames(bmffImage(primary = 1, imageItems = listOf(1, 1))),
+    )
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectBmffFrames(
+        byteArrayOf(0, 0, 0, 4) + "ftyp".toByteArray(Charsets.US_ASCII) + ByteArray(8),
+      ),
+    )
+  }
+
+  @Test
+  fun bmffInspectionIsBoundedExactAndCooperativelyCancellable() {
+    val fixture = bmffImage(primary = 1, imageItems = listOf(1)) +
+      bmffBox("free", ByteArray(128 * 1_024))
+    val token = ImageHashCancellationToken()
+    val input = object : java.io.ByteArrayInputStream(fixture) {
+      override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val count = super.read(buffer, offset, minOf(length, 1_024))
+        if (pos > 8 * 1_024) token.cancel()
+        return count
+      }
+    }
+    assertThrows(NativeException::class.java) {
+      ImagePerceptualHasher.inspectBmffFrames(input, fixture.size.toLong(), token)
+    }
+    assertEquals(
+      ContainerFrameInspection.INVALID,
+      ImagePerceptualHasher.inspectBmffFrames(
+        bmffImage(primary = 1, imageItems = listOf(1)) + byteArrayOf(0),
+      ),
+    )
+  }
+
+  @Test
   fun structurallyPaddedAnimationContainersCannotBypassLegacyLimits() {
     val values = animationFixtures()
     val paddedPng = insertPrivatePngChunks(
@@ -333,6 +416,67 @@ class ImagePerceptualHasherTest {
     val body = "WEBP".toByteArray() + junk + image
     return "RIFF".toByteArray() + littleEndian(body.size) + body
   }
+
+  private fun bmffImage(
+    primary: Int,
+    imageItems: List<Int>,
+    itemTypes: Map<Int, String> = emptyMap(),
+    references: List<Triple<String, Int, List<Int>>> = emptyList(),
+  ): ByteArray {
+    val primaryItem = bmffBox("pitm", byteArrayOf(0, 0, 0, 0) + unsignedShort(primary))
+    val itemEntries = imageItems.map { itemId ->
+      bmffBox(
+        "infe",
+        byteArrayOf(2, 0, 0, 0) + unsignedShort(itemId) + unsignedShort(0) +
+          (itemTypes[itemId] ?: "hvc1").toByteArray(Charsets.US_ASCII) + byteArrayOf(0),
+      )
+    }
+    val itemInfo = bmffBox(
+      "iinf",
+      byteArrayOf(0, 0, 0, 0) + unsignedShort(itemEntries.size) +
+        itemEntries.fold(ByteArray(0)) { result, entry -> result + entry },
+    )
+    val itemReferences = if (references.isEmpty()) {
+      ByteArray(0)
+    } else {
+      bmffBox(
+        "iref",
+        byteArrayOf(0, 0, 0, 0) + references.map { (type, from, targets) ->
+          bmffBox(
+            type,
+            unsignedShort(from) + unsignedShort(targets.size) +
+              targets.fold(ByteArray(0)) { result, target -> result + unsignedShort(target) },
+          )
+        }.fold(ByteArray(0)) { result, reference -> result + reference },
+      )
+    }
+    return bmffFileType("heic") + bmffBox(
+      "meta",
+      byteArrayOf(0, 0, 0, 0) + primaryItem + itemInfo + itemReferences,
+    )
+  }
+
+  private fun bmffFileType(brand: String): ByteArray = bmffBox(
+    "ftyp",
+    brand.toByteArray(Charsets.US_ASCII) + byteArrayOf(0, 0, 0, 0) +
+      "mif1".toByteArray(Charsets.US_ASCII) + brand.toByteArray(Charsets.US_ASCII),
+  )
+
+  private fun bmffBox(type: String, payload: ByteArray): ByteArray {
+    require(type.length == 4)
+    val size = payload.size + 8
+    return byteArrayOf(
+      (size ushr 24).toByte(),
+      (size ushr 16).toByte(),
+      (size ushr 8).toByte(),
+      size.toByte(),
+    ) + type.toByteArray(Charsets.US_ASCII) + payload
+  }
+
+  private fun unsignedShort(value: Int): ByteArray = byteArrayOf(
+    (value ushr 8).toByte(),
+    value.toByte(),
+  )
 
   private fun insertPrivatePngChunks(bytes: ByteArray, count: Int): ByteArray {
     val animationControlOffset = findPngChunk(bytes, "acTL")

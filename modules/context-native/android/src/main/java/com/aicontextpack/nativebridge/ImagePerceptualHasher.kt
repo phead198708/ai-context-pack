@@ -322,6 +322,16 @@ internal object ImagePerceptualHasher {
   const val sampleWidth = 9
   const val sampleHeight = 8
   const val maximumSourceBytes = 52_428_800L
+  private const val maximumBmffItems = 4_096
+  private val bmffImageBrands = setOf(
+    "mif1", "msf1", "heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs",
+    "avif", "avis", "avio", "MA1A", "MA1B",
+  )
+  private val bmffSequenceBrands = setOf("msf1", "hevc", "hevx", "hevm", "hevs", "avis")
+  private val bmffImageItemTypes = setOf(
+    "hvc1", "hev1", "av01", "jpeg", "j2k1", "j2k2", "grid", "iovl", "iden",
+  )
+  private val bmffPreludeBoxTypes = setOf("free", "skip", "wide", "uuid")
   // v1 retains one bounded decoded bitmap plus one scanline. It never creates an
   // orientation copy or a full-image IntArray.
   const val maximumPixelCount = 16_000_000L
@@ -577,6 +587,17 @@ internal object ImagePerceptualHasher {
       ContainerFrameInspection.SINGLE -> return false
       ContainerFrameInspection.NOT_RECOGNIZED -> Unit
     }
+    when (
+      java.io.File(path).inputStream().buffered().use { input ->
+        inspectBmffFrames(input, sourceLength, cancellation)
+      }
+    ) {
+      ContainerFrameInspection.ANIMATED,
+      ContainerFrameInspection.INVALID,
+      -> return true
+      ContainerFrameInspection.SINGLE -> return false
+      ContainerFrameInspection.NOT_RECOGNIZED -> Unit
+    }
     cancellation.throwIfCancelled()
     return false
   }
@@ -614,6 +635,277 @@ internal object ImagePerceptualHasher {
     cancellation: ImageHashCancellationToken,
   ): ContainerFrameInspection = ByteArrayInputStream(bytes).use { input ->
     inspectWebPFrames(input, bytes.size.toLong(), cancellation)
+  }
+
+  internal fun inspectBmffFrames(bytes: ByteArray): ContainerFrameInspection =
+    ByteArrayInputStream(bytes).use { input ->
+      inspectBmffFrames(input, bytes.size.toLong(), ImageHashCancellationToken())
+    }
+
+  internal fun inspectBmffFrames(
+    input: InputStream,
+    maximumBytes: Long,
+    cancellation: ImageHashCancellationToken,
+  ): ContainerFrameInspection {
+    val reader = BoundedContainerReader(input, maximumBytes, cancellation)
+    if (maximumBytes < 16L) return ContainerFrameInspection.NOT_RECOGNIZED
+    var fileType = readBmffBox(reader, maximumBytes)
+      ?: return ContainerFrameInspection.NOT_RECOGNIZED
+    if (!fileType.isValid) {
+      return if (fileType.type == "ftyp" || fileType.type in bmffPreludeBoxTypes) {
+        ContainerFrameInspection.INVALID
+      } else {
+        ContainerFrameInspection.NOT_RECOGNIZED
+      }
+    }
+    var preludeCount = 0
+    while (fileType.type != "ftyp") {
+      if (fileType.type !in bmffPreludeBoxTypes || preludeCount >= 16) {
+        return ContainerFrameInspection.NOT_RECOGNIZED
+      }
+      if (!reader.skipExactly(fileType.endOffset - reader.consumedBytes)) {
+        return ContainerFrameInspection.INVALID
+      }
+      if (maximumBytes - reader.consumedBytes < 8L) return ContainerFrameInspection.INVALID
+      fileType = readBmffBox(reader, maximumBytes) ?: return ContainerFrameInspection.INVALID
+      if (!fileType.isValid) return ContainerFrameInspection.INVALID
+      preludeCount += 1
+    }
+    if ((fileType.endOffset - reader.consumedBytes) < 8L) {
+      return ContainerFrameInspection.INVALID
+    }
+    val brands = mutableSetOf<String>()
+    brands += String(reader.readBytes(4) ?: return ContainerFrameInspection.INVALID, Charsets.US_ASCII)
+    if (!reader.skipExactly(4L)) return ContainerFrameInspection.INVALID
+    while (reader.consumedBytes < fileType.endOffset) {
+      if (fileType.endOffset - reader.consumedBytes < 4L) {
+        return ContainerFrameInspection.INVALID
+      }
+      brands += String(reader.readBytes(4) ?: return ContainerFrameInspection.INVALID, Charsets.US_ASCII)
+    }
+    if (brands.none { it in bmffImageBrands }) {
+      return ContainerFrameInspection.NOT_RECOGNIZED
+    }
+    if (brands.any { it in bmffSequenceBrands }) {
+      return ContainerFrameInspection.ANIMATED
+    }
+
+    var metadata: BmffMetadata? = null
+    while (reader.consumedBytes < maximumBytes) {
+      if (maximumBytes - reader.consumedBytes < 8L) return ContainerFrameInspection.INVALID
+      val box = readBmffBox(reader, maximumBytes) ?: return ContainerFrameInspection.INVALID
+      if (!box.isValid) return ContainerFrameInspection.INVALID
+      if (box.type == "meta") {
+        if (metadata != null) return ContainerFrameInspection.INVALID
+        metadata = parseBmffMetadata(reader, box.endOffset)
+          ?: return ContainerFrameInspection.INVALID
+      } else if (!reader.skipExactly(box.endOffset - reader.consumedBytes)) {
+        return ContainerFrameInspection.INVALID
+      }
+    }
+    if (!reader.isAtExactEof()) return ContainerFrameInspection.INVALID
+    val parsed = metadata ?: return ContainerFrameInspection.INVALID
+    val primary = parsed.primaryItem ?: return ContainerFrameInspection.INVALID
+    if (!parsed.sawItemInfo || primary !in parsed.imageItems) {
+      return ContainerFrameInspection.INVALID
+    }
+    if (!parsed.requiredImageReferenceItems.all { it in parsed.imageItems }) {
+      return ContainerFrameInspection.INVALID
+    }
+    val displayedRoots = parsed.imageItems - parsed.dependentItems
+    return when {
+      displayedRoots.size > 1 -> ContainerFrameInspection.ANIMATED
+      displayedRoots.size == 1 && primary in displayedRoots -> ContainerFrameInspection.SINGLE
+      else -> ContainerFrameInspection.INVALID
+    }
+  }
+
+  private data class BmffBox(
+    val type: String,
+    val endOffset: Long,
+    val isValid: Boolean = true,
+  )
+
+  private data class BmffMetadata(
+    var primaryItem: Long? = null,
+    var sawItemInfo: Boolean = false,
+    val allItems: MutableSet<Long> = mutableSetOf(),
+    val imageItems: MutableSet<Long> = mutableSetOf(),
+    val dependentItems: MutableSet<Long> = mutableSetOf(),
+    val requiredImageReferenceItems: MutableSet<Long> = mutableSetOf(),
+  )
+
+  private fun readBmffBox(reader: BoundedContainerReader, parentEnd: Long): BmffBox? {
+    val start = reader.consumedBytes
+    if (parentEnd - start < 8L) return null
+    val size32 = reader.readUnsignedInt() ?: return null
+    val type = String(reader.readBytes(4) ?: return null, Charsets.US_ASCII)
+    val headerBytes: Long
+    val boxBytes = when (size32) {
+      0L -> {
+        headerBytes = 8L
+        parentEnd - start
+      }
+      1L -> {
+        headerBytes = 16L
+        reader.readBoundedUnsignedLong() ?: return BmffBox(type, start, false)
+      }
+      else -> {
+        headerBytes = 8L
+        size32
+      }
+    }
+    if (boxBytes < headerBytes || boxBytes > parentEnd - start) {
+      return BmffBox(type, start, false)
+    }
+    return BmffBox(type, start + boxBytes)
+  }
+
+  private fun parseBmffMetadata(
+    reader: BoundedContainerReader,
+    metadataEnd: Long,
+  ): BmffMetadata? {
+    val fullBox = reader.readBytes(4) ?: return null
+    if (fullBox[0].toInt() != 0) return null
+    val metadata = BmffMetadata()
+    var sawPrimary = false
+    var sawReferences = false
+    while (reader.consumedBytes < metadataEnd) {
+      val box = readBmffBox(reader, metadataEnd) ?: return null
+      if (!box.isValid) return null
+      when (box.type) {
+        "pitm" -> {
+          if (sawPrimary || !parseBmffPrimaryItem(reader, box.endOffset, metadata)) return null
+          sawPrimary = true
+        }
+        "iinf" -> {
+          if (metadata.sawItemInfo || !parseBmffItemInfo(reader, box.endOffset, metadata)) {
+            return null
+          }
+          metadata.sawItemInfo = true
+        }
+        "iref" -> {
+          if (sawReferences || !parseBmffReferences(reader, box.endOffset, metadata)) return null
+          sawReferences = true
+        }
+        else -> if (!reader.skipExactly(box.endOffset - reader.consumedBytes)) return null
+      }
+      if (reader.consumedBytes != box.endOffset) return null
+    }
+    return if (reader.consumedBytes == metadataEnd) metadata else null
+  }
+
+  private fun parseBmffPrimaryItem(
+    reader: BoundedContainerReader,
+    boxEnd: Long,
+    metadata: BmffMetadata,
+  ): Boolean {
+    val fullBox = reader.readBytes(4) ?: return false
+    metadata.primaryItem = when (fullBox[0].toInt() and 0xff) {
+      0 -> reader.readUnsignedShort()?.toLong()
+      1 -> reader.readUnsignedInt()
+      else -> return false
+    } ?: return false
+    return reader.skipExactly(boxEnd - reader.consumedBytes)
+  }
+
+  private fun parseBmffItemInfo(
+    reader: BoundedContainerReader,
+    boxEnd: Long,
+    metadata: BmffMetadata,
+  ): Boolean {
+    val fullBox = reader.readBytes(4) ?: return false
+    val version = fullBox[0].toInt() and 0xff
+    val entryCount = when (version) {
+      0 -> reader.readUnsignedShort()?.toLong()
+      1 -> reader.readUnsignedInt()
+      else -> return false
+    } ?: return false
+    if (entryCount > maximumBmffItems || entryCount > (boxEnd - reader.consumedBytes) / 8L) {
+      return false
+    }
+    repeat(entryCount.toInt()) {
+      val entry = readBmffBox(reader, boxEnd) ?: return false
+      if (!entry.isValid) return false
+      if (entry.type != "infe" || !parseBmffItemInfoEntry(reader, entry.endOffset, metadata)) {
+        return false
+      }
+    }
+    return reader.skipExactly(boxEnd - reader.consumedBytes)
+  }
+
+  private fun parseBmffItemInfoEntry(
+    reader: BoundedContainerReader,
+    boxEnd: Long,
+    metadata: BmffMetadata,
+  ): Boolean {
+    val fullBox = reader.readBytes(4) ?: return false
+    val version = fullBox[0].toInt() and 0xff
+    val itemId = when (version) {
+      2 -> reader.readUnsignedShort()?.toLong()
+      3 -> reader.readUnsignedInt()
+      else -> return false
+    } ?: return false
+    if (reader.readUnsignedShort() == null) return false
+    val itemType = reader.readBytes(4)?.let { String(it, Charsets.US_ASCII) } ?: return false
+    if (!metadata.allItems.add(itemId)) return false
+    if (itemType in bmffImageItemTypes) {
+      metadata.imageItems += itemId
+      if (metadata.imageItems.size > maximumBmffItems) return false
+    }
+    return reader.skipExactly(boxEnd - reader.consumedBytes)
+  }
+
+  private fun parseBmffReferences(
+    reader: BoundedContainerReader,
+    boxEnd: Long,
+    metadata: BmffMetadata,
+  ): Boolean {
+    val fullBox = reader.readBytes(4) ?: return false
+    val version = fullBox[0].toInt() and 0xff
+    if (version !in 0..1) return false
+    var referenceCount = 0
+    while (reader.consumedBytes < boxEnd) {
+      val reference = readBmffBox(reader, boxEnd) ?: return false
+      if (!reference.isValid) return false
+      val fromItem = if (version == 0) {
+        reader.readUnsignedShort()?.toLong()
+      } else {
+        reader.readUnsignedInt()
+      } ?: return false
+      val targetCount = reader.readUnsignedShort() ?: return false
+      if (
+        targetCount == 0 ||
+        targetCount > maximumBmffItems ||
+        referenceCount + targetCount > maximumBmffItems
+      ) {
+        return false
+      }
+      val targets = mutableListOf<Long>()
+      repeat(targetCount) {
+        val target = if (version == 0) {
+          reader.readUnsignedShort()?.toLong()
+        } else {
+          reader.readUnsignedInt()
+        } ?: return false
+        targets += target
+      }
+      when (reference.type) {
+        "thmb", "auxl" -> {
+          metadata.dependentItems += fromItem
+          metadata.requiredImageReferenceItems += fromItem
+          metadata.requiredImageReferenceItems += targets
+        }
+        "dimg" -> {
+          metadata.dependentItems += targets
+          metadata.requiredImageReferenceItems += fromItem
+          metadata.requiredImageReferenceItems += targets
+        }
+      }
+      referenceCount += targetCount
+      if (!reader.skipExactly(reference.endOffset - reader.consumedBytes)) return false
+    }
+    return reader.consumedBytes == boxEnd
   }
 
   private fun inspectPngFrames(
@@ -908,6 +1200,20 @@ private class BoundedContainerReader(
       ((bytes[1].toLong() and 0xffL) shl 16) or
       ((bytes[2].toLong() and 0xffL) shl 8) or
       (bytes[3].toLong() and 0xffL)
+  }
+
+  fun readUnsignedShort(): Int? {
+    val bytes = readBytes(2) ?: return null
+    return ((bytes[0].toInt() and 0xff) shl 8) or
+      (bytes[1].toInt() and 0xff)
+  }
+
+  fun readBoundedUnsignedLong(): Long? {
+    val bytes = readBytes(8) ?: return null
+    if ((bytes[0].toInt() and 0x80) != 0) return null
+    var value = 0L
+    for (byte in bytes) value = (value shl 8) or (byte.toLong() and 0xffL)
+    return value
   }
 
   fun readUnsignedLittleEndianInt(): Long? {

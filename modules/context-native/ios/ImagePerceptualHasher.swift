@@ -312,16 +312,55 @@ enum ImageHashSnapshotStore {
 
 final class ImmutableImageSnapshot {
   let url: URL
+  private let removeItem: (URL) throws -> Void
+  private var closed = false
 
-  init(url: URL) { self.url = url }
+  init(
+    url: URL,
+    removeItem: @escaping (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+  ) {
+    self.url = url
+    self.removeItem = removeItem
+  }
 
-  deinit { try? FileManager.default.removeItem(at: url) }
+  deinit {
+    if !closed { try? removeItem(url) }
+  }
+
+  func close() throws {
+    guard !closed else { return }
+    do {
+      try removeItem(url)
+      closed = true
+    } catch {
+      let cocoaError = error as NSError
+      if cocoaError.domain == NSCocoaErrorDomain && cocoaError.code == NSFileNoSuchFileError {
+        closed = true
+        return
+      }
+      throw ImagePerceptualHashError.resourceLimit
+    }
+  }
+
+  func withURL<ResultValue>(_ body: (URL) throws -> ResultValue) throws -> ResultValue {
+    let result: Result<ResultValue, Error>
+    do {
+      result = .success(try body(url))
+    } catch {
+      result = .failure(error)
+    }
+    // A cleanup error wins over a processing error so private snapshot retention
+    // cannot be hidden behind the original failure.
+    try close()
+    return try result.get()
+  }
 
   static func create(
     sourceURL: URL,
     expectedByteCount: Int64,
     expectedSHA256: String,
-    cancellation: ImageHashCancellationToken
+    cancellation: ImageHashCancellationToken,
+    removeItem: @escaping (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
   ) throws -> ImmutableImageSnapshot {
     guard expectedByteCount > 0,
           expectedByteCount <= ImagePerceptualHasher.maximumSourceBytes,
@@ -350,43 +389,48 @@ final class ImmutableImageSnapshot {
       S_IRUSR | S_IWUSR
     )
     guard destination >= 0 else { throw ImagePerceptualHashError.resourceLimit }
-    var keepSnapshot = false
-    defer {
-      Darwin.close(destination)
-      if !keepSnapshot { try? FileManager.default.removeItem(at: snapshotURL) }
-    }
-
-    var digest = SHA256()
-    var copied: Int64 = 0
-    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
-    while true {
-      try cancellation.check()
-      let count = buffer.withUnsafeMutableBytes { bytes in
-        Darwin.read(source, bytes.baseAddress, bytes.count)
+    do {
+      var digest = SHA256()
+      var copied: Int64 = 0
+      var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+      while true {
+        try cancellation.check()
+        let count = buffer.withUnsafeMutableBytes { bytes in
+          Darwin.read(source, bytes.baseAddress, bytes.count)
+        }
+        guard count >= 0 else { throw ImagePerceptualHashError.integrityFailure }
+        if count == 0 { break }
+        copied += Int64(count)
+        guard copied <= expectedByteCount else {
+          throw ImagePerceptualHashError.integrityFailure
+        }
+        digest.update(data: Data(buffer[0..<count]))
+        var written = 0
+        while written < count {
+          let amount = buffer.withUnsafeBytes { bytes in
+            Darwin.write(destination, bytes.baseAddress!.advanced(by: written), count - written)
+          }
+          guard amount > 0 else { throw ImagePerceptualHashError.resourceLimit }
+          written += amount
+        }
       }
-      guard count >= 0 else { throw ImagePerceptualHashError.integrityFailure }
-      if count == 0 { break }
-      copied += Int64(count)
-      guard copied <= expectedByteCount else {
+      let actualSHA256 = digest.finalize().map { String(format: "%02x", $0) }.joined()
+      guard copied == expectedByteCount, actualSHA256 == expectedSHA256,
+            fchmod(destination, S_IRUSR) == 0 else {
         throw ImagePerceptualHashError.integrityFailure
       }
-      digest.update(data: Data(buffer[0..<count]))
-      var written = 0
-      while written < count {
-        let amount = buffer.withUnsafeBytes { bytes in
-          Darwin.write(destination, bytes.baseAddress!.advanced(by: written), count - written)
-        }
-        guard amount > 0 else { throw ImagePerceptualHashError.resourceLimit }
-        written += amount
+      Darwin.close(destination)
+      return ImmutableImageSnapshot(url: snapshotURL, removeItem: removeItem)
+    } catch {
+      let operationError = error
+      Darwin.close(destination)
+      do {
+        try removeItem(snapshotURL)
+      } catch {
+        throw ImagePerceptualHashError.resourceLimit
       }
+      throw operationError
     }
-    let actualSHA256 = digest.finalize().map { String(format: "%02x", $0) }.joined()
-    guard copied == expectedByteCount, actualSHA256 == expectedSHA256,
-          fchmod(destination, S_IRUSR) == 0 else {
-      throw ImagePerceptualHashError.integrityFailure
-    }
-    keepSnapshot = true
-    return ImmutableImageSnapshot(url: snapshotURL)
   }
 }
 
@@ -493,7 +537,10 @@ enum ImagePerceptualHasher {
     expectedSHA256: String,
     cancellation: ImageHashCancellationToken,
     sourceMutationHook: ((String) throws -> Void)? = nil,
-    providerReadHook: ((off_t) -> Void)? = nil
+    providerReadHook: ((off_t) -> Void)? = nil,
+    snapshotRemoveItem: @escaping (URL) throws -> Void = {
+      try FileManager.default.removeItem(at: $0)
+    }
   ) throws -> [String: Any] {
     let started = ContinuousClock.now
     try cancellation.check()
@@ -501,62 +548,65 @@ enum ImagePerceptualHasher {
       sourceURL: fileURL,
       expectedByteCount: expectedByteCount,
       expectedSHA256: expectedSHA256,
-      cancellation: cancellation
-    )
-    try sourceMutationHook?("snapshot-ready")
-    let provider = try CancellableImageDataProvider.create(
-      url: snapshot.url,
-      byteCount: expectedByteCount,
       cancellation: cancellation,
-      readHook: providerReadHook
+      removeItem: snapshotRemoveItem
     )
-    guard let source = CGImageSourceCreateWithDataProvider(provider, nil) else {
+    return try snapshot.withURL { snapshotURL in
+      try sourceMutationHook?("snapshot-ready")
+      let provider = try CancellableImageDataProvider.create(
+        url: snapshotURL,
+        byteCount: expectedByteCount,
+        cancellation: cancellation,
+        readHook: providerReadHook
+      )
+      guard let source = CGImageSourceCreateWithDataProvider(provider, nil) else {
+        try cancellation.check()
+        throw ImagePerceptualHashError.invalidImage
+      }
+      guard acceptsFrameCount(CGImageSourceGetCount(source)) else {
+        try cancellation.check()
+        throw ImagePerceptualHashError.invalidImage
+      }
       try cancellation.check()
-      throw ImagePerceptualHashError.invalidImage
-    }
-    guard acceptsFrameCount(CGImageSourceGetCount(source)) else {
+      guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+            let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+            let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+        throw ImagePerceptualHashError.invalidImage
+      }
+      let pixelCount = width.int64Value.multipliedReportingOverflow(by: height.int64Value)
+      guard !pixelCount.overflow, pixelCount.partialValue > 0,
+            pixelCount.partialValue <= Int64(maximumPixelCount) else {
+        throw ImagePerceptualHashError.resourceLimit
+      }
+      let thumbnailOptions: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: max(width.intValue, height.intValue),
+        kCGImageSourceShouldCacheImmediately: true,
+      ]
+      guard let image = CGImageSourceCreateThumbnailAtIndex(
+        source,
+        0,
+        thumbnailOptions as CFDictionary
+      ) else {
+        try cancellation.check()
+        throw ImagePerceptualHashError.invalidImage
+      }
       try cancellation.check()
-      throw ImagePerceptualHashError.invalidImage
-    }
-    try cancellation.check()
-    guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-          let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
-          let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
-      throw ImagePerceptualHashError.invalidImage
-    }
-    let pixelCount = width.int64Value.multipliedReportingOverflow(by: height.int64Value)
-    guard !pixelCount.overflow, pixelCount.partialValue > 0,
-          pixelCount.partialValue <= Int64(maximumPixelCount) else {
-      throw ImagePerceptualHashError.resourceLimit
-    }
-    let thumbnailOptions: [CFString: Any] = [
-      kCGImageSourceCreateThumbnailFromImageAlways: true,
-      kCGImageSourceCreateThumbnailWithTransform: true,
-      kCGImageSourceThumbnailMaxPixelSize: max(width.intValue, height.intValue),
-      kCGImageSourceShouldCacheImmediately: true,
-    ]
-    guard let image = CGImageSourceCreateThumbnailAtIndex(
-      source,
-      0,
-      thumbnailOptions as CFDictionary
-    ) else {
+      let luminance = try sampleLuminance(image: image, cancellation: cancellation)
+      try sourceMutationHook?("decode-complete")
       try cancellation.check()
-      throw ImagePerceptualHashError.invalidImage
+      return [
+        "schemaVersion": 1,
+        "algorithm": "dhash-64-v1",
+        "hash": hash(luminance: luminance),
+        "sampleWidth": sampleWidth,
+        "sampleHeight": sampleHeight,
+        "orientationApplied": true,
+        "durationMs": durationMilliseconds(since: started),
+        "revision": "1",
+      ]
     }
-    try cancellation.check()
-    let luminance = try sampleLuminance(image: image, cancellation: cancellation)
-    try sourceMutationHook?("decode-complete")
-    try cancellation.check()
-    return [
-      "schemaVersion": 1,
-      "algorithm": "dhash-64-v1",
-      "hash": hash(luminance: luminance),
-      "sampleWidth": sampleWidth,
-      "sampleHeight": sampleHeight,
-      "orientationApplied": true,
-      "durationMs": durationMilliseconds(since: started),
-      "revision": "1",
-    ]
   }
 
   static func hash(luminance: [UInt8]) -> String {
