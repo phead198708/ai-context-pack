@@ -16,6 +16,7 @@ import { PackLibraryController } from '../src/features/packLibrary/controller';
 import {
   DurablePackProcessingCoordinator,
   joinBoundedPdfPageText,
+  NativeDuplicateAnalysisStageWorker,
   NativeExtractionStageWorker,
   type PackStageWorker,
   type PackStageWorkHandle,
@@ -2371,7 +2372,147 @@ test('analyze settlement atomically registers normalized text and versioned anal
   await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
     items: [{ id: itemId, state: 'analyzed' }],
   });
+  await expect(repository.listArtifactRecords()).resolves.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: artifact.id, kind: 'normalized-text' }),
+    ]),
+  );
+  const reopenedRepository = new ExpoSqlitePersistenceRepository(
+    new NodeSqlConnection(database) as never,
+  );
+  await reopenedRepository.initialize();
+  await expect(reopenedRepository.listArtifactRecords()).resolves.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: artifact.id, kind: 'normalized-text' }),
+    ]),
+  );
   await repository.releaseCleanupLease(owner);
+});
+
+test('a second sibling starts and settles after normalized text is persisted', async () => {
+  const siblingItemId = '7a3e4567-e89b-42d3-a456-426614174000';
+  const siblingIngestionId = '8a3e4567-e89b-42d3-a456-426614174000';
+  const source =
+    'Synthetic sibling analysis text with enough stable fingerprint characters.';
+  await seedSingleItem(packId, siblingItemId, siblingIngestionId, 'image/png');
+  let graph = (await repository.findPackGraph(packId))!;
+  const failed = graph.items.map(item => ({
+    ...item,
+    state: 'failed' as const,
+    retryStage: 'extract' as const,
+  }));
+  await repository.savePackGraph({
+    pack: {
+      ...graph.pack,
+      state: 'failed',
+      updatedAt: now,
+      orderedItemIds: failed.map(item => item.id),
+    },
+    items: failed,
+    expectedRevision: graph.revision,
+  });
+
+  const extractionWorker = new DeferredWorker();
+  jest.spyOn(extractionWorker, 'artifact').mockImplementation(run => ({
+    id: run.id,
+    itemId: run.itemId,
+    kind: 'ocr-text',
+    relativePath: ownedDerivedPath(run.packId, run.id, 'txt'),
+    mediaType: 'text/plain',
+    byteCount: source.length,
+    sha256: 'b'.repeat(64),
+    processorVersion: {
+      processor: 'fixture-extraction',
+      version: '1',
+      contractVersion: 1,
+    },
+    createdAt: run.startedAt,
+    immutable: true,
+  }));
+  const extractionCoordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    extractionWorker,
+    () => now,
+  );
+  await new PackLibraryController(
+    async () => repository,
+    () => now,
+    extractionCoordinator,
+  ).retryPack(packId);
+  await waitFor(() => extractionWorker.starts.length === 1);
+  const firstExtraction = extractionWorker.starts[0]!;
+  extractionWorker.results
+    .get(firstExtraction.id)!
+    .resolve(extractionWorker.artifact(firstExtraction));
+  await waitFor(() => extractionWorker.starts.length === 2);
+  const secondExtraction = extractionWorker.starts[1]!;
+  extractionWorker.results
+    .get(secondExtraction.id)!
+    .resolve(extractionWorker.artifact(secondExtraction));
+  await extractionCoordinator.waitForIdle();
+
+  const native = {
+    verifyArtifact: verifiedOriginal(),
+    resolveOwnedArtifactFileUri: jest.fn(
+      async (relativePath: string) => `file:///owned/${relativePath}`,
+    ),
+    readPlainTextFile: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      text: source,
+      byteCount: source.length,
+      encoding: 'utf-8',
+      revision: '1',
+    }),
+    hashImagePerceptually: jest.fn().mockResolvedValue({
+      schemaVersion: 1,
+      algorithm: 'dhash-64-v1',
+      hash: '0123456789abcdef',
+      sampleWidth: 9,
+      sampleHeight: 8,
+      orientationApplied: true,
+      durationMs: 1,
+      revision: '1',
+    }),
+    cancelImagePerceptualHash: jest.fn().mockResolvedValue(undefined),
+    writeTextArtifact: jest.fn(async (relativePath: string, text: string) => ({
+      relativePath,
+      byteCount: text.length,
+      sha256: 'd'.repeat(64),
+      created: true,
+    })),
+    quarantineOwnedArtifact: jest.fn(),
+  } as unknown as NativeAdapter;
+  const analysisWorker = new NativeDuplicateAnalysisStageWorker(
+    async () => repository,
+    native,
+    () => now,
+  );
+  const starts = jest.spyOn(analysisWorker, 'start');
+  const analysisCoordinator = new DurablePackProcessingCoordinator(
+    async () => repository,
+    analysisWorker,
+    () => now,
+  );
+
+  await expect(
+    new PackLibraryController(
+      async () => repository,
+      () => now,
+      analysisCoordinator,
+    ).analyzePack(packId),
+  ).resolves.toBe(2);
+
+  expect(starts).toHaveBeenCalledTimes(2);
+  graph = (await repository.findPackGraph(packId))!;
+  expect(graph.items).toEqual([
+    expect.objectContaining({ id: itemId, state: 'analyzed' }),
+    expect.objectContaining({ id: siblingItemId, state: 'analyzed' }),
+  ]);
+  expect(
+    (await repository.listArtifactRecords()).filter(
+      artifact => artifact.kind === 'normalized-text',
+    ),
+  ).toHaveLength(2);
 });
 
 test('extraction settlement is fenced when the publication lease owner changes', async () => {

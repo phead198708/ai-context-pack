@@ -124,7 +124,10 @@ internal class ImageHashScheduledWork(
     started.set(true)
     worker.set(Thread.currentThread())
     try {
-      token.throwIfCancelled()
+      if (token.isCancelled()) {
+        cancelBeforeStart()
+        return@Runnable
+      }
       action()
     } finally {
       worker.set(null)

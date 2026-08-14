@@ -4055,6 +4055,7 @@ function artifactKind(value: string): PersistedArtifactRecord['kind'] {
     case 'original':
     case 'ocr-text':
     case 'pdf-page-text':
+    case 'normalized-text':
     case 'compressed-image':
     case 'redacted-image':
     case 'preview':

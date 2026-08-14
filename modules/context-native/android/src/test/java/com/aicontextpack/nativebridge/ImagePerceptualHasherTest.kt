@@ -541,6 +541,64 @@ class ImagePerceptualHasherTest {
   }
 
   @Test
+  fun dequeuedCancellationRejectsOnceAndReleasesTheRegistryEntry() {
+    val dequeued = java.util.concurrent.CountDownLatch(1)
+    val release = java.util.concurrent.CountDownLatch(1)
+    val executor = object : java.util.concurrent.ThreadPoolExecutor(
+      1,
+      1,
+      0,
+      java.util.concurrent.TimeUnit.MILLISECONDS,
+      java.util.concurrent.ArrayBlockingQueue(1),
+    ) {
+      override fun beforeExecute(thread: Thread, runnable: Runnable) {
+        dequeued.countDown()
+        if (!release.await(2, java.util.concurrent.TimeUnit.SECONDS))
+          throw AssertionError("dequeued work was not released")
+        super.beforeExecute(thread, runnable)
+      }
+    }
+    val registry = ImageHashTaskRegistry()
+    val ownerId = "owner-a"
+    val taskId = "423e4567-e89b-42d3-a456-426614174000"
+    val token = checkNotNull(registry.reserve(ownerId, taskId))
+    val terminalRejections = java.util.concurrent.atomic.AtomicInteger(0)
+    val actionCalls = java.util.concurrent.atomic.AtomicInteger(0)
+    val cancellationResult = java.util.concurrent.atomic.AtomicReference<Boolean>()
+    val settled = java.util.concurrent.atomic.AtomicBoolean(false)
+    val work = ImageHashScheduledWork(
+      executor,
+      token,
+      action = { actionCalls.incrementAndGet() },
+      cancelBeforeStart = {
+        if (settled.compareAndSet(false, true)) terminalRejections.incrementAndGet()
+      },
+      afterFinish = { registry.finish(ownerId, taskId, token) },
+    )
+    registry.attach(ownerId, taskId, token, work::cancelAndWait)
+
+    work.schedule()
+    assertTrue(dequeued.await(2, java.util.concurrent.TimeUnit.SECONDS))
+    val cancellation = Thread {
+      cancellationResult.set(registry.cancel(ownerId, taskId))
+    }.apply { start() }
+    val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+    while (!token.isCancelled() && System.nanoTime() < deadline) Thread.yield()
+    assertTrue(token.isCancelled())
+    release.countDown()
+    cancellation.join(2_000)
+
+    assertFalse(cancellation.isAlive)
+    assertEquals(true, cancellationResult.get())
+    assertEquals(0, actionCalls.get())
+    assertEquals(1, terminalRejections.get())
+    assertNotNull(registry.reserve("owner-b", taskId))
+    registry.destroyOwner("owner-b")
+    executor.shutdown()
+    assertTrue(executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS))
+  }
+
+  @Test
   fun startupMaintenancePurgesEveryInheritedSnapshotAndPreservesCurrentProcessFiles() {
     val directory = java.io.File(
       System.getProperty("java.io.tmpdir"),
