@@ -401,13 +401,27 @@ internal object ImageCompressionTemporaryStore {
 
   data class Paths(val partial: File, val complete: File)
 
-  fun startupMaintenance(context: Context) {
-    val root = runCatching { directory(context) }.getOrNull() ?: return
-    root.listFiles()?.forEach { candidate ->
-      if (candidate.name.startsWith(sessionPrefix)) return@forEach
-      runCatching {
-        val stat = Os.lstat(candidate.path)
-        if (OsConstants.S_ISREG(stat.st_mode)) candidate.delete()
+  fun startupMaintenance(
+    context: Context,
+    remover: (File) -> Boolean = { it.delete() },
+  ) {
+    repeat(2) { attempt ->
+      try {
+        val root = directory(context)
+        val candidates = root.listFiles()
+          ?: throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        candidates.forEach { candidate ->
+          if (candidate.name.startsWith(sessionPrefix)) return@forEach
+          val stat = Os.lstat(candidate.path)
+          if (
+            OsConstants.S_ISREG(stat.st_mode) &&
+            !remover(candidate) &&
+            existsNoFollow(candidate)
+          ) throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        }
+        return
+      } catch (_: Exception) {
+        if (attempt == 1) throw NativeException("PIPELINE_RECOVERY_REQUIRED")
       }
     }
   }
@@ -416,6 +430,9 @@ internal object ImageCompressionTemporaryStore {
     if (runCatching { UUID.fromString(taskId).toString() == taskId }.getOrDefault(false).not()) {
       throw NativeException("PROCESSOR_OUTPUT_INVALID")
     }
+    // Fence inherited-output cleanup before accepting current-process work so
+    // cleanup failure is stable and visible through the compression request.
+    startupMaintenance(context)
     val root = directory(context)
     val partial = File(root, "$sessionPrefix$taskId.tmp.partial")
     val complete = File(root, "$sessionPrefix$taskId.tmp")

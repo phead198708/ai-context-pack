@@ -1,5 +1,6 @@
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
 import {
+  isBudgetOptimizationPlanV1,
   isBudgetOptimizationResultV1,
   isPackBudgetEstimateV1,
 } from '../../domain/budgetOptimization';
@@ -310,6 +311,7 @@ function isBudget(value: unknown): value is Budget {
     'estimatorVersion',
     'latestEstimate',
     'latestOptimization',
+    'pendingOptimization',
   ];
   return (
     Object.keys(value).every(key => allowed.includes(key)) &&
@@ -329,7 +331,9 @@ function isBudget(value: unknown): value is Budget {
     (value.latestEstimate === undefined ||
       isPackBudgetEstimateV1(value.latestEstimate)) &&
     (value.latestOptimization === undefined ||
-      isBudgetOptimizationResultV1(value.latestOptimization))
+      isBudgetOptimizationResultV1(value.latestOptimization)) &&
+    (value.pendingOptimization === undefined ||
+      isBudgetOptimizationPlanV1(value.pendingOptimization))
   );
 }
 

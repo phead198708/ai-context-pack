@@ -135,13 +135,40 @@ final class ImageCompressionProcessorTests: XCTestCase {
     )
     try Data([3]).write(to: inherited)
 
-    ImageCompressionTemporaryStore.startupMaintenance()
+    try ImageCompressionTemporaryStore.startupMaintenance()
 
     XCTAssertTrue(FileManager.default.fileExists(atPath: paths.partial.path))
     XCTAssertTrue(FileManager.default.fileExists(atPath: paths.complete.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: inherited.path))
     try ImageCompressionTemporaryStore.removeUnregistered([paths.partial])
     XCTAssertTrue(ImageCompressionTemporaryStore.finish(taskId: taskId))
+  }
+
+  func testStartupMaintenanceReportsRemovalFailureAfterBoundedRetry() throws {
+    let taskId = UUID().uuidString.lowercased()
+    let paths = try ImageCompressionTemporaryStore.prepare(taskId: taskId)
+    let inherited = paths.partial.deletingLastPathComponent().appendingPathComponent(
+      "inherited-\(UUID().uuidString).tmp"
+    )
+    try Data([7]).write(to: inherited)
+    var attempts = 0
+
+    XCTAssertThrowsError(
+      try ImageCompressionTemporaryStore.startupMaintenance(remover: { candidate in
+        if candidate.lastPathComponent == inherited.lastPathComponent {
+          attempts += 1
+          throw CocoaError(.fileWriteNoPermission)
+        }
+        try FileManager.default.removeItem(at: candidate)
+      })
+    ) {
+      XCTAssertEqual(
+        ($0 as? ImagePerceptualHashError)?.stableCode,
+        "PIPELINE_RECOVERY_REQUIRED"
+      )
+    }
+    XCTAssertEqual(attempts, 2)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: inherited.path))
   }
 
   func testRotatedTextFixtureRemainsSystemReadableAfterCompactCompression() throws {

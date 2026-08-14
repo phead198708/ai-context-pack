@@ -355,7 +355,6 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
           {
             InboxArtifactHandoff.runStartupMaintenance(context.filesDir)
             ImageHashSnapshotStore.runStartupMaintenance(context)
-            ImageCompressionTemporaryStore.startupMaintenance(context)
           },
           "ai-context-pack-tombstone-sweep",
         ).start()

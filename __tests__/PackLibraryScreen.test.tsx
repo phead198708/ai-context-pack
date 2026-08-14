@@ -455,6 +455,21 @@ test('renders all required library views and every partial-failure item state', 
 
 test('previews a versioned budget plan and reports actual compression savings', async () => {
   const value = controller();
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+  value.load.mockResolvedValue({
+    ...snapshot,
+    sections: {
+      ...snapshot.sections,
+      processing: [
+        ...snapshot.sections.processing,
+        {
+          ...snapshot.sections.processing[0]!,
+          id: otherPackId,
+          title: 'Other Pack',
+        },
+      ],
+    },
+  });
   const plan = {
     schemaVersion: 1 as const,
     planId: 'a23e4567-e89b-42d3-a456-426614174000',
@@ -563,6 +578,15 @@ test('previews a versioned budget plan and reports actual compression savings', 
 
   await press(button(renderer, 'Create compressed derivatives'));
   expect(value.applyBudget).toHaveBeenCalledWith(plan);
+  const otherPack = button(renderer, 'Open Other Pack');
+  expect(otherPack.props.accessibilityState?.disabled).toBe(true);
+  await press(otherPack);
+  expect(
+    value.load.mock.calls.some(([selected]) => selected === otherPackId),
+  ).toBe(false);
+  expect(
+    renderer.root.findByProps({ testID: `pack-editor-${packId}` }),
+  ).toBeDefined();
   const cancel = button(renderer, 'Cancel budget optimization');
   expect(cancel.props.accessibilityState?.disabled).toBe(false);
   await press(cancel);
@@ -578,6 +602,94 @@ test('previews a versioned budget plan and reports actual compression savings', 
   expect(
     text(renderer.root.findByProps({ testID: 'budget-actual-summary' })),
   ).toContain('-32');
+  act(() => renderer.unmount());
+});
+
+test('drops Pack-local optimization state after an idle Pack switch', async () => {
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+  const pendingOptimization = {
+    schemaVersion: 1 as const,
+    planId: 'b23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 3,
+    createdAt: '2026-08-10T00:00:02Z',
+    preset: 'compact' as const,
+    estimatorVersion: 'context-budget-estimator-v1' as const,
+    compressionVersion: 'image-compression-v1' as const,
+    budget: {
+      preset: 'compact' as const,
+      maxOutputBytes: 5_242_880,
+      minimumImageLongestEdge: 720,
+      targetImageLongestEdge: 1_280,
+      imageQuality: 0.7,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+    },
+    estimate: {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: 0,
+      predictedOutputBytes: 0,
+      imageCount: 0,
+      pdfPageCount: 0,
+      textCharacterCount: 0,
+      estimatedTokens: 0,
+    },
+    withinBudget: true,
+    predictedSavingsBytes: 0,
+    excludedItemIds: [],
+    actions: [],
+    recommendations: [],
+  };
+  const sections = {
+    ...snapshot.sections,
+    processing: [
+      ...snapshot.sections.processing,
+      {
+        ...snapshot.sections.processing[0]!,
+        id: otherPackId,
+        title: 'Other Pack',
+      },
+    ],
+  };
+  const withPending: PackLibrarySnapshot = {
+    ...snapshot,
+    sections,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        budget: { ...snapshot.selected!.pack.budget, pendingOptimization },
+      },
+    },
+  };
+  const otherSnapshot: PackLibrarySnapshot = {
+    ...snapshot,
+    sections,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        id: otherPackId,
+        title: 'Other Pack',
+      },
+    },
+  };
+  const value = controller();
+  value.load.mockImplementation(async selected =>
+    selected === otherPackId ? otherSnapshot : withPending,
+  );
+  const renderer = await render(value);
+  expect(renderer.root.findByProps({ testID: 'budget-plan' })).toBeDefined();
+
+  await press(button(renderer, 'Open Other Pack'));
+
+  expect(
+    renderer.root.findByProps({ testID: `pack-editor-${otherPackId}` }),
+  ).toBeDefined();
+  expect(renderer.root.findAllByProps({ testID: 'budget-plan' })).toHaveLength(
+    0,
+  );
   act(() => renderer.unmount());
 });
 

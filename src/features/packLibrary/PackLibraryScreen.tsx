@@ -75,15 +75,23 @@ export function PackLibraryScreen({
   const [mutationErrorCode, setMutationErrorCode] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [budgetApplyingPackId, setBudgetApplyingPackId] = useState<
+    string | undefined
+  >(undefined);
   const busyRef = useRef(false);
   const cancellingRef = useRef(false);
+  const budgetApplyingPackIdRef = useRef<string | undefined>(undefined);
   const selectionLoadStateRef = useRef<PackSelectionLoadState>({
     controlledPackId: selectedPackId,
     activePackId: selectedPackId,
     loadGeneration: 0,
   });
   const selectionLoadState = selectionLoadStateRef.current;
-  synchronizeControlledPackSelection(selectionLoadState, selectedPackId);
+  const effectiveSelectedPackId = budgetApplyingPackId ?? selectedPackId;
+  synchronizeControlledPackSelection(
+    selectionLoadState,
+    effectiveSelectedPackId,
+  );
   const load = useCallback(
     async (packId?: string): Promise<void> => {
       const generation = selectionLoadState.loadGeneration + 1;
@@ -108,11 +116,11 @@ export function PackLibraryScreen({
   );
   useEffect(() => {
     setLoadState({ kind: 'loading' });
-    run(load(selectedPackId));
+    run(load(effectiveSelectedPackId));
     return () => {
       selectionLoadState.loadGeneration += 1;
     };
-  }, [load, refreshKey, selectedPackId, selectionLoadState]);
+  }, [effectiveSelectedPackId, load, refreshKey, selectionLoadState]);
 
   const mutate = useCallback(
     async (operation: () => Promise<unknown>): Promise<void> => {
@@ -154,6 +162,19 @@ export function PackLibraryScreen({
       }
     },
     [controller, load, onChanged, selectionLoadState],
+  );
+
+  const setBudgetApplying = useCallback(
+    (packId: string, applying: boolean): void => {
+      if (applying) {
+        budgetApplyingPackIdRef.current = packId;
+        setBudgetApplyingPackId(packId);
+      } else if (budgetApplyingPackIdRef.current === packId) {
+        budgetApplyingPackIdRef.current = undefined;
+        setBudgetApplyingPackId(undefined);
+      }
+    },
+    [],
   );
 
   const mutationError = mutationErrorCode ? (
@@ -206,11 +227,13 @@ export function PackLibraryScreen({
       {mutationError}
       {PACK_LIBRARY_SECTIONS.map(section => (
         <LibrarySection
+          disabled={budgetApplyingPackId !== undefined}
           key={section}
           locale={locale}
           rows={loadState.snapshot.sections[section]}
           section={section}
           select={packId => {
+            if (budgetApplyingPackIdRef.current !== undefined) return;
             selectionLoadState.activePackId = packId;
             onSelectPack(packId);
             run(load(packId));
@@ -227,6 +250,7 @@ export function PackLibraryScreen({
           key={detail.pack.id}
           locale={locale}
           mutate={mutate}
+          setBudgetApplying={setBudgetApplying}
         />
       ) : (
         <Text style={styles.detail} testID="pack-library-no-selection">
@@ -261,11 +285,13 @@ function MutationErrorBanner({
 }
 
 function LibrarySection({
+  disabled,
   locale,
   rows,
   section,
   select,
 }: {
+  readonly disabled: boolean;
   readonly locale: AppLocale;
   readonly rows: PackLibrarySnapshot['sections'][PackLibrarySection];
   readonly section: PackLibrarySection;
@@ -291,8 +317,12 @@ function LibrarySection({
           <Pressable
             accessibilityLabel={t(locale, 'openPack', { title: row.title })}
             accessibilityRole="button"
+            accessibilityState={{ disabled }}
+            disabled={disabled}
             key={row.id}
-            onPress={() => select(row.id)}
+            onPress={() => {
+              if (!disabled) select(row.id);
+            }}
             style={styles.packRow}
             testID={`pack-row-${row.id}`}
           >
@@ -315,6 +345,7 @@ function PackEditor({
   detail,
   locale,
   mutate,
+  setBudgetApplying,
 }: {
   readonly busy: boolean;
   readonly cancelling: boolean;
@@ -323,6 +354,7 @@ function PackEditor({
   readonly detail: NonNullable<PackLibrarySnapshot['selected']>;
   readonly locale: AppLocale;
   readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
+  readonly setBudgetApplying: (packId: string, applying: boolean) => void;
 }): React.JSX.Element {
   const [title, setTitle, acknowledgeTitle] = usePersistedDraft(
     detail.pack.title,
@@ -390,10 +422,12 @@ function PackEditor({
       <BudgetOptimizationReview
         busy={busy}
         controller={controller}
+        key={detail.pack.id}
         locale={locale}
         mutate={mutate}
         pack={detail.pack}
         items={detail.items}
+        setBudgetApplying={setBudgetApplying}
       />
       {['processing', 'recovering'].includes(detail.pack.state) ? (
         <Button
@@ -455,6 +489,7 @@ function BudgetOptimizationReview({
   mutate,
   pack,
   items,
+  setBudgetApplying,
 }: {
   readonly busy: boolean;
   readonly controller: PackLibraryController;
@@ -462,12 +497,26 @@ function BudgetOptimizationReview({
   readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
   readonly pack: NonNullable<PackLibrarySnapshot['selected']>['pack'];
   readonly items: readonly PackItemRow[];
+  readonly setBudgetApplying: (packId: string, applying: boolean) => void;
 }): React.JSX.Element {
-  const [preset, setPreset] = useState<BudgetPreset>(pack.budget.preset);
-  const [customMiB, setCustomMiB] = useState(
-    String(Math.max(1, Math.round(pack.budget.maxOutputBytes / 1_048_576))),
+  const pendingPlan = pack.budget.pendingOptimization;
+  const [preset, setPreset] = useState<BudgetPreset>(
+    pendingPlan?.preset ?? pack.budget.preset,
   );
-  const [plan, setPlan] = useState<BudgetOptimizationPlanV1>();
+  const [customMiB, setCustomMiB] = useState(
+    String(
+      Math.max(
+        1,
+        Math.round(
+          (pendingPlan?.budget.maxOutputBytes ?? pack.budget.maxOutputBytes) /
+            1_048_576,
+        ),
+      ),
+    ),
+  );
+  const [plan, setPlan] = useState<BudgetOptimizationPlanV1 | undefined>(
+    pendingPlan,
+  );
   const [result, setResult] = useState<BudgetOptimizationResultV1>();
   const [applying, setApplying] = useState(false);
   const fixedExcludedItemIds = useMemo(
@@ -484,7 +533,11 @@ function BudgetOptimizationReview({
     [items],
   );
   const [excludedItemIds, setExcludedItemIds] = useState<ReadonlySet<string>>(
-    () => fixedExcludedItemIds,
+    () =>
+      new Set([
+        ...fixedExcludedItemIds,
+        ...(pendingPlan?.excludedItemIds ?? []),
+      ]),
   );
   useEffect(() => {
     setExcludedItemIds(
@@ -528,22 +581,22 @@ function BudgetOptimizationReview({
       <Text style={styles.detail}>{t(locale, 'budgetEstimateNotice')}</Text>
       <View style={styles.actions}>
         <Button
-          disabled={busy}
+          disabled={busy || pendingPlan !== undefined}
           label={t(locale, 'budgetPresetQuality')}
           onPress={() => choose('quality')}
         />
         <Button
-          disabled={busy}
+          disabled={busy || pendingPlan !== undefined}
           label={t(locale, 'budgetPresetBalanced')}
           onPress={() => choose('balanced')}
         />
         <Button
-          disabled={busy}
+          disabled={busy || pendingPlan !== undefined}
           label={t(locale, 'budgetPresetCompact')}
           onPress={() => choose('compact')}
         />
         <Button
-          disabled={busy}
+          disabled={busy || pendingPlan !== undefined}
           label={t(locale, 'budgetPresetCustom')}
           onPress={() => choose('custom')}
         />
@@ -551,7 +604,7 @@ function BudgetOptimizationReview({
       {preset === 'custom' ? (
         <TextInput
           accessibilityLabel={t(locale, 'budgetCustomMiB')}
-          editable={!busy}
+          editable={!busy && pendingPlan === undefined}
           keyboardType="number-pad"
           maxLength={3}
           onChangeText={value => {
@@ -570,7 +623,7 @@ function BudgetOptimizationReview({
             </Text>
           ) : (
             <Button
-              disabled={busy}
+              disabled={busy || pendingPlan !== undefined}
               key={item.id}
               label={t(
                 locale,
@@ -587,6 +640,7 @@ function BudgetOptimizationReview({
       <Button
         disabled={
           busy ||
+          pendingPlan !== undefined ||
           (preset === 'custom' &&
             (!Number.isFinite(Number(customMiB)) || Number(customMiB) < 1))
         }
@@ -668,11 +722,13 @@ function BudgetOptimizationReview({
               run(
                 mutate(async () => {
                   setApplying(true);
+                  setBudgetApplying(pack.id, true);
                   try {
                     setResult(await controller.applyBudget(plan));
                     setPlan(undefined);
                   } finally {
                     setApplying(false);
+                    setBudgetApplying(pack.id, false);
                   }
                 }),
               )

@@ -14,7 +14,10 @@ import {
   NativeAtomicArtifactFileStore,
   PublishedArtifactCoordinator,
 } from '../../infrastructure/persistence/artifactStore';
-import type { ProductionPersistenceRepository } from '../../infrastructure/persistence/contracts';
+import type {
+  PersistedArtifactRecord,
+  ProductionPersistenceRepository,
+} from '../../infrastructure/persistence/contracts';
 import { ownedDerivedPath } from '../../infrastructure/persistence/ownedPaths';
 
 export interface BudgetOptimizationApplyOptions {
@@ -37,6 +40,8 @@ export class PackBudgetOptimizationService {
     const repository = await this.getRepository();
     const graph = await repository.findPackGraph(packId);
     if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
+    if (graph.pack.budget.pendingOptimization)
+      return graph.pack.budget.pendingOptimization;
     const [artifacts, duplicateAnalysis] = await Promise.all([
       repository.listArtifactRecords(),
       repository.findDuplicateAnalysis(packId),
@@ -74,6 +79,8 @@ export class PackBudgetOptimizationService {
       if (included && !original)
         throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
       const analysis = analyses.get(item.id);
+      if (includesExtracted && !analysis)
+        throw new DomainError('PIPELINE_RECOVERY_REQUIRED');
       let pdfPageCount = 0;
       if (includesOriginal && item.sourceType === 'pdf' && original) {
         const taskId = this.createId();
@@ -137,11 +144,39 @@ export class PackBudgetOptimizationService {
     plan: BudgetOptimizationPlanV1,
     options: BudgetOptimizationApplyOptions = {},
   ): Promise<BudgetOptimizationResultV1> {
+    throwIfAborted(options.signal);
     const repository = await this.getRepository();
-    const graph = await repository.findPackGraph(plan.packId);
-    if (!graph || graph.revision !== plan.packRevision)
+    throwIfAborted(options.signal);
+    let graph = await repository.findPackGraph(plan.packId);
+    if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
+    const pending = graph.pack.budget.pendingOptimization;
+    if (pending && !samePlan(pending, plan))
       throw new DomainError('PERSISTENCE_CONFLICT');
+    if (!pending) {
+      if (graph.revision !== plan.packRevision)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const updatedAt = monotonicTimestamp(this.now(), [
+        graph.pack.updatedAt,
+        plan.createdAt,
+      ]);
+      const checkpointPack = {
+        ...graph.pack,
+        updatedAt,
+        budget: { ...graph.pack.budget, pendingOptimization: plan },
+      };
+      const revision = await repository.savePackGraph({
+        pack: checkpointPack,
+        items: graph.items,
+        expectedRevision: graph.revision,
+      });
+      graph = { pack: checkpointPack, items: graph.items, revision };
+    }
+    const effectivePlan = graph.pack.budget.pendingOptimization;
+    if (!effectivePlan || !samePlan(effectivePlan, plan))
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    throwIfAborted(options.signal);
     const artifacts = await repository.listArtifactRecords();
+    throwIfAborted(options.signal);
     const originals = new Map(
       artifacts
         .filter(
@@ -172,9 +207,8 @@ export class PackBudgetOptimizationService {
     };
     options.signal?.addEventListener('abort', abort, { once: true });
     try {
-      for (const action of plan.actions) {
-        if (options.signal?.aborted)
-          throw new DomainError('PIPELINE_STAGE_FAILED');
+      for (const action of effectivePlan.actions) {
+        throwIfAborted(options.signal);
         const original = originals.get(action.itemId);
         if (!original) throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
         if (action.kind === 'keep') {
@@ -188,21 +222,32 @@ export class PackBudgetOptimizationService {
           });
           continue;
         }
+        const checkpoint = artifacts.find(
+          artifact => artifact.id === action.outputArtifactId,
+        );
+        if (checkpoint) {
+          results.push(
+            resultFromCheckpoint(effectivePlan, action, original, checkpoint),
+          );
+          continue;
+        }
         if (
           !this.native.compressImage ||
           !this.native.cancelImageCompression ||
           !this.native.finishImageCompression
         )
           throw new DomainError('DOMAIN_INVALID_TRANSITION');
+        const fileUri = await this.native.resolveOwnedArtifactFileUri(
+          original.relativePath,
+        );
+        throwIfAborted(options.signal);
         activeTaskId = action.outputArtifactId;
         cancellation = undefined;
         try {
           const value = await this.native.compressImage({
             schemaVersion: 1,
             taskId: action.outputArtifactId,
-            fileUri: await this.native.resolveOwnedArtifactFileUri(
-              original.relativePath,
-            ),
+            fileUri,
             expectedByteCount: original.byteCount,
             expectedSha256: original.sha256,
             targetWidth: action.targetWidth,
@@ -220,7 +265,7 @@ export class PackBudgetOptimizationService {
             itemId: action.itemId,
             kind: 'compressed-image',
             relativePath: ownedDerivedPath(
-              plan.packId,
+              effectivePlan.packId,
               action.outputArtifactId,
               value.mediaType === 'image/png' ? 'png' : 'jpg',
             ),
@@ -234,14 +279,15 @@ export class PackBudgetOptimizationService {
               engine: value.engine,
               engineRevision: value.revision,
             },
-            createdAt: plan.createdAt,
+            createdAt: effectivePlan.createdAt,
             immutable: true,
           };
           await coordinator.publish({
-            packId: plan.packId,
+            packId: effectivePlan.packId,
             sourceFileUri: value.temporaryFileUri,
             artifact,
           });
+          throwIfAborted(options.signal);
           results.push({
             itemId: action.itemId,
             action: 'compressed',
@@ -262,33 +308,50 @@ export class PackBudgetOptimizationService {
           await this.native.finishImageCompression(action.outputArtifactId);
           activeTaskId = undefined;
         }
+        throwIfAborted(options.signal);
       }
       const result = completeBudgetOptimizationResultV1({
-        plan,
-        completedAt: validTimestamp(this.now(), graph.pack.updatedAt),
+        plan: effectivePlan,
+        completedAt: monotonicTimestamp(this.now(), [
+          graph.pack.updatedAt,
+          effectivePlan.createdAt,
+        ]),
         items: results,
       });
-      const refreshed = await repository.findPackGraph(plan.packId);
-      if (!refreshed || refreshed.revision !== plan.packRevision)
-        throw new DomainError('PERSISTENCE_CONFLICT');
-      const excluded = new Set(plan.excludedItemIds);
+      const refreshed = await repository.findPackGraph(effectivePlan.packId);
       if (
-        excluded.size !== plan.excludedItemIds.length ||
-        plan.excludedItemIds.some(
+        !refreshed ||
+        refreshed.revision !== graph.revision ||
+        !refreshed.pack.budget.pendingOptimization ||
+        !samePlan(refreshed.pack.budget.pendingOptimization, effectivePlan)
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const excluded = new Set(effectivePlan.excludedItemIds);
+      if (
+        excluded.size !== effectivePlan.excludedItemIds.length ||
+        effectivePlan.excludedItemIds.some(
           excludedId => !refreshed.items.some(item => item.id === excludedId),
         )
       )
         throw new DomainError('SCHEMA_INVALID');
+      // The graph save below is the irreversible optimization commit point.
+      // Observe cancellation immediately before entering it; once it succeeds,
+      // the durable result is authoritative even if the caller later aborts.
+      throwIfAborted(options.signal);
       await repository.savePackGraph({
         pack: {
           ...refreshed.pack,
-          updatedAt: validTimestamp(this.now(), refreshed.pack.updatedAt),
+          updatedAt: monotonicTimestamp(this.now(), [
+            refreshed.pack.updatedAt,
+            effectivePlan.createdAt,
+            result.completedAt,
+          ]),
           budget: {
-            ...plan.budget,
-            latestEstimate: plan.estimate,
+            ...effectivePlan.budget,
+            latestEstimate: effectivePlan.estimate,
             latestOptimization: result,
           },
-          estimatedTokens: plan.estimate.estimatedTokens,
+          estimatedTokens: effectivePlan.estimate.estimatedTokens,
         },
         items: refreshed.items.map(item =>
           excluded.has(item.id)
@@ -304,10 +367,70 @@ export class PackBudgetOptimizationService {
   }
 }
 
-function validTimestamp(value: string, floor: string): string {
+function monotonicTimestamp(value: string, floors: readonly string[]): string {
   if (!Number.isFinite(Date.parse(value)))
     throw new DomainError('SCHEMA_INVALID');
-  return Date.parse(value) < Date.parse(floor) ? floor : value;
+  return floors.reduce(
+    (latest, floor) =>
+      Date.parse(floor) > Date.parse(latest) ? floor : latest,
+    value,
+  );
+}
+
+function validTimestamp(value: string, floor: string): string {
+  return monotonicTimestamp(value, [floor]);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new DomainError('PIPELINE_STAGE_FAILED');
+}
+
+function samePlan(
+  left: BudgetOptimizationPlanV1,
+  right: BudgetOptimizationPlanV1,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function resultFromCheckpoint(
+  plan: BudgetOptimizationPlanV1,
+  action: Extract<
+    BudgetOptimizationPlanV1['actions'][number],
+    { kind: 'compress' }
+  >,
+  original: Artifact,
+  artifact: PersistedArtifactRecord,
+): BudgetOptimizationItemResultV1 {
+  const expectedPath = ownedDerivedPath(
+    plan.packId,
+    action.outputArtifactId,
+    artifact.mediaType === 'image/png' ? 'png' : 'jpg',
+  );
+  if (
+    artifact.itemId !== action.itemId ||
+    artifact.kind !== 'compressed-image' ||
+    artifact.mediaType !== action.outputMediaType ||
+    artifact.relativePath !== expectedPath ||
+    (artifact.mediaType !== 'image/jpeg' &&
+      artifact.mediaType !== 'image/png') ||
+    artifact.createdAt !== plan.createdAt ||
+    artifact.processorVersion.processor !== 'native-image-compression' ||
+    artifact.processorVersion.version !== plan.compressionVersion ||
+    artifact.processorVersion.contractVersion !== 1 ||
+    !Number.isSafeInteger(artifact.byteCount) ||
+    artifact.byteCount <= 0 ||
+    !/^[0-9a-f]{64}$/.test(artifact.sha256)
+  )
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  return {
+    itemId: action.itemId,
+    action: 'compressed',
+    predictedOutputBytes: action.predictedOutputBytes,
+    actualOutputBytes: artifact.byteCount,
+    actualSavingsBytes: Math.max(0, original.byteCount - artifact.byteCount),
+    deviationBytes: artifact.byteCount - action.predictedOutputBytes,
+    artifactId: artifact.id,
+  };
 }
 
 async function awaitCancellationBestEffort(

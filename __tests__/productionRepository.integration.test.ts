@@ -18,6 +18,10 @@ import {
   type DuplicateAnalysisItemV1,
 } from '../src/domain/duplicateDetection';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
+import {
+  BUDGET_PRESETS,
+  createBudgetOptimizationPlanV1,
+} from '../src/domain/budgetOptimization';
 
 type SqlValue = string | number | null;
 interface NodeStatement {
@@ -1011,6 +1015,51 @@ describe('production repository against SQLite', () => {
     const graph = await repository.findPackGraph(emptyPackId);
     expect(graph?.revision).toBe(2);
     expect(graph?.pack.orderedItemIds).toEqual([appendedItemId]);
+  });
+
+  test('restores a pending budget optimization plan after reopening SQLite', async () => {
+    const graph = await repository.findPackGraph(packId);
+    const pendingOptimization = createBudgetOptimizationPlanV1({
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      packId,
+      packRevision: graph!.revision,
+      createdAt: '2026-08-14T00:10:00Z',
+      budget: BUDGET_PRESETS.compact,
+      items: [
+        {
+          itemId: firstItemId,
+          sourceType: 'text',
+          included: true,
+          includeOriginal: true,
+          includeExtracted: false,
+          sourceByteCount: 4,
+          textCharacterCount: 0,
+          textUtf8ByteCount: 0,
+          pdfPageCount: 0,
+        },
+      ],
+      createArtifactId: () => 'c43e4567-e89b-42d3-a456-426614174000',
+    });
+    await repository.savePackGraph({
+      pack: {
+        ...graph!.pack,
+        updatedAt: pendingOptimization.createdAt,
+        budget: { ...graph!.pack.budget, pendingOptimization },
+      },
+      items: graph!.items,
+      expectedRevision: graph!.revision,
+    });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
+      pack: { budget: { pendingOptimization } },
+    });
   });
 
   test('maps malformed persisted values to recoverable storage divergence', async () => {

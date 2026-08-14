@@ -1012,6 +1012,7 @@ function nativeImageCompressionBoundaryError(
     code === 'ARTIFACT_INTEGRITY_FAILED' ||
     code === 'RESOURCE_MEMORY_PRESSURE' ||
     code === 'PIPELINE_STAGE_FAILED' ||
+    code === 'PIPELINE_RECOVERY_REQUIRED' ||
     code === 'PROCESSOR_OUTPUT_INVALID'
       ? code
       : 'PROCESSOR_OUTPUT_INVALID',

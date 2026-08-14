@@ -207,6 +207,13 @@ describe('versioned Pack budget estimator', () => {
         items: [{ ...result.items[0]!, deviationBytes: 0 }],
       }),
     ).toThrow(new DomainError('SCHEMA_INVALID'));
+    expect(() =>
+      completeBudgetOptimizationResultV1({
+        plan,
+        completedAt: '2026-08-13T23:59:59Z',
+        items: result.items,
+      }),
+    ).toThrow(new DomainError('SCHEMA_INVALID'));
   });
 
   test('rejects invalid custom bounds and malformed native payloads', () => {
@@ -249,6 +256,18 @@ describe('versioned Pack budget estimator', () => {
         },
         items: [imageItem(1, 100, 10, 10)],
         createArtifactId: () => id(100),
+      }),
+    ).toThrow(new DomainError('SCHEMA_INVALID'));
+    const largeImage = imageItem(2, 2_000_000, 3_000, 2_000);
+    expect(() =>
+      createBudgetOptimizationPlanV1({
+        planId: id(800),
+        packId,
+        packRevision: 1,
+        createdAt,
+        budget: BUDGET_PRESETS.compact,
+        items: [largeImage],
+        createArtifactId: () => largeImage.itemId,
       }),
     ).toThrow(new DomainError('SCHEMA_INVALID'));
   });

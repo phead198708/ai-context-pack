@@ -43,7 +43,6 @@ public final class ContextNativeModule: Module {
       }
       DispatchQueue.global(qos: .utility).async {
         ImageHashSnapshotStore.runStartupMaintenance()
-        ImageCompressionTemporaryStore.startupMaintenance()
       }
       guard let container = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: appGroupIdentifier

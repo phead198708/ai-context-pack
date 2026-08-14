@@ -337,6 +337,8 @@ export function createBudgetOptimizationPlanV1(input: {
     !isSupportedBudget(input.budget)
   )
     throw new DomainError('SCHEMA_INVALID');
+  const planBudget = { ...input.budget };
+  delete planBudget.pendingOptimization;
   assertUniqueBudgetItems(input.items);
   const images = input.items.filter(
     (
@@ -403,6 +405,19 @@ export function createBudgetOptimizationPlanV1(input: {
       predictedOutputBytes,
     } satisfies CompressImageOptimizationActionV1;
   });
+  const outputArtifactIds = actions.flatMap(action =>
+    action.kind === 'compress' ? [action.outputArtifactId] : [],
+  );
+  const reservedIds = new Set([
+    input.packId,
+    input.planId,
+    ...input.items.map(item => item.itemId),
+  ]);
+  if (
+    new Set(outputArtifactIds).size !== outputArtifactIds.length ||
+    outputArtifactIds.some(artifactId => reservedIds.has(artifactId))
+  )
+    throw new DomainError('SCHEMA_INVALID');
   const effectivePredictions = new Map(
     actions.map(action => [action.itemId, action.predictedOutputBytes]),
   );
@@ -436,7 +451,7 @@ export function createBudgetOptimizationPlanV1(input: {
     preset: input.budget.preset,
     estimatorVersion: CONTEXT_BUDGET_ESTIMATOR_VERSION,
     compressionVersion: IMAGE_COMPRESSION_PROCESSOR_VERSION,
-    budget: input.budget,
+    budget: planBudget,
     estimate,
     withinBudget,
     predictedSavingsBytes: Math.max(
@@ -458,6 +473,7 @@ export function completeBudgetOptimizationResultV1(input: {
 }): BudgetOptimizationResultV1 {
   if (
     !Number.isFinite(Date.parse(input.completedAt)) ||
+    Date.parse(input.completedAt) < Date.parse(input.plan.createdAt) ||
     input.items.length !== input.plan.actions.length ||
     input.items.some(result => {
       const action = input.plan.actions.find(
@@ -539,6 +555,81 @@ export function isPackBudgetEstimateV1(
       value.estimatedTokens,
     ].every(isNonNegativeSafeInteger)
   );
+}
+
+export function isBudgetOptimizationPlanV1(
+  value: unknown,
+): value is BudgetOptimizationPlanV1 {
+  if (!isRecord(value)) return false;
+  const keys = [
+    'schemaVersion',
+    'planId',
+    'packId',
+    'packRevision',
+    'createdAt',
+    'preset',
+    'estimatorVersion',
+    'compressionVersion',
+    'budget',
+    'estimate',
+    'withinBudget',
+    'predictedSavingsBytes',
+    'excludedItemIds',
+    'actions',
+    'recommendations',
+  ];
+  const actions = Array.isArray(value.actions) ? value.actions : [];
+  const outputArtifactIds = actions.flatMap(action =>
+    isRecord(action) &&
+    action.kind === 'compress' &&
+    typeof action.outputArtifactId === 'string'
+      ? [action.outputArtifactId]
+      : [],
+  );
+  const reservedIds = new Set([
+    value.packId,
+    value.planId,
+    ...actions.flatMap(action =>
+      isRecord(action) && typeof action.itemId === 'string'
+        ? [action.itemId]
+        : [],
+    ),
+  ]);
+  if (
+    !exactKeys(value, keys) ||
+    value.schemaVersion !== 1 ||
+    !isCanonicalUuid(value.planId) ||
+    !isCanonicalUuid(value.packId) ||
+    !isPositiveSafeInteger(value.packRevision) ||
+    typeof value.createdAt !== 'string' ||
+    !Number.isFinite(Date.parse(value.createdAt)) ||
+    !isPlanBudget(value.budget) ||
+    value.preset !== value.budget.preset ||
+    value.estimatorVersion !== CONTEXT_BUDGET_ESTIMATOR_VERSION ||
+    value.compressionVersion !== IMAGE_COMPRESSION_PROCESSOR_VERSION ||
+    !isPackBudgetEstimateV1(value.estimate) ||
+    typeof value.withinBudget !== 'boolean' ||
+    value.withinBudget !==
+      value.estimate.predictedOutputBytes <= value.budget.maxOutputBytes ||
+    !isNonNegativeSafeInteger(value.predictedSavingsBytes) ||
+    value.predictedSavingsBytes !==
+      Math.max(
+        0,
+        value.estimate.sourceBytes - value.estimate.predictedOutputBytes,
+      ) ||
+    !isSortedUniqueCanonicalIds(value.excludedItemIds) ||
+    !Array.isArray(value.actions) ||
+    !value.actions.every(isImageOptimizationActionV1) ||
+    new Set(value.actions.map(action => action.itemId)).size !==
+      value.actions.length ||
+    new Set(outputArtifactIds).size !== outputArtifactIds.length ||
+    outputArtifactIds.some(artifactId => reservedIds.has(artifactId)) ||
+    !Array.isArray(value.recommendations) ||
+    !value.recommendations.every(isBudgetRecommendationV1) ||
+    new Set(value.recommendations).size !== value.recommendations.length
+  )
+    return false;
+  return true;
 }
 
 export function isBudgetOptimizationResultV1(
@@ -720,6 +811,100 @@ function isBudgetOptimizationItemResultV1(
       (typeof value.artifactId === 'string' &&
         isCanonicalUuid(value.artifactId))) &&
     (value.action === 'compressed') === (value.artifactId !== undefined)
+  );
+}
+
+function isPlanBudget(value: unknown): value is Budget {
+  if (!isRecord(value)) return false;
+  const allowed = [
+    'preset',
+    'maxOutputBytes',
+    'minimumImageLongestEdge',
+    'targetImageLongestEdge',
+    'imageQuality',
+    'estimatorVersion',
+    'latestEstimate',
+    'latestOptimization',
+  ];
+  return (
+    Object.keys(value).every(key => allowed.includes(key)) &&
+    isSupportedBudget(value as unknown as Budget) &&
+    (value.latestEstimate === undefined ||
+      isPackBudgetEstimateV1(value.latestEstimate)) &&
+    (value.latestOptimization === undefined ||
+      isBudgetOptimizationResultV1(value.latestOptimization))
+  );
+}
+
+function isBudgetRecommendationV1(
+  value: unknown,
+): value is BudgetRecommendationV1 {
+  return (
+    value === 'lower-quality' ||
+    value === 'ocr-only' ||
+    value === 'split-pack' ||
+    value === 'remove-items'
+  );
+}
+
+function isImageOptimizationActionV1(
+  value: unknown,
+): value is ImageOptimizationActionV1 {
+  if (!isRecord(value) || !isCanonicalUuid(value.itemId)) return false;
+  if (value.kind === 'keep')
+    return (
+      exactKeys(value, [
+        'kind',
+        'itemId',
+        'sourceByteCount',
+        'predictedOutputBytes',
+        'reason',
+      ]) &&
+      isPositiveSafeInteger(value.sourceByteCount) &&
+      isPositiveSafeInteger(value.predictedOutputBytes) &&
+      (value.reason === 'already-efficient' ||
+        value.reason === 'transparent-not-smaller')
+    );
+  return (
+    value.kind === 'compress' &&
+    exactKeys(value, [
+      'kind',
+      'itemId',
+      'outputArtifactId',
+      'sourceByteCount',
+      'sourceSha256',
+      'sourceMediaType',
+      'sourceWidth',
+      'sourceHeight',
+      'targetWidth',
+      'targetHeight',
+      'targetLongestEdge',
+      'quality',
+      'outputMediaType',
+      'preserveAlpha',
+      'predictedOutputBytes',
+    ]) &&
+    isCanonicalUuid(value.outputArtifactId) &&
+    isPositiveSafeInteger(value.sourceByteCount) &&
+    typeof value.sourceSha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(value.sourceSha256) &&
+    typeof value.sourceMediaType === 'string' &&
+    SUPPORTED_SOURCE_IMAGE_MEDIA_TYPES.has(value.sourceMediaType) &&
+    [
+      value.sourceWidth,
+      value.sourceHeight,
+      value.targetWidth,
+      value.targetHeight,
+      value.targetLongestEdge,
+      value.predictedOutputBytes,
+    ].every(isPositiveSafeInteger) &&
+    typeof value.quality === 'number' &&
+    Number.isFinite(value.quality) &&
+    value.quality >= JPEG_MINIMUM_QUALITY &&
+    value.quality <= 1 &&
+    (value.outputMediaType === 'image/jpeg' ||
+      value.outputMediaType === 'image/png') &&
+    typeof value.preserveAlpha === 'boolean'
   );
 }
 

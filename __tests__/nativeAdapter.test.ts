@@ -313,6 +313,12 @@ describe('native adapter runtime boundary', () => {
     await expect(guarded.compressImage?.(request)).rejects.toMatchObject({
       code: 'RESOURCE_MEMORY_PRESSURE',
     });
+    native.compressImage.mockRejectedValue({
+      code: 'PIPELINE_RECOVERY_REQUIRED',
+    });
+    await expect(guarded.compressImage?.(request)).rejects.toMatchObject({
+      code: 'PIPELINE_RECOVERY_REQUIRED',
+    });
     native.compressImage.mockRejectedValue({ code: 'PRIVATE_NATIVE_ERROR' });
     await expect(guarded.compressImage?.(request)).rejects.toMatchObject({
       code: 'PROCESSOR_OUTPUT_INVALID',

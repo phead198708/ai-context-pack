@@ -84,23 +84,25 @@ function fixture(
     relativePath: secondItem.originalRelativePath!,
     sha256: secondItem.originalSha256!,
   };
-  const sourceItems = includeSecondImage ? [item, secondItem] : [item];
+  let sourceItems = includeSecondImage ? [item, secondItem] : [item];
   const artifacts: Artifact[] = includeSecondImage
     ? [original, secondOriginal]
     : [original];
   const saves: SavePackGraphInput[] = [];
   const registered: RegisterPublishedArtifactInput[] = [];
+  let currentPack = includeSecondImage
+    ? { ...pack, orderedItemIds: [itemId, secondItemId] }
+    : pack;
+  let currentRevision = 7;
   const graph = () => ({
-    pack: includeSecondImage
-      ? { ...pack, orderedItemIds: [itemId, secondItemId] }
-      : pack,
+    pack: currentPack,
     items: sourceItems.map(sourceItem => ({
       ...sourceItem,
       artifactIds: artifacts
         .filter(value => value.itemId === sourceItem.id)
         .map(value => value.id),
     })),
-    revision: 7,
+    revision: currentRevision,
   });
   const repository = {
     findPackGraph: jest.fn(async () => graph()),
@@ -130,7 +132,10 @@ function fixture(
     recordRecoveryDiagnostic: jest.fn().mockResolvedValue(undefined),
     savePackGraph: jest.fn(async (input: SavePackGraphInput) => {
       saves.push(input);
-      return 8;
+      currentPack = input.pack;
+      sourceItems = [...input.items];
+      currentRevision += 1;
+      return currentRevision;
     }),
   } as unknown as ProductionPersistenceRepository;
   const native = {
@@ -201,7 +206,7 @@ function fixture(
     now,
     () => ids.shift()!,
   );
-  return { service, native, repository, saves, registered };
+  return { service, native, repository, saves, registered, graph };
 }
 
 test('previews metrics before encoding and publishes an immutable derivative', async () => {
@@ -239,9 +244,16 @@ test('previews metrics before encoding and publishes an immutable derivative', a
     byteCount: 500_000,
     sha256: 'b'.repeat(64),
   });
-  expect(saves[0]?.pack.budget.latestOptimization).toEqual(result);
-  expect(saves[0]?.pack.estimatedTokens).toBe(plan.estimate.estimatedTokens);
-  expect(saves[0]?.items[0]?.artifactIds).toEqual([originalId, derivativeId]);
+  expect(saves[0]?.pack.budget.pendingOptimization).toEqual(plan);
+  expect(saves.at(-1)?.pack.budget.latestOptimization).toEqual(result);
+  expect(saves.at(-1)?.pack.budget.pendingOptimization).toBeUndefined();
+  expect(saves.at(-1)?.pack.estimatedTokens).toBe(
+    plan.estimate.estimatedTokens,
+  );
+  expect(saves.at(-1)?.items[0]?.artifactIds).toEqual([
+    originalId,
+    derivativeId,
+  ]);
 });
 
 test('always finishes the native temporary output when publication fails', async () => {
@@ -255,33 +267,38 @@ test('always finishes the native temporary output when publication fails', async
 
 test('replays stable immutable metadata after a final Pack save failure', async () => {
   let tick = 1;
-  const { service, repository, registered } = fixture(
+  const { service, native, repository, registered, graph } = fixture(
     () => `2026-08-14T00:00:${String(tick++).padStart(2, '0')}Z`,
   );
   const plan = await service.preview(packId, BUDGET_PRESETS.compact);
-  (repository.savePackGraph as jest.Mock).mockRejectedValueOnce(
-    new Error('synthetic Pack save'),
-  );
+  const save = repository.savePackGraph as jest.Mock;
+  const commit = save.getMockImplementation()!;
+  save
+    .mockImplementationOnce(commit)
+    .mockRejectedValueOnce(new Error('synthetic Pack save'));
 
   await expect(service.apply(plan)).rejects.toThrow('synthetic Pack save');
-  await expect(service.apply(plan)).resolves.toMatchObject({
+  const recoveredPlan = graph().pack.budget.pendingOptimization!;
+  const restarted = new PackBudgetOptimizationService(
+    async () => repository,
+    native,
+    () => `2026-08-14T00:01:${String(tick++).padStart(2, '0')}Z`,
+  );
+  await expect(restarted.apply(recoveredPlan)).resolves.toMatchObject({
     planId: plan.planId,
   });
 
   const replayed = registered.filter(
     value => value.artifact.id === derivativeId,
   );
-  expect(replayed).toHaveLength(2);
-  expect(replayed.map(value => value.artifact.createdAt)).toEqual([
-    plan.createdAt,
-    plan.createdAt,
-  ]);
-  expect(replayed[1]?.artifact).toEqual(replayed[0]?.artifact);
+  expect(replayed).toHaveLength(1);
+  expect(replayed[0]?.artifact.createdAt).toBe(plan.createdAt);
+  expect(native.compressImage).toHaveBeenCalledTimes(1);
 });
 
 test('replays a stable first derivative after the second publication fails', async () => {
   let tick = 1;
-  const { service, native, registered } = fixture(
+  const { service, native, repository, registered, graph } = fixture(
     () => `2026-08-14T00:01:${String(tick++).padStart(2, '0')}Z`,
     true,
   );
@@ -306,18 +323,22 @@ test('replays a stable first derivative after the second publication fails', asy
   await expect(service.apply(plan)).rejects.toThrow(
     'synthetic second publication',
   );
-  await expect(service.apply(plan)).resolves.toMatchObject({
+  const recoveredPlan = graph().pack.budget.pendingOptimization!;
+  const restarted = new PackBudgetOptimizationService(
+    async () => repository,
+    native,
+    () => `2026-08-14T00:02:${String(tick++).padStart(2, '0')}Z`,
+  );
+  await expect(restarted.apply(recoveredPlan)).resolves.toMatchObject({
     planId: plan.planId,
   });
 
   const firstPublications = registered.filter(
     value => value.artifact.id === derivativeId,
   );
-  expect(firstPublications).toHaveLength(2);
-  expect(firstPublications[1]?.artifact).toEqual(
-    firstPublications[0]?.artifact,
-  );
+  expect(firstPublications).toHaveLength(1);
   expect(firstPublications[0]?.artifact.createdAt).toBe(plan.createdAt);
+  expect(native.compressImage).toHaveBeenCalledTimes(3);
 });
 
 test('previews and durably applies explicit item exclusions without encoding', async () => {
@@ -338,7 +359,7 @@ test('previews and durably applies explicit item exclusions without encoding', a
   expect(result.actualOutputBytes).toBe(0);
   expect(result.actualSavingsBytes).toBe(original.byteCount);
   expect(native.compressImage).not.toHaveBeenCalled();
-  expect(saves[0]?.items[0]?.inclusionMode).toBe('excluded');
+  expect(saves.at(-1)?.items[0]?.inclusionMode).toBe('excluded');
 });
 
 const nonImageRepresentationCases = (['pdf', 'text', 'url'] as const).flatMap(
@@ -376,10 +397,10 @@ test.each(nonImageRepresentationCases)(
       ...original,
       mediaType,
     };
-    const graph = { pack, items: [sourceItem], revision: 7 };
+    let graph = { pack, items: [sourceItem], revision: 7 };
     const saves: SavePackGraphInput[] = [];
     const repository = {
-      findPackGraph: jest.fn().mockResolvedValue(graph),
+      findPackGraph: jest.fn(async () => graph),
       listArtifactRecords: jest.fn().mockResolvedValue([sourceArtifact]),
       findDuplicateAnalysis: jest.fn().mockResolvedValue({
         manifest: null,
@@ -395,7 +416,12 @@ test.each(nonImageRepresentationCases)(
       }),
       savePackGraph: jest.fn(async (input: SavePackGraphInput) => {
         saves.push(input);
-        return 8;
+        graph = {
+          pack: input.pack,
+          items: [...input.items],
+          revision: graph.revision + 1,
+        };
+        return graph.revision;
       }),
     } as unknown as ProductionPersistenceRepository;
     const native = {
@@ -428,7 +454,7 @@ test.each(nonImageRepresentationCases)(
         inclusionMode === 'extracted' || inclusionMode === 'both' ? 1_000 : 0,
     });
     expect(result.actualOutputBytes).toBe(expectedOutputBytes);
-    expect(saves[0]?.pack.budget.latestOptimization).toEqual(result);
+    expect(saves.at(-1)?.pack.budget.latestOptimization).toEqual(result);
   },
 );
 
@@ -439,10 +465,10 @@ test('persists an empty extracted representation as zero output bytes', async ()
     mediaType: 'text/plain',
     inclusionMode: 'extracted',
   };
-  const graph = { pack, items: [sourceItem], revision: 7 };
+  let graph = { pack, items: [sourceItem], revision: 7 };
   const saves: SavePackGraphInput[] = [];
   const repository = {
-    findPackGraph: jest.fn().mockResolvedValue(graph),
+    findPackGraph: jest.fn(async () => graph),
     listArtifactRecords: jest
       .fn()
       .mockResolvedValue([{ ...original, mediaType: 'text/plain' }]),
@@ -460,7 +486,12 @@ test('persists an empty extracted representation as zero output bytes', async ()
     }),
     savePackGraph: jest.fn(async (input: SavePackGraphInput) => {
       saves.push(input);
-      return 8;
+      graph = {
+        pack: input.pack,
+        items: [...input.items],
+        revision: graph.revision + 1,
+      };
+      return graph.revision;
     }),
   } as unknown as ProductionPersistenceRepository;
   const native = {
@@ -478,7 +509,180 @@ test('persists an empty extracted representation as zero output bytes', async ()
 
   expect(plan.estimate.predictedOutputBytes).toBe(0);
   expect(result.actualOutputBytes).toBe(0);
-  expect(saves[0]?.pack.budget.latestOptimization).toEqual(result);
+  expect(saves.at(-1)?.pack.budget.latestOptimization).toEqual(result);
+});
+
+const analysisReadinessCases = (
+  ['image', 'pdf', 'text', 'url'] as const
+).flatMap(sourceType =>
+  (['original', 'extracted', 'both', 'excluded'] as const).flatMap(
+    inclusionMode =>
+      [false, true].map(analysisPresent => ({
+        sourceType,
+        inclusionMode,
+        analysisPresent,
+      })),
+  ),
+);
+
+test.each(analysisReadinessCases)(
+  'distinguishes analysis=$analysisPresent for $sourceType/$inclusionMode',
+  async ({ sourceType, inclusionMode, analysisPresent }) => {
+    const mediaType =
+      sourceType === 'image'
+        ? 'image/jpeg'
+        : sourceType === 'pdf'
+        ? 'application/pdf'
+        : sourceType === 'url'
+        ? 'text/uri-list'
+        : 'text/plain';
+    const sourceItem: ContextItem = {
+      ...item,
+      sourceType,
+      mediaType,
+      inclusionMode,
+    };
+    const repository = {
+      findPackGraph: jest
+        .fn()
+        .mockResolvedValue({ pack, items: [sourceItem], revision: 7 }),
+      listArtifactRecords: jest
+        .fn()
+        .mockResolvedValue([{ ...original, mediaType }]),
+      findDuplicateAnalysis: jest.fn().mockResolvedValue({
+        manifest: null,
+        analyses: analysisPresent
+          ? [
+              {
+                itemId,
+                normalizedCharacterCount: 0,
+                normalizedByteCount: 0,
+              },
+            ]
+          : [],
+        suggestions: [],
+        decisions: [],
+      }),
+    } as unknown as ProductionPersistenceRepository;
+    const native = {
+      available: true,
+      resolveOwnedArtifactFileUri: jest
+        .fn()
+        .mockResolvedValue('file:///owned/source.bin'),
+      inspectPdf: jest.fn().mockResolvedValue({ pageCount: 2 }),
+      finishPdfExtraction: jest.fn().mockResolvedValue(undefined),
+      inspectImageForCompression: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        sourceByteCount: original.byteCount,
+        sourceSha256: original.sha256,
+        sourceMediaType: 'image/jpeg',
+        width: 2_000,
+        height: 1_000,
+        hasAlpha: false,
+        animated: false,
+        orientationApplied: true,
+        revision: '1',
+      }),
+    } as unknown as jest.Mocked<NativeAdapter>;
+    let idCounter = 100;
+    const service = new PackBudgetOptimizationService(
+      async () => repository,
+      native,
+      () => '2026-08-14T00:00:01Z',
+      () => `00000000-0000-4000-8000-${String(idCounter++).padStart(12, '0')}`,
+    );
+    const needsAnalysis =
+      inclusionMode === 'extracted' || inclusionMode === 'both';
+
+    if (!analysisPresent && needsAnalysis) {
+      await expect(
+        service.preview(packId, BUDGET_PRESETS.compact),
+      ).rejects.toMatchObject({ code: 'PIPELINE_RECOVERY_REQUIRED' });
+      return;
+    }
+    const plan = await service.preview(packId, BUDGET_PRESETS.compact);
+    expect(plan.estimate.textCharacterCount).toBe(0);
+    if (inclusionMode === 'extracted' || inclusionMode === 'excluded')
+      expect(plan.estimate.predictedOutputBytes).toBe(0);
+  },
+);
+
+test('does not start native encoding after cancellation during URI resolution', async () => {
+  const { service, native } = fixture();
+  const plan = await service.preview(packId, BUDGET_PRESETS.compact);
+  let releaseUri: (() => void) | undefined;
+  let markResolving: (() => void) | undefined;
+  const resolving = new Promise<void>(resolve => (markResolving = resolve));
+  native.resolveOwnedArtifactFileUri.mockImplementationOnce(
+    () =>
+      new Promise(resolve => {
+        markResolving?.();
+        releaseUri = () => resolve('file:///owned/original.bin');
+      }),
+  );
+  const cancellation = new AbortController();
+  const pending = service.apply(plan, { signal: cancellation.signal });
+  await resolving;
+
+  cancellation.abort();
+  releaseUri?.();
+
+  await expect(pending).rejects.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  expect(native.compressImage).not.toHaveBeenCalled();
+});
+
+test('checkpoints a published derivative when cancellation wins before Pack commit', async () => {
+  const { service, native, registered, graph } = fixture();
+  const plan = await service.preview(packId, BUDGET_PRESETS.compact);
+  let releasePublication: (() => void) | undefined;
+  let markPublishing: (() => void) | undefined;
+  const publishing = new Promise<void>(resolve => (markPublishing = resolve));
+  native.publishArtifact.mockImplementationOnce(
+    (_source, relativePath, expectedByteCount, expectedSha256) =>
+      new Promise(resolve => {
+        markPublishing?.();
+        releasePublication = () =>
+          resolve({
+            relativePath,
+            byteCount: expectedByteCount!,
+            sha256: expectedSha256!,
+            created: true,
+          });
+      }),
+  );
+  const cancellation = new AbortController();
+  const pending = service.apply(plan, { signal: cancellation.signal });
+  await publishing;
+
+  cancellation.abort();
+  releasePublication?.();
+
+  await expect(pending).rejects.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+  expect(registered.map(value => value.artifact.id)).toEqual([derivativeId]);
+  expect(graph().pack.budget.pendingOptimization).toEqual(plan);
+  expect(graph().pack.budget.latestOptimization).toBeUndefined();
+});
+
+test('floors completion and Pack timestamps against the persisted plan', async () => {
+  const times = [
+    '2026-08-14T00:10:00Z',
+    '2026-08-14T00:05:00Z',
+    '2026-08-14T00:04:00Z',
+    '2026-08-14T00:03:00Z',
+    '2026-08-14T00:02:00Z',
+  ];
+  const { service, saves } = fixture(() => times.shift()!);
+  const plan = await service.preview(packId, BUDGET_PRESETS.compact);
+
+  const result = await service.apply(plan);
+
+  expect(result.completedAt).toBe(plan.createdAt);
+  expect(saves.at(-1)?.pack.updatedAt).toBe(plan.createdAt);
+  expect(saves.at(-1)?.pack.budget.latestOptimization).toEqual(result);
 });
 
 test('cancels active native encoding and never publishes its late result', async () => {

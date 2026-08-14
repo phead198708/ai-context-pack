@@ -120,6 +120,31 @@ class ImageCompressionProcessorInstrumentedTest {
   }
 
   @Test
+  fun startupMaintenanceReportsRemovalFailureAfterBoundedRetry() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val taskId = UUID.randomUUID().toString()
+    val paths = ImageCompressionTemporaryStore.prepare(context, taskId)
+    val inherited = File(paths.partial.parentFile, "inherited-${UUID.randomUUID()}.tmp")
+    inherited.writeBytes(byteArrayOf(7))
+    var attempts = 0
+
+    val error = assertThrows(NativeException::class.java) {
+      ImageCompressionTemporaryStore.startupMaintenance(context) { candidate ->
+        if (candidate.name == inherited.name) {
+          attempts += 1
+          false
+        } else {
+          candidate.delete()
+        }
+      }
+    }
+    assertEquals("PIPELINE_RECOVERY_REQUIRED", error.code)
+    assertEquals(2, attempts)
+    assertTrue(inherited.exists())
+    assertTrue(inherited.delete())
+  }
+
+  @Test
   fun rotatedTextFixtureRemainsSystemReadableAfterCompactCompression() {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val context = instrumentation.targetContext

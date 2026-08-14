@@ -327,14 +327,29 @@ enum ImageCompressionTemporaryStore {
   private static let directoryName = "ImageCompression"
   private static let sessionPrefix = UUID().uuidString.lowercased() + "-"
 
-  static func startupMaintenance() {
-    guard let directory = try? directory() else { return }
-    for child in (try? FileManager.default.contentsOfDirectory(
-      at: directory,
-      includingPropertiesForKeys: nil
-    )) ?? [] {
-      if child.lastPathComponent.hasPrefix(sessionPrefix) { continue }
-      try? FileManager.default.removeItem(at: child)
+  static func startupMaintenance(
+    fileManager: FileManager = .default,
+    remover: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+  ) throws {
+    for attempt in 0..<2 {
+      do {
+        let root = try directory(fileManager: fileManager)
+        for child in try fileManager.contentsOfDirectory(
+          at: root,
+          includingPropertiesForKeys: nil
+        ) {
+          if child.lastPathComponent.hasPrefix(sessionPrefix) { continue }
+          do {
+            try remover(child)
+          } catch {
+            if try !existsNoFollow(child) { continue }
+            throw error
+          }
+        }
+        return
+      } catch {
+        if attempt == 1 { throw ImagePerceptualHashError.cleanupFailure }
+      }
     }
   }
 
@@ -342,6 +357,9 @@ enum ImageCompressionTemporaryStore {
     guard UUID(uuidString: taskId)?.uuidString.lowercased() == taskId else {
       throw ImagePerceptualHashError.invalidImage
     }
+    // This synchronous fence makes inherited-output cleanup observable before
+    // the process can create or publish a new derivative.
+    try startupMaintenance()
     let root = try directory()
     let complete = root.appendingPathComponent("\(sessionPrefix)\(taskId).tmp")
     let partial = root.appendingPathComponent("\(sessionPrefix)\(taskId).tmp.partial")
@@ -384,12 +402,12 @@ enum ImageCompressionTemporaryStore {
     return true
   }
 
-  private static func directory() throws -> URL {
-    let value = FileManager.default.temporaryDirectory.appendingPathComponent(
+  private static func directory(fileManager: FileManager = .default) throws -> URL {
+    let value = fileManager.temporaryDirectory.appendingPathComponent(
       directoryName,
       isDirectory: true
     )
-    try FileManager.default.createDirectory(
+    try fileManager.createDirectory(
       at: value,
       withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700]
@@ -401,7 +419,7 @@ enum ImageCompressionTemporaryStore {
     guard metadata.isDirectory == true, metadata.isSymbolicLink != true else {
       throw ImagePerceptualHashError.resourceLimit
     }
-    try FileManager.default.setAttributes(
+    try fileManager.setAttributes(
       [.posixPermissions: 0o700],
       ofItemAtPath: value.path
     )

@@ -1,5 +1,6 @@
 import type { DomainErrorCode } from './errors';
 import type {
+  BudgetOptimizationPlanV1,
   BudgetOptimizationResultV1,
   PackBudgetEstimateV1,
 } from './budgetOptimization';
@@ -55,6 +56,8 @@ export interface Budget {
   readonly estimatorVersion: string;
   readonly latestEstimate?: PackBudgetEstimateV1;
   readonly latestOptimization?: BudgetOptimizationResultV1;
+  /** Durable exact-plan checkpoint until optimization commits to the Pack. */
+  readonly pendingOptimization?: BudgetOptimizationPlanV1;
 }
 
 export interface ContextPack {
