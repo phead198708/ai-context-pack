@@ -31,6 +31,7 @@ export type RemovedOriginalDisposition = 'preserve' | 'release';
 
 export class PackLibraryController {
   private chain = Promise.resolve();
+  private activeBudgetCancellation: AbortController | undefined;
 
   constructor(
     private readonly getRepository: () => Promise<ProductionPersistenceRepository>,
@@ -60,7 +61,25 @@ export class PackLibraryController {
   ): Promise<BudgetOptimizationResultV1> {
     if (!this.budgetOptimization)
       return Promise.reject(new DomainError('DOMAIN_INVALID_TRANSITION'));
-    return this.enqueue(() => this.budgetOptimization!.apply(plan));
+    if (this.activeBudgetCancellation)
+      return Promise.reject(new DomainError('DOMAIN_INVALID_TRANSITION'));
+    const cancellation = new AbortController();
+    this.activeBudgetCancellation = cancellation;
+    return this.enqueue(async () => {
+      try {
+        return await this.budgetOptimization!.apply(plan, {
+          signal: cancellation.signal,
+        });
+      } finally {
+        if (this.activeBudgetCancellation === cancellation)
+          this.activeBudgetCancellation = undefined;
+      }
+    });
+  }
+
+  /** Bypasses the mutation queue held by the active optimization. */
+  cancelBudget(): void {
+    this.activeBudgetCancellation?.abort();
   }
 
   async load(selectedPackId?: string): Promise<PackLibrarySnapshot> {

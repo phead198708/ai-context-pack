@@ -75,7 +75,7 @@ export class PackBudgetOptimizationService {
         throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
       const analysis = analyses.get(item.id);
       let pdfPageCount = 0;
-      if (included && item.sourceType === 'pdf' && original) {
+      if (includesOriginal && item.sourceType === 'pdf' && original) {
         const taskId = this.createId();
         const fileUri = await this.native.resolveOwnedArtifactFileUri(
           original.relativePath,
@@ -105,18 +105,17 @@ export class PackBudgetOptimizationService {
           original.sha256,
         );
       }
-      const useExtractedText =
-        includesExtracted ||
-        (included && item.sourceType !== 'image' && analysis !== undefined);
       items.push({
         itemId: item.id,
         sourceType: item.sourceType,
         included,
+        includeOriginal: includesOriginal,
+        includeExtracted: includesExtracted,
         sourceByteCount: original?.byteCount ?? 0,
-        textCharacterCount: useExtractedText
+        textCharacterCount: includesExtracted
           ? analysis?.normalizedCharacterCount ?? 0
           : 0,
-        textUtf8ByteCount: useExtractedText
+        textUtf8ByteCount: includesExtracted
           ? analysis?.normalizedByteCount ?? 0
           : 0,
         pdfPageCount,
@@ -127,6 +126,7 @@ export class PackBudgetOptimizationService {
       planId: this.createId(),
       packId,
       packRevision: graph.revision,
+      createdAt: validTimestamp(this.now(), graph.pack.updatedAt),
       budget,
       items,
       createArtifactId: () => this.createId(),
@@ -215,7 +215,6 @@ export class PackBudgetOptimizationService {
             await cancellation;
             throw new DomainError('PIPELINE_STAGE_FAILED');
           }
-          const createdAt = validTimestamp(this.now(), graph.pack.updatedAt);
           const artifact: Artifact = {
             id: action.outputArtifactId,
             itemId: action.itemId,
@@ -235,7 +234,7 @@ export class PackBudgetOptimizationService {
               engine: value.engine,
               engineRevision: value.revision,
             },
-            createdAt,
+            createdAt: plan.createdAt,
             immutable: true,
           };
           await coordinator.publish({

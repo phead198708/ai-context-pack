@@ -13,6 +13,7 @@ import {
 import { DomainError } from '../src/domain/errors';
 
 const packId = id(900);
+const createdAt = '2026-08-14T00:00:00Z';
 
 describe('versioned Pack budget estimator', () => {
   test('reports bytes, images, pages, characters, and a labelled token estimate', () => {
@@ -22,6 +23,8 @@ describe('versioned Pack budget estimator', () => {
         itemId: id(2),
         sourceType: 'pdf',
         included: true,
+        includeOriginal: true,
+        includeExtracted: true,
         sourceByteCount: 800_000,
         textCharacterCount: 4_001,
         textUtf8ByteCount: 4_400,
@@ -31,6 +34,8 @@ describe('versioned Pack budget estimator', () => {
         itemId: id(3),
         sourceType: 'text',
         included: false,
+        includeOriginal: false,
+        includeExtracted: false,
         sourceByteCount: 900,
         textCharacterCount: 900,
         textUtf8ByteCount: 900,
@@ -43,7 +48,7 @@ describe('versioned Pack budget estimator', () => {
       estimatorVersion: CONTEXT_BUDGET_ESTIMATOR_VERSION,
       isEstimate: true,
       sourceBytes: 2_000_900,
-      predictedOutputBytes: 1_204_500,
+      predictedOutputBytes: 2_004_500,
       imageCount: 1,
       pdfPageCount: 3,
       textCharacterCount: 4_101,
@@ -62,6 +67,7 @@ describe('versioned Pack budget estimator', () => {
           planId: id(800),
           packId,
           packRevision: 4,
+          createdAt,
           budget: BUDGET_PRESETS.compact,
           items,
           createArtifactId: itemId =>
@@ -92,6 +98,7 @@ describe('versioned Pack budget estimator', () => {
       planId: id(800),
       packId,
       packRevision: 1,
+      createdAt,
       budget: BUDGET_PRESETS.balanced,
       items: [item],
       createArtifactId: () => id(100),
@@ -112,6 +119,7 @@ describe('versioned Pack budget estimator', () => {
       planId: id(800),
       packId,
       packRevision: 1,
+      createdAt,
       budget: BUDGET_PRESETS.compact,
       items: [item],
       createArtifactId: () => id(100),
@@ -131,12 +139,15 @@ describe('versioned Pack budget estimator', () => {
       planId: id(800),
       packId,
       packRevision: 1,
+      createdAt,
       budget: budgetForPreset('custom', 1_048_576),
       items: [
         {
           itemId: id(1),
           sourceType: 'text',
           included: true,
+          includeOriginal: false,
+          includeExtracted: true,
           sourceByteCount: 2_000_000,
           textCharacterCount: 2_000_000,
           textUtf8ByteCount: 2_000_000,
@@ -161,6 +172,7 @@ describe('versioned Pack budget estimator', () => {
       planId: id(800),
       packId,
       packRevision: 1,
+      createdAt,
       budget: BUDGET_PRESETS.balanced,
       items: [item],
       createArtifactId: () => id(100),
@@ -230,6 +242,7 @@ describe('versioned Pack budget estimator', () => {
         planId: id(800),
         packId,
         packRevision: 1,
+        createdAt,
         budget: {
           ...BUDGET_PRESETS.balanced,
           targetImageLongestEdge: 1_000_000,
@@ -238,6 +251,55 @@ describe('versioned Pack budget estimator', () => {
         createArtifactId: () => id(100),
       }),
     ).toThrow(new DomainError('SCHEMA_INVALID'));
+  });
+
+  test.each([
+    ['original', true, false, 2_000_000, 0, 10],
+    ['extracted', false, true, 1_000, 1_000, 0],
+    ['both', true, true, 2_001_000, 1_000, 10],
+    ['excluded', false, false, 0, 0, 0],
+  ] as const)(
+    'counts every %s PDF representation exactly once',
+    (_mode, includeOriginal, includeExtracted, output, characters, pages) => {
+      expect(
+        estimatePackBudgetV1([
+          {
+            itemId: id(40),
+            sourceType: 'pdf',
+            included: includeOriginal || includeExtracted,
+            includeOriginal,
+            includeExtracted,
+            sourceByteCount: 2_000_000,
+            textCharacterCount: 1_000,
+            textUtf8ByteCount: 1_000,
+            pdfPageCount: 10,
+          },
+        ]),
+      ).toMatchObject({
+        sourceBytes: 2_000_000,
+        predictedOutputBytes: output,
+        textCharacterCount: characters,
+        pdfPageCount: pages,
+      });
+    },
+  );
+
+  test('does not replace an empty extracted representation with source bytes', () => {
+    expect(
+      estimatePackBudgetV1([
+        {
+          itemId: id(41),
+          sourceType: 'text',
+          included: true,
+          includeOriginal: false,
+          includeExtracted: true,
+          sourceByteCount: 2_000_000,
+          textCharacterCount: 0,
+          textUtf8ByteCount: 0,
+          pdfPageCount: 0,
+        },
+      ]).predictedOutputBytes,
+    ).toBe(0);
   });
 });
 
@@ -252,6 +314,8 @@ function imageItem(
     itemId: id(index),
     sourceType: 'image',
     included: true,
+    includeOriginal: true,
+    includeExtracted: true,
     sourceByteCount,
     textCharacterCount: 100,
     textUtf8ByteCount: 100,

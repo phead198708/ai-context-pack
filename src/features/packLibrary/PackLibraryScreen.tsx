@@ -469,6 +469,7 @@ function BudgetOptimizationReview({
   );
   const [plan, setPlan] = useState<BudgetOptimizationPlanV1>();
   const [result, setResult] = useState<BudgetOptimizationResultV1>();
+  const [applying, setApplying] = useState(false);
   const fixedExcludedItemIds = useMemo(
     () =>
       new Set(
@@ -666,12 +667,24 @@ function BudgetOptimizationReview({
             onPress={() =>
               run(
                 mutate(async () => {
-                  setResult(await controller.applyBudget(plan));
-                  setPlan(undefined);
+                  setApplying(true);
+                  try {
+                    setResult(await controller.applyBudget(plan));
+                    setPlan(undefined);
+                  } finally {
+                    setApplying(false);
+                  }
                 }),
               )
             }
           />
+          {applying ? (
+            <Button
+              disabled={false}
+              label={t(locale, 'cancelBudget')}
+              onPress={() => controller.cancelBudget()}
+            />
+          ) : null}
         </View>
       ) : null}
       {actual ? (

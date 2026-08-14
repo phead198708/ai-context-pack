@@ -18,7 +18,16 @@ final class ImageCompressionProcessorTests: XCTestCase {
 
   override func tearDownWithError() throws {
     try? FileManager.default.removeItem(at: source)
-    ImageCompressionTemporaryStore.startupMaintenance()
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "ImageCompression",
+      isDirectory: true
+    )
+    for child in (try? FileManager.default.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: nil
+    )) ?? [] {
+      try? FileManager.default.removeItem(at: child)
+    }
   }
 
   func testTransparentFixtureRemainsAlphaReadableAndOriginalIsImmutable() throws {
@@ -86,7 +95,53 @@ final class ImageCompressionProcessorTests: XCTestCase {
       isDirectory: true
     )
     let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-    XCTAssertFalse(names.contains { $0.hasPrefix(taskId) })
+    XCTAssertFalse(names.contains { $0.contains(taskId) })
+  }
+
+  func testCancellationStopsCompleteOutputHashingAfterTheCurrentChunk() throws {
+    let output = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "\(UUID().uuidString).bin"
+    )
+    try Data(repeating: 0x5a, count: 192 * 1_024).write(to: output)
+    defer { try? FileManager.default.removeItem(at: output) }
+    let token = ImageHashCancellationToken()
+    var reads = 0
+
+    XCTAssertThrowsError(
+      try ImageCompressionProcessor.outputMetadata(
+        output,
+        cancellation: token,
+        readChunk: { handle in
+          let data = try handle.read(upToCount: 64 * 1_024) ?? Data()
+          reads += 1
+          if reads == 1 { token.cancel() }
+          return data
+        }
+      )
+    ) {
+      XCTAssertEqual(($0 as? ImagePerceptualHashError)?.stableCode, "PIPELINE_STAGE_FAILED")
+    }
+    XCTAssertEqual(reads, 1)
+  }
+
+  func testStartupMaintenancePurgesInheritedFilesButPreservesCurrentTasks() throws {
+    let taskId = UUID().uuidString.lowercased()
+    let paths = try ImageCompressionTemporaryStore.prepare(taskId: taskId)
+    try Data([1]).write(to: paths.partial)
+    try Data([2]).write(to: paths.complete)
+    ImageCompressionTemporaryStore.register(taskId: taskId, fileURL: paths.complete)
+    let inherited = paths.partial.deletingLastPathComponent().appendingPathComponent(
+      "inherited-\(UUID().uuidString).tmp"
+    )
+    try Data([3]).write(to: inherited)
+
+    ImageCompressionTemporaryStore.startupMaintenance()
+
+    XCTAssertTrue(FileManager.default.fileExists(atPath: paths.partial.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: paths.complete.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: inherited.path))
+    try ImageCompressionTemporaryStore.removeUnregistered([paths.partial])
+    XCTAssertTrue(ImageCompressionTemporaryStore.finish(taskId: taskId))
   }
 
   func testRotatedTextFixtureRemainsSystemReadableAfterCompactCompression() throws {

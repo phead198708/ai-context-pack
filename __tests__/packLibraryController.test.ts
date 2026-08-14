@@ -1,4 +1,9 @@
 import type { ContextItem, ContextPack } from '../src/domain/models';
+import {
+  BUDGET_PRESETS,
+  createBudgetOptimizationPlanV1,
+} from '../src/domain/budgetOptimization';
+import { DomainError } from '../src/domain/errors';
 import type {
   PersistedArtifactRecord,
   PersistedPackGraph,
@@ -7,6 +12,7 @@ import type {
 } from '../src/infrastructure/persistence/contracts';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
 import type { PackProcessingScheduler } from '../src/features/packLibrary/processing';
+import type { PackBudgetOptimizationService } from '../src/features/packLibrary/budgetOptimization';
 
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const firstId = '223e4567-e89b-42d3-a456-426614174000';
@@ -396,6 +402,54 @@ test('keeps cancellation reachable while analyze settlement remains pending', as
   expect(repo.saves.at(-1)?.cancelActivePipelineRuns).toBe(true);
   releaseIdle?.();
   await expect(analysis).resolves.toBe(2);
+});
+
+test('cancels budget optimization outside the controller mutation queue', async () => {
+  const plan = createBudgetOptimizationPlanV1({
+    planId: 'a23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 7,
+    createdAt: '2026-08-10T00:00:01Z',
+    budget: BUDGET_PRESETS.balanced,
+    items: [],
+    createArtifactId: () => firstId,
+  });
+  let observedSignal: AbortSignal | undefined;
+  const apply = jest.fn(
+    (_plan: typeof plan, options: { readonly signal?: AbortSignal } = {}) =>
+      new Promise<never>((_resolve, reject) => {
+        observedSignal = options.signal;
+        options.signal?.addEventListener(
+          'abort',
+          () => reject(new DomainError('PIPELINE_STAGE_FAILED')),
+          { once: true },
+        );
+      }),
+  );
+  const optimization = {
+    apply,
+  } as unknown as PackBudgetOptimizationService;
+  const controller = new PackLibraryController(
+    async () => repository().value,
+    () => '2026-08-10T00:00:02Z',
+    undefined,
+    optimization,
+  );
+
+  const pending = controller.applyBudget(plan);
+  const rejection = pending.then(
+    () => undefined,
+    error => error,
+  );
+  for (let attempt = 0; attempt < 20 && !observedSignal; attempt += 1)
+    await Promise.resolve();
+
+  controller.cancelBudget();
+
+  expect(observedSignal?.aborted).toBe(true);
+  await expect(rejection).resolves.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
 });
 
 test('preferred duplicate choice excludes peers without deleting originals', async () => {

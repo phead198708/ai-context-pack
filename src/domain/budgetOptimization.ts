@@ -55,6 +55,8 @@ export interface BudgetSourceItemV1 {
   readonly itemId: string;
   readonly sourceType: ContextItemSource;
   readonly included: boolean;
+  readonly includeOriginal: boolean;
+  readonly includeExtracted: boolean;
   readonly sourceByteCount: number;
   readonly textCharacterCount: number;
   readonly textUtf8ByteCount: number;
@@ -103,6 +105,7 @@ export interface BudgetOptimizationPlanV1 {
   readonly planId: string;
   readonly packId: string;
   readonly packRevision: number;
+  readonly createdAt: string;
   readonly preset: BudgetPreset;
   readonly estimatorVersion: typeof CONTEXT_BUDGET_ESTIMATOR_VERSION;
   readonly compressionVersion: typeof IMAGE_COMPRESSION_PROCESSOR_VERSION;
@@ -274,24 +277,28 @@ export function estimatePackBudgetV1(
   for (const item of items) {
     sourceBytes = safeAdd(sourceBytes, item.sourceByteCount);
     if (!item.included) continue;
-    textCharacterCount = safeAdd(textCharacterCount, item.textCharacterCount);
-    pdfPageCount = safeAdd(pdfPageCount, item.pdfPageCount);
-    predictedOutputBytes = safeAdd(
-      predictedOutputBytes,
-      item.image
-        ? safeAdd(
-            predictedImageOutputBytes?.get(item.itemId) ?? item.sourceByteCount,
-            item.textUtf8ByteCount,
-          )
-        : item.textUtf8ByteCount > 0
-        ? item.textUtf8ByteCount
-        : item.sourceByteCount,
-    );
-    estimatedTokens = safeAdd(
-      estimatedTokens,
-      Math.ceil(item.textCharacterCount / 4) + item.pdfPageCount * 32,
-    );
-    if (item.image) {
+    if (item.includeExtracted) {
+      textCharacterCount = safeAdd(textCharacterCount, item.textCharacterCount);
+      predictedOutputBytes = safeAdd(
+        predictedOutputBytes,
+        item.textUtf8ByteCount,
+      );
+      estimatedTokens = safeAdd(
+        estimatedTokens,
+        Math.ceil(item.textCharacterCount / 4),
+      );
+    }
+    if (item.includeOriginal) {
+      predictedOutputBytes = safeAdd(
+        predictedOutputBytes,
+        item.image
+          ? predictedImageOutputBytes?.get(item.itemId) ?? item.sourceByteCount
+          : item.sourceByteCount,
+      );
+      pdfPageCount = safeAdd(pdfPageCount, item.pdfPageCount);
+      estimatedTokens = safeAdd(estimatedTokens, item.pdfPageCount * 32);
+    }
+    if (item.includeOriginal && item.image) {
       imageCount = safeAdd(imageCount, 1);
       estimatedTokens = safeAdd(
         estimatedTokens,
@@ -316,6 +323,7 @@ export function createBudgetOptimizationPlanV1(input: {
   readonly planId: string;
   readonly packId: string;
   readonly packRevision: number;
+  readonly createdAt: string;
   readonly budget: Budget;
   readonly items: readonly BudgetSourceItemV1[];
   readonly createArtifactId: (itemId: string) => string;
@@ -325,6 +333,7 @@ export function createBudgetOptimizationPlanV1(input: {
     !isCanonicalUuid(input.packId) ||
     !Number.isSafeInteger(input.packRevision) ||
     input.packRevision < 1 ||
+    !Number.isFinite(Date.parse(input.createdAt)) ||
     !isSupportedBudget(input.budget)
   )
     throw new DomainError('SCHEMA_INVALID');
@@ -423,6 +432,7 @@ export function createBudgetOptimizationPlanV1(input: {
     planId: input.planId,
     packId: input.packId,
     packRevision: input.packRevision,
+    createdAt: input.createdAt,
     preset: input.budget.preset,
     estimatorVersion: CONTEXT_BUDGET_ESTIMATOR_VERSION,
     compressionVersion: IMAGE_COMPRESSION_PROCESSOR_VERSION,
@@ -802,6 +812,9 @@ function assertUniqueBudgetItems(items: readonly BudgetSourceItemV1[]): void {
       ids.has(item.itemId) ||
       !['image', 'pdf', 'text', 'url'].includes(item.sourceType) ||
       typeof item.included !== 'boolean' ||
+      typeof item.includeOriginal !== 'boolean' ||
+      typeof item.includeExtracted !== 'boolean' ||
+      item.included !== (item.includeOriginal || item.includeExtracted) ||
       ![
         item.sourceByteCount,
         item.textCharacterCount,

@@ -45,6 +45,7 @@ const en = {
   budgetExcludedSummary: 'Excluded item IDs: {values}',
   previewBudget: 'Preview optimization plan',
   applyBudget: 'Create compressed derivatives',
+  cancelBudget: 'Cancel budget optimization',
   budgetEstimatorVersion: 'Estimate · {version}',
   budgetEstimateSummary:
     '{source} source bytes → {output} predicted bytes · {images} images · {pages} PDF pages · {characters} text characters · {tokens} estimated tokens',
@@ -249,6 +250,7 @@ const zhHans: Record<keyof typeof en, string> = {
   budgetExcludedSummary: '已排除项目 ID：{values}',
   previewBudget: '预览优化方案',
   applyBudget: '创建压缩派生文件',
+  cancelBudget: '取消预算优化',
   budgetEstimatorVersion: '预估 · {version}',
   budgetEstimateSummary:
     '源文件 {source} 字节 → 预计 {output} 字节 · {images} 张图片 · {pages} 个 PDF 页面 · {characters} 个文本字符 · 预计 {tokens} tokens',

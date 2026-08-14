@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.Debug
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.android.gms.tasks.Tasks
@@ -17,7 +18,10 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 @RunWith(AndroidJUnit4::class)
 class ImageCompressionProcessorInstrumentedTest {
@@ -92,7 +96,27 @@ class ImageCompressionProcessorInstrumentedTest {
     }
     assertEquals("PIPELINE_STAGE_FAILED", error.code)
     val directory = File(context.cacheDir, "ImageCompression")
-    assertFalse(directory.listFiles().orEmpty().any { it.name.startsWith(taskId) })
+    assertFalse(directory.listFiles().orEmpty().any { it.name.contains(taskId) })
+  }
+
+  @Test
+  fun startupMaintenancePurgesInheritedFilesButPreservesCurrentTasks() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val taskId = UUID.randomUUID().toString()
+    val paths = ImageCompressionTemporaryStore.prepare(context, taskId)
+    paths.partial.writeBytes(byteArrayOf(1))
+    paths.complete.writeBytes(byteArrayOf(2))
+    ImageCompressionTemporaryStore.register(taskId, paths.complete)
+    val inherited = File(paths.partial.parentFile, "inherited-${UUID.randomUUID()}.tmp")
+    inherited.writeBytes(byteArrayOf(3))
+
+    ImageCompressionTemporaryStore.startupMaintenance(context)
+
+    assertTrue(paths.partial.exists())
+    assertTrue(paths.complete.exists())
+    assertFalse(inherited.exists())
+    ImageCompressionTemporaryStore.removeUnregistered(listOf(paths.partial))
+    assertTrue(ImageCompressionTemporaryStore.finish(taskId))
   }
 
   @Test
@@ -191,26 +215,31 @@ class ImageCompressionProcessorInstrumentedTest {
     val sha256 = digest(source.readBytes())
     for (count in listOf(10, 20, 50)) {
       val started = android.os.SystemClock.elapsedRealtimeNanos()
-      var peakBytes = usedHeapBytes()
       var outputBytes = 0L
-      repeat(count) {
-        val taskId = UUID.randomUUID().toString()
-        val output = ImageCompressionProcessor.compress(
-          context,
-          taskId,
-          source.toURI().toString(),
-          source.length(),
-          sha256,
-          1_280,
-          427,
-          0.7,
-          "image/jpeg",
-          false,
-          ImageHashCancellationToken(),
-        )
-        outputBytes += (output.getValue("outputByteCount") as Number).toLong()
-        peakBytes = maxOf(peakBytes, usedHeapBytes())
-        assertTrue(ImageCompressionTemporaryStore.finish(taskId))
+      val sampler = ProcessPeakMemorySampler(::processPssBytes)
+      sampler.start()
+      var peakBytes = 0L
+      try {
+        repeat(count) {
+          val taskId = UUID.randomUUID().toString()
+          val output = ImageCompressionProcessor.compress(
+            context,
+            taskId,
+            source.toURI().toString(),
+            source.length(),
+            sha256,
+            1_280,
+            427,
+            0.7,
+            "image/jpeg",
+            false,
+            ImageHashCancellationToken(),
+          )
+          outputBytes += (output.getValue("outputByteCount") as Number).toLong()
+          assertTrue(ImageCompressionTemporaryStore.finish(taskId))
+        }
+      } finally {
+        peakBytes = sampler.stop()
       }
       val durationMs = (android.os.SystemClock.elapsedRealtimeNanos() - started) / 1_000_000
       assertTrue(durationMs >= 0)
@@ -219,9 +248,27 @@ class ImageCompressionProcessorInstrumentedTest {
       println(
         "IMAGE_COMPRESSION_BENCHMARK platform=android images=$count " +
           "inputBytes=${source.length() * count} outputBytes=$outputBytes " +
-          "durationMs=$durationMs observedPeakBytes=$peakBytes",
+          "durationMs=$durationMs sampledPeakPssBytes=$peakBytes",
       )
     }
+  }
+
+  @Test
+  fun peakMemorySamplerCapturesAnInFlightHighWaterMark() {
+    val current = AtomicLong(100)
+    val highSampled = CountDownLatch(1)
+    val sampler = ProcessPeakMemorySampler(
+      readBytes = {
+        current.get().also { if (it == 900L) highSampled.countDown() }
+      },
+      intervalMillis = 1,
+    )
+    sampler.start()
+    current.set(900)
+    assertTrue(highSampled.await(2, TimeUnit.SECONDS))
+    current.set(200)
+
+    assertEquals(900L, sampler.stop())
   }
 
   private fun transparentFixture(directory: File): File {
@@ -250,7 +297,52 @@ class ImageCompressionProcessorInstrumentedTest {
     MessageDigest.getInstance("SHA-256").digest(bytes)
       .joinToString("") { "%02x".format(it) }
 
-  private fun usedHeapBytes(): Long = Runtime.getRuntime().let {
-    it.totalMemory() - it.freeMemory()
+  private fun processPssBytes(): Long {
+    val memory = Debug.MemoryInfo()
+    Debug.getMemoryInfo(memory)
+    return memory.totalPss.toLong() * 1_024
+  }
+
+  private class ProcessPeakMemorySampler(
+    private val readBytes: () -> Long,
+    private val intervalMillis: Long = 2,
+  ) {
+    private val running = AtomicBoolean(false)
+    private val peak = AtomicLong(0)
+    private lateinit var worker: Thread
+
+    fun start() {
+      check(running.compareAndSet(false, true))
+      sample()
+      worker = Thread(
+        {
+          while (running.get()) {
+            sample()
+            try {
+              Thread.sleep(intervalMillis)
+            } catch (_: InterruptedException) {
+              Thread.currentThread().interrupt()
+              break
+            }
+          }
+        },
+        "image-compression-memory-sampler",
+      ).apply {
+        isDaemon = true
+        start()
+      }
+    }
+
+    fun stop(): Long {
+      if (!running.getAndSet(false)) return peak.get()
+      worker.join(5_000)
+      sample()
+      return peak.get()
+    }
+
+    private fun sample() {
+      val value = readBytes()
+      peak.getAndUpdate { current -> maxOf(current, value) }
+    }
   }
 }

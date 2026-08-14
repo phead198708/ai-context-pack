@@ -151,7 +151,7 @@ enum ImageCompressionProcessor {
     }
     do {
       try cancellation.check()
-      let metadata = try outputMetadata(output)
+      let metadata = try outputMetadata(output, cancellation: cancellation)
       return [
         "schemaVersion": 1,
         "taskId": taskId,
@@ -283,15 +283,23 @@ enum ImageCompressionProcessor {
     }
   }
 
-  private static func outputMetadata(
-    _ fileURL: URL
+  static func outputMetadata(
+    _ fileURL: URL,
+    cancellation: ImageHashCancellationToken,
+    readChunk: ((FileHandle) throws -> Data)? = nil
   ) throws -> (byteCount: Int64, sha256: String) {
     let handle = try FileHandle(forReadingFrom: fileURL)
     defer { try? handle.close() }
     var hash = SHA256()
     var byteCount: Int64 = 0
     while true {
-      let data = try handle.read(upToCount: 64 * 1_024) ?? Data()
+      try cancellation.check()
+      let data: Data
+      if let readChunk {
+        data = try readChunk(handle)
+      } else {
+        data = try handle.read(upToCount: 64 * 1_024) ?? Data()
+      }
       if data.isEmpty { break }
       byteCount += Int64(data.count)
       hash.update(data: data)
@@ -299,6 +307,7 @@ enum ImageCompressionProcessor {
     guard byteCount > 0, byteCount <= maximumOutputBytes else {
       throw ImagePerceptualHashError.resourceLimit
     }
+    try cancellation.check()
     return (byteCount, hash.finalize().map { String(format: "%02x", $0) }.joined())
   }
 
@@ -316,6 +325,7 @@ enum ImageCompressionTemporaryStore {
   private static let lock = NSLock()
   private static var outputs: [String: URL] = [:]
   private static let directoryName = "ImageCompression"
+  private static let sessionPrefix = UUID().uuidString.lowercased() + "-"
 
   static func startupMaintenance() {
     guard let directory = try? directory() else { return }
@@ -323,6 +333,7 @@ enum ImageCompressionTemporaryStore {
       at: directory,
       includingPropertiesForKeys: nil
     )) ?? [] {
+      if child.lastPathComponent.hasPrefix(sessionPrefix) { continue }
       try? FileManager.default.removeItem(at: child)
     }
   }
@@ -332,8 +343,8 @@ enum ImageCompressionTemporaryStore {
       throw ImagePerceptualHashError.invalidImage
     }
     let root = try directory()
-    let complete = root.appendingPathComponent("\(taskId).tmp")
-    let partial = root.appendingPathComponent("\(taskId).tmp.partial")
+    let complete = root.appendingPathComponent("\(sessionPrefix)\(taskId).tmp")
+    let partial = root.appendingPathComponent("\(sessionPrefix)\(taskId).tmp.partial")
     try removeIfPresent(partial)
     guard try !existsNoFollow(complete) else {
       throw ImagePerceptualHashError.resourceLimit

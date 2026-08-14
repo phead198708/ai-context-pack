@@ -396,6 +396,7 @@ internal object ImageCompressionProcessor {
 
 internal object ImageCompressionTemporaryStore {
   private const val directoryName = "ImageCompression"
+  private val sessionPrefix = "${UUID.randomUUID()}-"
   private val outputs = mutableMapOf<String, File>()
 
   data class Paths(val partial: File, val complete: File)
@@ -403,6 +404,7 @@ internal object ImageCompressionTemporaryStore {
   fun startupMaintenance(context: Context) {
     val root = runCatching { directory(context) }.getOrNull() ?: return
     root.listFiles()?.forEach { candidate ->
+      if (candidate.name.startsWith(sessionPrefix)) return@forEach
       runCatching {
         val stat = Os.lstat(candidate.path)
         if (OsConstants.S_ISREG(stat.st_mode)) candidate.delete()
@@ -415,8 +417,8 @@ internal object ImageCompressionTemporaryStore {
       throw NativeException("PROCESSOR_OUTPUT_INVALID")
     }
     val root = directory(context)
-    val partial = File(root, "$taskId.tmp.partial")
-    val complete = File(root, "$taskId.tmp")
+    val partial = File(root, "$sessionPrefix$taskId.tmp.partial")
+    val complete = File(root, "$sessionPrefix$taskId.tmp")
     removeIfPresent(partial)
     if (existsNoFollow(complete)) throw NativeException("RESOURCE_MEMORY_PRESSURE")
     return Paths(partial, complete)

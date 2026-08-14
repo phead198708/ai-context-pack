@@ -179,6 +179,7 @@ function controller(): jest.Mocked<PackLibraryController> {
     cancelProcessing: jest.fn().mockResolvedValue(undefined),
     previewBudget: jest.fn(),
     applyBudget: jest.fn(),
+    cancelBudget: jest.fn(),
   } as unknown as jest.Mocked<PackLibraryController>;
 }
 
@@ -459,6 +460,7 @@ test('previews a versioned budget plan and reports actual compression savings', 
     planId: 'a23e4567-e89b-42d3-a456-426614174000',
     packId,
     packRevision: 3,
+    createdAt: '2026-08-10T00:00:01Z',
     preset: 'compact' as const,
     estimatorVersion: 'context-budget-estimator-v1' as const,
     compressionVersion: 'image-compression-v1' as const,
@@ -531,7 +533,13 @@ test('previews a versioned budget plan and reports actual compression savings', 
     ],
   };
   value.previewBudget.mockResolvedValue(plan);
-  value.applyBudget.mockResolvedValue(result);
+  let finishApply: ((value: typeof result) => void) | undefined;
+  value.applyBudget.mockImplementationOnce(
+    () =>
+      new Promise(resolve => {
+        finishApply = resolve;
+      }),
+  );
   const renderer = await render(value);
 
   await press(button(renderer, 'Compact'));
@@ -555,6 +563,15 @@ test('previews a versioned budget plan and reports actual compression savings', 
 
   await press(button(renderer, 'Create compressed derivatives'));
   expect(value.applyBudget).toHaveBeenCalledWith(plan);
+  const cancel = button(renderer, 'Cancel budget optimization');
+  expect(cancel.props.accessibilityState?.disabled).toBe(false);
+  await press(cancel);
+  expect(value.cancelBudget).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    finishApply?.(result);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
   expect(
     text(renderer.root.findByProps({ testID: 'budget-actual-summary' })),
   ).toContain('480');
