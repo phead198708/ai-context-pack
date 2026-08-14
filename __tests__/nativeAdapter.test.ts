@@ -217,6 +217,115 @@ describe('native adapter runtime boundary', () => {
     ).rejects.toMatchObject({ code: 'PROCESSOR_OUTPUT_INVALID' });
   });
 
+  test('validates image compression inspection, output identity, and task lifecycle', async () => {
+    const taskId = '123e4567-e89b-42d3-a456-426614174000';
+    const sourceSha256 = 'a'.repeat(64);
+    const inspection = {
+      schemaVersion: 1,
+      sourceByteCount: 1_024,
+      sourceSha256,
+      sourceMediaType: 'image/png',
+      width: 640,
+      height: 480,
+      hasAlpha: true,
+      animated: false,
+      orientationApplied: true,
+      revision: '1',
+    };
+    const request = {
+      schemaVersion: 1 as const,
+      taskId,
+      fileUri: 'file:///cache/synthetic.png',
+      expectedByteCount: 1_024,
+      expectedSha256: sourceSha256,
+      targetWidth: 320,
+      targetHeight: 240,
+      quality: 1,
+      outputMediaType: 'image/png' as const,
+      preserveAlpha: true,
+    };
+    const result = {
+      schemaVersion: 1,
+      taskId,
+      sourceSha256,
+      temporaryFileUri: `file:///cache/${taskId}.tmp`,
+      outputByteCount: 512,
+      outputSha256: 'b'.repeat(64),
+      width: 320,
+      height: 240,
+      mediaType: 'image/png',
+      quality: 1,
+      alphaPreserved: true,
+      engine: 'android-bitmap',
+      revision: '1',
+      durationMs: 2,
+    };
+    const native = {
+      ...mockNativeModule,
+      inspectImageForCompression: jest.fn().mockResolvedValue(inspection),
+      compressImage: jest.fn().mockResolvedValue(result),
+      cancelImageCompression: jest.fn().mockResolvedValue(true),
+      finishImageCompression: jest.fn().mockResolvedValue(true),
+    };
+    const guarded = createNativeAdapter(native);
+
+    await expect(
+      guarded.inspectImageForCompression?.(
+        taskId,
+        request.fileUri,
+        request.expectedByteCount,
+        sourceSha256,
+      ),
+    ).resolves.toEqual(inspection);
+    await expect(guarded.compressImage?.(request)).resolves.toEqual(result);
+    expect(native.compressImage).toHaveBeenCalledWith(request);
+    await expect(
+      guarded.cancelImageCompression?.(taskId),
+    ).resolves.toBeUndefined();
+    await expect(
+      guarded.finishImageCompression?.(taskId),
+    ).resolves.toBeUndefined();
+
+    native.inspectImageForCompression.mockResolvedValue({
+      ...inspection,
+      sourceSha256: 'c'.repeat(64),
+    });
+    await expect(
+      guarded.inspectImageForCompression?.(
+        taskId,
+        request.fileUri,
+        request.expectedByteCount,
+        sourceSha256,
+      ),
+    ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+
+    native.compressImage.mockResolvedValue({ ...result, width: 319 });
+    await expect(guarded.compressImage?.(request)).rejects.toMatchObject({
+      code: 'PROCESSOR_OUTPUT_INVALID',
+    });
+    await expect(
+      guarded.compressImage?.({ ...request, preserveAlpha: false }),
+    ).rejects.toMatchObject({ code: 'PROCESSOR_OUTPUT_INVALID' });
+
+    native.compressImage.mockRejectedValue({
+      code: 'RESOURCE_MEMORY_PRESSURE',
+    });
+    await expect(guarded.compressImage?.(request)).rejects.toMatchObject({
+      code: 'RESOURCE_MEMORY_PRESSURE',
+    });
+    native.compressImage.mockRejectedValue({ code: 'PRIVATE_NATIVE_ERROR' });
+    await expect(guarded.compressImage?.(request)).rejects.toMatchObject({
+      code: 'PROCESSOR_OUTPUT_INVALID',
+    });
+
+    native.cancelImageCompression.mockResolvedValue(false);
+    await expect(
+      guarded.cancelImageCompression?.(taskId),
+    ).rejects.toMatchObject({
+      code: 'PROCESSOR_OUTPUT_INVALID',
+    });
+  });
+
   test('validates and binds PDF inspection, page extraction, cancellation, and UTF-8 text reads', async () => {
     const taskId = '123e4567-e89b-42d3-a456-426614174000';
     const fileUri = 'file:///cache/synthetic.pdf';

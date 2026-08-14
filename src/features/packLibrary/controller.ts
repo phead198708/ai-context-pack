@@ -1,5 +1,10 @@
 import { DomainError } from '../../domain/errors';
 import type { ContextItem, ContextPack } from '../../domain/models';
+import type { Budget } from '../../domain/models';
+import type {
+  BudgetOptimizationPlanV1,
+  BudgetOptimizationResultV1,
+} from '../../domain/budgetOptimization';
 import {
   groupDuplicateSuggestionsV1,
   type DuplicateDecisionChoiceV1,
@@ -20,6 +25,7 @@ import {
   type RetryPlan,
 } from './domain';
 import { createPipelineRun, type PackProcessingScheduler } from './processing';
+import type { PackBudgetOptimizationService } from './budgetOptimization';
 
 export type RemovedOriginalDisposition = 'preserve' | 'release';
 
@@ -30,10 +36,31 @@ export class PackLibraryController {
     private readonly getRepository: () => Promise<ProductionPersistenceRepository>,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly processing?: PackProcessingScheduler,
+    private readonly budgetOptimization?: PackBudgetOptimizationService,
   ) {}
 
   recoverProcessing(): Promise<void> {
     return this.processing?.recover() ?? Promise.resolve();
+  }
+
+  previewBudget(
+    packId: string,
+    budget: Budget,
+    excludedItemIds: readonly string[] = [],
+  ): Promise<BudgetOptimizationPlanV1> {
+    if (!this.budgetOptimization)
+      return Promise.reject(new DomainError('DOMAIN_INVALID_TRANSITION'));
+    return this.enqueue(() =>
+      this.budgetOptimization!.preview(packId, budget, excludedItemIds),
+    );
+  }
+
+  applyBudget(
+    plan: BudgetOptimizationPlanV1,
+  ): Promise<BudgetOptimizationResultV1> {
+    if (!this.budgetOptimization)
+      return Promise.reject(new DomainError('DOMAIN_INVALID_TRANSITION'));
+    return this.enqueue(() => this.budgetOptimization!.apply(plan));
   }
 
   async load(selectedPackId?: string): Promise<PackLibrarySnapshot> {

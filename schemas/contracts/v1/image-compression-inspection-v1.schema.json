@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aicontextpack.local/schemas/contracts/v1/image-compression-inspection-v1.schema.json",
+  "title": "ImageCompressionInspectionV1",
+  "$comment": "Structural V1 schema. Cross-field semantic authority: src/domain/validation.ts#isImageCompressionInspectionV1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sourceByteCount",
+    "sourceSha256",
+    "sourceMediaType",
+    "width",
+    "height",
+    "hasAlpha",
+    "animated",
+    "orientationApplied",
+    "revision"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sourceByteCount": { "type": "integer", "minimum": 1, "maximum": 52428800 },
+    "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sourceMediaType": {
+      "enum": [
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/bmp",
+        "image/webp",
+        "image/heic",
+        "image/heif"
+      ]
+    },
+    "width": { "type": "integer", "minimum": 1, "maximum": 16000000 },
+    "height": { "type": "integer", "minimum": 1, "maximum": 16000000 },
+    "hasAlpha": { "type": "boolean" },
+    "animated": { "const": false },
+    "orientationApplied": { "const": true },
+    "revision": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}$"
+    }
+  }
+}

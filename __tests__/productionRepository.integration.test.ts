@@ -962,6 +962,7 @@ describe('production repository against SQLite', () => {
         preset: 'balanced',
         maxOutputBytes: 10_485_760,
         minimumImageLongestEdge: 1_280,
+        targetImageLongestEdge: 1_280,
         imageQuality: 0.82,
         estimatorVersion: 'v1',
       },

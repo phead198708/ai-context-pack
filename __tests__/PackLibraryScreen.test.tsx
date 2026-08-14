@@ -63,6 +63,7 @@ const snapshot: PackLibrarySnapshot = {
         preset: 'balanced',
         maxOutputBytes: 10_485_760,
         minimumImageLongestEdge: 1_280,
+        targetImageLongestEdge: 1_280,
         imageQuality: 0.82,
         estimatorVersion: 'v1',
       },
@@ -176,6 +177,8 @@ function controller(): jest.Mocked<PackLibraryController> {
     reviewDuplicateGroup: jest.fn().mockResolvedValue(undefined),
     restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
     cancelProcessing: jest.fn().mockResolvedValue(undefined),
+    previewBudget: jest.fn(),
+    applyBudget: jest.fn(),
   } as unknown as jest.Mocked<PackLibraryController>;
 }
 
@@ -446,6 +449,118 @@ test('renders all required library views and every partial-failure item state', 
     await Promise.resolve();
   });
   expect(value.reorderItem).toHaveBeenCalledWith(packId, itemIds[1], 2);
+  act(() => renderer.unmount());
+});
+
+test('previews a versioned budget plan and reports actual compression savings', async () => {
+  const value = controller();
+  const plan = {
+    schemaVersion: 1 as const,
+    planId: 'a23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 3,
+    preset: 'compact' as const,
+    estimatorVersion: 'context-budget-estimator-v1' as const,
+    compressionVersion: 'image-compression-v1' as const,
+    budget: {
+      preset: 'compact' as const,
+      maxOutputBytes: 5_242_880,
+      minimumImageLongestEdge: 720,
+      targetImageLongestEdge: 1_280,
+      imageQuality: 0.7,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+    },
+    estimate: {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: 1_024,
+      predictedOutputBytes: 512,
+      imageCount: 1,
+      pdfPageCount: 2,
+      textCharacterCount: 400,
+      estimatedTokens: 526,
+    },
+    withinBudget: true,
+    predictedSavingsBytes: 512,
+    excludedItemIds: [itemIds[1]],
+    actions: [
+      {
+        kind: 'compress' as const,
+        itemId: itemIds[0],
+        outputArtifactId: 'b23e4567-e89b-42d3-a456-426614174000',
+        sourceByteCount: 1_024,
+        sourceSha256: 'a'.repeat(64),
+        sourceMediaType: 'image/png',
+        sourceWidth: 640,
+        sourceHeight: 480,
+        targetWidth: 320,
+        targetHeight: 240,
+        targetLongestEdge: 320,
+        quality: 1,
+        outputMediaType: 'image/png' as const,
+        preserveAlpha: true,
+        predictedOutputBytes: 512,
+      },
+    ],
+    recommendations: [],
+  };
+  const result = {
+    schemaVersion: 1 as const,
+    planId: plan.planId,
+    estimatorVersion: plan.estimatorVersion,
+    compressionVersion: plan.compressionVersion,
+    completedAt: '2026-08-10T00:00:02Z',
+    predictedOutputBytes: 512,
+    actualOutputBytes: 480,
+    predictedSavingsBytes: 512,
+    actualSavingsBytes: 544,
+    deviationBytes: -32,
+    withinBudget: true,
+    excludedItemIds: plan.excludedItemIds,
+    items: [
+      {
+        itemId: itemIds[0],
+        action: 'compressed' as const,
+        predictedOutputBytes: 512,
+        actualOutputBytes: 480,
+        actualSavingsBytes: 544,
+        deviationBytes: -32,
+        artifactId: 'b23e4567-e89b-42d3-a456-426614174000',
+      },
+    ],
+  };
+  value.previewBudget.mockResolvedValue(plan);
+  value.applyBudget.mockResolvedValue(result);
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Compact'));
+  await press(button(renderer, 'Exclude Processing PDF from plan'));
+  await press(button(renderer, 'Preview optimization plan'));
+  expect(value.previewBudget).toHaveBeenCalledWith(packId, plan.budget, [
+    itemIds[1],
+  ]);
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-estimator-version' })),
+  ).toContain('context-budget-estimator-v1');
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-estimate-summary' })),
+  ).toContain('526');
+  expect(
+    renderer.root.findByProps({ testID: `budget-action-${itemIds[0]}` }),
+  ).toBeDefined();
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-excluded-summary' })),
+  ).toContain('Processing PDF');
+
+  await press(button(renderer, 'Create compressed derivatives'));
+  expect(value.applyBudget).toHaveBeenCalledWith(plan);
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-actual-summary' })),
+  ).toContain('480');
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-actual-summary' })),
+  ).toContain('-32');
   act(() => renderer.unmount());
 });
 

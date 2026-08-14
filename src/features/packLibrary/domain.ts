@@ -55,6 +55,7 @@ export interface PackItemRow {
   readonly sourceType: ContextItem['sourceType'];
   readonly mediaType: string;
   readonly byteCount: number;
+  readonly inclusionMode?: ContextItem['inclusionMode'];
   readonly state: ContextItem['state'];
   readonly stage: PipelineStage;
   readonly progress: number;
@@ -290,6 +291,7 @@ function buildPackDetail(
       sourceType: item.sourceType,
       mediaType: item.mediaType,
       byteCount: original?.byteCount ?? 0,
+      inclusionMode: item.inclusionMode,
       state: item.state,
       stage: stageForItem(item, itemArtifacts),
       progress: progressForItem(item, itemArtifacts),

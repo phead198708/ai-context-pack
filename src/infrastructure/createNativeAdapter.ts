@@ -49,6 +49,11 @@ import {
   isOwnedArtifactStorePath,
 } from './persistence/ownedPaths';
 import { isImagePerceptualHashV1 } from '../domain/duplicateDetection';
+import {
+  isImageCompressionInspectionV1,
+  isImageCompressionRequestV1,
+  isImageCompressionResultV1,
+} from '../domain/budgetOptimization';
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
@@ -98,6 +103,26 @@ export interface NativeMethods {
     expectedSha256: string,
   ): Promise<unknown>;
   cancelImagePerceptualHash?(taskId: string): Promise<unknown>;
+  inspectImageForCompression?(
+    taskId: string,
+    fileUri: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<unknown>;
+  compressImage?(request: {
+    readonly schemaVersion: 1;
+    readonly taskId: string;
+    readonly fileUri: string;
+    readonly expectedByteCount: number;
+    readonly expectedSha256: string;
+    readonly targetWidth: number;
+    readonly targetHeight: number;
+    readonly quality: number;
+    readonly outputMediaType: 'image/jpeg' | 'image/png';
+    readonly preserveAlpha: boolean;
+  }): Promise<unknown>;
+  cancelImageCompression?(taskId: string): Promise<unknown>;
+  finishImageCompression?(taskId: string): Promise<unknown>;
   recognizeText(
     taskId: string,
     uri: string,
@@ -464,6 +489,79 @@ export const createNativeAdapter = (
           if (acknowledged !== true)
             throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
         },
+        inspectImageForCompression: async (
+          taskId,
+          fileUri,
+          expectedByteCount,
+          expectedSha256,
+        ) => {
+          if (!nativeModule.inspectImageForCompression)
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          assertImageProcessorSource(
+            taskId,
+            fileUri,
+            expectedByteCount,
+            expectedSha256,
+          );
+          let value: unknown;
+          try {
+            value = await nativeModule.inspectImageForCompression(
+              taskId,
+              fileUri,
+              expectedByteCount,
+              expectedSha256,
+            );
+          } catch (error) {
+            throw nativeImageCompressionBoundaryError(error);
+          }
+          if (!isImageCompressionInspectionV1(value))
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          if (
+            value.sourceByteCount !== expectedByteCount ||
+            value.sourceSha256 !== expectedSha256
+          )
+            throw new NativeBoundaryError('ARTIFACT_INTEGRITY_FAILED');
+          return value;
+        },
+        compressImage: async request => {
+          if (
+            !nativeModule.compressImage ||
+            !isImageCompressionRequestV1(request)
+          )
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          requireControlledFileUri(request.fileUri, 'PROCESSOR_OUTPUT_INVALID');
+          let value: unknown;
+          try {
+            value = await nativeModule.compressImage(request);
+          } catch (error) {
+            throw nativeImageCompressionBoundaryError(error);
+          }
+          if (!isImageCompressionResultV1(value))
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          if (
+            value.taskId !== request.taskId ||
+            value.sourceSha256 !== request.expectedSha256 ||
+            value.width !== request.targetWidth ||
+            value.height !== request.targetHeight ||
+            value.mediaType !== request.outputMediaType ||
+            value.quality !== request.quality ||
+            value.alphaPreserved !== request.preserveAlpha
+          )
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          return value;
+        },
+        cancelImageCompression: async taskId => {
+          await requireTrueImageTaskResult(
+            taskId,
+            nativeModule.cancelImageCompression,
+          );
+        },
+        finishImageCompression: async taskId => {
+          await requireTrueImageTaskResult(
+            taskId,
+            nativeModule.finishImageCompression,
+          );
+        },
         recognizeText: async request => {
           if (!isOCRRequestV1(request))
             throw new NativeBoundaryError('OCR_RESULT_INVALID');
@@ -703,6 +801,18 @@ export const createNativeAdapter = (
         cancelImagePerceptualHash: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
+        inspectImageForCompression: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        compressImage: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        cancelImageCompression: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        finishImageCompression: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
         recognizeText: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
@@ -860,6 +970,52 @@ function requirePDFInspectionRequest(request: PDFInspectionRequestV1): void {
 function requireControlledFileUri(fileUri: string, code: string): void {
   if (typeof fileUri !== 'string' || !fileUri.startsWith('file://'))
     throw new NativeBoundaryError(code);
+}
+
+function assertImageProcessorSource(
+  taskId: string,
+  fileUri: string,
+  expectedByteCount: number,
+  expectedSha256: string,
+): void {
+  if (
+    !isCanonicalUuid(taskId) ||
+    !Number.isSafeInteger(expectedByteCount) ||
+    expectedByteCount <= 0 ||
+    expectedByteCount > 52_428_800 ||
+    !/^[0-9a-f]{64}$/.test(expectedSha256)
+  )
+    throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+  requireControlledFileUri(fileUri, 'PROCESSOR_OUTPUT_INVALID');
+}
+
+async function requireTrueImageTaskResult(
+  taskId: string,
+  operation: ((taskId: string) => Promise<unknown>) | undefined,
+): Promise<void> {
+  if (!isCanonicalUuid(taskId) || !operation)
+    throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+  let value: unknown;
+  try {
+    value = await operation(taskId);
+  } catch (error) {
+    throw nativeImageCompressionBoundaryError(error);
+  }
+  if (value !== true) throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+}
+
+function nativeImageCompressionBoundaryError(
+  error: unknown,
+): NativeBoundaryError {
+  const code = nativeErrorCode(error);
+  return new NativeBoundaryError(
+    code === 'ARTIFACT_INTEGRITY_FAILED' ||
+    code === 'RESOURCE_MEMORY_PRESSURE' ||
+    code === 'PIPELINE_STAGE_FAILED' ||
+    code === 'PROCESSOR_OUTPUT_INVALID'
+      ? code
+      : 'PROCESSOR_OUTPUT_INVALID',
+  );
 }
 
 function requireFileUris(fileUris: readonly string[]): void {

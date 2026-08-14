@@ -1,4 +1,8 @@
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
+import {
+  isBudgetOptimizationResultV1,
+  isPackBudgetEstimateV1,
+} from '../../domain/budgetOptimization';
 import { DOMAIN_ERROR_CATALOG, DomainError } from '../../domain/errors';
 import type {
   Artifact,
@@ -243,8 +247,14 @@ export function encodeBudget(value: Budget): string {
 
 export function decodeBudget(value: string): Budget {
   const parsed = parseJson(value);
-  if (!isBudget(parsed)) invalid();
-  return parsed;
+  if (isBudget(parsed)) return parsed;
+  if (!isRecord(parsed)) invalid();
+  const legacy = {
+    ...parsed,
+    targetImageLongestEdge: parsed.minimumImageLongestEdge,
+  };
+  if (!isBudget(legacy)) invalid();
+  return legacy;
 }
 
 export function encodeProcessorVersion(value: ProcessorVersion): string {
@@ -291,24 +301,35 @@ export function isIsoDateTime(value: unknown): value is string {
 
 function isBudget(value: unknown): value is Budget {
   if (!isRecord(value)) return false;
+  const allowed = [
+    'preset',
+    'maxOutputBytes',
+    'minimumImageLongestEdge',
+    'targetImageLongestEdge',
+    'imageQuality',
+    'estimatorVersion',
+    'latestEstimate',
+    'latestOptimization',
+  ];
   return (
-    exactKeys(value, [
-      'preset',
-      'maxOutputBytes',
-      'minimumImageLongestEdge',
-      'imageQuality',
-      'estimatorVersion',
-    ]) &&
+    Object.keys(value).every(key => allowed.includes(key)) &&
     typeof value.preset === 'string' &&
     BUDGET_PRESETS.has(value.preset) &&
     isNonNegativeInteger(value.maxOutputBytes) &&
     isNonNegativeInteger(value.minimumImageLongestEdge) &&
+    isNonNegativeInteger(value.targetImageLongestEdge) &&
+    value.minimumImageLongestEdge > 0 &&
+    value.targetImageLongestEdge >= value.minimumImageLongestEdge &&
     typeof value.imageQuality === 'number' &&
     Number.isFinite(value.imageQuality) &&
     value.imageQuality >= 0 &&
     value.imageQuality <= 1 &&
     typeof value.estimatorVersion === 'string' &&
-    SAFE_VERSION.test(value.estimatorVersion)
+    SAFE_VERSION.test(value.estimatorVersion) &&
+    (value.latestEstimate === undefined ||
+      isPackBudgetEstimateV1(value.latestEstimate)) &&
+    (value.latestOptimization === undefined ||
+      isBudgetOptimizationResultV1(value.latestOptimization))
   );
 }
 

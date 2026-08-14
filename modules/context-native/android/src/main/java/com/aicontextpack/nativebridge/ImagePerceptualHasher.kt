@@ -849,7 +849,7 @@ internal object ImagePerceptualHasher {
     return (299 * compositedRed + 587 * compositedGreen + 114 * compositedBlue) / 1_000
   }
 
-  private fun readOrientation(
+  internal fun readOrientation(
     file: File,
     expectedByteCount: Long,
     cancellation: ImageHashCancellationToken,
@@ -872,7 +872,7 @@ internal object ImagePerceptualHasher {
     }
   }
 
-  private fun violatesSingleFramePolicy(
+  internal fun violatesSingleFramePolicy(
     path: String,
     cancellation: ImageHashCancellationToken,
   ): Boolean {

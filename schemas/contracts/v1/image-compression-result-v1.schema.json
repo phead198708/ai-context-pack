@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aicontextpack.local/schemas/contracts/v1/image-compression-result-v1.schema.json",
+  "title": "ImageCompressionResultV1",
+  "$comment": "Structural V1 schema. Cross-field semantic authority: src/domain/validation.ts#isImageCompressionResultV1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "sourceSha256",
+    "temporaryFileUri",
+    "outputByteCount",
+    "outputSha256",
+    "width",
+    "height",
+    "mediaType",
+    "quality",
+    "alphaPreserved",
+    "engine",
+    "revision",
+    "durationMs"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "taskId": { "type": "string", "format": "uuid" },
+    "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "temporaryFileUri": { "type": "string", "pattern": "^file://" },
+    "outputByteCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 52428800
+    },
+    "outputSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "width": { "type": "integer", "minimum": 1 },
+    "height": { "type": "integer", "minimum": 1 },
+    "mediaType": { "enum": ["image/jpeg", "image/png"] },
+    "quality": { "type": "number", "minimum": 0.58, "maximum": 1 },
+    "alphaPreserved": { "type": "boolean" },
+    "engine": { "enum": ["core-graphics", "android-bitmap"] },
+    "revision": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}$"
+    },
+    "durationMs": { "type": "number", "minimum": 0 }
+  }
+}

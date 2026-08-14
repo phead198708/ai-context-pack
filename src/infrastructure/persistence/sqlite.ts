@@ -2611,7 +2611,7 @@ export class ExpoSqlitePersistenceRepository
 }
 
 const DEFAULT_BUDGET_JSON =
-  '{"preset":"balanced","maxOutputBytes":10485760,"minimumImageLongestEdge":1280,"imageQuality":0.82,"estimatorVersion":"v1"}';
+  '{"preset":"balanced","maxOutputBytes":10485760,"minimumImageLongestEdge":960,"targetImageLongestEdge":1600,"imageQuality":0.82,"estimatorVersion":"context-budget-estimator-v1"}';
 const INBOX_PROCESSOR_JSON =
   '{"processor":"inbox-handoff","version":"1","contractVersion":1}';
 

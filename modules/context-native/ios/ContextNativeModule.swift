@@ -43,6 +43,7 @@ public final class ContextNativeModule: Module {
       }
       DispatchQueue.global(qos: .utility).async {
         ImageHashSnapshotStore.runStartupMaintenance()
+        ImageCompressionTemporaryStore.startupMaintenance()
       }
       guard let container = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: appGroupIdentifier
@@ -423,6 +424,135 @@ public final class ContextNativeModule: Module {
         ownerId: imageHashOwnerId,
         taskId: taskId
       )
+    }
+
+    AsyncFunction("inspectImageForCompression") { [weak self] (
+      taskId: String,
+      fileUri: String,
+      expectedByteCount: Int64,
+      expectedSha256: String
+    ) async throws -> [String: Any] in
+      guard let self else { throw NativeError("PIPELINE_STAGE_FAILED") }
+      let url = try controlledArtifactSourceURL(fileUri)
+      let registry = AppleVisionOCRProcessScope.imageHashRegistry
+      guard let token = registry.reserve(ownerId: imageHashOwnerId, taskId: taskId) else {
+        throw NativeError("PIPELINE_STAGE_FAILED")
+      }
+      do {
+        return try await withCheckedThrowingContinuation { continuation in
+          guard let work = AppleVisionOCRProcessScope.imageHashScheduler.submit(
+            token: token,
+            work: {
+              try ImageCompressionProcessor.inspect(
+                fileURL: url,
+                expectedByteCount: expectedByteCount,
+                expectedSHA256: expectedSha256,
+                cancellation: token
+              )
+            },
+            completion: { result in
+              registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+              continuation.resume(with: result)
+            }
+          ) else {
+            registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+            continuation.resume(throwing: ImagePerceptualHashError.resourceLimit)
+            return
+          }
+          registry.attach(
+            ownerId: self.imageHashOwnerId,
+            taskId: taskId,
+            token: token,
+            cancel: { work.cancel() },
+            awaitCompletion: { work.cancelAndWait() }
+          )
+        }
+      } catch let error as ImagePerceptualHashError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("PROCESSOR_OUTPUT_INVALID")
+      }
+    }
+
+    AsyncFunction("compressImage") { [weak self] (
+      request: [String: Any]
+    ) async throws -> [String: Any] in
+      guard let self else { throw NativeError("PIPELINE_STAGE_FAILED") }
+      let expectedKeys: Set<String> = [
+        "schemaVersion", "taskId", "fileUri", "expectedByteCount",
+        "expectedSha256", "targetWidth", "targetHeight", "quality",
+        "outputMediaType", "preserveAlpha",
+      ]
+      guard Set(request.keys) == expectedKeys,
+            (request["schemaVersion"] as? NSNumber)?.intValue == 1,
+            let taskId = request["taskId"] as? String,
+            let fileUri = request["fileUri"] as? String,
+            let expectedByteCount = (request["expectedByteCount"] as? NSNumber)?.int64Value,
+            let expectedSha256 = request["expectedSha256"] as? String,
+            let targetWidth = (request["targetWidth"] as? NSNumber)?.intValue,
+            let targetHeight = (request["targetHeight"] as? NSNumber)?.intValue,
+            let quality = (request["quality"] as? NSNumber)?.doubleValue,
+            let outputMediaType = request["outputMediaType"] as? String,
+            let preserveAlpha = request["preserveAlpha"] as? Bool else {
+        throw NativeError("PROCESSOR_OUTPUT_INVALID")
+      }
+      let url = try controlledArtifactSourceURL(fileUri)
+      let registry = AppleVisionOCRProcessScope.imageHashRegistry
+      guard let token = registry.reserve(ownerId: imageHashOwnerId, taskId: taskId) else {
+        throw NativeError("PIPELINE_STAGE_FAILED")
+      }
+      do {
+        return try await withCheckedThrowingContinuation { continuation in
+          guard let work = AppleVisionOCRProcessScope.imageHashScheduler.submit(
+            token: token,
+            work: {
+              try ImageCompressionProcessor.compress(
+                taskId: taskId,
+                fileURL: url,
+                expectedByteCount: expectedByteCount,
+                expectedSHA256: expectedSha256,
+                targetWidth: targetWidth,
+                targetHeight: targetHeight,
+                quality: quality,
+                outputMediaType: outputMediaType,
+                preserveAlpha: preserveAlpha,
+                cancellation: token
+              )
+            },
+            completion: { result in
+              registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+              continuation.resume(with: result)
+            }
+          ) else {
+            registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+            continuation.resume(throwing: ImagePerceptualHashError.resourceLimit)
+            return
+          }
+          registry.attach(
+            ownerId: self.imageHashOwnerId,
+            taskId: taskId,
+            token: token,
+            cancel: { work.cancel() },
+            awaitCompletion: { work.cancelAndWait() }
+          )
+        }
+      } catch let error as ImagePerceptualHashError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("PROCESSOR_OUTPUT_INVALID")
+      }
+    }
+
+    AsyncFunction("cancelImageCompression") { [weak self] (taskId: String) -> Bool in
+      guard let self else { return false }
+      return AppleVisionOCRProcessScope.imageHashRegistry.cancel(
+        ownerId: imageHashOwnerId,
+        taskId: taskId
+      )
+    }
+
+    AsyncFunction("finishImageCompression") { (taskId: String) -> Bool in
+      ImageCompressionTemporaryStore.finish(taskId: taskId)
     }
 
     AsyncFunction("recognizeText") { [weak self] (

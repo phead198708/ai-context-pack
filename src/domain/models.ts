@@ -1,4 +1,8 @@
 import type { DomainErrorCode } from './errors';
+import type {
+  BudgetOptimizationResultV1,
+  PackBudgetEstimateV1,
+} from './budgetOptimization';
 
 export type PackId = string;
 export type ItemId = string;
@@ -46,8 +50,11 @@ export interface Budget {
   readonly preset: BudgetPreset;
   readonly maxOutputBytes: number;
   readonly minimumImageLongestEdge: number;
+  readonly targetImageLongestEdge: number;
   readonly imageQuality: number;
   readonly estimatorVersion: string;
+  readonly latestEstimate?: PackBudgetEstimateV1;
+  readonly latestOptimization?: BudgetOptimizationResultV1;
 }
 
 export interface ContextPack {

@@ -8,6 +8,8 @@ export const CONTRACT_VERSIONS = {
   riskFinding: 1,
   exportManifest: 1,
   imagePerceptualHash: 1,
+  imageCompressionInspection: 1,
+  imageCompressionResult: 1,
 } as const;
 
 export type ContractName = keyof typeof CONTRACT_VERSIONS;

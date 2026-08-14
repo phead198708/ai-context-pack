@@ -37,21 +37,23 @@ Tests execute every allowed transition and every invalid state-command pair.
 
 ## Contract registry
 
-| Contract              | Semantic runtime validator                          | Structural JSON Schema                                                                                    | Canonical fixture                                                                         |
-| --------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| ImportManifestV1      | `contracts.ts` / `isImportManifestV1`               | [`import-manifest-v1.schema.json`](../../schemas/contracts/v1/import-manifest-v1.schema.json)             | [`import-manifest-v1.json`](../../fixtures/contracts/import-manifest-v1.json)             |
-| OCRResultV1           | `contracts.ts` / `isOCRResultV1`                    | [`ocr-result-v1.schema.json`](../../schemas/contracts/v1/ocr-result-v1.schema.json)                       | [`ocr-result-v1.json`](../../fixtures/contracts/ocr-result-v1.json)                       |
-| PDFPageExtractionV1   | `contracts.ts` / `isPDFPageExtractionV1`            | [`pdf-page-extraction-v1.schema.json`](../../schemas/contracts/v1/pdf-page-extraction-v1.schema.json)     | [`pdf-page-extraction-v1.json`](../../fixtures/contracts/pdf-page-extraction-v1.json)     |
-| PipelineCheckpointV1  | `contracts.ts` / `isPipelineCheckpointV1`           | [`pipeline-checkpoint-v1.schema.json`](../../schemas/contracts/v1/pipeline-checkpoint-v1.schema.json)     | [`pipeline-checkpoint-v1.json`](../../fixtures/contracts/pipeline-checkpoint-v1.json)     |
-| RiskFindingV1         | `contracts.ts` / `isRiskFindingV1`                  | [`risk-finding-v1.schema.json`](../../schemas/contracts/v1/risk-finding-v1.schema.json)                   | [`risk-finding-v1.json`](../../fixtures/contracts/risk-finding-v1.json)                   |
-| ExportManifestV1      | `contracts.ts` / `isExportManifestV1`               | [`export-manifest-v1.schema.json`](../../schemas/contracts/v1/export-manifest-v1.schema.json)             | [`export-manifest-v1.json`](../../fixtures/contracts/export-manifest-v1.json)             |
-| ImagePerceptualHashV1 | `duplicateDetection.ts` / `isImagePerceptualHashV1` | [`image-perceptual-hash-v1.schema.json`](../../schemas/contracts/v1/image-perceptual-hash-v1.schema.json) | [`image-perceptual-hash-v1.json`](../../fixtures/contracts/image-perceptual-hash-v1.json) |
+| Contract                     | Semantic runtime validator                                 | Structural JSON Schema                                                                                                  | Canonical fixture                                                                                       |
+| ---------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| ImportManifestV1             | `contracts.ts` / `isImportManifestV1`                      | [`import-manifest-v1.schema.json`](../../schemas/contracts/v1/import-manifest-v1.schema.json)                           | [`import-manifest-v1.json`](../../fixtures/contracts/import-manifest-v1.json)                           |
+| OCRResultV1                  | `contracts.ts` / `isOCRResultV1`                           | [`ocr-result-v1.schema.json`](../../schemas/contracts/v1/ocr-result-v1.schema.json)                                     | [`ocr-result-v1.json`](../../fixtures/contracts/ocr-result-v1.json)                                     |
+| PDFPageExtractionV1          | `contracts.ts` / `isPDFPageExtractionV1`                   | [`pdf-page-extraction-v1.schema.json`](../../schemas/contracts/v1/pdf-page-extraction-v1.schema.json)                   | [`pdf-page-extraction-v1.json`](../../fixtures/contracts/pdf-page-extraction-v1.json)                   |
+| PipelineCheckpointV1         | `contracts.ts` / `isPipelineCheckpointV1`                  | [`pipeline-checkpoint-v1.schema.json`](../../schemas/contracts/v1/pipeline-checkpoint-v1.schema.json)                   | [`pipeline-checkpoint-v1.json`](../../fixtures/contracts/pipeline-checkpoint-v1.json)                   |
+| RiskFindingV1                | `contracts.ts` / `isRiskFindingV1`                         | [`risk-finding-v1.schema.json`](../../schemas/contracts/v1/risk-finding-v1.schema.json)                                 | [`risk-finding-v1.json`](../../fixtures/contracts/risk-finding-v1.json)                                 |
+| ExportManifestV1             | `contracts.ts` / `isExportManifestV1`                      | [`export-manifest-v1.schema.json`](../../schemas/contracts/v1/export-manifest-v1.schema.json)                           | [`export-manifest-v1.json`](../../fixtures/contracts/export-manifest-v1.json)                           |
+| ImagePerceptualHashV1        | `duplicateDetection.ts` / `isImagePerceptualHashV1`        | [`image-perceptual-hash-v1.schema.json`](../../schemas/contracts/v1/image-perceptual-hash-v1.schema.json)               | [`image-perceptual-hash-v1.json`](../../fixtures/contracts/image-perceptual-hash-v1.json)               |
+| ImageCompressionInspectionV1 | `budgetOptimization.ts` / `isImageCompressionInspectionV1` | [`image-compression-inspection-v1.schema.json`](../../schemas/contracts/v1/image-compression-inspection-v1.schema.json) | [`image-compression-inspection-v1.json`](../../fixtures/contracts/image-compression-inspection-v1.json) |
+| ImageCompressionResultV1     | `budgetOptimization.ts` / `isImageCompressionResultV1`     | [`image-compression-result-v1.schema.json`](../../schemas/contracts/v1/image-compression-result-v1.schema.json)         | [`image-compression-result-v1.json`](../../fixtures/contracts/image-compression-result-v1.json)         |
 
-The Swift and Kotlin test encoders construct all six payloads independently and compare their canonical JSON with these same repository fixtures.
+The Swift and Kotlin test encoders construct all nine payloads independently and compare their canonical JSON with these same repository fixtures.
 
 ### Structural and semantic validation
 
-The Draft 2020-12 schemas are the machine-readable structural layer: required and unknown fields, primitive ranges, enums, canonical identifiers, safe path syntax, aggregate import composition, and checkpoint reason/action combinations. Jest compiles every schema with Ajv and runs all six canonical fixtures plus the structural portion of the negative corpus through it.
+The Draft 2020-12 schemas are the machine-readable structural layer: required and unknown fields, primitive ranges, enums, canonical identifiers, safe path syntax, aggregate import composition, and checkpoint reason/action combinations. Jest compiles every schema with Ajv and runs all nine canonical fixtures plus the structural portion of the negative corpus through it.
 
 The exported TypeScript validator named in each schema's `$comment` is the semantic authority. Consumers must run it after structural validation. Standard Draft 2020-12 cannot portably express projected uniqueness, an import path equal to `<item.id>.bin`, array position equal to `item.order`, or sums such as `x + width <= 1`; the negative corpus proves these payloads pass the structural schema and fail the semantic authority. Native import readers mirror the relevant `ImportManifestV1` semantic checks at the platform boundary.
 
@@ -79,7 +81,7 @@ Infrastructure may resolve a validated relative path to a controlled file URL at
 
 ## Compatibility and migration policy
 
-All six contracts currently support exactly `schemaVersion: 1`.
+All nine contracts currently support exactly `schemaVersion: 1`.
 
 - Missing versions are `SCHEMA_INVALID`.
 - Unknown numeric versions are `SCHEMA_VERSION_UNSUPPORTED` and fail closed.

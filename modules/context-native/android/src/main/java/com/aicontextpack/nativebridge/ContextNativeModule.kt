@@ -72,6 +72,21 @@ internal object AndroidImageHashProcessScope {
   )
 }
 
+internal object AndroidImageCompressionProcessScope {
+  val registry = ImageHashTaskRegistry()
+  val executor = ThreadPoolExecutor(
+    1,
+    1,
+    0L,
+    TimeUnit.MILLISECONDS,
+    ArrayBlockingQueue(2),
+    { action ->
+      Thread(action, "ai-context-pack-image-compression").apply { isDaemon = true }
+    },
+    ThreadPoolExecutor.AbortPolicy(),
+  )
+}
+
 internal data class OcrLifecycleRegistration(
   val taskId: String,
   val close: () -> Unit,
@@ -326,6 +341,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
   private val ocrLifecycle = OcrModuleLifecycle()
   private val pdfLifecycle = OcrModuleLifecycle()
   private val imageHashOwnerId = UUID.randomUUID().toString()
+  private val imageCompressionOwnerId = UUID.randomUUID().toString()
   private var callbackContext: Context? = null
 
   override fun definition() = ModuleDefinition {
@@ -339,6 +355,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
           {
             InboxArtifactHandoff.runStartupMaintenance(context.filesDir)
             ImageHashSnapshotStore.runStartupMaintenance(context)
+            ImageCompressionTemporaryStore.startupMaintenance(context)
           },
           "ai-context-pack-tombstone-sweep",
         ).start()
@@ -364,6 +381,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         active.reject?.invoke()
       }
       AndroidImageHashProcessScope.registry.destroyOwner(imageHashOwnerId)
+      AndroidImageCompressionProcessScope.registry.destroyOwner(imageCompressionOwnerId)
     }
 
     AsyncFunction("scanInbox") {
@@ -656,6 +674,179 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
 
     AsyncFunction("cancelImagePerceptualHash") { taskId: String ->
       AndroidImageHashProcessScope.registry.cancel(imageHashOwnerId, taskId)
+    }
+
+    AsyncFunction("inspectImageForCompression") {
+      taskId: String,
+      fileUri: String,
+      expectedByteCount: Double,
+      expectedSha256: String,
+      promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      if (
+        !expectedByteCount.isFinite() || expectedByteCount % 1.0 != 0.0 ||
+        expectedByteCount !in 1.0..ImagePerceptualHasher.maximumSourceBytes.toDouble()
+      ) return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val token = AndroidImageCompressionProcessScope.registry.reserve(
+        imageCompressionOwnerId,
+        taskId,
+      ) ?: return@AsyncFunction promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
+      val settled = AtomicBoolean(false)
+      fun rejectOnce(error: NativeException) {
+        if (settled.compareAndSet(false, true)) promise.reject(error)
+      }
+      val work = ImageHashScheduledWork(
+        executor = AndroidImageCompressionProcessScope.executor,
+        token = token,
+        action = {
+          try {
+            val value = ImageCompressionProcessor.inspect(
+              context,
+              fileUri,
+              expectedByteCount.toLong(),
+              expectedSha256,
+              token,
+            )
+            if (settled.compareAndSet(false, true)) promise.resolve(value)
+          } catch (error: NativeException) {
+            rejectOnce(error)
+          } catch (_: OutOfMemoryError) {
+            rejectOnce(NativeException("RESOURCE_MEMORY_PRESSURE"))
+          } catch (_: Throwable) {
+            rejectOnce(NativeException("PROCESSOR_OUTPUT_INVALID"))
+          }
+        },
+        cancelBeforeStart = { rejectOnce(NativeException("PIPELINE_STAGE_FAILED")) },
+        afterFinish = {
+          AndroidImageCompressionProcessScope.registry.finish(
+            imageCompressionOwnerId,
+            taskId,
+            token,
+          )
+        },
+      )
+      AndroidImageCompressionProcessScope.registry.attach(
+        imageCompressionOwnerId,
+        taskId,
+        token,
+        work::cancelAndWait,
+      )
+      try {
+        work.schedule()
+      } catch (_: RejectedExecutionException) {
+        AndroidImageCompressionProcessScope.registry.finish(
+          imageCompressionOwnerId,
+          taskId,
+          token,
+        )
+        rejectOnce(NativeException("PIPELINE_STAGE_FAILED"))
+      }
+    }
+
+    AsyncFunction("compressImage") {
+      request: Map<String, Any>,
+      promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      val expectedKeys = setOf(
+        "schemaVersion", "taskId", "fileUri", "expectedByteCount",
+        "expectedSha256", "targetWidth", "targetHeight", "quality",
+        "outputMediaType", "preserveAlpha",
+      )
+      if (request.keys != expectedKeys || (request["schemaVersion"] as? Number)?.toInt() != 1) {
+        return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      }
+      val taskId = request["taskId"] as? String
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val fileUri = request["fileUri"] as? String
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val expectedByteCount = (request["expectedByteCount"] as? Number)?.toDouble()
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val expectedSha256 = request["expectedSha256"] as? String
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val targetWidth = (request["targetWidth"] as? Number)?.toInt()
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val targetHeight = (request["targetHeight"] as? Number)?.toInt()
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val quality = (request["quality"] as? Number)?.toDouble()
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val outputMediaType = request["outputMediaType"] as? String
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val preserveAlpha = request["preserveAlpha"] as? Boolean
+        ?: return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      if (
+        !expectedByteCount.isFinite() || expectedByteCount % 1.0 != 0.0 ||
+        expectedByteCount !in 1.0..ImagePerceptualHasher.maximumSourceBytes.toDouble()
+      ) return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val token = AndroidImageCompressionProcessScope.registry.reserve(
+        imageCompressionOwnerId,
+        taskId,
+      ) ?: return@AsyncFunction promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
+      val settled = AtomicBoolean(false)
+      fun rejectOnce(error: NativeException) {
+        if (settled.compareAndSet(false, true)) promise.reject(error)
+      }
+      val work = ImageHashScheduledWork(
+        executor = AndroidImageCompressionProcessScope.executor,
+        token = token,
+        action = {
+          try {
+            val value = ImageCompressionProcessor.compress(
+              context,
+              taskId,
+              fileUri,
+              expectedByteCount.toLong(),
+              expectedSha256,
+              targetWidth,
+              targetHeight,
+              quality,
+              outputMediaType,
+              preserveAlpha,
+              token,
+            )
+            if (settled.compareAndSet(false, true)) promise.resolve(value)
+          } catch (error: NativeException) {
+            rejectOnce(error)
+          } catch (_: OutOfMemoryError) {
+            rejectOnce(NativeException("RESOURCE_MEMORY_PRESSURE"))
+          } catch (_: Throwable) {
+            rejectOnce(NativeException("PROCESSOR_OUTPUT_INVALID"))
+          }
+        },
+        cancelBeforeStart = { rejectOnce(NativeException("PIPELINE_STAGE_FAILED")) },
+        afterFinish = {
+          AndroidImageCompressionProcessScope.registry.finish(
+            imageCompressionOwnerId,
+            taskId,
+            token,
+          )
+        },
+      )
+      AndroidImageCompressionProcessScope.registry.attach(
+        imageCompressionOwnerId,
+        taskId,
+        token,
+        work::cancelAndWait,
+      )
+      try {
+        work.schedule()
+      } catch (_: RejectedExecutionException) {
+        AndroidImageCompressionProcessScope.registry.finish(
+          imageCompressionOwnerId,
+          taskId,
+          token,
+        )
+        rejectOnce(NativeException("PIPELINE_STAGE_FAILED"))
+      }
+    }
+
+    AsyncFunction("cancelImageCompression") { taskId: String ->
+      AndroidImageCompressionProcessScope.registry.cancel(imageCompressionOwnerId, taskId)
+    }
+
+    AsyncFunction("finishImageCompression") { taskId: String ->
+      ImageCompressionTemporaryStore.finish(taskId)
     }
 
     AsyncFunction("recognizeText") {

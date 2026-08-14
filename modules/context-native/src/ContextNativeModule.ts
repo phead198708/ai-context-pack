@@ -21,6 +21,10 @@ import type {
 } from '../../../src/domain/nativeAdapter';
 import type { ImagePerceptualHashV1 } from '../../../src/domain/duplicateDetection';
 import type {
+  ImageCompressionInspectionV1,
+  ImageCompressionResultV1,
+} from '../../../src/domain/budgetOptimization';
+import type {
   PendingShareEvent,
   RecoveryEvent,
 } from '../../../src/domain/shareImportResult';
@@ -81,6 +85,26 @@ declare class ContextNativeModule extends NativeModule {
     expectedSha256: string,
   ): Promise<ImagePerceptualHashV1>;
   cancelImagePerceptualHash(taskId: string): Promise<boolean>;
+  inspectImageForCompression(
+    taskId: string,
+    fileUri: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<ImageCompressionInspectionV1>;
+  compressImage(request: {
+    readonly schemaVersion: 1;
+    readonly taskId: string;
+    readonly fileUri: string;
+    readonly expectedByteCount: number;
+    readonly expectedSha256: string;
+    readonly targetWidth: number;
+    readonly targetHeight: number;
+    readonly quality: number;
+    readonly outputMediaType: 'image/jpeg' | 'image/png';
+    readonly preserveAlpha: boolean;
+  }): Promise<ImageCompressionResultV1>;
+  cancelImageCompression(taskId: string): Promise<boolean>;
+  finishImageCompression(taskId: string): Promise<boolean>;
   recognizeText(
     taskId: string,
     fileUri: string,

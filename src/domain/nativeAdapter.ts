@@ -15,6 +15,11 @@ import type {
   PDFPageExtractionRequestV1,
 } from './pdfExtraction';
 import type { ImagePerceptualHashV1 } from './duplicateDetection';
+import type {
+  ImageCompressionInspectionV1,
+  ImageCompressionRequestV1,
+  ImageCompressionResultV1,
+} from './budgetOptimization';
 export interface NativeHandoffArtifact {
   readonly id: string;
   readonly itemId: string;
@@ -118,6 +123,17 @@ export interface NativeAdapter {
     expectedSha256: string,
   ): Promise<ImagePerceptualHashV1>;
   cancelImagePerceptualHash?(taskId: string): Promise<void>;
+  inspectImageForCompression?(
+    taskId: string,
+    fileUri: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<ImageCompressionInspectionV1>;
+  compressImage?(
+    request: ImageCompressionRequestV1,
+  ): Promise<ImageCompressionResultV1>;
+  cancelImageCompression?(taskId: string): Promise<void>;
+  finishImageCompression?(taskId: string): Promise<void>;
   recognizeText(request: OCRRequestV1): Promise<OCRResultV1>;
   cancelTextRecognition(taskId: string): Promise<void>;
   inspectPdf(request: PDFInspectionRequestV1): Promise<PDFDocumentInfoV1>;
