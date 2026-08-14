@@ -9,8 +9,15 @@ import type {
   RiskFinding,
 } from '../../domain/models';
 import type { NativeHandoffResult } from '../../domain/nativeAdapter';
+import type {
+  DuplicateAnalysisItemV1,
+  DuplicateAnalysisManifestV1,
+  DuplicateAnalysisSnapshotV1,
+  DuplicateDecisionV1,
+  DuplicateSuggestionV1,
+} from '../../domain/duplicateDetection';
 
-export const PERSISTENCE_SCHEMA_VERSION = 7 as const;
+export const PERSISTENCE_SCHEMA_VERSION = 8 as const;
 export const DEVELOPMENT_RESET_CONFIRMATION =
   'RESET_AI_CONTEXT_PACK_DEVELOPMENT_DATA' as const;
 
@@ -143,13 +150,16 @@ export type CompletePipelineRunInput = {
 } & (
   | {
       readonly artifact: Artifact;
-      /** Required for extraction settlement and fenced in the same transaction. */
+      /** Analyze runs settle their versioned detector result with the derivative. */
+      readonly analysis?: DuplicateAnalysisItemV1;
+      /** Required for derivative settlement and fenced in the same transaction. */
       readonly publicationLeaseOwnerId: string;
       /** @deprecated Validated when present but never used as lease authority. */
       readonly publicationLeaseObservedAt?: string;
     }
   | {
       readonly artifact?: undefined;
+      readonly analysis?: never;
       readonly publicationLeaseOwnerId?: never;
       readonly publicationLeaseObservedAt?: never;
     }
@@ -245,6 +255,8 @@ export interface ContextPackRepository {
   ): Promise<boolean>;
   completePipelineRun(input: CompletePipelineRunInput): Promise<boolean>;
   failPipelineRun(input: FailPipelineRunInput): Promise<boolean>;
+  /** True only after a durable user/owner cancellation settled this exact run. */
+  pipelineRunIsCancelled(runId: string): Promise<boolean>;
   cancelPipelineRuns(packId: string, updatedAt: string): Promise<number>;
 }
 
@@ -268,6 +280,28 @@ export interface ArtifactRecordRepository {
   ): Promise<'created' | 'replayed'>;
   listArtifactRecords(): Promise<readonly PersistedArtifactRecord[]>;
   markArtifactVerified(artifactId: string, verifiedAt: string): Promise<void>;
+}
+
+export interface ReplaceDuplicateAnalysisInput {
+  readonly manifest: DuplicateAnalysisManifestV1;
+  readonly analyses: readonly DuplicateAnalysisItemV1[];
+  readonly suggestions: readonly DuplicateSuggestionV1[];
+}
+
+export interface DuplicateAnalysisRepository {
+  findDuplicateAnalysis(packId: string): Promise<DuplicateAnalysisSnapshotV1>;
+  replaceDuplicateAnalysis(input: ReplaceDuplicateAnalysisInput): Promise<void>;
+  /** Decisions are durable user intent and are never replaced by detector output. */
+  saveDuplicateDecisions(
+    packId: string,
+    decisions: readonly DuplicateDecisionV1[],
+  ): Promise<void>;
+  /** Restores the captured baseline even when the detector group no longer exists. */
+  restoreDuplicateDecision(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void>;
 }
 
 export interface QuarantineRecordInput {
@@ -356,6 +390,7 @@ export interface ProductionPersistenceRepository
     RiskFindingRepository,
     ExportRecordRepository,
     ArtifactRecordRepository,
+    DuplicateAnalysisRepository,
     RecoveryDiagnosticsRepository,
     QuarantineRepository,
     CleanupLeaseRepository,

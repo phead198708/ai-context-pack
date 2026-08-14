@@ -7,6 +7,8 @@ private let appGroupIdentifier = "group.com.example.aicontextpack"
 
 private enum AppleVisionOCRProcessScope {
   static let registry = OCRCancellationRegistry()
+  static let imageHashRegistry = ImageHashTaskRegistry()
+  static let imageHashScheduler = ImageHashScheduler()
   static let pdfFinishCoordinator = PDFProcessorFinishCoordinator()
   static let plainTextReadCoordinator = PlainTextReadCoordinator()
 }
@@ -25,6 +27,7 @@ public final class ContextNativeModule: Module {
   private let plainTextReadCoordinator = AppleVisionOCRProcessScope.plainTextReadCoordinator
   private let ocrLifetime = OCRModuleLifetime()
   private let pdfLifetime = OCRModuleLifetime()
+  private let imageHashOwnerId = UUID().uuidString.lowercased()
   private var memoryWarningObserver: NSObjectProtocol?
 
   public func definition() -> ModuleDefinition {
@@ -37,6 +40,9 @@ public final class ContextNativeModule: Module {
         queue: nil
       ) { [weak self] _ in
         self?.ocrProcessor.setMemoryPressure(true)
+      }
+      DispatchQueue.global(qos: .utility).async {
+        ImageHashSnapshotStore.runStartupMaintenance()
       }
       guard let container = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: appGroupIdentifier
@@ -63,6 +69,9 @@ public final class ContextNativeModule: Module {
       let activePDFTaskId = pdfLifetime.destroy()
       pdfFinishCoordinator.destroyOwner(pdfFinishOwner)
       pdfProcessor.destroy(activeTaskId: activePDFTaskId)
+      if let ownerId = self?.imageHashOwnerId {
+        AppleVisionOCRProcessScope.imageHashRegistry.destroyOwner(ownerId)
+      }
     }
 
     AsyncFunction("scanInbox") { () throws -> [[String: Any]] in
@@ -360,6 +369,62 @@ public final class ContextNativeModule: Module {
       return self.ocrProcessor.capabilities()
     }
 
+    AsyncFunction("hashImagePerceptually") { [weak self] (
+      taskId: String,
+      fileUri: String,
+      expectedByteCount: Int64,
+      expectedSha256: String
+    ) async throws -> [String: Any] in
+      guard let self else { throw NativeError("PIPELINE_STAGE_FAILED") }
+      let url = try controlledArtifactSourceURL(fileUri)
+      let registry = AppleVisionOCRProcessScope.imageHashRegistry
+      guard let token = registry.reserve(ownerId: imageHashOwnerId, taskId: taskId) else {
+        throw NativeError("PIPELINE_STAGE_FAILED")
+      }
+      do {
+        return try await withCheckedThrowingContinuation { continuation in
+          guard let work = AppleVisionOCRProcessScope.imageHashScheduler.submit(
+            token: token,
+            work: {
+              try ImagePerceptualHasher.hash(
+                fileURL: url,
+                expectedByteCount: expectedByteCount,
+                expectedSHA256: expectedSha256,
+                cancellation: token
+              )
+            },
+            completion: { result in
+              registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+              continuation.resume(with: result)
+            }
+          ) else {
+            registry.finish(ownerId: self.imageHashOwnerId, taskId: taskId, token: token)
+            continuation.resume(throwing: ImagePerceptualHashError.resourceLimit)
+            return
+          }
+          registry.attach(
+            ownerId: self.imageHashOwnerId,
+            taskId: taskId,
+            token: token,
+            cancel: { work.cancel() },
+            awaitCompletion: { work.cancelAndWait() }
+          )
+        }
+      } catch let error as ImagePerceptualHashError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("PROCESSOR_OUTPUT_INVALID")
+      }
+    }
+
+    AsyncFunction("cancelImagePerceptualHash") { [weak self] (taskId: String) -> Bool in
+      guard let self else { return false }
+      return AppleVisionOCRProcessScope.imageHashRegistry.cancel(
+        ownerId: imageHashOwnerId,
+        taskId: taskId
+      )
+    }
+
     AsyncFunction("recognizeText") { [weak self] (
       taskId: String,
       fileUri: String,
@@ -561,10 +626,21 @@ public final class ContextNativeModule: Module {
       }
     }
 
-    AsyncFunction("readPlainTextFile") { (fileUri: String) async throws -> [String: Any] in
+    AsyncFunction("readPlainTextFile") {
+      (
+        fileUri: String,
+        maximumBytes: Int,
+        expectedByteCount: Int?,
+        expectedSha256: String?
+      ) async throws -> [String: Any] in
       let url = try controlledArtifactSourceURL(fileUri)
       do {
-        return try await self.plainTextReadCoordinator.read(fileURL: url)
+        return try await self.plainTextReadCoordinator.read(
+          fileURL: url,
+          maximumBytes: maximumBytes,
+          expectedByteCount: expectedByteCount,
+          expectedSHA256: expectedSha256
+        )
       } catch let error as PlainTextFileReaderError {
         throw NativeError(error.stableCode)
       } catch {

@@ -57,6 +57,21 @@ internal object AndroidPDFProcessScope {
   )
 }
 
+internal object AndroidImageHashProcessScope {
+  val registry = ImageHashTaskRegistry()
+  val executor = ThreadPoolExecutor(
+    1,
+    1,
+    0L,
+    TimeUnit.MILLISECONDS,
+    ArrayBlockingQueue(2),
+    { action ->
+      Thread(action, "ai-context-pack-image-hash").apply { isDaemon = true }
+    },
+    ThreadPoolExecutor.AbortPolicy(),
+  )
+}
+
 internal data class OcrLifecycleRegistration(
   val taskId: String,
   val close: () -> Unit,
@@ -310,6 +325,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
   private val pdfFinishCoordinator = AndroidPDFProcessScope.finishCoordinator
   private val ocrLifecycle = OcrModuleLifecycle()
   private val pdfLifecycle = OcrModuleLifecycle()
+  private val imageHashOwnerId = UUID.randomUUID().toString()
   private var callbackContext: Context? = null
 
   override fun definition() = ModuleDefinition {
@@ -320,7 +336,10 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         context.registerComponentCallbacks(this@ContextNativeModule)
         callbackContext = context
         Thread(
-          { InboxArtifactHandoff.runStartupMaintenance(context.filesDir) },
+          {
+            InboxArtifactHandoff.runStartupMaintenance(context.filesDir)
+            ImageHashSnapshotStore.runStartupMaintenance(context)
+          },
           "ai-context-pack-tombstone-sweep",
         ).start()
       }
@@ -344,6 +363,7 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
         active.close()
         active.reject?.invoke()
       }
+      AndroidImageHashProcessScope.registry.destroyOwner(imageHashOwnerId)
     }
 
     AsyncFunction("scanInbox") {
@@ -576,6 +596,66 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
     AsyncFunction("getOCRCapabilities") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       ocrProcessor.capabilities(context)
+    }
+
+    AsyncFunction("hashImagePerceptually") {
+      taskId: String,
+      fileUri: String,
+      expectedByteCount: Double,
+      expectedSha256: String,
+      promise: Promise ->
+      val context = appContext.reactContext
+        ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
+      if (
+        !expectedByteCount.isFinite() ||
+        expectedByteCount % 1.0 != 0.0 ||
+        expectedByteCount !in 1.0..ImagePerceptualHasher.maximumSourceBytes.toDouble()
+      ) return@AsyncFunction promise.reject(NativeException("PROCESSOR_OUTPUT_INVALID"))
+      val token = AndroidImageHashProcessScope.registry.reserve(imageHashOwnerId, taskId)
+        ?: return@AsyncFunction promise.reject(NativeException("PIPELINE_STAGE_FAILED"))
+      val settled = AtomicBoolean(false)
+      fun rejectOnce(error: NativeException) {
+        if (settled.compareAndSet(false, true)) promise.reject(error)
+      }
+      val work = ImageHashScheduledWork(
+        executor = AndroidImageHashProcessScope.executor,
+        token = token,
+        action = {
+          try {
+            val value = ImagePerceptualHasher.hash(
+              context,
+              fileUri,
+              expectedByteCount.toLong(),
+              expectedSha256,
+              token,
+            )
+            if (settled.compareAndSet(false, true)) promise.resolve(value)
+          }
+          catch (error: NativeException) { rejectOnce(error) }
+          catch (_: OutOfMemoryError) { rejectOnce(NativeException("RESOURCE_MEMORY_PRESSURE")) }
+          catch (_: Throwable) { rejectOnce(NativeException("PROCESSOR_OUTPUT_INVALID")) }
+        },
+        cancelBeforeStart = { rejectOnce(NativeException("PIPELINE_STAGE_FAILED")) },
+        afterFinish = {
+          AndroidImageHashProcessScope.registry.finish(imageHashOwnerId, taskId, token)
+        },
+      )
+      AndroidImageHashProcessScope.registry.attach(
+        imageHashOwnerId,
+        taskId,
+        token,
+        work::cancelAndWait,
+      )
+      try {
+        work.schedule()
+      } catch (_: RejectedExecutionException) {
+        AndroidImageHashProcessScope.registry.finish(imageHashOwnerId, taskId, token)
+        rejectOnce(NativeException("PIPELINE_STAGE_FAILED"))
+      }
+    }
+
+    AsyncFunction("cancelImagePerceptualHash") { taskId: String ->
+      AndroidImageHashProcessScope.registry.cancel(imageHashOwnerId, taskId)
     }
 
     AsyncFunction("recognizeText") {
@@ -838,12 +918,27 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       )
     }
 
-    AsyncFunction("readPlainTextFile") { fileUri: String, promise: Promise ->
+    AsyncFunction("readPlainTextFile") {
+      fileUri: String,
+      maximumBytes: Int,
+      expectedByteCount: Int?,
+      expectedSha256: String?,
+      promise: Promise ->
       val context = appContext.reactContext
         ?: return@AsyncFunction promise.reject(NativeException("CONTEXT_UNAVAILABLE"))
       try {
         AndroidPDFProcessScope.executor.execute {
-          try { promise.resolve(AndroidPlainTextFileReader.read(context, fileUri)) }
+          try {
+            promise.resolve(
+              AndroidPlainTextFileReader.read(
+                context,
+                fileUri,
+                maximumBytes,
+                expectedByteCount,
+                expectedSha256,
+              ),
+            )
+          }
           catch (error: NativeException) { promise.reject(error) }
           catch (_: OutOfMemoryError) { promise.reject(NativeException("RESOURCE_MEMORY_PRESSURE")) }
           catch (_: Throwable) { promise.reject(NativeException("TEXT_RESULT_INVALID")) }

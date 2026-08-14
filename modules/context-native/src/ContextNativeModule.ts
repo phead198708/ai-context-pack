@@ -19,6 +19,7 @@ import type {
   NativeQuarantinePurgeResult,
   NativeQuarantinedArtifact,
 } from '../../../src/domain/nativeAdapter';
+import type { ImagePerceptualHashV1 } from '../../../src/domain/duplicateDetection';
 import type {
   PendingShareEvent,
   RecoveryEvent,
@@ -73,6 +74,13 @@ declare class ContextNativeModule extends NativeModule {
   ): Promise<NativeQuarantinePurgeResult>;
   getArtifactStorageUsage(): Promise<NativeArtifactStorageUsage>;
   getOCRCapabilities(): Promise<OCRCapabilitiesV1>;
+  hashImagePerceptually(
+    taskId: string,
+    fileUri: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<ImagePerceptualHashV1>;
+  cancelImagePerceptualHash(taskId: string): Promise<boolean>;
   recognizeText(
     taskId: string,
     fileUri: string,
@@ -94,7 +102,12 @@ declare class ContextNativeModule extends NativeModule {
   ): Promise<PDFPageExtractionV1>;
   cancelPdfExtraction(taskId: string): Promise<boolean>;
   finishPdfExtraction(taskId: string): Promise<boolean>;
-  readPlainTextFile(fileUri: string): Promise<NativePlainTextFileV1>;
+  readPlainTextFile(
+    fileUri: string,
+    maximumBytes: number,
+    expectedByteCount: number | null,
+    expectedSha256: string | null,
+  ): Promise<NativePlainTextFileV1>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }
 export default requireNativeModule<ContextNativeModule>('ContextNative');

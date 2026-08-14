@@ -14,6 +14,7 @@ import type {
   PDFInspectionRequestV1,
   PDFPageExtractionRequestV1,
 } from './pdfExtraction';
+import type { ImagePerceptualHashV1 } from './duplicateDetection';
 export interface NativeHandoffArtifact {
   readonly id: string;
   readonly itemId: string;
@@ -110,6 +111,13 @@ export interface NativeAdapter {
   ): Promise<NativeQuarantinePurgeResult>;
   getArtifactStorageUsage(): Promise<NativeArtifactStorageUsage>;
   getOCRCapabilities(): Promise<OCRCapabilitiesV1>;
+  hashImagePerceptually?(
+    taskId: string,
+    fileUri: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<ImagePerceptualHashV1>;
+  cancelImagePerceptualHash?(taskId: string): Promise<void>;
   recognizeText(request: OCRRequestV1): Promise<OCRResultV1>;
   cancelTextRecognition(taskId: string): Promise<void>;
   inspectPdf(request: PDFInspectionRequestV1): Promise<PDFDocumentInfoV1>;
@@ -118,6 +126,11 @@ export interface NativeAdapter {
   ): Promise<PDFPageExtractionV1>;
   cancelPdfExtraction(taskId: string): Promise<void>;
   finishPdfExtraction(taskId: string): Promise<void>;
-  readPlainTextFile(fileUri: string): Promise<NativePlainTextFileV1>;
+  readPlainTextFile(
+    fileUri: string,
+    maximumBytes?: number,
+    expectedByteCount?: number,
+    expectedSha256?: string,
+  ): Promise<NativePlainTextFileV1>;
   probePdf(fileUri: string): Promise<PDFProbeResultV1>;
 }

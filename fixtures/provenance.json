@@ -11,6 +11,22 @@
       "license": "MIT"
     },
     {
+      "path": "contracts/image-animation-policy-v1.tsv",
+      "sha256": "c9a002aff25efaf6667d9d9348970add36793056bcea8c14e9e276eeb3b0a59f",
+      "kind": "contract",
+      "purpose": "cross-platform single-frame policy rejection for synthetic APNG, GIF, and WebP bytes",
+      "source": "project-authored minimal animated image payloads encoded as base64",
+      "license": "MIT"
+    },
+    {
+      "path": "contracts/image-perceptual-hash-v1.json",
+      "sha256": "4e0774c89558485c52b03d9cced8934657814581daa4bd388369c5d5bb1d3407",
+      "kind": "contract",
+      "purpose": "canonical ImagePerceptualHashV1 parity payload",
+      "source": "project-authored synthetic perceptual-hash payload",
+      "license": "MIT"
+    },
+    {
       "path": "contracts/import-manifest-v1.json",
       "sha256": "5c828e44c5a366361c42ed9608e0fc163f5160a07661fdc6e870cff6f80fab9e",
       "kind": "contract",
@@ -56,6 +72,14 @@
       "kind": "security-corpus",
       "purpose": "archive traversal and malformed path cases",
       "source": "project-authored attack strings",
+      "license": "MIT"
+    },
+    {
+      "path": "corpus/duplicate-detection-cases.json",
+      "sha256": "1eaa01fd064c6b0851190b6c7bf60cd726223d83408375cc03340461d3cbbf55",
+      "kind": "domain-corpus",
+      "purpose": "positive and negative exact, text-similarity, and image-similarity duplicate cases",
+      "source": "project-authored fake text and synthetic perceptual hashes",
       "license": "MIT"
     },
     {

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum PlainTextFileReaderError: Error, Equatable {
@@ -6,6 +7,7 @@ enum PlainTextFileReaderError: Error, Equatable {
   case tooLarge
   case resourceBusy
   case resultInvalid
+  case integrityFailure
 
   var stableCode: String {
     switch self {
@@ -14,6 +16,7 @@ enum PlainTextFileReaderError: Error, Equatable {
     case .tooLarge: return "TEXT_TOO_LARGE"
     case .resourceBusy: return "TEXT_RESOURCE_BUSY"
     case .resultInvalid: return "TEXT_RESULT_INVALID"
+    case .integrityFailure: return "ARTIFACT_INTEGRITY_FAILED"
     }
   }
 }
@@ -41,11 +44,23 @@ final class PlainTextReadCoordinator: @unchecked Sendable {
     self.queue = queue
   }
 
-  func read(fileURL: URL) async throws -> [String: Any] {
+  func read(
+    fileURL: URL,
+    maximumBytes: Int,
+    expectedByteCount: Int?,
+    expectedSHA256: String?
+  ) async throws -> [String: Any] {
     try await withCheckedThrowingContinuation { continuation in
       do {
         try submit(
-          operation: { try PlainTextFileReader.read(fileURL: fileURL) },
+          operation: {
+            try PlainTextFileReader.read(
+              fileURL: fileURL,
+              maximumBytes: maximumBytes,
+              expectedByteCount: expectedByteCount,
+              expectedSHA256: expectedSHA256
+            )
+          },
           completion: { continuation.resume(with: $0) }
         )
       } catch {
@@ -90,8 +105,24 @@ final class PlainTextReadCoordinator: @unchecked Sendable {
 
 enum PlainTextFileReader {
   static let maximumBytes = 1_048_576
+  static let maximumDerivedBytes = 16_777_216
 
-  static func read(fileURL: URL) throws -> [String: Any] {
+  static func read(
+    fileURL: URL,
+    maximumBytes allowedMaximumBytes: Int = maximumBytes,
+    expectedByteCount: Int? = nil,
+    expectedSHA256: String? = nil
+  ) throws -> [String: Any] {
+    guard (1...maximumDerivedBytes).contains(allowedMaximumBytes) else {
+      throw PlainTextFileReaderError.resultInvalid
+    }
+    guard (expectedByteCount == nil) == (expectedSHA256 == nil),
+          expectedByteCount.map({ (0...allowedMaximumBytes).contains($0) }) != false,
+          expectedSHA256.map({
+            $0.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+          }) != false else {
+      throw PlainTextFileReaderError.resultInvalid
+    }
     guard fileURL.isFileURL else { throw PlainTextFileReaderError.invalidLocalFile }
     let values: URLResourceValues
     do {
@@ -105,16 +136,19 @@ enum PlainTextFileReader {
           let size = values.fileSize, size >= 0 else {
       throw PlainTextFileReaderError.invalidLocalFile
     }
-    guard size <= maximumBytes else { throw PlainTextFileReaderError.tooLarge }
+    guard size <= allowedMaximumBytes else { throw PlainTextFileReaderError.tooLarge }
+    guard expectedByteCount == nil || expectedByteCount == size else {
+      throw PlainTextFileReaderError.integrityFailure
+    }
     let handle: FileHandle
     do { handle = try FileHandle(forReadingFrom: fileURL) }
     catch { throw PlainTextFileReaderError.invalidLocalFile }
     defer { try? handle.close() }
     var data = Data()
-    data.reserveCapacity(min(size, maximumBytes))
+    data.reserveCapacity(min(size, allowedMaximumBytes))
     do {
       while true {
-        let remaining = maximumBytes - data.count
+        let remaining = allowedMaximumBytes - data.count
         guard remaining >= 0 else { throw PlainTextFileReaderError.tooLarge }
         guard let chunk = try handle.read(upToCount: min(16 * 1_024, remaining + 1)),
               !chunk.isEmpty else { break }
@@ -127,6 +161,10 @@ enum PlainTextFileReader {
       throw PlainTextFileReaderError.invalidLocalFile
     }
     guard data.count == size else { throw PlainTextFileReaderError.resultInvalid }
+    if let expectedSHA256 {
+      let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+      guard actual == expectedSHA256 else { throw PlainTextFileReaderError.integrityFailure }
+    }
     guard let text = String(data: data, encoding: .utf8) else {
       throw PlainTextFileReaderError.invalidUTF8
     }

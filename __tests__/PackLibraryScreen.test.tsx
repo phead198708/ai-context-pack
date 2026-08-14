@@ -172,6 +172,9 @@ function controller(): jest.Mocked<PackLibraryController> {
       completedArtifactIds: [itemIds[2]],
     }),
     retryPack: jest.fn().mockResolvedValue([]),
+    analyzePack: jest.fn().mockResolvedValue(1),
+    reviewDuplicateGroup: jest.fn().mockResolvedValue(undefined),
+    restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
     cancelProcessing: jest.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<PackLibraryController>;
 }
@@ -270,6 +273,107 @@ test('exposes stable loading, error recovery, and empty-state identifiers', asyn
     emptyRenderer.root.findByProps({ testID: 'pack-library-no-selection' }),
   ).toBeDefined();
   act(() => emptyRenderer.unmount());
+});
+
+test('renders side-by-side duplicate review and wires reversible actions', async () => {
+  const value = controller();
+  value.load.mockResolvedValue({
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      duplicateReview: {
+        normalizationVersion: 'text-normalization-v1',
+        detectorVersion: 1,
+        actualBytesSaved: 128,
+        actualCharactersSaved: 64,
+        standaloneDecisions: [
+          {
+            id: itemIds[2],
+            displayName: 'Stranded choice',
+            contentKind: 'code',
+            normalizedCharacterCount: 48,
+            normalizedByteCount: 48,
+            choice: 'exclude',
+          },
+        ],
+        groups: [
+          {
+            key: `${itemIds[0]}:${itemIds[4]}`,
+            reasons: ['near-image'],
+            confidence: 0.98,
+            expectedBytesSaved: 128,
+            expectedCharactersSaved: 64,
+            items: [
+              {
+                id: itemIds[0],
+                displayName: 'Complete image',
+                contentKind: 'prose',
+                normalizedCharacterCount: 80,
+                normalizedByteCount: 80,
+                choice: 'preferred',
+              },
+              {
+                id: itemIds[4],
+                displayName: 'Duplicate image',
+                contentKind: 'prose',
+                normalizedCharacterCount: 80,
+                normalizedByteCount: 80,
+                choice: 'exclude',
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  const renderer = await render(value);
+
+  expect(
+    renderer.root.findByProps({ testID: 'duplicate-review' }),
+  ).toBeDefined();
+  expect(
+    renderer.root.findByProps({ testID: 'duplicate-actual-savings' }),
+  ).toBeDefined();
+  expect(
+    renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[0]}` }),
+  ).toBeDefined();
+  expect(
+    renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[0]}` })
+      .props.accessible,
+  ).not.toBe(true);
+  expect(
+    renderer.root.findByProps({ testID: `duplicate-preview-${itemIds[4]}` }),
+  ).toBeDefined();
+
+  await press(button(renderer, 'Prefer Complete image'));
+  expect(value.reviewDuplicateGroup).toHaveBeenCalledWith(
+    packId,
+    [itemIds[0], itemIds[4]],
+    { kind: 'preferred', itemId: itemIds[0] },
+  );
+  await press(button(renderer, 'Keep all candidates'));
+  expect(value.reviewDuplicateGroup).toHaveBeenCalledWith(
+    packId,
+    [itemIds[0], itemIds[4]],
+    { kind: 'keep-all' },
+  );
+  expect(
+    renderer.root.findByProps({ testID: 'duplicate-standalone-decisions' }),
+  ).toBeDefined();
+  await press(button(renderer, 'Restore Stranded choice'));
+  expect(value.restoreDuplicateDecision).toHaveBeenCalledWith(
+    packId,
+    itemIds[2],
+  );
+
+  const chineseRenderer = await render(value, 'zh-Hans');
+  const chinese = text(chineseRenderer.root);
+  expect(chinese).toContain('视觉近似图片');
+  expect(chinese).toContain('正文');
+  expect(chinese).toContain('首选');
+  expect(chinese).not.toContain('near-image');
+  expect(chinese).not.toContain('prose');
+  expect(chinese).not.toContain('preferred');
 });
 
 test('renders all required library views and every partial-failure item state', async () => {
@@ -381,6 +485,30 @@ test('supports rename, persisted reorder, retry, cancel, and non-destructive rem
   expect(value.removeItem).toHaveBeenCalledWith(packId, itemIds[0], 'preserve');
   expect(value.cancelProcessing).toHaveBeenCalledWith(packId);
   expect(onChanged).toHaveBeenCalledTimes(5);
+  act(() => renderer.unmount());
+});
+
+test('keeps Cancel enabled and dispatches it while duplicate analysis is pending', async () => {
+  let finishAnalysis: (() => void) | undefined;
+  const value = controller();
+  value.analyzePack.mockReturnValue(
+    new Promise(resolve => {
+      finishAnalysis = () => resolve(1);
+    }),
+  );
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Analyze normalized content'));
+  const cancel = button(renderer, 'Cancel processing');
+  expect(cancel.props.accessibilityState?.disabled).not.toBe(true);
+  await press(cancel);
+  expect(value.cancelProcessing).toHaveBeenCalledWith(packId);
+
+  await act(async () => {
+    finishAnalysis?.();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
   act(() => renderer.unmount());
 });
 

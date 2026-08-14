@@ -90,6 +90,7 @@ export type ArtifactKind =
   | 'original'
   | 'ocr-text'
   | 'pdf-page-text'
+  | 'normalized-text'
   | 'compressed-image'
   | 'redacted-image'
   | 'preview'

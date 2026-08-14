@@ -15,6 +15,7 @@ import {
   decodePipelineCheckpointV1,
   decodeRiskFindingV1,
   isExportManifestV1,
+  isImagePerceptualHashV1,
   isImportManifestV1,
   isOCRResultV1,
   isPDFPageExtractionV1,
@@ -24,6 +25,7 @@ import {
   IMPORT_MANIFEST_MAX_MEDIA_TYPE_LENGTH,
 } from '../src/domain/validation';
 import { DOMAIN_ERROR_CATALOG } from '../src/domain/errors';
+import { decodeImagePerceptualHashV1 } from '../src/domain/duplicateDetection';
 
 const { readFileSync, readdirSync } = jest.requireActual<{
   readonly readFileSync: (path: string, encoding: 'utf8') => string;
@@ -90,6 +92,12 @@ const contracts: readonly {
     schema: 'export-manifest-v1.schema.json',
     validate: isExportManifestV1,
     decode: value => decodeExportManifestV1(value),
+  },
+  {
+    fixture: 'image-perceptual-hash-v1.json',
+    schema: 'image-perceptual-hash-v1.schema.json',
+    validate: isImagePerceptualHashV1,
+    decode: value => decodeImagePerceptualHashV1(value),
   },
 ];
 

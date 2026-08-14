@@ -10,6 +10,13 @@ import type {
   PersistedImportDetail,
   PersistedPackGraph,
 } from '../../infrastructure/persistence/contracts';
+import {
+  calculateDuplicateSavingsV1,
+  groupDuplicateSuggestionsV1,
+  type DuplicateAnalysisSnapshotV1,
+  type DuplicateDecisionChoiceV1,
+  type DuplicateReasonV1,
+} from '../../domain/duplicateDetection';
 
 export const PACK_LIBRARY_SECTIONS = [
   'draft',
@@ -62,6 +69,35 @@ export interface PackDetailSnapshot {
   readonly revision: number;
   readonly items: readonly PackItemRow[];
   readonly completeness: PackCompleteness;
+  readonly duplicateReview?: DuplicateReviewSnapshot;
+}
+
+export interface DuplicateReviewItemRow {
+  readonly id: string;
+  readonly displayName: string;
+  readonly contentKind: 'prose' | 'code' | 'mixed';
+  readonly normalizedCharacterCount: number;
+  readonly normalizedByteCount: number;
+  readonly choice: DuplicateDecisionChoiceV1 | 'keep';
+}
+
+export interface DuplicateReviewGroupRow {
+  readonly key: string;
+  readonly reasons: readonly DuplicateReasonV1[];
+  readonly confidence: number;
+  readonly expectedBytesSaved: number;
+  readonly expectedCharactersSaved: number;
+  readonly items: readonly DuplicateReviewItemRow[];
+}
+
+export interface DuplicateReviewSnapshot {
+  readonly normalizationVersion: string;
+  readonly detectorVersion: number;
+  readonly groups: readonly DuplicateReviewGroupRow[];
+  /** Durable choices whose prior detector group no longer exists. */
+  readonly standaloneDecisions: readonly DuplicateReviewItemRow[];
+  readonly actualBytesSaved: number;
+  readonly actualCharactersSaved: number;
 }
 
 export interface PackLibrarySnapshot {
@@ -88,6 +124,7 @@ export function buildPackLibrarySnapshot(
   artifacts: readonly PersistedArtifactRecord[],
   imports: readonly PersistedImportDetail[],
   selectedPackId?: string,
+  duplicateAnalysis?: DuplicateAnalysisSnapshotV1,
 ): PackLibrarySnapshot {
   const artifactsByItem = groupArtifactsByItem(artifacts);
   const errorsByItem = new Map<string, string>();
@@ -131,6 +168,7 @@ export function buildPackLibrarySnapshot(
             selectedGraph,
             artifactsByItem,
             errorsByItem,
+            duplicateAnalysis,
           ),
         }
       : {}),
@@ -213,6 +251,7 @@ function buildPackDetail(
   graph: PersistedPackGraph,
   artifactsByItem: ReadonlyMap<string, readonly PersistedArtifactRecord[]>,
   errorsByItem: ReadonlyMap<string, string>,
+  duplicateAnalysis?: DuplicateAnalysisSnapshotV1,
 ): PackDetailSnapshot {
   const firstByHash = new Map<string, string>();
   const rows = graph.items.map(item => {
@@ -265,6 +304,86 @@ function buildPackDetail(
     revision: graph.revision,
     items: rows,
     completeness: summarizeCompleteness(graph.items),
+    ...(duplicateAnalysis?.manifest
+      ? {
+          duplicateReview: buildDuplicateReview(graph.items, duplicateAnalysis),
+        }
+      : {}),
+  };
+}
+
+function buildDuplicateReview(
+  items: readonly ContextItem[],
+  snapshot: DuplicateAnalysisSnapshotV1,
+): DuplicateReviewSnapshot {
+  if (!snapshot.manifest) throw new DomainError('SCHEMA_INVALID');
+  const itemById = new Map(items.map(item => [item.id, item]));
+  const analysisById = new Map(
+    snapshot.analyses.map(analysis => [analysis.itemId, analysis]),
+  );
+  const decisionsById = new Map(
+    snapshot.decisions.map(decision => [decision.itemId, decision]),
+  );
+  const groups = groupDuplicateSuggestionsV1(snapshot.suggestions).map(
+    group => ({
+      key: group.key,
+      reasons: [
+        ...new Set(group.suggestions.map(value => value.reason)),
+      ].sort(),
+      confidence: group.suggestions.reduce(
+        (maximum, value) => Math.max(maximum, value.confidence),
+        0,
+      ),
+      expectedBytesSaved: group.expectedBytesSaved,
+      expectedCharactersSaved: group.expectedCharactersSaved,
+      items: group.itemIds.map(itemId => {
+        const item = itemById.get(itemId);
+        const analysis = analysisById.get(itemId);
+        if (!item || !analysis) throw new DomainError('SCHEMA_INVALID');
+        return {
+          id: itemId,
+          displayName:
+            item.originalDisplayName ??
+            `${item.sourceType} ${item.sortIndex + 1}`,
+          contentKind: analysis.contentKind,
+          normalizedCharacterCount: analysis.normalizedCharacterCount,
+          normalizedByteCount: analysis.normalizedByteCount,
+          choice: decisionsById.get(itemId)?.choice ?? 'keep',
+        };
+      }),
+    }),
+  );
+  const groupedItemIds = new Set(
+    groups.flatMap(group => group.items.map(item => item.id)),
+  );
+  const standaloneDecisions = snapshot.decisions
+    .filter(decision => !groupedItemIds.has(decision.itemId))
+    .map(decision => {
+      const item = itemById.get(decision.itemId);
+      const analysis = analysisById.get(decision.itemId);
+      if (!item || !analysis) throw new DomainError('SCHEMA_INVALID');
+      return {
+        id: item.id,
+        displayName:
+          item.originalDisplayName ??
+          `${item.sourceType} ${item.sortIndex + 1}`,
+        contentKind: analysis.contentKind,
+        normalizedCharacterCount: analysis.normalizedCharacterCount,
+        normalizedByteCount: analysis.normalizedByteCount,
+        choice: decision.choice,
+      };
+    });
+  const actual = calculateDuplicateSavingsV1(
+    snapshot.analyses,
+    snapshot.decisions,
+  );
+  return {
+    normalizationVersion: snapshot.manifest.config.normalizationVersion,
+    detectorVersion: snapshot.manifest.schemaVersion,
+    groups,
+    standaloneDecisions,
+    actualBytesSaved: actual.bytes,
+    actualCharactersSaved: actual.characters,
   };
 }
 

@@ -7,6 +7,7 @@ export const CONTRACT_VERSIONS = {
   pipelineCheckpoint: 1,
   riskFinding: 1,
   exportManifest: 1,
+  imagePerceptualHash: 1,
 } as const;
 
 export type ContractName = keyof typeof CONTRACT_VERSIONS;

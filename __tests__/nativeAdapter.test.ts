@@ -3,7 +3,11 @@ import {
   NativeBoundaryError,
 } from '../src/infrastructure/createNativeAdapter';
 import { MAIN_APP_IMPORT_MAX_TEXT_BYTES } from '../src/domain/mainAppImport';
-import type { ImportManifestV1 } from '../src/domain/contracts';
+import {
+  DERIVED_TEXT_MAXIMUM_UTF8_BYTES,
+  type ImportManifestV1,
+} from '../src/domain/contracts';
+import { PLAIN_TEXT_FILE_MAX_BYTES } from '../src/domain/validation';
 
 describe('native adapter runtime boundary', () => {
   const mockNativeModule = {
@@ -141,6 +145,78 @@ describe('native adapter runtime boundary', () => {
     ).rejects.toMatchObject({ code: 'OCR_RESULT_INVALID' });
   });
 
+  test('validates image perceptual hashes and preserves only stable resource errors', async () => {
+    const taskId = '123e4567-e89b-42d3-a456-426614174000';
+    const result = {
+      schemaVersion: 1,
+      algorithm: 'dhash-64-v1',
+      hash: '000000a810000000',
+      sampleWidth: 9,
+      sampleHeight: 8,
+      orientationApplied: true,
+      durationMs: 1,
+      revision: '1',
+    };
+    const hashImagePerceptually = jest.fn().mockResolvedValue(result);
+    const cancelImagePerceptualHash = jest.fn().mockResolvedValue(true);
+    const guarded = createNativeAdapter({
+      ...mockNativeModule,
+      hashImagePerceptually,
+      cancelImagePerceptualHash,
+    });
+
+    await expect(
+      guarded.hashImagePerceptually?.(
+        taskId,
+        'file:///cache/synthetic.png',
+        1024,
+        'a'.repeat(64),
+      ),
+    ).resolves.toEqual(result);
+    expect(hashImagePerceptually).toHaveBeenCalledWith(
+      taskId,
+      'file:///cache/synthetic.png',
+      1024,
+      'a'.repeat(64),
+    );
+    await expect(
+      guarded.cancelImagePerceptualHash?.(taskId),
+    ).resolves.toBeUndefined();
+    expect(cancelImagePerceptualHash).toHaveBeenCalledWith(taskId);
+
+    hashImagePerceptually.mockResolvedValue({ ...result, hash: 'invalid' });
+    await expect(
+      guarded.hashImagePerceptually?.(
+        taskId,
+        'file:///cache/synthetic.png',
+        1024,
+        'a'.repeat(64),
+      ),
+    ).rejects.toMatchObject({ code: 'PROCESSOR_OUTPUT_INVALID' });
+
+    hashImagePerceptually.mockRejectedValue({
+      code: 'RESOURCE_MEMORY_PRESSURE',
+    });
+    await expect(
+      guarded.hashImagePerceptually?.(
+        taskId,
+        'file:///cache/synthetic.png',
+        1024,
+        'a'.repeat(64),
+      ),
+    ).rejects.toMatchObject({ code: 'RESOURCE_MEMORY_PRESSURE' });
+
+    hashImagePerceptually.mockRejectedValue({ code: 'PRIVATE_NATIVE_ERROR' });
+    await expect(
+      guarded.hashImagePerceptually?.(
+        taskId,
+        'file:///cache/synthetic.png',
+        1024,
+        'a'.repeat(64),
+      ),
+    ).rejects.toMatchObject({ code: 'PROCESSOR_OUTPUT_INVALID' });
+  });
+
   test('validates and binds PDF inspection, page extraction, cancellation, and UTF-8 text reads', async () => {
     const taskId = '123e4567-e89b-42d3-a456-426614174000';
     const fileUri = 'file:///cache/synthetic.pdf';
@@ -216,6 +292,33 @@ describe('native adapter runtime boundary', () => {
     await expect(
       guarded.readPlainTextFile('file:///cache/synthetic.txt'),
     ).resolves.toMatchObject({ text, byteCount: 22 });
+    expect(native.readPlainTextFile).toHaveBeenLastCalledWith(
+      'file:///cache/synthetic.txt',
+      PLAIN_TEXT_FILE_MAX_BYTES,
+      null,
+      null,
+    );
+
+    const derivedText = 'a'.repeat(PLAIN_TEXT_FILE_MAX_BYTES + 1);
+    native.readPlainTextFile.mockResolvedValueOnce({
+      schemaVersion: 1,
+      text: derivedText,
+      byteCount: derivedText.length,
+      encoding: 'utf-8',
+      revision: '1',
+    });
+    await expect(
+      guarded.readPlainTextFile(
+        'file:///cache/synthetic.txt',
+        DERIVED_TEXT_MAXIMUM_UTF8_BYTES,
+      ),
+    ).resolves.toMatchObject({ byteCount: PLAIN_TEXT_FILE_MAX_BYTES + 1 });
+    await expect(
+      guarded.readPlainTextFile(
+        'file:///cache/synthetic.txt',
+        DERIVED_TEXT_MAXIMUM_UTF8_BYTES + 1,
+      ),
+    ).rejects.toMatchObject({ code: 'TEXT_RESULT_INVALID' });
   });
 
   test('accepts only source-proven sparse embedded text reconciled with OCR blocks', async () => {

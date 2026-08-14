@@ -9,6 +9,15 @@ import type {
 } from '../src/domain/models';
 import { ownedDerivedPath } from '../src/infrastructure/persistence/ownedPaths';
 import { ExpoSqlitePersistenceRepository } from '../src/infrastructure/persistence/sqlite';
+import { DEVELOPMENT_RESET_CONFIRMATION } from '../src/infrastructure/persistence/contracts';
+import {
+  DUPLICATE_DETECTOR_CONFIG_V1,
+  buildDuplicateSuggestionsV1,
+  fingerprintNormalizedTextV1,
+  normalizeContentV1,
+  type DuplicateAnalysisItemV1,
+} from '../src/domain/duplicateDetection';
+import { PackLibraryController } from '../src/features/packLibrary/controller';
 
 type SqlValue = string | number | null;
 interface NodeStatement {
@@ -47,11 +56,15 @@ const ingestionId = '223e4567-e89b-42d3-a456-426614174000';
 const firstItemId = '323e4567-e89b-42d3-a456-426614174000';
 const secondItemId = '423e4567-e89b-42d3-a456-426614174000';
 const derivedId = '523e4567-e89b-42d3-a456-426614174000';
+const secondDerivedId = '533e4567-e89b-42d3-a456-426614174000';
 const findingId = '623e4567-e89b-42d3-a456-426614174000';
 const exportId = '723e4567-e89b-42d3-a456-426614174000';
 const emptyPackId = '823e4567-e89b-42d3-a456-426614174000';
 const appendedIngestionId = '923e4567-e89b-42d3-a456-426614174000';
 const appendedItemId = 'a23e4567-e89b-42d3-a456-426614174000';
+const thirdIngestionId = 'a33e4567-e89b-42d3-a456-426614174000';
+const thirdItemId = 'a43e4567-e89b-42d3-a456-426614174000';
+const thirdDerivedId = 'a53e4567-e89b-42d3-a456-426614174000';
 const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
 const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
 const cleanupMutationOwnerId = 'c33e4567-e89b-42d3-a456-426614174000';
@@ -166,6 +179,10 @@ describe('production repository against SQLite', () => {
   let repository: ExpoSqlitePersistenceRepository;
 
   function dropV7OperationalLeaseColumns(): void {
+    database.exec('DROP TABLE duplicate_decisions');
+    database.exec('DROP TABLE duplicate_suggestions');
+    database.exec('DROP TABLE duplicate_analysis_items');
+    database.exec('DROP TABLE duplicate_analysis_manifests');
     database.exec('ALTER TABLE cleanup_leases DROP COLUMN session_id');
     database.exec('ALTER TABLE cleanup_leases DROP COLUMN deadline_ms');
   }
@@ -288,6 +305,38 @@ describe('production repository against SQLite', () => {
       1,
     );
     expect((await repository.findPackGraph(packId))?.revision).toBe(3);
+  });
+
+  test('development reset drops v8 duplicate tables before replaying every migration', async () => {
+    const resettable = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+      undefined,
+      true,
+    );
+    await resettable.initialize();
+
+    await expect(
+      resettable.resetForDevelopment(DEVELOPMENT_RESET_CONFIRMATION),
+    ).resolves.toBeUndefined();
+
+    expect(database.prepare('PRAGMA user_version').get()).toMatchObject({
+      user_version: 8,
+    });
+    expect(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name LIKE 'duplicate_%'
+           ORDER BY name`,
+        )
+        .all(),
+    ).toEqual([
+      { name: 'duplicate_analysis_items' },
+      { name: 'duplicate_analysis_manifests' },
+      { name: 'duplicate_decisions' },
+      { name: 'duplicate_suggestions' },
+    ]);
+    await expect(resettable.listPackGraphs()).resolves.toEqual([]);
   });
 
   test('persists an exact terminal retry stage across repository restart', async () => {
@@ -970,6 +1019,808 @@ describe('production repository against SQLite', () => {
 
     await expect(repository.findPackGraph(packId)).rejects.toMatchObject({
       code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
+  });
+
+  test('persists detector output separately from reversible duplicate decisions', async () => {
+    const normalized = normalizeContentV1(
+      'Synthetic repeated context long enough for deterministic duplicate analysis.',
+    );
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-05T00:00:01Z',
+        '2026-08-05T00:01:01Z',
+      ),
+    ).resolves.toBe(true);
+    const artifacts = [
+      { id: derivedId, itemId: firstItemId, sha256: 'd'.repeat(64) },
+      { id: secondDerivedId, itemId: secondItemId, sha256: 'e'.repeat(64) },
+    ] as const;
+    for (const artifact of artifacts)
+      await repository.registerPublishedArtifact({
+        packId,
+        publicationLeaseOwnerId: exportId,
+        artifact: {
+          id: artifact.id,
+          itemId: artifact.itemId,
+          kind: 'normalized-text',
+          relativePath: ownedDerivedPath(packId, artifact.id, 'txt'),
+          mediaType: 'text/plain',
+          byteCount: normalized.utf8ByteCount,
+          sha256: artifact.sha256,
+          processorVersion: {
+            processor: 'shared-content-normalization',
+            version: 'text-normalization-v1',
+            contractVersion: 1,
+          },
+          createdAt: '2026-08-05T00:00:02Z',
+          immutable: true,
+        },
+      });
+    await repository.releaseCleanupLease(exportId);
+    const analyses: readonly DuplicateAnalysisItemV1[] = artifacts.map(
+      (artifact, index) => ({
+        schemaVersion: 1,
+        packId,
+        itemId: artifact.itemId,
+        originalSha256: index === 0 ? 'a'.repeat(64) : 'b'.repeat(64),
+        originalByteCount: index === 0 ? 4 : 8,
+        normalizedArtifactId: artifact.id,
+        normalizedSha256: artifact.sha256,
+        normalizedByteCount: normalized.utf8ByteCount,
+        normalizedCharacterCount: normalized.characterCount,
+        contentKind: normalized.contentKind,
+        textFingerprint: fingerprintNormalizedTextV1(normalized),
+        ...(index === 0
+          ? {
+              imageFingerprint: {
+                schemaVersion: 1 as const,
+                algorithm: 'dhash-64-v1' as const,
+                hash: '0123456789abcdef',
+                sampleWidth: 9 as const,
+                sampleHeight: 8 as const,
+                orientationApplied: true as const,
+                durationMs: 0,
+                revision: '1' as const,
+              },
+            }
+          : {}),
+        analyzedAt: `2026-08-05T00:00:0${index + 2}Z`,
+      }),
+    );
+    const suggestions = buildDuplicateSuggestionsV1(analyses);
+    await repository.replaceDuplicateAnalysis({
+      manifest: {
+        schemaVersion: 1,
+        packId,
+        config: DUPLICATE_DETECTOR_CONFIG_V1,
+        analyzedAt: '2026-08-05T00:00:03Z',
+        itemCount: 2,
+        suggestionCount: suggestions.length,
+      },
+      analyses,
+      suggestions,
+    });
+    expect(suggestions).toHaveLength(1);
+    const mismatchedSuggestions = [
+      {
+        ...suggestions[0]!,
+        expectedBytesSaved: suggestions[0]!.expectedBytesSaved + 1,
+      },
+    ];
+    await expect(
+      repository.replaceDuplicateAnalysis({
+        manifest: {
+          schemaVersion: 1,
+          packId,
+          config: DUPLICATE_DETECTOR_CONFIG_V1,
+          analyzedAt: '2026-08-05T00:00:03Z',
+          itemCount: 2,
+          suggestionCount: mismatchedSuggestions.length,
+        },
+        analyses,
+        suggestions: mismatchedSuggestions,
+      }),
+    ).rejects.toMatchObject({ code: 'SCHEMA_INVALID' });
+    const forgedAnalyses = [
+      { ...analyses[0]!, originalSha256: 'f'.repeat(64) },
+      analyses[1]!,
+    ];
+    await expect(
+      repository.replaceDuplicateAnalysis({
+        manifest: {
+          schemaVersion: 1,
+          packId,
+          config: DUPLICATE_DETECTOR_CONFIG_V1,
+          analyzedAt: '2026-08-05T00:00:03Z',
+          itemCount: 2,
+          suggestionCount: buildDuplicateSuggestionsV1(forgedAnalyses).length,
+        },
+        analyses: forgedAnalyses,
+        suggestions: buildDuplicateSuggestionsV1(forgedAnalyses),
+      }),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondItemId,
+        choice: 'exclude',
+        baselineInclusionMode: 'both',
+        decidedAt: '2026-08-05T00:00:04Z',
+      },
+    ]);
+    const decidedGraph = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.savePackGraph({
+        pack: decidedGraph.pack,
+        items: decidedGraph.items.map(item =>
+          item.id === secondItemId
+            ? { ...item, inclusionMode: 'both' as const }
+            : item,
+        ),
+        expectedRevision: decidedGraph.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+    const preservedGraph = await repository.findPackGraph(packId);
+    expect(preservedGraph?.revision).toBe(decidedGraph.revision);
+    expect(
+      preservedGraph?.items.find(item => item.id === secondItemId)
+        ?.inclusionMode,
+    ).toBe('excluded');
+    database
+      .prepare('UPDATE context_items SET inclusion_mode = ? WHERE id = ?')
+      .run('both', secondItemId);
+    await expect(repository.findPackGraph(packId)).rejects.toMatchObject({
+      code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
+    database
+      .prepare('UPDATE context_items SET inclusion_mode = ? WHERE id = ?')
+      .run('excluded', secondItemId);
+    database
+      .prepare('INSERT INTO packs (id, created_at) VALUES (?, ?)')
+      .run(emptyPackId, createdAt);
+    database
+      .prepare('UPDATE duplicate_decisions SET pack_id = ? WHERE item_id = ?')
+      .run(emptyPackId, secondItemId);
+    await expect(repository.findPackGraph(packId)).rejects.toMatchObject({
+      code: 'STORAGE_DIVERGENCE_DETECTED',
+    });
+    database
+      .prepare('UPDATE duplicate_decisions SET pack_id = ? WHERE item_id = ?')
+      .run(packId, secondItemId);
+    await repository.replaceDuplicateAnalysis({
+      manifest: {
+        schemaVersion: 1,
+        packId,
+        config: DUPLICATE_DETECTOR_CONFIG_V1,
+        analyzedAt: '2026-08-05T00:00:03Z',
+        itemCount: 2,
+        suggestionCount: suggestions.length,
+      },
+      analyses,
+      suggestions,
+    });
+    expect(await repository.findDuplicateAnalysis(packId)).toMatchObject({
+      decisions: [
+        expect.objectContaining({ itemId: secondItemId, choice: 'exclude' }),
+      ],
+    });
+    await expect(
+      repository.replaceDuplicateAnalysis({
+        manifest: {
+          schemaVersion: 1,
+          packId,
+          config: DUPLICATE_DETECTOR_CONFIG_V1,
+          analyzedAt: analyses[0]!.analyzedAt,
+          itemCount: 1,
+          suggestionCount: 0,
+        },
+        analyses: [analyses[0]!],
+        suggestions: [],
+      }),
+    ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === secondItemId,
+      )?.inclusionMode,
+    ).toBe('excluded');
+
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondItemId,
+        choice: 'keep',
+        baselineInclusionMode: 'both',
+        decidedAt: '2026-08-05T00:00:05Z',
+      },
+    ]);
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === secondItemId,
+      )?.inclusionMode,
+    ).toBe('both');
+    expect(
+      database
+        .prepare('SELECT updated_at FROM context_items WHERE id = ?')
+        .get(secondItemId),
+    ).toEqual({ updated_at: '2026-08-05T00:00:05Z' });
+
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: firstItemId,
+        choice: 'preferred',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondItemId,
+        choice: 'exclude',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+    ]);
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: firstItemId,
+        choice: 'exclude',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:07Z',
+      },
+      {
+        schemaVersion: 1,
+        packId,
+        itemId: secondItemId,
+        choice: 'preferred',
+        baselineInclusionMode: 'both',
+        source: 'preferred-group',
+        decidedAt: '2026-08-05T00:00:07Z',
+      },
+    ]);
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+    expect(await repository.findDuplicateAnalysis(packId)).toMatchObject({
+      decisions: expect.arrayContaining([
+        expect.objectContaining({
+          itemId: firstItemId,
+          choice: 'exclude',
+          source: 'preferred-group',
+        }),
+        expect.objectContaining({
+          itemId: secondItemId,
+          choice: 'preferred',
+          source: 'preferred-group',
+        }),
+      ]),
+    });
+    expect(
+      (await repository.findPackGraph(packId))?.items.map(item => ({
+        id: item.id,
+        inclusionMode: item.inclusionMode,
+      })),
+    ).toEqual([
+      { id: firstItemId, inclusionMode: 'excluded' },
+      { id: secondItemId, inclusionMode: 'both' },
+    ]);
+
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(forgedAnalyses[0]), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    const impossibleFingerprint = {
+      ...analyses[0]!,
+      textFingerprint: {
+        ...analyses[0]!.textFingerprint,
+        shingleCount: 0,
+      },
+    };
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(impossibleFingerprint), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    const impossibleShingleCount = {
+      ...analyses[0]!,
+      textFingerprint: {
+        ...analyses[0]!.textFingerprint,
+        shingleCount: 1_000_000,
+      },
+    };
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(impossibleShingleCount), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    const overpopulatedFingerprint = {
+      ...analyses[0]!,
+      textFingerprint: {
+        ...analyses[0]!.textFingerprint,
+        shingleCount: 1,
+        hashes: ['00000001', '00000002'],
+      },
+    };
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(overpopulatedFingerprint), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    for (const impossibleCounts of [
+      {
+        ...analyses[0]!,
+        normalizedByteCount: 0,
+        normalizedCharacterCount: 0,
+      },
+      {
+        ...analyses[0]!,
+        normalizedByteCount: 0,
+        normalizedCharacterCount: 1,
+      },
+    ]) {
+      database
+        .prepare(
+          'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+        )
+        .run(JSON.stringify(impossibleCounts), firstItemId);
+      await expect(
+        repository.findDuplicateAnalysis(packId),
+      ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    }
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    const missingImageFingerprint = { ...analyses[0]! };
+    delete (missingImageFingerprint as { imageFingerprint?: unknown })
+      .imageFingerprint;
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(missingImageFingerprint), firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[0]), firstItemId);
+
+    const nonImageWithFingerprint = {
+      ...analyses[1]!,
+      imageFingerprint: analyses[0]!.imageFingerprint,
+    };
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(nonImageWithFingerprint), secondItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(analyses[1]), secondItemId);
+
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET analyzed_at = ? WHERE item_id = ?',
+      )
+      .run('2026-08-05T00:00:04Z', firstItemId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_items SET analyzed_at = ? WHERE item_id = ?',
+      )
+      .run(analyses[0]!.analyzedAt, firstItemId);
+
+    database
+      .prepare(
+        'UPDATE duplicate_suggestions SET payload_json = ? WHERE suggestion_key = ?',
+      )
+      .run(JSON.stringify(mismatchedSuggestions[0]), suggestions[0]!.key);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_suggestions SET payload_json = ? WHERE suggestion_key = ?',
+      )
+      .run(JSON.stringify(suggestions[0]), suggestions[0]!.key);
+
+    const mismatchedManifest = {
+      schemaVersion: 1,
+      packId,
+      config: DUPLICATE_DETECTOR_CONFIG_V1,
+      analyzedAt: '2026-08-05T00:00:04Z',
+      itemCount: 2,
+      suggestionCount: suggestions.length,
+    } as const;
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_manifests SET payload_json = ? WHERE pack_id = ?',
+      )
+      .run(JSON.stringify(mismatchedManifest), packId);
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_analysis_manifests SET payload_json = ? WHERE pack_id = ?',
+      )
+      .run(
+        JSON.stringify({
+          ...mismatchedManifest,
+          analyzedAt: '2026-08-05T00:00:03Z',
+        }),
+        packId,
+      );
+
+    const decision = {
+      schemaVersion: 1,
+      packId,
+      itemId: secondItemId,
+      choice: 'keep',
+      baselineInclusionMode: 'both',
+      decidedAt: '2026-08-05T00:00:05Z',
+    } as const;
+    database
+      .prepare(
+        'UPDATE duplicate_decisions SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(
+        JSON.stringify({ ...decision, itemId: appendedItemId }),
+        secondItemId,
+      );
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    database
+      .prepare(
+        'UPDATE duplicate_decisions SET payload_json = ? WHERE item_id = ?',
+      )
+      .run(JSON.stringify(decision), secondItemId);
+
+    await repository.saveDuplicateDecisions(packId, [
+      {
+        ...decision,
+        choice: 'exclude',
+        decidedAt: '2026-08-05T00:00:05.500Z',
+      },
+    ]);
+
+    const graphBeforeRemoval = await repository.findPackGraph(packId);
+    expect(graphBeforeRemoval).not.toBeNull();
+    const remainingItems = graphBeforeRemoval!.items
+      .filter(item => item.id === secondItemId)
+      .map(item => ({ ...item, sortIndex: 0 }));
+    await repository.savePackGraph({
+      pack: {
+        ...graphBeforeRemoval!.pack,
+        orderedItemIds: [secondItemId],
+        updatedAt: '2026-08-05T00:00:06Z',
+      },
+      items: remainingItems,
+      expectedRevision: graphBeforeRemoval!.revision,
+      removedItemOriginalDisposition: 'preserve',
+    });
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).resolves.toMatchObject({
+      manifest: { itemCount: 1, suggestionCount: 0 },
+      analyses: [expect.objectContaining({ itemId: secondItemId })],
+      suggestions: [],
+      decisions: [
+        expect.objectContaining({ itemId: secondItemId, choice: 'exclude' }),
+      ],
+    });
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === secondItemId,
+      )?.inclusionMode,
+    ).toBe('excluded');
+
+    database.exec(
+      `DELETE FROM duplicate_suggestions WHERE pack_id = '${packId}';
+       DELETE FROM duplicate_analysis_items WHERE pack_id = '${packId}';
+       DELETE FROM duplicate_analysis_manifests WHERE pack_id = '${packId}';`,
+    );
+    await expect(
+      repository.findDuplicateAnalysis(packId),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+
+    await repository.restoreDuplicateDecision(
+      packId,
+      secondItemId,
+      '2026-08-05T00:00:07Z',
+    );
+    expect(
+      (await repository.findPackGraph(packId))?.items.find(
+        item => item.id === secondItemId,
+      )?.inclusionMode,
+    ).toBe('both');
+    await expect(repository.findDuplicateAnalysis(packId)).resolves.toEqual({
+      manifest: null,
+      analyses: [],
+      suggestions: [],
+      decisions: [],
+    });
+  });
+
+  test('preserves a same-timestamp ambiguous source-less exclusion after restart', async () => {
+    await repository.commitImport({
+      packId,
+      manifest: {
+        schemaVersion: 1,
+        ingestionId: thirdIngestionId,
+        createdAt: '2026-08-05T00:00:01Z',
+        source: 'main-app-picker',
+        status: 'complete',
+        items: [
+          {
+            id: thirdItemId,
+            order: 0,
+            mediaType: 'text/plain',
+            status: 'copied',
+            byteCount: 12,
+            relativePath: `${thirdItemId}.bin`,
+            sha256: '3'.repeat(64),
+          },
+        ],
+      },
+      manifestFingerprint: '3'.repeat(64),
+      artifacts: [
+        {
+          id: thirdItemId,
+          itemId: thirdItemId,
+          relativePath: `Packs/${packId}/originals/${thirdItemId}.bin`,
+          mediaType: 'text/plain',
+          byteCount: 12,
+          sha256: '3'.repeat(64),
+        },
+      ],
+    });
+    const normalized = normalizeContentV1(
+      'Synthetic repeated context long enough for deterministic duplicate analysis.',
+    );
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-05T00:00:01Z',
+        '2026-08-05T00:01:01Z',
+      ),
+    ).resolves.toBe(true);
+    const artifactInputs = [
+      { id: derivedId, itemId: firstItemId, sha256: 'd'.repeat(64) },
+      { id: secondDerivedId, itemId: secondItemId, sha256: 'e'.repeat(64) },
+      { id: thirdDerivedId, itemId: thirdItemId, sha256: 'f'.repeat(64) },
+    ] as const;
+    for (const artifact of artifactInputs)
+      await repository.registerPublishedArtifact({
+        packId,
+        publicationLeaseOwnerId: exportId,
+        artifact: {
+          id: artifact.id,
+          itemId: artifact.itemId,
+          kind: 'normalized-text',
+          relativePath: ownedDerivedPath(packId, artifact.id, 'txt'),
+          mediaType: 'text/plain',
+          byteCount: normalized.utf8ByteCount,
+          sha256: artifact.sha256,
+          processorVersion: {
+            processor: 'shared-content-normalization',
+            version: 'text-normalization-v1',
+            contractVersion: 1,
+          },
+          createdAt: '2026-08-05T00:00:02Z',
+          immutable: true,
+        },
+      });
+    await repository.releaseCleanupLease(exportId);
+    const fingerprintSets = [
+      [...Array.from({ length: 46 }, (_, value) => value), 50, 51, 52, 53],
+      Array.from({ length: 50 }, (_, value) => value),
+      [...Array.from({ length: 46 }, (_, value) => value + 4), 54, 55, 56, 57],
+    ] as const;
+    const analyses: readonly DuplicateAnalysisItemV1[] = artifactInputs.map(
+      (artifact, index) => ({
+        schemaVersion: 1,
+        packId,
+        itemId: artifact.itemId,
+        originalSha256: ['a', 'b', '3'][index]!.repeat(64),
+        originalByteCount: [4, 8, 12][index]!,
+        normalizedArtifactId: artifact.id,
+        normalizedSha256: artifact.sha256,
+        normalizedByteCount: normalized.utf8ByteCount,
+        normalizedCharacterCount: normalized.characterCount,
+        contentKind: normalized.contentKind,
+        textFingerprint: {
+          schemaVersion: 1,
+          algorithm: 'bottom-k-fnv1a32-5gram-v1',
+          shingleSize: 5,
+          sampleSize: 128,
+          similarityCharacterCount: normalized.characterCount,
+          shingleCount: normalized.characterCount - 4,
+          hashes: fingerprintSets[index]!.map(value =>
+            value.toString(16).padStart(8, '0'),
+          ),
+        },
+        ...(index === 0
+          ? {
+              imageFingerprint: {
+                schemaVersion: 1 as const,
+                algorithm: 'dhash-64-v1' as const,
+                hash: '0123456789abcdef',
+                sampleWidth: 9 as const,
+                sampleHeight: 8 as const,
+                orientationApplied: true as const,
+                durationMs: 0,
+                revision: '1' as const,
+              },
+            }
+          : {}),
+        analyzedAt: `2026-08-05T00:00:0${index + 2}Z`,
+      }),
+    );
+    const chainSuggestions = buildDuplicateSuggestionsV1(analyses);
+    expect(
+      chainSuggestions.map(suggestion => [
+        suggestion.leftItemId,
+        suggestion.rightItemId,
+      ]),
+    ).toEqual([
+      [firstItemId, secondItemId],
+      [secondItemId, thirdItemId],
+    ]);
+    await repository.replaceDuplicateAnalysis({
+      manifest: {
+        schemaVersion: 1,
+        packId,
+        config: DUPLICATE_DETECTOR_CONFIG_V1,
+        analyzedAt: '2026-08-05T00:00:04Z',
+        itemCount: 3,
+        suggestionCount: chainSuggestions.length,
+      },
+      analyses,
+      suggestions: chainSuggestions,
+    });
+    const baseline = 'both' as const;
+    const legacy = [
+      {
+        schemaVersion: 1 as const,
+        packId,
+        itemId: firstItemId,
+        choice: 'preferred' as const,
+        baselineInclusionMode: baseline,
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+      {
+        schemaVersion: 1 as const,
+        packId,
+        itemId: secondItemId,
+        choice: 'exclude' as const,
+        baselineInclusionMode: baseline,
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+      {
+        schemaVersion: 1 as const,
+        packId,
+        itemId: thirdItemId,
+        choice: 'exclude' as const,
+        baselineInclusionMode: baseline,
+        decidedAt: '2026-08-05T00:00:06Z',
+      },
+    ];
+    for (const decision of legacy)
+      database
+        .prepare(
+          `INSERT INTO duplicate_decisions
+             (item_id, pack_id, payload_json, decided_at) VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          decision.itemId,
+          packId,
+          JSON.stringify(decision),
+          decision.decidedAt,
+        );
+    database.exec(
+      `UPDATE context_items SET inclusion_mode = 'excluded'
+       WHERE id IN ('${secondItemId}', '${thirdItemId}')`,
+    );
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-05T00:00:07Z',
+    );
+    await controller.reviewDuplicateGroup(
+      packId,
+      [firstItemId, secondItemId, thirdItemId],
+      { kind: 'preferred', itemId: firstItemId },
+    );
+
+    expect(
+      (await repository.findPackGraph(packId))?.items.map(item => ({
+        id: item.id,
+        inclusionMode: item.inclusionMode,
+      })),
+    ).toEqual([
+      { id: firstItemId, inclusionMode: 'both' },
+      { id: secondItemId, inclusionMode: 'excluded' },
+      { id: thirdItemId, inclusionMode: 'excluded' },
+    ]);
+    expect(await repository.findDuplicateAnalysis(packId)).toMatchObject({
+      decisions: expect.arrayContaining([
+        expect.objectContaining({
+          itemId: thirdItemId,
+          choice: 'exclude',
+          decidedAt: '2026-08-05T00:00:06Z',
+        }),
+      ]),
     });
   });
 

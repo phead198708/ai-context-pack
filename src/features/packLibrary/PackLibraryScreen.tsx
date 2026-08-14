@@ -68,7 +68,9 @@ export function PackLibraryScreen({
   });
   const [mutationErrorCode, setMutationErrorCode] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const busyRef = useRef(false);
+  const cancellingRef = useRef(false);
   const selectionLoadStateRef = useRef<PackSelectionLoadState>({
     controlledPackId: selectedPackId,
     activePackId: selectedPackId,
@@ -124,6 +126,28 @@ export function PackLibraryScreen({
       }
     },
     [load, onChanged, selectionLoadState],
+  );
+
+  const cancelProcessing = useCallback(
+    async (packId: string): Promise<void> => {
+      if (cancellingRef.current) return;
+      cancellingRef.current = true;
+      setCancelling(true);
+      setMutationErrorCode(undefined);
+      try {
+        // Cancellation intentionally bypasses the general mutation lock. An
+        // analysis mutation remains busy until its native work settles.
+        await controller.cancelProcessing(packId);
+        await load(selectionLoadState.activePackId);
+        await onChanged();
+      } catch (error) {
+        setMutationErrorCode(errorCode(error));
+      } finally {
+        cancellingRef.current = false;
+        setCancelling(false);
+      }
+    },
+    [controller, load, onChanged, selectionLoadState],
   );
 
   const mutationError = mutationErrorCode ? (
@@ -190,6 +214,8 @@ export function PackLibraryScreen({
       {detail ? (
         <PackEditor
           busy={busy}
+          cancelling={cancelling}
+          cancelProcessing={cancelProcessing}
           controller={controller}
           detail={detail}
           key={detail.pack.id}
@@ -277,12 +303,16 @@ function LibrarySection({
 
 function PackEditor({
   busy,
+  cancelling,
+  cancelProcessing,
   controller,
   detail,
   locale,
   mutate,
 }: {
   readonly busy: boolean;
+  readonly cancelling: boolean;
+  readonly cancelProcessing: (packId: string) => Promise<void>;
   readonly controller: PackLibraryController;
   readonly detail: NonNullable<PackLibrarySnapshot['selected']>;
   readonly locale: AppLocale;
@@ -353,10 +383,18 @@ function PackEditor({
       />
       {['processing', 'recovering'].includes(detail.pack.state) ? (
         <Button
-          disabled={busy}
+          disabled={cancelling}
           label={t(locale, 'cancelProcessing')}
+          onPress={() => run(cancelProcessing(detail.pack.id))}
+        />
+      ) : null}
+      {['processing', 'recovering'].includes(detail.pack.state) &&
+      detail.items.some(item => item.state === 'extracted') ? (
+        <Button
+          disabled={busy}
+          label={t(locale, 'analyzeDuplicates')}
           onPress={() =>
-            run(mutate(() => controller.cancelProcessing(detail.pack.id)))
+            run(mutate(() => controller.analyzePack(detail.pack.id)))
           }
         />
       ) : null}
@@ -367,6 +405,16 @@ function PackEditor({
           onPress={() =>
             run(mutate(() => controller.retryPack(detail.pack.id)))
           }
+        />
+      ) : null}
+      {detail.duplicateReview ? (
+        <DuplicateReview
+          busy={busy}
+          controller={controller}
+          locale={locale}
+          mutate={mutate}
+          packId={detail.pack.id}
+          review={detail.duplicateReview}
         />
       ) : null}
       {detail.items.map((item, index) => (
@@ -383,6 +431,239 @@ function PackEditor({
         />
       ))}
     </View>
+  );
+}
+
+function DuplicateReview({
+  busy,
+  controller,
+  locale,
+  mutate,
+  packId,
+  review,
+}: {
+  readonly busy: boolean;
+  readonly controller: PackLibraryController;
+  readonly locale: AppLocale;
+  readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
+  readonly packId: string;
+  readonly review: NonNullable<
+    NonNullable<PackLibrarySnapshot['selected']>['duplicateReview']
+  >;
+}): React.JSX.Element {
+  return (
+    <View style={styles.card} testID="duplicate-review">
+      <Text accessibilityRole="header" style={styles.sectionTitle}>
+        {t(locale, 'duplicateReview')}
+      </Text>
+      <Text style={styles.detail} testID="duplicate-detector-version">
+        {t(locale, 'duplicateDetectorVersion', {
+          detector: review.detectorVersion,
+          normalization: review.normalizationVersion,
+        })}
+      </Text>
+      <Text style={styles.detail} testID="duplicate-actual-savings">
+        {t(locale, 'duplicateActualSavings', {
+          bytes: review.actualBytesSaved,
+          characters: review.actualCharactersSaved,
+        })}
+      </Text>
+      <Text style={styles.detail}>{t(locale, 'duplicateSafetyNotice')}</Text>
+      {review.groups.length === 0 ? (
+        <Text style={styles.detail}>{t(locale, 'duplicateNone')}</Text>
+      ) : (
+        review.groups.map(group => (
+          <View
+            key={group.key}
+            style={styles.duplicateGroup}
+            testID={`duplicate-group-${group.key}`}
+          >
+            <Text style={styles.label}>
+              {t(locale, 'duplicateCandidateSummary', {
+                reason: group.reasons
+                  .map(reason => localizedDuplicateReason(locale, reason))
+                  .join(', '),
+                confidence: Math.round(group.confidence * 100),
+                bytes: group.expectedBytesSaved,
+                characters: group.expectedCharactersSaved,
+              })}
+            </Text>
+            <View style={styles.comparisonRow}>
+              {group.items.map(item => (
+                <View
+                  key={item.id}
+                  style={styles.comparisonCard}
+                  testID={`duplicate-preview-${item.id}`}
+                >
+                  <Text style={styles.label}>{item.displayName}</Text>
+                  <Text
+                    accessible
+                    accessibilityLabel={duplicateItemSummary(locale, item)}
+                    style={styles.detail}
+                  >
+                    {t(locale, 'duplicateItemPreview', {
+                      item: item.displayName,
+                      kind: localizedDuplicateKind(locale, item.contentKind),
+                      characters: item.normalizedCharacterCount,
+                      bytes: item.normalizedByteCount,
+                      choice: localizedDuplicateChoice(locale, item.choice),
+                    })}
+                  </Text>
+                  <View style={styles.actions}>
+                    <Button
+                      disabled={busy}
+                      label={t(locale, 'duplicateExclude', {
+                        item: item.displayName,
+                      })}
+                      onPress={() =>
+                        run(
+                          mutate(() =>
+                            controller.reviewDuplicateGroup(
+                              packId,
+                              group.items.map(value => value.id),
+                              { kind: 'exclude', itemId: item.id },
+                            ),
+                          ),
+                        )
+                      }
+                    />
+                    <Button
+                      disabled={busy}
+                      label={t(locale, 'duplicatePreferred', {
+                        item: item.displayName,
+                      })}
+                      onPress={() =>
+                        run(
+                          mutate(() =>
+                            controller.reviewDuplicateGroup(
+                              packId,
+                              group.items.map(value => value.id),
+                              { kind: 'preferred', itemId: item.id },
+                            ),
+                          ),
+                        )
+                      }
+                    />
+                  </View>
+                </View>
+              ))}
+            </View>
+            <Button
+              disabled={busy}
+              label={t(locale, 'duplicateKeepAll')}
+              onPress={() =>
+                run(
+                  mutate(() =>
+                    controller.reviewDuplicateGroup(
+                      packId,
+                      group.items.map(value => value.id),
+                      { kind: 'keep-all' },
+                    ),
+                  ),
+                )
+              }
+            />
+          </View>
+        ))
+      )}
+      {review.standaloneDecisions.length > 0 ? (
+        <View testID="duplicate-standalone-decisions">
+          <Text accessibilityRole="header" style={styles.label}>
+            {t(locale, 'duplicateStandaloneDecisions')}
+          </Text>
+          <Text style={styles.detail}>
+            {t(locale, 'duplicateStandaloneDecisionHelp')}
+          </Text>
+          {review.standaloneDecisions.map(item => (
+            <View key={item.id} style={styles.duplicateGroup}>
+              <Text style={styles.detail}>
+                {t(locale, 'duplicateItemPreview', {
+                  item: item.displayName,
+                  kind: localizedDuplicateKind(locale, item.contentKind),
+                  characters: item.normalizedCharacterCount,
+                  bytes: item.normalizedByteCount,
+                  choice: localizedDuplicateChoice(locale, item.choice),
+                })}
+              </Text>
+              <Button
+                disabled={busy}
+                label={t(locale, 'duplicateRestore', {
+                  item: item.displayName,
+                })}
+                onPress={() =>
+                  run(
+                    mutate(() =>
+                      controller.restoreDuplicateDecision(packId, item.id),
+                    ),
+                  )
+                }
+              />
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function duplicateItemSummary(
+  locale: AppLocale,
+  item: {
+    readonly displayName: string;
+    readonly contentKind: 'prose' | 'code' | 'mixed';
+    readonly normalizedCharacterCount: number;
+    readonly normalizedByteCount: number;
+    readonly choice: 'keep' | 'exclude' | 'preferred';
+  },
+): string {
+  return t(locale, 'duplicateItemPreview', {
+    item: item.displayName,
+    kind: localizedDuplicateKind(locale, item.contentKind),
+    characters: item.normalizedCharacterCount,
+    bytes: item.normalizedByteCount,
+    choice: localizedDuplicateChoice(locale, item.choice),
+  });
+}
+
+function localizedDuplicateReason(
+  locale: AppLocale,
+  reason: 'exact-binary' | 'near-image' | 'similar-text',
+): string {
+  return t(
+    locale,
+    reason === 'exact-binary'
+      ? 'duplicateReasonExactBinary'
+      : reason === 'near-image'
+      ? 'duplicateReasonNearImage'
+      : 'duplicateReasonSimilarText',
+  );
+}
+
+function localizedDuplicateKind(
+  locale: AppLocale,
+  kind: 'prose' | 'code' | 'mixed',
+): string {
+  return t(
+    locale,
+    kind === 'prose'
+      ? 'duplicateKindProse'
+      : kind === 'code'
+      ? 'duplicateKindCode'
+      : 'duplicateKindMixed',
+  );
+}
+
+function localizedDuplicateChoice(
+  locale: AppLocale,
+  choice: 'keep' | 'exclude' | 'preferred',
+): string {
+  return t(
+    locale,
+    choice === 'keep'
+      ? 'duplicateChoiceKeep'
+      : choice === 'exclude'
+      ? 'duplicateChoiceExclude'
+      : 'duplicateChoicePreferred',
   );
 }
 
@@ -807,6 +1088,26 @@ const styles = StyleSheet.create({
     borderColor: colors.muted,
     borderRadius: 8,
     borderWidth: 1,
+    padding: spacing.sm,
+  },
+  duplicateGroup: {
+    borderColor: colors.muted,
+    borderRadius: 10,
+    borderWidth: 1,
+    gap: spacing.sm,
+    padding: spacing.sm,
+  },
+  comparisonRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  comparisonCard: {
+    backgroundColor: colors.background,
+    borderRadius: 10,
+    flexBasis: 240,
+    flexGrow: 1,
+    gap: spacing.sm,
     padding: spacing.sm,
   },
 });

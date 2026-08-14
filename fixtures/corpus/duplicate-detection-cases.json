@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "syntheticOnly": true,
+  "acceptedMinimumPrecision": 0.9,
+  "acceptedMinimumRecall": 0.9,
+  "textPairs": [
+    {
+      "id": "receipt-minor-gate-change",
+      "expectedDuplicate": true,
+      "left": "Flight receipt total is USD 129.40. Reservation ABC123 leaves at 09:30 from Gate 4.",
+      "right": "Flight receipt total is USD 129.40. Reservation ABC123 leaves at 09:30 from Gate 5."
+    },
+    {
+      "id": "project-note-punctuation",
+      "expectedDuplicate": true,
+      "left": "Project notes: verify the import queue, preserve the original file, and publish an immutable derivative.",
+      "right": "Project notes: verify the import queue, preserve the original file and publish an immutable derivative."
+    },
+    {
+      "id": "chinese-punctuation",
+      "expectedDuplicate": true,
+      "left": "会议记录：确认离线导入、保留原始文件，并在用户审核后生成不可变的派生内容；同时记录检测器版本、候选原因、置信度和实际节省空间，保证重新分析不会覆盖用户选择。",
+      "right": "会议记录：确认离线导入，保留原始文件，并在用户审核后生成不可变的派生内容；同时记录检测器版本、候选原因、置信度和实际节省空间，保证重新分析不会覆盖用户选择。"
+    },
+    {
+      "id": "sequential-error-screens",
+      "expectedDuplicate": false,
+      "left": "Sequential error screen: payment failed and no attachment was received.",
+      "right": "Sequential error screen: upload failed after permission expired."
+    },
+    {
+      "id": "unrelated-weather-receipt",
+      "expectedDuplicate": false,
+      "left": "A weather forecast with temperatures, wind direction, and rain probability for tomorrow.",
+      "right": "Purchase receipt with subtotal, tax, total, and a synthetic order reference."
+    },
+    {
+      "id": "different-code-semantics",
+      "expectedDuplicate": false,
+      "left": "function allow(value) {\n  return value === true;\n}",
+      "right": "function allow(value) {\n  return value !== true;\n}"
+    }
+  ],
+  "imageHashPairs": [
+    {
+      "id": "near-one-bit",
+      "expectedDuplicate": true,
+      "left": "0123456789abcdef",
+      "right": "0123456789abcdee"
+    },
+    {
+      "id": "near-eight-bits",
+      "expectedDuplicate": true,
+      "left": "0000000000000000",
+      "right": "00000000000000ff"
+    },
+    {
+      "id": "sequential-hard-negative",
+      "expectedDuplicate": false,
+      "left": "0123456789abcdef",
+      "right": "fedcba9876543210"
+    }
+  ]
+}

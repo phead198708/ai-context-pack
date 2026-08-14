@@ -844,8 +844,8 @@ describe('persistence path and migration decisions', () => {
       expect(isOwnedArtifactPath(invalid)).toBe(false);
   });
 
-  test('schema migrates through v1-v7 without BLOB content columns', () => {
-    expect(PERSISTENCE_MIGRATIONS).toHaveLength(7);
+  test('schema migrates through v1-v8 without BLOB content columns', () => {
+    expect(PERSISTENCE_MIGRATIONS).toHaveLength(8);
     expect(PERSISTENCE_MIGRATIONS[0]).toContain('PRAGMA user_version = 1');
     expect(PERSISTENCE_MIGRATIONS[0]).toContain(
       'relative_path TEXT NOT NULL UNIQUE',
@@ -884,6 +884,13 @@ describe('persistence path and migration decisions', () => {
     );
     expect(PERSISTENCE_MIGRATIONS[6]).toContain(
       'ALTER TABLE cleanup_leases ADD COLUMN deadline_ms REAL',
+    );
+    expect(PERSISTENCE_MIGRATIONS[7]).toContain('PRAGMA user_version = 8');
+    expect(PERSISTENCE_MIGRATIONS[7]).toContain(
+      'CREATE TABLE duplicate_analysis_manifests',
+    );
+    expect(PERSISTENCE_MIGRATIONS[7]).toContain(
+      'CREATE TABLE duplicate_decisions',
     );
     for (const migration of PERSISTENCE_MIGRATIONS)
       expect(migration).not.toMatch(/\bBLOB\b/);

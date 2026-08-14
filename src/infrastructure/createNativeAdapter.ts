@@ -25,7 +25,9 @@ import {
   isPDFPageExtractionV1,
   isPDFProbeResultV1,
   ocrBlocksMatchText,
+  PLAIN_TEXT_FILE_MAX_BYTES,
 } from '../domain/validation';
+import { DERIVED_TEXT_MAXIMUM_UTF8_BYTES } from '../domain/contracts';
 import {
   isOCRErrorCode,
   isOCRRequestV1,
@@ -46,6 +48,7 @@ import {
   isOwnedArtifactPath,
   isOwnedArtifactStorePath,
 } from './persistence/ownedPaths';
+import { isImagePerceptualHashV1 } from '../domain/duplicateDetection';
 
 export interface NativeMethods {
   scanInbox(): Promise<unknown>;
@@ -88,6 +91,13 @@ export interface NativeMethods {
   purgeArtifactQuarantine?(olderThanEpochMs: number): Promise<unknown>;
   getArtifactStorageUsage?(): Promise<unknown>;
   getOCRCapabilities?(): Promise<unknown>;
+  hashImagePerceptually?(
+    taskId: string,
+    fileUri: string,
+    expectedByteCount: number,
+    expectedSha256: string,
+  ): Promise<unknown>;
+  cancelImagePerceptualHash?(taskId: string): Promise<unknown>;
   recognizeText(
     taskId: string,
     uri: string,
@@ -109,7 +119,12 @@ export interface NativeMethods {
   ): Promise<unknown>;
   cancelPdfExtraction?(taskId: string): Promise<unknown>;
   finishPdfExtraction?(taskId: string): Promise<unknown>;
-  readPlainTextFile?(uri: string): Promise<unknown>;
+  readPlainTextFile?(
+    uri: string,
+    maximumBytes: number,
+    expectedByteCount: number | null,
+    expectedSha256: string | null,
+  ): Promise<unknown>;
   probePdf(uri: string): Promise<unknown>;
 }
 
@@ -391,6 +406,64 @@ export const createNativeAdapter = (
             throw new NativeBoundaryError('OCR_RESULT_INVALID');
           return value;
         },
+        hashImagePerceptually: async (
+          taskId,
+          fileUri,
+          expectedByteCount,
+          expectedSha256,
+        ) => {
+          if (!nativeModule.hashImagePerceptually)
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          if (
+            !isCanonicalUuid(taskId) ||
+            !Number.isSafeInteger(expectedByteCount) ||
+            expectedByteCount <= 0 ||
+            !/^[0-9a-f]{64}$/.test(expectedSha256)
+          )
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          requireControlledFileUri(fileUri, 'PROCESSOR_OUTPUT_INVALID');
+          let value: unknown;
+          try {
+            value = await nativeModule.hashImagePerceptually(
+              taskId,
+              fileUri,
+              expectedByteCount,
+              expectedSha256,
+            );
+          } catch (error) {
+            const code = nativeErrorCode(error);
+            throw new NativeBoundaryError(
+              code === 'RESOURCE_MEMORY_PRESSURE' ||
+              code === 'PIPELINE_STAGE_FAILED' ||
+              code === 'ARTIFACT_INTEGRITY_FAILED' ||
+              code === 'INVALID_LOCAL_FILE_URI'
+                ? code
+                : 'PROCESSOR_OUTPUT_INVALID',
+            );
+          }
+          if (!isImagePerceptualHashV1(value))
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          return value;
+        },
+        cancelImagePerceptualHash: async taskId => {
+          if (!isCanonicalUuid(taskId))
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+          if (!nativeModule.cancelImagePerceptualHash)
+            throw new NativeBoundaryError('PIPELINE_STAGE_FAILED');
+          let acknowledged: unknown;
+          try {
+            acknowledged = await nativeModule.cancelImagePerceptualHash(taskId);
+          } catch (error) {
+            const code = nativeErrorCode(error);
+            throw new NativeBoundaryError(
+              code === 'PIPELINE_STAGE_FAILED'
+                ? code
+                : 'PROCESSOR_OUTPUT_INVALID',
+            );
+          }
+          if (acknowledged !== true)
+            throw new NativeBoundaryError('PROCESSOR_OUTPUT_INVALID');
+        },
         recognizeText: async request => {
           if (!isOCRRequestV1(request))
             throw new NativeBoundaryError('OCR_RESULT_INVALID');
@@ -502,13 +575,40 @@ export const createNativeAdapter = (
           if (acknowledged !== true)
             throw new NativeBoundaryError('PDF_RESULT_INVALID');
         },
-        readPlainTextFile: async fileUri => {
+        readPlainTextFile: async (
+          fileUri,
+          maximumBytes = PLAIN_TEXT_FILE_MAX_BYTES,
+          expectedByteCount,
+          expectedSha256,
+        ) => {
           if (!nativeModule.readPlainTextFile)
             throw new NativeBoundaryError('TEXT_RESULT_INVALID');
           requireControlledFileUri(fileUri, 'TEXT_RESULT_INVALID');
+          if (
+            !Number.isSafeInteger(maximumBytes) ||
+            maximumBytes <= 0 ||
+            maximumBytes > DERIVED_TEXT_MAXIMUM_UTF8_BYTES
+          )
+            throw new NativeBoundaryError('TEXT_RESULT_INVALID');
+          const hasExpectedByteCount = expectedByteCount !== undefined;
+          const hasExpectedSha256 = expectedSha256 !== undefined;
+          if (
+            hasExpectedByteCount !== hasExpectedSha256 ||
+            (hasExpectedByteCount &&
+              (!Number.isSafeInteger(expectedByteCount) ||
+                (expectedByteCount as number) < 0 ||
+                (expectedByteCount as number) > maximumBytes ||
+                !/^[0-9a-f]{64}$/.test(expectedSha256 as string)))
+          )
+            throw new NativeBoundaryError('TEXT_RESULT_INVALID');
           let value: unknown;
           try {
-            value = await nativeModule.readPlainTextFile(fileUri);
+            value = await nativeModule.readPlainTextFile(
+              fileUri,
+              maximumBytes,
+              expectedByteCount ?? null,
+              expectedSha256 ?? null,
+            );
           } catch (error) {
             const code = nativeErrorCode(error);
             throw new NativeBoundaryError(
@@ -516,13 +616,19 @@ export const createNativeAdapter = (
               code === 'TEXT_TOO_LARGE' ||
               code === 'TEXT_RESOURCE_BUSY' ||
               code === 'RESOURCE_MEMORY_PRESSURE' ||
+              code === 'ARTIFACT_INTEGRITY_FAILED' ||
               code === 'INVALID_LOCAL_FILE_URI'
                 ? code
                 : 'TEXT_RESULT_INVALID',
             );
           }
-          if (!isNativePlainTextFileV1(value))
+          if (!isNativePlainTextFileV1(value, maximumBytes))
             throw new NativeBoundaryError('TEXT_RESULT_INVALID');
+          if (
+            expectedByteCount !== undefined &&
+            value.byteCount !== expectedByteCount
+          )
+            throw new NativeBoundaryError('ARTIFACT_INTEGRITY_FAILED');
           return value;
         },
         probePdf: async uri => {
@@ -589,6 +695,12 @@ export const createNativeAdapter = (
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         getOCRCapabilities: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        hashImagePerceptually: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
+        cancelImagePerceptualHash: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },
         recognizeText: async () => {

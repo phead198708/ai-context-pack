@@ -1,6 +1,11 @@
 import { DomainError } from '../../domain/errors';
 import type { ContextItem, ContextPack } from '../../domain/models';
 import {
+  groupDuplicateSuggestionsV1,
+  type DuplicateDecisionChoiceV1,
+  type DuplicateDecisionV1,
+} from '../../domain/duplicateDetection';
+import {
   restoreItemCheckpoint,
   transitionItem,
   transitionPack,
@@ -38,7 +43,17 @@ export class PackLibraryController {
     const graphs = await repository.listPackGraphs();
     const artifacts = await repository.listArtifactRecords();
     const imports = await repository.listImportDetails();
-    return buildPackLibrarySnapshot(graphs, artifacts, imports, selectedPackId);
+    const selectedId = selectedPackId ?? graphs[0]?.pack.id;
+    const duplicateAnalysis = selectedId
+      ? await repository.findDuplicateAnalysis(selectedId)
+      : undefined;
+    return buildPackLibrarySnapshot(
+      graphs,
+      artifacts,
+      imports,
+      selectedPackId,
+      duplicateAnalysis,
+    );
   }
 
   renamePack(packId: string, title: string): Promise<void> {
@@ -206,6 +221,7 @@ export class PackLibraryController {
           artifacts.filter(value => value.itemId === item.id),
         );
         if (
+          item.state === stateAtRetryCheckpoint(plan.stage) &&
           plan.stage !== 'import' &&
           (!this.processing || this.processing.supports(plan.stage))
         )
@@ -253,6 +269,146 @@ export class PackLibraryController {
       });
       this.processing?.launch(runs);
       return plans;
+    });
+  }
+
+  async analyzePack(packId: string): Promise<number> {
+    const durableRuns = await this.enqueue(async () => {
+      if (!this.processing?.supports('analyze'))
+        throw new DomainError('DOMAIN_INVALID_TRANSITION');
+      const repository = await this.getRepository();
+      const graph = await repository.findPackGraph(packId);
+      if (!graph || !['processing', 'recovering'].includes(graph.pack.state))
+        throw new DomainError('DOMAIN_INVALID_TRANSITION');
+      const candidates = graph.items.filter(item => item.state === 'extracted');
+      if (candidates.length === 0)
+        throw new DomainError('DOMAIN_INVALID_TRANSITION');
+      const updatedAt = this.timestamp(graph.pack);
+      const runs = candidates.map(item =>
+        createPipelineRun(
+          { packId, itemId: item.id, stage: 'analyze' },
+          updatedAt,
+        ),
+      );
+      await repository.savePackGraph({
+        pack: updatedPack(graph.pack, graph.items, updatedAt),
+        items: graph.items,
+        expectedRevision: graph.revision,
+        startedPipelineRuns: runs,
+      });
+      this.processing.launch(runs);
+      return runs;
+    });
+    // Only durable run creation is serialized. Settlement can take seconds and
+    // must not hold the controller queue that makes cancellation durable.
+    await this.processing!.waitForIdle();
+    return durableRuns.length;
+  }
+
+  reviewDuplicateGroup(
+    packId: string,
+    groupItemIds: readonly string[],
+    action:
+      | { readonly kind: 'keep-all' }
+      | {
+          readonly kind: 'exclude' | 'preferred';
+          readonly itemId: string;
+        },
+  ): Promise<void> {
+    return this.enqueue(async () => {
+      const repository = await this.getRepository();
+      const graph = await repository.findPackGraph(packId);
+      if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
+      const snapshot = await repository.findDuplicateAnalysis(packId);
+      const matching = groupDuplicateSuggestionsV1(snapshot.suggestions).find(
+        group => sameStringSet(group.itemIds, groupItemIds),
+      );
+      if (!matching || groupItemIds.length < 2)
+        throw new DomainError('SCHEMA_INVALID');
+      if (action.kind !== 'keep-all' && !groupItemIds.includes(action.itemId))
+        throw new DomainError('SCHEMA_INVALID');
+      const priorById = new Map(
+        snapshot.decisions.map(decision => [decision.itemId, decision]),
+      );
+      const itemById = new Map(graph.items.map(item => [item.id, item]));
+      const decidedAt = this.timestamp(graph.pack);
+      const createDecision = (
+        itemId: string,
+        choice: DuplicateDecisionChoiceV1,
+        source: DuplicateDecisionV1['source'] = 'standalone',
+      ): DuplicateDecisionV1 => {
+        const item = itemById.get(itemId);
+        if (!item) throw new DomainError('PERSISTENCE_CONFLICT');
+        return {
+          schemaVersion: 1,
+          packId,
+          itemId,
+          choice,
+          baselineInclusionMode:
+            priorById.get(itemId)?.baselineInclusionMode ?? item.inclusionMode,
+          source,
+          decidedAt,
+        };
+      };
+      const preferredCoverageIds = new Set(
+        action.kind === 'preferred'
+          ? matching.suggestions.flatMap(suggestion => {
+              if (suggestion.leftItemId === action.itemId)
+                return [suggestion.rightItemId];
+              if (suggestion.rightItemId === action.itemId)
+                return [suggestion.leftItemId];
+              return [];
+            })
+          : [],
+      );
+      // V1 source-less exclusions have no reliable action identifier: timestamp
+      // resolution and rollback clamping can make separate actions identical.
+      // Preserve every ambiguous row as a standalone privacy choice. Only rows
+      // carrying explicit preferred-group provenance may be restored together.
+      const wasPreferredGroupDecision = (
+        decision: DuplicateDecisionV1 | undefined,
+      ): boolean => decision?.source === 'preferred-group';
+      const decisions =
+        action.kind === 'keep-all'
+          ? groupItemIds.map(itemId => createDecision(itemId, 'keep'))
+          : action.kind === 'exclude'
+          ? [createDecision(action.itemId, 'exclude')]
+          : groupItemIds.flatMap(itemId => {
+              if (itemId === action.itemId)
+                return [createDecision(itemId, 'preferred', 'preferred-group')];
+              if (preferredCoverageIds.has(itemId)) {
+                const prior = priorById.get(itemId);
+                return [
+                  createDecision(
+                    itemId,
+                    'exclude',
+                    prior?.choice === 'exclude' &&
+                      !wasPreferredGroupDecision(prior)
+                      ? 'standalone'
+                      : 'preferred-group',
+                  ),
+                ];
+              }
+              const prior = priorById.get(itemId);
+              return wasPreferredGroupDecision(prior)
+                ? [createDecision(itemId, 'keep', 'preferred-group')]
+                : [];
+            });
+      await repository.saveDuplicateDecisions(packId, decisions);
+    });
+  }
+
+  restoreDuplicateDecision(packId: string, itemId: string): Promise<void> {
+    return this.enqueue(async () => {
+      const repository = await this.getRepository();
+      const graph = await repository.findPackGraph(packId);
+      if (!graph || !graph.items.some(item => item.id === itemId))
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      await repository.restoreDuplicateDecision(
+        packId,
+        itemId,
+        this.timestamp(graph.pack),
+      );
     });
   }
 
@@ -401,4 +557,15 @@ function boundedUserText(
   if (!allowEmpty && normalized.length === 0)
     throw new DomainError('SCHEMA_INVALID');
   return allowEmpty ? value : normalized;
+}
+
+function sameStringSet(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    new Set(left).size === left.length &&
+    left.every(value => right.includes(value))
+  );
 }

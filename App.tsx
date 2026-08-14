@@ -34,6 +34,7 @@ import {
 import { PackLibraryScreen } from './src/features/packLibrary/PackLibraryScreen';
 import {
   packLibraryController,
+  subscribeRecoveredPackProcessingCompletions,
   subscribePackProcessingFailures,
 } from './src/features/packLibrary/runtime';
 import { NewPackFlow, type NewPackFlowHandle } from './src/ui/NewPackFlow';
@@ -58,6 +59,7 @@ function App(): React.JSX.Element {
   const [retryDraft, setRetryDraft] = useState<MainAppImportDraft>();
   const [retryDraftError, setRetryDraftError] = useState<string>();
   const [pipelineRecoveryError, setPipelineRecoveryError] = useState<string>();
+  const [processingRefreshRevision, setProcessingRefreshRevision] = useState(0);
   const scrollView = useRef<ScrollView | null>(null);
   const newPackFlow = useRef<NewPackFlowHandle | null>(null);
   const screenRef = useRef<Screen>('inbox');
@@ -135,6 +137,10 @@ function App(): React.JSX.Element {
         if (mounted) setPipelineRecoveryError(code);
       },
     );
+    const unsubscribeProcessingCompletions =
+      subscribeRecoveredPackProcessingCompletions(() => {
+        if (mounted) setProcessingRefreshRevision(value => value + 1);
+      });
     recoverWithBoundedRetry().catch(() => undefined);
     const recoveryPoll = setInterval(
       () => recoverWithBoundedRetry().catch(() => undefined),
@@ -190,6 +196,7 @@ function App(): React.JSX.Element {
       openPackSubscription.remove();
       backSubscription.remove();
       unsubscribeProcessingFailures();
+      unsubscribeProcessingCompletions();
     };
   }, [recoverProcessing]);
   useEffect(() => {
@@ -345,7 +352,9 @@ function App(): React.JSX.Element {
                 locale={locale}
                 onChanged={refreshAfterPackMutation}
                 onSelectPack={selectDetailPack}
-                refreshKey={packLibraryRefreshKey(state)}
+                refreshKey={`${packLibraryRefreshKey(
+                  state,
+                )}:processing-${processingRefreshRevision}`}
                 {...(selectedDetailPackId
                   ? { selectedPackId: selectedDetailPackId }
                   : {})}

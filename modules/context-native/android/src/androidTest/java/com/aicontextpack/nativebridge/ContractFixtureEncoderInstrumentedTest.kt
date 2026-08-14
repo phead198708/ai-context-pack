@@ -48,6 +48,7 @@ private object ContractFixtureEncoder {
     "pipeline-checkpoint-v1.json" to pipelineCheckpoint(),
     "risk-finding-v1.json" to riskFinding(),
     "export-manifest-v1.json" to exportManifest(),
+    "image-perceptual-hash-v1.json" to imagePerceptualHash(),
   )
 
   private fun importManifest() = JSONObject()
@@ -154,4 +155,14 @@ private object ContractFixtureEncoder {
       "privacyReview",
       JSONObject().put("status", "complete").put("decisionSetSha256", "c".repeat(64)),
     )
+
+  private fun imagePerceptualHash() = JSONObject()
+    .put("schemaVersion", 1)
+    .put("algorithm", "dhash-64-v1")
+    .put("hash", "0123456789abcdef")
+    .put("sampleWidth", 9)
+    .put("sampleHeight", 8)
+    .put("orientationApplied", true)
+    .put("durationMs", 2)
+    .put("revision", "1")
 }

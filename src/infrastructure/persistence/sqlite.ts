@@ -19,6 +19,19 @@ import {
   isImportManifestV1,
 } from '../../domain/validation';
 import {
+  buildDuplicateSuggestionsV1,
+  DUPLICATE_DETECTOR_CONFIG_V1,
+  isDuplicateAnalysisItemV1,
+  isDuplicateAnalysisManifestV1,
+  isDuplicateDecisionV1,
+  isDuplicateSuggestionV1,
+  type DuplicateAnalysisItemV1,
+  type DuplicateAnalysisManifestV1,
+  type DuplicateAnalysisSnapshotV1,
+  type DuplicateDecisionV1,
+  type DuplicateSuggestionV1,
+} from '../../domain/duplicateDetection';
+import {
   DEVELOPMENT_RESET_CONFIRMATION,
   PERSISTENCE_SCHEMA_VERSION,
   type CleanupCandidate,
@@ -41,6 +54,7 @@ import {
   type SavePackGraphInput,
   type StartPipelineRunInput,
   type QuarantineRecordInput,
+  type ReplaceDuplicateAnalysisInput,
   type StorageUsageSummary,
 } from './contracts';
 import {
@@ -993,14 +1007,23 @@ export class ExpoSqlitePersistenceRepository
       )
         return false;
       const stage = pipelineStage(run.stage);
+      const derivativeStage = stage === 'extract' || stage === 'analyze';
       if (
-        stage !== 'extract' ||
+        !derivativeStage ||
         !['processing', 'recovering'].includes(run.pack_state) ||
         run.item_state !== pipelineCheckpointState(stage) ||
         input.artifact.id !== input.runId ||
         input.artifact.itemId !== run.item_id ||
         input.artifact.kind !==
-          (run.source_type === 'pdf' ? 'pdf-page-text' : 'ocr-text')
+          (stage === 'analyze'
+            ? 'normalized-text'
+            : run.source_type === 'pdf'
+            ? 'pdf-page-text'
+            : 'ocr-text') ||
+        (stage === 'analyze' &&
+          !isDuplicateNormalizationProcessorVersion(
+            input.artifact.processorVersion,
+          ))
       )
         throw new DomainError('SCHEMA_INVALID');
       validatePublishedArtifact({
@@ -1051,6 +1074,8 @@ export class ExpoSqlitePersistenceRepository
     requirePipelineClaimVersion(input.claimVersion);
     requireIsoDateTime(input.updatedAt);
     if (input.artifact) assertArtifact(input.artifact);
+    if (input.analysis && !isDuplicateAnalysisItemV1(input.analysis))
+      throw new DomainError('SCHEMA_INVALID');
     if (input.publicationLeaseObservedAt !== undefined)
       requireIsoDateTime(input.publicationLeaseObservedAt);
     return this.connection.exclusive(async transaction => {
@@ -1067,16 +1092,33 @@ export class ExpoSqlitePersistenceRepository
       )
         return false;
       const stage = pipelineStage(run.stage);
+      const derivativeStage = stage === 'extract' || stage === 'analyze';
       if (
-        (stage === 'extract') !== (input.artifact !== undefined) ||
+        derivativeStage !== (input.artifact !== undefined) ||
+        (stage === 'analyze') !== (input.analysis !== undefined) ||
         (input.artifact &&
           (input.artifact.itemId !== run.item_id ||
             input.artifact.kind !==
-              (run.source_type === 'pdf' ? 'pdf-page-text' : 'ocr-text')))
+              (stage === 'analyze'
+                ? 'normalized-text'
+                : run.source_type === 'pdf'
+                ? 'pdf-page-text'
+                : 'ocr-text') ||
+            (stage === 'analyze' &&
+              !isDuplicateNormalizationProcessorVersion(
+                input.artifact.processorVersion,
+              )))) ||
+        (input.analysis &&
+          (!input.artifact ||
+            input.analysis.packId !== run.pack_id ||
+            input.analysis.itemId !== run.item_id ||
+            input.analysis.normalizedArtifactId !== input.artifact.id ||
+            input.analysis.normalizedSha256 !== input.artifact.sha256 ||
+            input.analysis.normalizedByteCount !== input.artifact.byteCount))
       )
         throw new DomainError('SCHEMA_INVALID');
       if (
-        stage === 'extract' &&
+        derivativeStage &&
         (input.publicationLeaseOwnerId === undefined ||
           !isCanonicalUuid(input.publicationLeaseOwnerId) ||
           !(await cleanupLeaseOwnerMatches(
@@ -1095,7 +1137,7 @@ export class ExpoSqlitePersistenceRepository
           )
         : undefined;
       if (
-        stage === 'extract' &&
+        derivativeStage &&
         (!checkpoint ||
           !input.artifact ||
           encodePipelinePublishedArtifact(checkpoint) !==
@@ -1125,7 +1167,7 @@ export class ExpoSqlitePersistenceRepository
         ? input.publicationLeaseOwnerId
         : undefined;
       if (
-        stage === 'extract' &&
+        derivativeStage &&
         (publicationOwnerId === undefined ||
           !(await cleanupLeaseOwnerMatches(
             transaction,
@@ -1143,6 +1185,11 @@ export class ExpoSqlitePersistenceRepository
           packId: run.pack_id,
           artifact: input.artifact,
         });
+        if (input.analysis)
+          await upsertDuplicateAnalysisInTransaction(
+            transaction,
+            input.analysis,
+          );
       }
       const itemUpdate = await transaction.run(
         `UPDATE context_items SET state = ?, retry_stage = NULL, updated_at = ?
@@ -1170,7 +1217,7 @@ export class ExpoSqlitePersistenceRepository
       if (!this.pipelineClaimIsLive(run, this.operationalNow()))
         throw new DomainError('PERSISTENCE_CONFLICT');
       if (
-        stage === 'extract' &&
+        derivativeStage &&
         (publicationOwnerId === undefined ||
           !(await cleanupLeaseOwnerMatches(
             transaction,
@@ -1280,6 +1327,15 @@ export class ExpoSqlitePersistenceRepository
       [updatedAt, updatedAt, updatedAt, updatedAt, packId],
     );
     return result.changes;
+  }
+
+  async pipelineRunIsCancelled(runId: string): Promise<boolean> {
+    requireCanonicalId(runId);
+    const row = await this.connection.first<{ status: string }>(
+      'SELECT status FROM pipeline_runs WHERE id = ?',
+      [runId],
+    );
+    return row?.status === 'cancelled';
   }
 
   async deletePack(
@@ -1586,6 +1642,449 @@ export class ExpoSqlitePersistenceRepository
     );
     if (result.changes !== 1)
       throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  }
+
+  async findDuplicateAnalysis(
+    packId: string,
+  ): Promise<DuplicateAnalysisSnapshotV1> {
+    requireCanonicalId(packId);
+    return this.connection.exclusive(async transaction => {
+      const manifestRow = await transaction.first<{
+        payload_json: string;
+        analyzed_at: string;
+      }>(
+        `SELECT payload_json, analyzed_at
+         FROM duplicate_analysis_manifests WHERE pack_id = ?`,
+        [packId],
+      );
+      const analysisRows = await transaction.all<{
+        payload_json: string;
+        stored_item_id: string;
+        stored_normalized_artifact_id: string;
+        stored_analyzed_at: string;
+        item_pack_id: string | null;
+        normalized_item_id: string | null;
+        normalized_kind: string | null;
+        normalized_sha256: string | null;
+        normalized_byte_count: number | null;
+        normalized_processor_version_json: string | null;
+        item_source_type: string | null;
+        original_count: number;
+        original_sha256: string | null;
+        original_byte_count: number | null;
+      }>(
+        `SELECT record.payload_json,
+           record.item_id AS stored_item_id,
+           record.normalized_artifact_id AS stored_normalized_artifact_id,
+           record.analyzed_at AS stored_analyzed_at,
+           item.pack_id AS item_pack_id,
+           item.source_type AS item_source_type,
+           normalized.item_id AS normalized_item_id,
+           normalized.kind AS normalized_kind,
+           normalized.sha256 AS normalized_sha256,
+           normalized.byte_count AS normalized_byte_count,
+           normalized.processor_version_json AS normalized_processor_version_json,
+           (SELECT COUNT(*) FROM artifacts original
+             WHERE original.item_id = record.item_id AND original.kind = 'original')
+             AS original_count,
+           (SELECT original.sha256 FROM artifacts original
+             WHERE original.item_id = record.item_id AND original.kind = 'original'
+             ORDER BY original.id LIMIT 1) AS original_sha256,
+           (SELECT original.byte_count FROM artifacts original
+             WHERE original.item_id = record.item_id AND original.kind = 'original'
+             ORDER BY original.id LIMIT 1) AS original_byte_count
+         FROM duplicate_analysis_items record
+         LEFT JOIN context_items item ON item.id = record.item_id
+         LEFT JOIN artifacts normalized
+           ON normalized.id = record.normalized_artifact_id
+         WHERE record.pack_id = ? ORDER BY record.item_id`,
+        [packId],
+      );
+      const suggestionRows = await transaction.all<{
+        payload_json: string;
+        suggestion_key: string;
+        left_item_id: string;
+        right_item_id: string;
+      }>(
+        `SELECT payload_json, suggestion_key, left_item_id, right_item_id
+         FROM duplicate_suggestions
+         WHERE pack_id = ? ORDER BY suggestion_key`,
+        [packId],
+      );
+      const decisionRows = await transaction.all<{
+        payload_json: string;
+        item_id: string;
+        decided_at: string;
+      }>(
+        `SELECT payload_json, item_id, decided_at FROM duplicate_decisions
+         WHERE pack_id = ? ORDER BY item_id`,
+        [packId],
+      );
+      return decodePersisted(() => {
+        const manifest = manifestRow
+          ? decodeStoredJson(
+              manifestRow.payload_json,
+              isDuplicateAnalysisManifestV1,
+            )
+          : null;
+        const analyses = analysisRows.map(row => {
+          const value = decodeStoredJson(
+            row.payload_json,
+            isDuplicateAnalysisItemV1,
+          );
+          if (
+            row.stored_item_id !== value.itemId ||
+            row.stored_normalized_artifact_id !== value.normalizedArtifactId ||
+            row.stored_analyzed_at !== value.analyzedAt ||
+            row.item_pack_id !== packId ||
+            row.normalized_item_id !== value.itemId ||
+            row.normalized_kind !== 'normalized-text' ||
+            row.normalized_sha256 !== value.normalizedSha256 ||
+            row.normalized_byte_count !== value.normalizedByteCount ||
+            row.normalized_processor_version_json === null ||
+            !isDuplicateNormalizationProcessorVersion(
+              decodeProcessorVersion(row.normalized_processor_version_json),
+            ) ||
+            row.original_count !== 1 ||
+            value.originalSha256 === undefined ||
+            row.original_sha256 !== value.originalSha256 ||
+            row.original_byte_count !== value.originalByteCount ||
+            !imageFingerprintMatchesSourceType(
+              row.item_source_type,
+              value.imageFingerprint !== undefined,
+            )
+          )
+            throw new DomainError('SCHEMA_INVALID');
+          return value;
+        });
+        const suggestions = suggestionRows.map(row => {
+          const value = decodeStoredJson(
+            row.payload_json,
+            isDuplicateSuggestionV1,
+          );
+          if (
+            row.suggestion_key !== value.key ||
+            row.left_item_id !== value.leftItemId ||
+            row.right_item_id !== value.rightItemId
+          )
+            throw new DomainError('SCHEMA_INVALID');
+          return value;
+        });
+        const decisions = decisionRows.map(row => {
+          const value = decodeStoredJson(
+            row.payload_json,
+            isDuplicateDecisionV1,
+          );
+          if (
+            row.item_id !== value.itemId ||
+            row.decided_at !== value.decidedAt
+          )
+            throw new DomainError('SCHEMA_INVALID');
+          return value;
+        });
+        const analysisItemIds = new Set(analyses.map(value => value.itemId));
+        const expectedSuggestions = buildDuplicateSuggestionsV1(analyses);
+        if (
+          (manifest === null &&
+            (analyses.length !== 0 ||
+              suggestions.length !== 0 ||
+              decisions.length !== 0)) ||
+          analyses.some(value => value.packId !== packId) ||
+          suggestions.some(value => value.packId !== packId) ||
+          decisions.some(
+            value =>
+              value.packId !== packId || !analysisItemIds.has(value.itemId),
+          ) ||
+          !sameDuplicateSuggestions(suggestions, expectedSuggestions) ||
+          (manifest !== null &&
+            (manifest.packId !== packId ||
+              manifestRow?.analyzed_at !== manifest.analyzedAt ||
+              manifest.itemCount !== analyses.length ||
+              manifest.suggestionCount !== suggestions.length ||
+              (analyses.length > 0 &&
+                manifest.analyzedAt !==
+                  latestTimestamp(analyses.map(value => value.analyzedAt)))))
+        )
+          throw new DomainError('SCHEMA_INVALID');
+        return { manifest, analyses, suggestions, decisions };
+      });
+    });
+  }
+
+  async replaceDuplicateAnalysis(
+    input: ReplaceDuplicateAnalysisInput,
+  ): Promise<void> {
+    validateDuplicateAnalysisReplacement(input);
+    await this.connection.exclusive(async transaction => {
+      const pack = await transaction.first<{ id: string }>(
+        'SELECT id FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [input.manifest.packId],
+      );
+      if (!pack) throw new DomainError('PERSISTENCE_CONFLICT');
+      const retainedItemIds = new Set(
+        input.analyses.map(value => value.itemId),
+      );
+      const existingDecisionRows = await transaction.all<{ item_id: string }>(
+        'SELECT item_id FROM duplicate_decisions WHERE pack_id = ?',
+        [input.manifest.packId],
+      );
+      if (
+        existingDecisionRows.some(value => !retainedItemIds.has(value.item_id))
+      )
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      for (const analysis of input.analyses) {
+        const row = await transaction.first<{
+          item_id: string | null;
+          kind: string;
+          sha256: string;
+          byte_count: number;
+          processor_version_json: string;
+          source_type: string;
+        }>(
+          `SELECT artifact.item_id, artifact.kind, artifact.sha256,
+             artifact.byte_count, artifact.processor_version_json,
+             item.source_type
+           FROM artifacts artifact
+           JOIN context_items item ON item.id = artifact.item_id
+           WHERE artifact.id = ? AND item.id = ? AND item.pack_id = ?`,
+          [
+            analysis.normalizedArtifactId,
+            analysis.itemId,
+            input.manifest.packId,
+          ],
+        );
+        if (
+          !row ||
+          row.item_id !== analysis.itemId ||
+          row.kind !== 'normalized-text' ||
+          row.sha256 !== analysis.normalizedSha256 ||
+          row.byte_count !== analysis.normalizedByteCount ||
+          !imageFingerprintMatchesSourceType(
+            row.source_type,
+            analysis.imageFingerprint !== undefined,
+          ) ||
+          !isDuplicateNormalizationProcessorVersion(
+            decodeProcessorVersion(row.processor_version_json),
+          )
+        )
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+        const originals = await transaction.all<{
+          sha256: string;
+          byte_count: number;
+        }>(
+          `SELECT sha256, byte_count FROM artifacts
+           WHERE item_id = ? AND kind = 'original'`,
+          [analysis.itemId],
+        );
+        if (
+          originals.length !== 1 ||
+          analysis.originalSha256 === undefined ||
+          originals[0]!.sha256 !== analysis.originalSha256 ||
+          originals[0]!.byte_count !== analysis.originalByteCount
+        )
+          throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      }
+      await transaction.run(
+        'DELETE FROM duplicate_suggestions WHERE pack_id = ?',
+        [input.manifest.packId],
+      );
+      await transaction.run(
+        'DELETE FROM duplicate_analysis_items WHERE pack_id = ?',
+        [input.manifest.packId],
+      );
+      await transaction.run(
+        'DELETE FROM duplicate_analysis_manifests WHERE pack_id = ?',
+        [input.manifest.packId],
+      );
+      await transaction.run(
+        `INSERT INTO duplicate_analysis_manifests
+          (pack_id, payload_json, analyzed_at) VALUES (?, ?, ?)`,
+        [
+          input.manifest.packId,
+          JSON.stringify(input.manifest),
+          input.manifest.analyzedAt,
+        ],
+      );
+      for (const analysis of input.analyses)
+        await transaction.run(
+          `INSERT INTO duplicate_analysis_items
+            (item_id, pack_id, normalized_artifact_id, payload_json, analyzed_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            analysis.itemId,
+            analysis.packId,
+            analysis.normalizedArtifactId,
+            JSON.stringify(analysis),
+            analysis.analyzedAt,
+          ],
+        );
+      for (const suggestion of input.suggestions)
+        await transaction.run(
+          `INSERT INTO duplicate_suggestions
+            (suggestion_key, pack_id, left_item_id, right_item_id, payload_json)
+           VALUES (?, ?, ?, ?, ?)`,
+          [
+            suggestion.key,
+            suggestion.packId,
+            suggestion.leftItemId,
+            suggestion.rightItemId,
+            JSON.stringify(suggestion),
+          ],
+        );
+    });
+  }
+
+  async saveDuplicateDecisions(
+    packId: string,
+    decisions: readonly DuplicateDecisionV1[],
+  ): Promise<void> {
+    requireCanonicalId(packId);
+    if (
+      !Array.isArray(decisions) ||
+      decisions.length === 0 ||
+      !decisions.every(
+        value => isDuplicateDecisionV1(value) && value.packId === packId,
+      ) ||
+      new Set(decisions.map(value => value.itemId)).size !== decisions.length
+    )
+      throw new DomainError('SCHEMA_INVALID');
+    await this.connection.exclusive(async transaction => {
+      const pack = await transaction.first<{ updated_at: string }>(
+        'SELECT updated_at FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      );
+      if (!pack) throw new DomainError('PERSISTENCE_CONFLICT');
+      for (const decision of decisions) {
+        const item = await transaction.first<{
+          inclusion_mode: string;
+          updated_at: string;
+        }>(
+          `SELECT inclusion_mode, updated_at FROM context_items item
+           WHERE item.id = ? AND item.pack_id = ?
+             AND EXISTS (
+               SELECT 1 FROM duplicate_suggestions suggestion
+               WHERE suggestion.pack_id = item.pack_id
+                 AND (suggestion.left_item_id = item.id OR suggestion.right_item_id = item.id)
+             )`,
+          [decision.itemId, packId],
+        );
+        if (!item) throw new DomainError('PERSISTENCE_CONFLICT');
+        const existing = await transaction.first<{ payload_json: string }>(
+          'SELECT payload_json FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
+          [decision.itemId, packId],
+        );
+        const prior = existing
+          ? decodeStoredJson(existing.payload_json, isDuplicateDecisionV1)
+          : undefined;
+        if (
+          prior?.baselineInclusionMode !== undefined &&
+          prior.baselineInclusionMode !== decision.baselineInclusionMode
+        )
+          throw new DomainError('PERSISTENCE_CONFLICT');
+        if (
+          prior === undefined &&
+          item.inclusion_mode !== decision.baselineInclusionMode
+        )
+          throw new DomainError('PERSISTENCE_CONFLICT');
+        await transaction.run(
+          `INSERT INTO duplicate_decisions (item_id, pack_id, payload_json, decided_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(item_id) DO UPDATE SET
+             pack_id = excluded.pack_id,
+             payload_json = excluded.payload_json,
+             decided_at = excluded.decided_at`,
+          [
+            decision.itemId,
+            packId,
+            JSON.stringify(decision),
+            decision.decidedAt,
+          ],
+        );
+        await transaction.run(
+          `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
+           WHERE id = ? AND pack_id = ?`,
+          [
+            decision.choice === 'exclude'
+              ? 'excluded'
+              : decision.baselineInclusionMode,
+            latestTimestamp([item.updated_at, decision.decidedAt]),
+            decision.itemId,
+            packId,
+          ],
+        );
+      }
+      await transaction.run(
+        `UPDATE packs SET updated_at = ?, revision = revision + 1
+         WHERE id = ? AND deleted_at IS NULL`,
+        [
+          latestTimestamp([
+            pack.updated_at,
+            ...decisions.map(value => value.decidedAt),
+          ]),
+          packId,
+        ],
+      );
+    });
+  }
+
+  async restoreDuplicateDecision(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void> {
+    requireCanonicalId(packId);
+    requireCanonicalId(itemId);
+    requireIsoDateTime(restoredAt);
+    await this.connection.exclusive(async transaction => {
+      const pack = await transaction.first<{ updated_at: string }>(
+        'SELECT updated_at FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      );
+      const item = await transaction.first<{
+        inclusion_mode: string;
+        updated_at: string;
+      }>(
+        'SELECT inclusion_mode, updated_at FROM context_items WHERE id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      const row = await transaction.first<{ payload_json: string }>(
+        'SELECT payload_json FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      if (!pack || !item || !row) throw new DomainError('PERSISTENCE_CONFLICT');
+      const decision = decodeStoredJson(
+        row.payload_json,
+        isDuplicateDecisionV1,
+      );
+      if (decision.packId !== packId || decision.itemId !== itemId)
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const expectedInclusionMode =
+        decision.choice === 'exclude'
+          ? 'excluded'
+          : decision.baselineInclusionMode;
+      if (item.inclusion_mode !== expectedInclusionMode)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const effectiveAt = latestTimestamp([
+        pack.updated_at,
+        item.updated_at,
+        decision.decidedAt,
+        restoredAt,
+      ]);
+      await transaction.run(
+        `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
+         WHERE id = ? AND pack_id = ?`,
+        [decision.baselineInclusionMode, effectiveAt, itemId, packId],
+      );
+      await transaction.run(
+        'DELETE FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      await transaction.run(
+        `UPDATE packs SET updated_at = ?, revision = revision + 1
+         WHERE id = ? AND deleted_at IS NULL`,
+        [effectiveAt, packId],
+      );
+    });
   }
 
   async recordRecoveryDiagnostic(
@@ -1965,6 +2464,10 @@ export class ExpoSqlitePersistenceRepository
       throw new DomainError('DEVELOPMENT_RESET_FORBIDDEN');
     await this.connection.exclusive(transaction =>
       transaction.exec(`
+        DROP TABLE IF EXISTS duplicate_suggestions;
+        DROP TABLE IF EXISTS duplicate_decisions;
+        DROP TABLE IF EXISTS duplicate_analysis_items;
+        DROP TABLE IF EXISTS duplicate_analysis_manifests;
         DROP TABLE IF EXISTS cleanup_leases;
         DROP TABLE IF EXISTS quarantine_records;
         DROP TABLE IF EXISTS recovery_diagnostics;
@@ -2137,6 +2640,8 @@ interface ContextItemRow {
   readonly state: string;
   readonly retry_stage: string | null;
   readonly inclusion_mode: string;
+  readonly duplicate_decision_pack_id: string | null;
+  readonly duplicate_decision_json: string | null;
   readonly sort_index: number;
 }
 
@@ -2230,10 +2735,16 @@ async function loadContextItems(
   packId: string,
 ): Promise<readonly ContextItem[]> {
   const rows = await connection.all<ContextItemRow>(
-    `SELECT id, pack_id, source_type, media_type, original_display_name,
-       original_sha256, original_relative_path, state, retry_stage,
-       inclusion_mode, sort_index
-     FROM context_items WHERE pack_id = ? ORDER BY sort_index, id`,
+    `SELECT item.id, item.pack_id, item.source_type, item.media_type,
+       item.original_display_name, item.original_sha256,
+       item.original_relative_path, item.state, item.retry_stage,
+       item.inclusion_mode, item.sort_index,
+       decision.pack_id AS duplicate_decision_pack_id,
+       decision.payload_json AS duplicate_decision_json
+     FROM context_items item
+     LEFT JOIN duplicate_decisions decision
+       ON decision.item_id = item.id
+     WHERE item.pack_id = ? ORDER BY item.sort_index, item.id`,
     [packId],
   );
   const items: ContextItem[] = [];
@@ -2269,6 +2780,19 @@ async function loadContextItems(
     };
     items.push(
       decodePersisted(() => {
+        if (row.duplicate_decision_json !== null) {
+          const decision = decodeStoredJson(
+            row.duplicate_decision_json,
+            isDuplicateDecisionV1,
+          );
+          if (
+            row.duplicate_decision_pack_id !== packId ||
+            decision.packId !== packId ||
+            decision.itemId !== item.id ||
+            duplicateDecisionInclusionMode(decision) !== item.inclusionMode
+          )
+            throw new DomainError('SCHEMA_INVALID');
+        }
         assertContextItem(item);
         if (item.sortIndex !== items.length)
           throw new DomainError('SCHEMA_INVALID');
@@ -2291,6 +2815,7 @@ async function replaceContextItems(
     'SELECT id FROM context_items WHERE pack_id = ?',
     [packId],
   );
+  let removedItem = false;
   await transaction.run(
     'UPDATE context_items SET sort_index = sort_index + 1000000000 WHERE pack_id = ?',
     [packId],
@@ -2298,6 +2823,7 @@ async function replaceContextItems(
   const retained = new Set(items.map(item => item.id));
   for (const row of existing) {
     if (retained.has(row.id)) continue;
+    removedItem = true;
     await transaction.run(
       `UPDATE pipeline_runs SET status = 'cancelled',
          claim_session_id = NULL, claim_deadline_ms = NULL,
@@ -2348,9 +2874,18 @@ async function replaceContextItems(
       media_type: string;
       original_sha256: string | null;
       original_relative_path: string | null;
+      inclusion_mode: string;
+      duplicate_decision_pack_id: string | null;
+      duplicate_decision_json: string | null;
     }>(
-      `SELECT pack_id, source_type, media_type, original_sha256, original_relative_path
-       FROM context_items WHERE id = ?`,
+      `SELECT item.pack_id, item.source_type, item.media_type,
+         item.original_sha256, item.original_relative_path, item.inclusion_mode,
+         decision.pack_id AS duplicate_decision_pack_id,
+         decision.payload_json AS duplicate_decision_json
+       FROM context_items item
+       LEFT JOIN duplicate_decisions decision
+         ON decision.item_id = item.id
+       WHERE item.id = ?`,
       [item.id],
     );
     if (
@@ -2363,6 +2898,23 @@ async function replaceContextItems(
           item.originalRelativePath)
     )
       throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+    if (existingItem && existingItem.duplicate_decision_json !== null) {
+      const encodedDecision = existingItem.duplicate_decision_json;
+      const decision = decodePersisted(() =>
+        decodeStoredJson(encodedDecision, isDuplicateDecisionV1),
+      );
+      if (
+        existingItem.duplicate_decision_pack_id !== packId ||
+        decision.packId !== packId ||
+        decision.itemId !== item.id
+      )
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const expectedInclusionMode = duplicateDecisionInclusionMode(decision);
+      if (inclusionMode(existingItem.inclusion_mode) !== expectedInclusionMode)
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      if (item.inclusionMode !== expectedInclusionMode)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+    }
     await assertItemRelationships(transaction, item);
     await transaction.run(
       `INSERT INTO context_items
@@ -2398,6 +2950,11 @@ async function replaceContextItems(
       ],
     );
   }
+  // Item deletion cascades analysis/suggestion/decision rows, but the manifest
+  // has no item FK. Rebuild it in this same graph transaction after all retained
+  // items are materialized so readers never observe stale counts or candidates.
+  if (removedItem)
+    await refreshDuplicateAnalysisForPackInTransaction(transaction, packId);
 }
 
 async function assertItemRelationships(
@@ -2630,6 +3187,157 @@ async function registerPublishedArtifactInTransaction(
   return 'created';
 }
 
+async function upsertDuplicateAnalysisInTransaction(
+  transaction: SqlConnection,
+  analysis: DuplicateAnalysisItemV1,
+): Promise<void> {
+  if (!isDuplicateAnalysisItemV1(analysis))
+    throw new DomainError('SCHEMA_INVALID');
+  const artifact = await transaction.first<{
+    item_id: string | null;
+    kind: string;
+    sha256: string;
+    byte_count: number;
+    processor_version_json: string;
+    item_pack_id: string | null;
+    item_source_type: string | null;
+  }>(
+    `SELECT artifact.item_id, artifact.kind, artifact.sha256,
+       artifact.byte_count, artifact.processor_version_json,
+       item.pack_id AS item_pack_id, item.source_type AS item_source_type
+     FROM artifacts artifact
+     LEFT JOIN context_items item ON item.id = artifact.item_id
+     WHERE artifact.id = ?`,
+    [analysis.normalizedArtifactId],
+  );
+  if (
+    !artifact ||
+    artifact.item_id !== analysis.itemId ||
+    artifact.item_pack_id !== analysis.packId ||
+    artifact.kind !== 'normalized-text' ||
+    artifact.sha256 !== analysis.normalizedSha256 ||
+    artifact.byte_count !== analysis.normalizedByteCount ||
+    !imageFingerprintMatchesSourceType(
+      artifact.item_source_type,
+      analysis.imageFingerprint !== undefined,
+    ) ||
+    !isDuplicateNormalizationProcessorVersion(
+      decodeProcessorVersion(artifact.processor_version_json),
+    )
+  )
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  const originals = await transaction.all<{
+    sha256: string;
+    byte_count: number;
+  }>(
+    `SELECT sha256, byte_count FROM artifacts
+     WHERE item_id = ? AND kind = 'original'`,
+    [analysis.itemId],
+  );
+  if (
+    originals.length !== 1 ||
+    analysis.originalSha256 === undefined ||
+    originals[0]!.sha256 !== analysis.originalSha256 ||
+    originals[0]!.byte_count !== analysis.originalByteCount
+  )
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  await transaction.run(
+    `INSERT INTO duplicate_analysis_items
+      (item_id, pack_id, normalized_artifact_id, payload_json, analyzed_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(item_id) DO UPDATE SET
+       pack_id = excluded.pack_id,
+       normalized_artifact_id = excluded.normalized_artifact_id,
+       payload_json = excluded.payload_json,
+       analyzed_at = excluded.analyzed_at`,
+    [
+      analysis.itemId,
+      analysis.packId,
+      analysis.normalizedArtifactId,
+      JSON.stringify(analysis),
+      analysis.analyzedAt,
+    ],
+  );
+  await refreshDuplicateAnalysisForPackInTransaction(
+    transaction,
+    analysis.packId,
+  );
+}
+
+async function refreshDuplicateAnalysisForPackInTransaction(
+  transaction: SqlConnection,
+  packId: string,
+): Promise<void> {
+  const rows = await transaction.all<{
+    payload_json: string;
+    item_source_type: string | null;
+  }>(
+    `SELECT record.payload_json, item.source_type AS item_source_type
+     FROM duplicate_analysis_items record
+     LEFT JOIN context_items item ON item.id = record.item_id
+     WHERE record.pack_id = ? ORDER BY record.item_id`,
+    [packId],
+  );
+  const analyses = rows.map(row => {
+    const value = decodeStoredJson(row.payload_json, isDuplicateAnalysisItemV1);
+    if (
+      !imageFingerprintMatchesSourceType(
+        row.item_source_type,
+        value.imageFingerprint !== undefined,
+      )
+    )
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    return value;
+  });
+  if (analyses.some(value => value.packId !== packId))
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  if (analyses.length === 0) {
+    await transaction.run(
+      'DELETE FROM duplicate_suggestions WHERE pack_id = ?',
+      [packId],
+    );
+    await transaction.run(
+      'DELETE FROM duplicate_analysis_manifests WHERE pack_id = ?',
+      [packId],
+    );
+    return;
+  }
+  const suggestions = buildDuplicateSuggestionsV1(analyses);
+  const analyzedAt = latestTimestamp(analyses.map(value => value.analyzedAt));
+  const manifest: DuplicateAnalysisManifestV1 = {
+    schemaVersion: 1,
+    packId,
+    config: DUPLICATE_DETECTOR_CONFIG_V1,
+    analyzedAt,
+    itemCount: analyses.length,
+    suggestionCount: suggestions.length,
+  };
+  await transaction.run(
+    `INSERT INTO duplicate_analysis_manifests
+      (pack_id, payload_json, analyzed_at) VALUES (?, ?, ?)
+     ON CONFLICT(pack_id) DO UPDATE SET
+       payload_json = excluded.payload_json,
+       analyzed_at = excluded.analyzed_at`,
+    [packId, JSON.stringify(manifest), analyzedAt],
+  );
+  await transaction.run('DELETE FROM duplicate_suggestions WHERE pack_id = ?', [
+    packId,
+  ]);
+  for (const suggestion of suggestions)
+    await transaction.run(
+      `INSERT INTO duplicate_suggestions
+        (suggestion_key, pack_id, left_item_id, right_item_id, payload_json)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        suggestion.key,
+        suggestion.packId,
+        suggestion.leftItemId,
+        suggestion.rightItemId,
+        JSON.stringify(suggestion),
+      ],
+    );
+}
+
 async function loadImportArtifactIdentities(
   transaction: SqlConnection,
   ingestionId: string,
@@ -2808,6 +3516,18 @@ function latestPipelineTimestamp(
   return values.reduce((latest, value) =>
     Date.parse(value) > Date.parse(latest) ? value : latest,
   );
+}
+
+function latestTimestamp(values: readonly string[]): string {
+  if (values.length === 0) throw new DomainError('SCHEMA_INVALID');
+  values.forEach(requireIsoDateTime);
+  return values
+    .slice(1)
+    .reduce(
+      (latest, value) =>
+        Date.parse(value) > Date.parse(latest) ? value : latest,
+      values[0]!,
+    );
 }
 
 async function cleanupLeaseOwnerMatches(
@@ -2991,6 +3711,105 @@ function decodePersisted<T>(decode: () => T): T {
   }
 }
 
+function decodeStoredJson<T>(
+  encoded: string,
+  validate: (value: unknown) => value is T,
+): T {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(encoded);
+  } catch {
+    throw new DomainError('SCHEMA_INVALID');
+  }
+  if (!validate(parsed)) throw new DomainError('SCHEMA_INVALID');
+  return parsed;
+}
+
+function validateDuplicateAnalysisReplacement(
+  input: ReplaceDuplicateAnalysisInput,
+): void {
+  if (
+    !isDuplicateAnalysisManifestV1(input.manifest) ||
+    !Array.isArray(input.analyses) ||
+    !input.analyses.every(isDuplicateAnalysisItemV1) ||
+    !Array.isArray(input.suggestions) ||
+    !input.suggestions.every(isDuplicateSuggestionV1) ||
+    input.manifest.itemCount !== input.analyses.length ||
+    input.manifest.suggestionCount !== input.suggestions.length ||
+    new Set(input.analyses.map(value => value.itemId)).size !==
+      input.analyses.length ||
+    new Set(input.suggestions.map(value => value.key)).size !==
+      input.suggestions.length
+  )
+    throw new DomainError('SCHEMA_INVALID');
+  const itemIds = new Set(input.analyses.map(value => value.itemId));
+  const expectedSuggestions = buildDuplicateSuggestionsV1(input.analyses);
+  if (
+    input.analyses.some(value => value.packId !== input.manifest.packId) ||
+    input.suggestions.some(
+      value =>
+        value.packId !== input.manifest.packId ||
+        !itemIds.has(value.leftItemId) ||
+        !itemIds.has(value.rightItemId),
+    ) ||
+    !sameDuplicateSuggestions(input.suggestions, expectedSuggestions)
+  )
+    throw new DomainError('SCHEMA_INVALID');
+  if (
+    input.analyses.length > 0 &&
+    input.manifest.analyzedAt !==
+      latestTimestamp(input.analyses.map(value => value.analyzedAt))
+  )
+    throw new DomainError('SCHEMA_INVALID');
+}
+
+function sameDuplicateSuggestions(
+  left: readonly DuplicateSuggestionV1[],
+  right: readonly DuplicateSuggestionV1[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const canonical = (value: DuplicateSuggestionV1): string =>
+    JSON.stringify([
+      value.schemaVersion,
+      value.key,
+      value.packId,
+      value.leftItemId,
+      value.rightItemId,
+      value.reason,
+      value.confidence,
+      value.expectedBytesSaved,
+      value.expectedCharactersSaved,
+    ]);
+  const rightValues = new Set(right.map(canonical));
+  return (
+    rightValues.size === right.length &&
+    left.every(value => rightValues.has(canonical(value)))
+  );
+}
+
+function isDuplicateNormalizationProcessorVersion(
+  value: Artifact['processorVersion'],
+): boolean {
+  return (
+    value.processor === 'shared-content-normalization' &&
+    value.version === 'text-normalization-v1' &&
+    value.contractVersion === 1 &&
+    value.engine === undefined &&
+    value.engineRevision === undefined
+  );
+}
+
+function imageFingerprintMatchesSourceType(
+  sourceType: unknown,
+  hasImageFingerprint: boolean,
+): boolean {
+  if (sourceType === 'image') return hasImageFingerprint;
+  return (
+    (sourceType === 'pdf' || sourceType === 'text' || sourceType === 'url') &&
+    !hasImageFingerprint
+  );
+}
+
 function sameStringSet(
   left: readonly string[],
   right: readonly string[],
@@ -3168,6 +3987,14 @@ function inclusionMode(value: string): ContextItem['inclusionMode'] {
   throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
 }
 
+function duplicateDecisionInclusionMode(
+  decision: DuplicateDecisionV1,
+): ContextItem['inclusionMode'] {
+  return decision.choice === 'exclude'
+    ? 'excluded'
+    : decision.baselineInclusionMode;
+}
+
 function riskCategory(value: string): RiskFinding['category'] {
   switch (value) {
     case 'api-key':
@@ -3228,6 +4055,7 @@ function artifactKind(value: string): PersistedArtifactRecord['kind'] {
     case 'original':
     case 'ocr-text':
     case 'pdf-page-text':
+    case 'normalized-text':
     case 'compressed-image':
     case 'redacted-image':
     case 'preview':

@@ -10,7 +10,7 @@ const source = readFileSync(
 const migrations = [...source.matchAll(/\n\s*`([\s\S]*?)`,/g)].map(
   match => match[1],
 );
-if (migrations.length !== 7)
+if (migrations.length !== 8)
   throw new Error('PERSISTENCE_MIGRATION_FIXTURE_INVALID');
 
 const temporary = mkdtempSync(join(tmpdir(), 'ai-context-pack-migrations-'));
@@ -144,6 +144,12 @@ INSERT INTO pipeline_runs (
     "SELECT status || ':' || claim_version || ':' || (claim_session_id IS NULL) || ':' || (claim_deadline_ms IS NULL) FROM pipeline_runs WHERE id = '623e4567-e89b-42d3-a456-426614174000';",
     'failed:1:1:1',
   );
+  execute(migrations[7]);
+  assertQuery('PRAGMA user_version;', '8');
+  assertQuery(
+    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('duplicate_analysis_manifests', 'duplicate_analysis_items', 'duplicate_suggestions', 'duplicate_decisions');",
+    '4',
+  );
   const binaryColumns = query(
     `SELECT COUNT(*)
      FROM sqlite_schema AS schema
@@ -156,7 +162,7 @@ INSERT INTO pipeline_runs (
     throw new Error('PERSISTENCE_BINARY_COLUMN_ASSERTION_FAILED');
   assertQuery('PRAGMA foreign_key_check;', '');
   process.stdout.write(
-    `PERSISTENCE_MIGRATIONS versions=0->1->2->3->4->5->6->7 rowsPreserved=1 materializedItems=1 pipelineRunsPreserved=1 binaryColumns=${binaryColumns} result=pass\n`,
+    `PERSISTENCE_MIGRATIONS versions=0->1->2->3->4->5->6->7->8 rowsPreserved=1 materializedItems=1 pipelineRunsPreserved=1 binaryColumns=${binaryColumns} result=pass\n`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true });
