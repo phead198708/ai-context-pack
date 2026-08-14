@@ -1,5 +1,6 @@
 import { isCanonicalUuid } from './canonicalUuid';
 import { DomainError } from './errors';
+import { compareIsoDateTimes, isIsoDateTime } from './isoDateTime';
 import {
   decodeVersionedContract,
   type ContractDecodeResult,
@@ -333,7 +334,7 @@ export function createBudgetOptimizationPlanV1(input: {
     !isCanonicalUuid(input.packId) ||
     !Number.isSafeInteger(input.packRevision) ||
     input.packRevision < 1 ||
-    !Number.isFinite(Date.parse(input.createdAt)) ||
+    !isIsoDateTime(input.createdAt) ||
     !isSupportedBudget(input.budget)
   )
     throw new DomainError('SCHEMA_INVALID');
@@ -472,8 +473,8 @@ export function completeBudgetOptimizationResultV1(input: {
   readonly items: readonly BudgetOptimizationItemResultV1[];
 }): BudgetOptimizationResultV1 {
   if (
-    !Number.isFinite(Date.parse(input.completedAt)) ||
-    Date.parse(input.completedAt) < Date.parse(input.plan.createdAt) ||
+    !isIsoDateTime(input.completedAt) ||
+    compareIsoDateTimes(input.completedAt, input.plan.createdAt) < 0 ||
     input.items.length !== input.plan.actions.length ||
     input.items.some(result => {
       const action = input.plan.actions.find(
@@ -601,8 +602,7 @@ export function isBudgetOptimizationPlanV1(
     !isCanonicalUuid(value.planId) ||
     !isCanonicalUuid(value.packId) ||
     !isPositiveSafeInteger(value.packRevision) ||
-    typeof value.createdAt !== 'string' ||
-    !Number.isFinite(Date.parse(value.createdAt)) ||
+    !isIsoDateTime(value.createdAt) ||
     !isPlanBudget(value.budget) ||
     value.preset !== value.budget.preset ||
     value.estimatorVersion !== CONTEXT_BUDGET_ESTIMATOR_VERSION ||
@@ -659,8 +659,7 @@ export function isBudgetOptimizationResultV1(
     isCanonicalUuid(value.planId) &&
     value.estimatorVersion === CONTEXT_BUDGET_ESTIMATOR_VERSION &&
     value.compressionVersion === IMAGE_COMPRESSION_PROCESSOR_VERSION &&
-    typeof value.completedAt === 'string' &&
-    Number.isFinite(Date.parse(value.completedAt)) &&
+    isIsoDateTime(value.completedAt) &&
     [
       value.predictedOutputBytes,
       value.actualOutputBytes,

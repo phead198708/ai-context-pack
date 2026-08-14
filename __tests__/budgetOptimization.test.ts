@@ -216,6 +216,41 @@ describe('versioned Pack budget estimator', () => {
     ).toThrow(new DomainError('SCHEMA_INVALID'));
   });
 
+  test('rejects completion before the plan at sub-millisecond precision', () => {
+    const item = imageItem(1, 2_000_000, 1_800, 600);
+    const plan = createBudgetOptimizationPlanV1({
+      planId: id(800),
+      packId,
+      packRevision: 1,
+      createdAt: '2026-08-14T00:00:00.000000999Z',
+      budget: BUDGET_PRESETS.compact,
+      items: [item],
+      createArtifactId: () => id(100),
+    });
+    const action = plan.actions[0]!;
+
+    expect(() =>
+      completeBudgetOptimizationResultV1({
+        plan,
+        completedAt: '2026-08-14T00:00:00.000000001Z',
+        items: [
+          {
+            itemId: action.itemId,
+            action: action.kind === 'compress' ? 'compressed' : 'keep',
+            predictedOutputBytes: action.predictedOutputBytes,
+            actualOutputBytes: action.predictedOutputBytes,
+            actualSavingsBytes:
+              action.sourceByteCount - action.predictedOutputBytes,
+            deviationBytes: 0,
+            ...(action.kind === 'compress'
+              ? { artifactId: action.outputArtifactId }
+              : {}),
+          },
+        ],
+      }),
+    ).toThrow(new DomainError('SCHEMA_INVALID'));
+  });
+
   test('rejects invalid custom bounds and malformed native payloads', () => {
     expect(() => budgetForPreset('custom', 1_000)).toThrow(
       new DomainError('SCHEMA_INVALID'),

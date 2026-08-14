@@ -196,6 +196,14 @@ function fixture(
         created: true,
       }),
     ),
+    verifyArtifact: jest.fn(
+      async (relativePath: string, byteCount: number, sha256: string) => ({
+        relativePath,
+        status: 'verified' as const,
+        byteCount,
+        sha256,
+      }),
+    ),
   } as unknown as jest.Mocked<NativeAdapter>;
   const ids = includeSecondImage
     ? [taskId, secondTaskId, planId, derivativeId, secondDerivativeId]
@@ -206,7 +214,17 @@ function fixture(
     now,
     () => ids.shift()!,
   );
-  return { service, native, repository, saves, registered, graph };
+  return {
+    service,
+    native,
+    repository,
+    saves,
+    registered,
+    graph,
+    advanceRevision: () => {
+      currentRevision += 1;
+    },
+  };
 }
 
 test('previews metrics before encoding and publishes an immutable derivative', async () => {
@@ -294,6 +312,59 @@ test('replays stable immutable metadata after a final Pack save failure', async 
   expect(replayed).toHaveLength(1);
   expect(replayed[0]?.artifact.createdAt).toBe(plan.createdAt);
   expect(native.compressImage).toHaveBeenCalledTimes(1);
+  expect(native.verifyArtifact).toHaveBeenCalledWith(
+    expect.stringContaining(derivativeId),
+    500_000,
+    'b'.repeat(64),
+  );
+});
+
+test('fails closed when a registered checkpoint file is missing on recovery', async () => {
+  const { service, native, repository, graph } = fixture();
+  const plan = await service.preview(packId, BUDGET_PRESETS.compact);
+  const save = repository.savePackGraph as jest.Mock;
+  const commit = save.getMockImplementation()!;
+  save
+    .mockImplementationOnce(commit)
+    .mockRejectedValueOnce(new Error('synthetic Pack save'));
+
+  await expect(service.apply(plan)).rejects.toThrow('synthetic Pack save');
+  native.verifyArtifact.mockResolvedValueOnce({
+    relativePath: `Packs/${packId}/derived/${derivativeId}.jpg`,
+    status: 'missing',
+  });
+  const restarted = new PackBudgetOptimizationService(
+    async () => repository,
+    native,
+  );
+
+  await expect(
+    restarted.apply(graph().pack.budget.pendingOptimization!),
+  ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+  expect(native.compressImage).toHaveBeenCalledTimes(1);
+});
+
+test('rejects a pending plan after any later Pack revision', async () => {
+  const { service, native, repository, graph, advanceRevision } = fixture();
+  const plan = await service.preview(packId, BUDGET_PRESETS.compact);
+  native.resolveOwnedArtifactFileUri.mockRejectedValueOnce(
+    new Error('synthetic URI failure'),
+  );
+  await expect(service.apply(plan)).rejects.toThrow('synthetic URI failure');
+  const recoveredPlan = graph().pack.budget.pendingOptimization!;
+  advanceRevision();
+  const restarted = new PackBudgetOptimizationService(
+    async () => repository,
+    native,
+  );
+
+  await expect(
+    restarted.preview(packId, BUDGET_PRESETS.compact),
+  ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+  await expect(restarted.apply(recoveredPlan)).rejects.toMatchObject({
+    code: 'PERSISTENCE_CONFLICT',
+  });
+  expect(native.compressImage).not.toHaveBeenCalled();
 });
 
 test('replays a stable first derivative after the second publication fails', async () => {
@@ -669,11 +740,11 @@ test('checkpoints a published derivative when cancellation wins before Pack comm
 
 test('floors completion and Pack timestamps against the persisted plan', async () => {
   const times = [
-    '2026-08-14T00:10:00Z',
-    '2026-08-14T00:05:00Z',
-    '2026-08-14T00:04:00Z',
-    '2026-08-14T00:03:00Z',
-    '2026-08-14T00:02:00Z',
+    '2026-08-14T00:10:00.000000999Z',
+    '2026-08-14T00:10:00.000000001Z',
+    '2026-08-14T00:10:00.000000002Z',
+    '2026-08-14T00:10:00.000000003Z',
+    '2026-08-14T00:10:00.000000004Z',
   ];
   const { service, saves } = fixture(() => times.shift()!);
   const plan = await service.preview(packId, BUDGET_PRESETS.compact);

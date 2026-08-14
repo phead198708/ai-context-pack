@@ -1,4 +1,5 @@
 import { DomainError } from '../../domain/errors';
+import { latestIsoDateTime } from '../../domain/isoDateTime';
 import type { ContextItem, ContextPack } from '../../domain/models';
 import type { Budget } from '../../domain/models';
 import type {
@@ -511,12 +512,7 @@ export class PackLibraryController {
   }
 
   private timestamp(pack: ContextPack): string {
-    const value = this.now();
-    if (!Number.isFinite(Date.parse(value)))
-      throw new DomainError('SCHEMA_INVALID');
-    return [value, pack.createdAt, pack.updatedAt].reduce((latest, candidate) =>
-      Date.parse(candidate) > Date.parse(latest) ? candidate : latest,
-    );
+    return latestIsoDateTime([this.now(), pack.createdAt, pack.updatedAt]);
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {

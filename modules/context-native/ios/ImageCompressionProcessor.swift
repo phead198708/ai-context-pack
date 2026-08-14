@@ -323,7 +323,9 @@ enum ImageCompressionProcessor {
 
 enum ImageCompressionTemporaryStore {
   private static let lock = NSLock()
+  private static let maintenanceLock = NSLock()
   private static var outputs: [String: URL] = [:]
+  private static var startupFailureCode: String?
   private static let directoryName = "ImageCompression"
   private static let sessionPrefix = UUID().uuidString.lowercased() + "-"
 
@@ -331,6 +333,8 @@ enum ImageCompressionTemporaryStore {
     fileManager: FileManager = .default,
     remover: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
   ) throws {
+    maintenanceLock.lock()
+    defer { maintenanceLock.unlock() }
     for attempt in 0..<2 {
       do {
         let root = try directory(fileManager: fileManager)
@@ -346,11 +350,34 @@ enum ImageCompressionTemporaryStore {
             throw error
           }
         }
+        startupFailureCode = nil
         return
       } catch {
-        if attempt == 1 { throw ImagePerceptualHashError.cleanupFailure }
+        if attempt == 1 {
+          startupFailureCode = ImagePerceptualHashError.cleanupFailure.stableCode
+          throw ImagePerceptualHashError.cleanupFailure
+        }
       }
     }
+  }
+
+  @discardableResult
+  static func runStartupMaintenance(
+    fileManager: FileManager = .default,
+    remover: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+  ) -> String? {
+    do {
+      try startupMaintenance(fileManager: fileManager, remover: remover)
+      return nil
+    } catch {
+      return ImagePerceptualHashError.cleanupFailure.stableCode
+    }
+  }
+
+  static func currentStartupFailureCode() -> String? {
+    maintenanceLock.lock()
+    defer { maintenanceLock.unlock() }
+    return startupFailureCode
   }
 
   static func prepare(taskId: String) throws -> (partial: URL, complete: URL) {

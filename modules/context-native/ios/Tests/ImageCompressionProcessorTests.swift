@@ -135,7 +135,7 @@ final class ImageCompressionProcessorTests: XCTestCase {
     )
     try Data([3]).write(to: inherited)
 
-    try ImageCompressionTemporaryStore.startupMaintenance()
+    XCTAssertNil(ImageCompressionTemporaryStore.runStartupMaintenance())
 
     XCTAssertTrue(FileManager.default.fileExists(atPath: paths.partial.path))
     XCTAssertTrue(FileManager.default.fileExists(atPath: paths.complete.path))
@@ -169,6 +169,26 @@ final class ImageCompressionProcessorTests: XCTestCase {
     }
     XCTAssertEqual(attempts, 2)
     XCTAssertTrue(FileManager.default.fileExists(atPath: inherited.path))
+
+    attempts = 0
+    XCTAssertEqual(
+      ImageCompressionTemporaryStore.runStartupMaintenance(remover: { candidate in
+        if candidate.lastPathComponent == inherited.lastPathComponent {
+          attempts += 1
+          throw CocoaError(.fileWriteNoPermission)
+        }
+        try FileManager.default.removeItem(at: candidate)
+      }),
+      "PIPELINE_RECOVERY_REQUIRED"
+    )
+    XCTAssertEqual(attempts, 2)
+    XCTAssertEqual(
+      ImageCompressionTemporaryStore.currentStartupFailureCode(),
+      "PIPELINE_RECOVERY_REQUIRED"
+    )
+    try FileManager.default.removeItem(at: inherited)
+    XCTAssertNil(ImageCompressionTemporaryStore.runStartupMaintenance())
+    XCTAssertNil(ImageCompressionTemporaryStore.currentStartupFailureCode())
   }
 
   func testRotatedTextFixtureRemainsSystemReadableAfterCompactCompression() throws {

@@ -8,6 +8,7 @@ import {
 } from '../../domain/budgetOptimization';
 import { createCanonicalUuid } from '../../domain/canonicalUuid';
 import { DomainError } from '../../domain/errors';
+import { latestIsoDateTime } from '../../domain/isoDateTime';
 import type { Artifact, Budget } from '../../domain/models';
 import type { NativeAdapter } from '../../domain/nativeAdapter';
 import {
@@ -40,8 +41,14 @@ export class PackBudgetOptimizationService {
     const repository = await this.getRepository();
     const graph = await repository.findPackGraph(packId);
     if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
-    if (graph.pack.budget.pendingOptimization)
+    if (graph.pack.budget.pendingOptimization) {
+      assertRecoverableCheckpoint(
+        graph.pack.id,
+        graph.revision,
+        graph.pack.budget.pendingOptimization,
+      );
       return graph.pack.budget.pendingOptimization;
+    }
     const [artifacts, duplicateAnalysis] = await Promise.all([
       repository.listArtifactRecords(),
       repository.findDuplicateAnalysis(packId),
@@ -152,6 +159,8 @@ export class PackBudgetOptimizationService {
     const pending = graph.pack.budget.pendingOptimization;
     if (pending && !samePlan(pending, plan))
       throw new DomainError('PERSISTENCE_CONFLICT');
+    if (pending)
+      assertRecoverableCheckpoint(graph.pack.id, graph.revision, pending);
     if (!pending) {
       if (graph.revision !== plan.packRevision)
         throw new DomainError('PERSISTENCE_CONFLICT');
@@ -169,6 +178,7 @@ export class PackBudgetOptimizationService {
         items: graph.items,
         expectedRevision: graph.revision,
       });
+      assertRecoverableCheckpoint(checkpointPack.id, revision, plan);
       graph = { pack: checkpointPack, items: graph.items, revision };
     }
     const effectivePlan = graph.pack.budget.pendingOptimization;
@@ -226,6 +236,8 @@ export class PackBudgetOptimizationService {
           artifact => artifact.id === action.outputArtifactId,
         );
         if (checkpoint) {
+          await verifyCheckpointArtifact(this.native, checkpoint);
+          throwIfAborted(options.signal);
           results.push(
             resultFromCheckpoint(effectivePlan, action, original, checkpoint),
           );
@@ -368,13 +380,7 @@ export class PackBudgetOptimizationService {
 }
 
 function monotonicTimestamp(value: string, floors: readonly string[]): string {
-  if (!Number.isFinite(Date.parse(value)))
-    throw new DomainError('SCHEMA_INVALID');
-  return floors.reduce(
-    (latest, floor) =>
-      Date.parse(floor) > Date.parse(latest) ? floor : latest,
-    value,
-  );
+  return latestIsoDateTime([value, ...floors]);
 }
 
 function validTimestamp(value: string, floor: string): string {
@@ -390,6 +396,38 @@ function samePlan(
   right: BudgetOptimizationPlanV1,
 ): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function assertRecoverableCheckpoint(
+  packId: string,
+  revision: number,
+  plan: BudgetOptimizationPlanV1,
+): void {
+  if (plan.packId !== packId)
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+  if (
+    plan.packRevision >= Number.MAX_SAFE_INTEGER ||
+    revision !== plan.packRevision + 1
+  )
+    throw new DomainError('PERSISTENCE_CONFLICT');
+}
+
+async function verifyCheckpointArtifact(
+  native: NativeAdapter,
+  artifact: PersistedArtifactRecord,
+): Promise<void> {
+  const verification = await native.verifyArtifact(
+    artifact.relativePath,
+    artifact.byteCount,
+    artifact.sha256,
+  );
+  if (
+    verification.status !== 'verified' ||
+    verification.relativePath !== artifact.relativePath ||
+    verification.byteCount !== artifact.byteCount ||
+    verification.sha256 !== artifact.sha256
+  )
+    throw new DomainError('ARTIFACT_INTEGRITY_FAILED');
 }
 
 function resultFromCheckpoint(

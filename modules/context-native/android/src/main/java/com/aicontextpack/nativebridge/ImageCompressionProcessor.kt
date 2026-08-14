@@ -398,9 +398,11 @@ internal object ImageCompressionTemporaryStore {
   private const val directoryName = "ImageCompression"
   private val sessionPrefix = "${UUID.randomUUID()}-"
   private val outputs = mutableMapOf<String, File>()
+  @Volatile private var startupFailureCode: String? = null
 
   data class Paths(val partial: File, val complete: File)
 
+  @Synchronized
   fun startupMaintenance(
     context: Context,
     remover: (File) -> Boolean = { it.delete() },
@@ -419,12 +421,29 @@ internal object ImageCompressionTemporaryStore {
             existsNoFollow(candidate)
           ) throw NativeException("PIPELINE_RECOVERY_REQUIRED")
         }
+        startupFailureCode = null
         return
       } catch (_: Exception) {
-        if (attempt == 1) throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        if (attempt == 1) {
+          startupFailureCode = "PIPELINE_RECOVERY_REQUIRED"
+          throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        }
       }
     }
   }
+
+  fun runStartupMaintenance(
+    context: Context,
+    remover: (File) -> Boolean = { it.delete() },
+  ): String? =
+    try {
+      startupMaintenance(context, remover)
+      null
+    } catch (_: NativeException) {
+      "PIPELINE_RECOVERY_REQUIRED"
+    }
+
+  fun currentStartupFailureCode(): String? = startupFailureCode
 
   fun prepare(context: Context, taskId: String): Paths {
     if (runCatching { UUID.fromString(taskId).toString() == taskId }.getOrDefault(false).not()) {

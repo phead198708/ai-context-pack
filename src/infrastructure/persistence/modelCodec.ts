@@ -5,6 +5,10 @@ import {
   isPackBudgetEstimateV1,
 } from '../../domain/budgetOptimization';
 import { DOMAIN_ERROR_CATALOG, DomainError } from '../../domain/errors';
+import {
+  compareIsoDateTimes,
+  isIsoDateTime as isCanonicalIsoDateTime,
+} from '../../domain/isoDateTime';
 import type {
   Artifact,
   Budget,
@@ -18,7 +22,6 @@ import type {
 import { isOwnedArtifactPath } from './ownedPaths';
 import type { SavePackGraphInput } from './contracts';
 
-const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const MEDIA_TYPE =
   /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/;
 const MAX_MEDIA_TYPE_LENGTH = 127;
@@ -128,7 +131,7 @@ export function assertPackGraph(input: SavePackGraphInput): void {
       run.packId !== input.pack.id ||
       !itemIds.has(run.itemId) ||
       !PIPELINE_STAGES.has(run.stage) ||
-      !ISO_DATE_TIME.test(run.startedAt) ||
+      !isIsoDateTime(run.startedAt) ||
       runIds.has(run.id)
     )
       invalid();
@@ -153,9 +156,11 @@ export function assertContextPack(pack: ContextPack): void {
     typeof pack.userInstruction !== 'string' ||
     !isIsoDateTime(pack.createdAt) ||
     !isIsoDateTime(pack.updatedAt) ||
-    Date.parse(pack.updatedAt) < Date.parse(pack.createdAt) ||
+    compareIsoDateTimes(pack.updatedAt, pack.createdAt) < 0 ||
     !PACK_STATES.has(pack.state) ||
     !isBudget(pack.budget) ||
+    (pack.budget.pendingOptimization !== undefined &&
+      pack.budget.pendingOptimization.packId !== pack.id) ||
     !Number.isSafeInteger(pack.estimatedTokens) ||
     pack.estimatedTokens < 0 ||
     !isUniqueCanonicalIdArray(pack.orderedItemIds) ||
@@ -293,11 +298,7 @@ export function decodeStringArray(value: string): readonly string[] {
 }
 
 export function isIsoDateTime(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    ISO_DATE_TIME.test(value) &&
-    Number.isFinite(Date.parse(value))
-  );
+  return isCanonicalIsoDateTime(value);
 }
 
 function isBudget(value: unknown): value is Budget {

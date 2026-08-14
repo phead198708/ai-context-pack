@@ -11,6 +11,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.google.android.gms.tasks.Tasks
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -110,7 +111,7 @@ class ImageCompressionProcessorInstrumentedTest {
     val inherited = File(paths.partial.parentFile, "inherited-${UUID.randomUUID()}.tmp")
     inherited.writeBytes(byteArrayOf(3))
 
-    ImageCompressionTemporaryStore.startupMaintenance(context)
+    assertNull(ImageCompressionTemporaryStore.runStartupMaintenance(context))
 
     assertTrue(paths.partial.exists())
     assertTrue(paths.complete.exists())
@@ -141,7 +142,27 @@ class ImageCompressionProcessorInstrumentedTest {
     assertEquals("PIPELINE_RECOVERY_REQUIRED", error.code)
     assertEquals(2, attempts)
     assertTrue(inherited.exists())
+
+    attempts = 0
+    assertEquals(
+      "PIPELINE_RECOVERY_REQUIRED",
+      ImageCompressionTemporaryStore.runStartupMaintenance(context) { candidate ->
+        if (candidate.name == inherited.name) {
+          attempts += 1
+          false
+        } else {
+          candidate.delete()
+        }
+      },
+    )
+    assertEquals(2, attempts)
+    assertEquals(
+      "PIPELINE_RECOVERY_REQUIRED",
+      ImageCompressionTemporaryStore.currentStartupFailureCode(),
+    )
     assertTrue(inherited.delete())
+    assertNull(ImageCompressionTemporaryStore.runStartupMaintenance(context))
+    assertNull(ImageCompressionTemporaryStore.currentStartupFailureCode())
   }
 
   @Test
