@@ -520,11 +520,16 @@ export class PackLibraryController {
       const graph = await repository.findPackGraph(packId);
       if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
       const changed = change(graph);
+      const contentProjectionChanged = packContentProjectionChanged(
+        graph.items,
+        changed.items,
+      );
       await repository.savePackGraph({
         pack: updatedPack(
           changed.pack,
           changed.items,
           this.timestamp(changed.pack),
+          contentProjectionChanged,
         ),
         items: changed.items,
         expectedRevision: graph.revision,
@@ -551,9 +556,14 @@ function updatedPack(
   pack: ContextPack,
   items: readonly ContextItem[],
   updatedAt: string,
+  invalidateCompletedOptimization = false,
 ): ContextPack {
   const budget = { ...pack.budget };
   delete budget.pendingOptimization;
+  if (invalidateCompletedOptimization) {
+    delete budget.latestEstimate;
+    delete budget.latestOptimization;
+  }
   const retainedItemIds = new Set(items.map(item => item.id));
   const exclusions = budget.exclusions?.filter(exclusion =>
     retainedItemIds.has(exclusion.itemId),
@@ -566,6 +576,25 @@ function updatedPack(
     budget,
     orderedItemIds: items.map(item => item.id),
   };
+}
+
+function packContentProjectionChanged(
+  current: readonly ContextItem[],
+  next: readonly ContextItem[],
+): boolean {
+  return (
+    current.length !== next.length ||
+    current.some((item, index) => {
+      const candidate = next[index];
+      return (
+        candidate === undefined ||
+        candidate.id !== item.id ||
+        candidate.sortIndex !== item.sortIndex ||
+        candidate.inclusionMode !== item.inclusionMode ||
+        !sameStringSet(candidate.artifactIds, item.artifactIds)
+      );
+    })
+  );
 }
 
 function packStateForRetry(state: ContextPack['state']): ContextPack['state'] {

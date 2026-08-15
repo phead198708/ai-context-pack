@@ -11,6 +11,7 @@ private enum AppleVisionOCRProcessScope {
   static let imageHashScheduler = ImageHashScheduler()
   static let pdfFinishCoordinator = PDFProcessorFinishCoordinator()
   static let plainTextReadCoordinator = PlainTextReadCoordinator()
+  static let imageCompressionStartup = ImageCompressionStartupMaintenanceBarrier()
 }
 
 public final class ContextNativeModule: Module {
@@ -44,8 +45,7 @@ public final class ContextNativeModule: Module {
       let recoveryContainer = FileManager.default.containerURL(
         forSecurityApplicationGroupIdentifier: appGroupIdentifier
       )
-      DispatchQueue.global(qos: .utility).async {
-        ImageHashSnapshotStore.runStartupMaintenance()
+      AppleVisionOCRProcessScope.imageCompressionStartup.start {
         let failureCode = ImageCompressionTemporaryStore.runStartupMaintenance()
         if let recoveryContainer {
           try? ImageCompressionStartupRecoveryReporter.reconcile(
@@ -56,6 +56,7 @@ public final class ContextNativeModule: Module {
       }
       guard let container = recoveryContainer else { return }
       DispatchQueue.global(qos: .utility).async {
+        ImageHashSnapshotStore.runStartupMaintenance()
         InboxArtifactHandoff.runStartupMaintenance(container: container)
       }
     }
@@ -120,6 +121,7 @@ public final class ContextNativeModule: Module {
         throw NativeError("APP_GROUP_UNAVAILABLE")
       }
       do {
+        AppleVisionOCRProcessScope.imageCompressionStartup.waitUntilFinished()
         try ImageCompressionStartupRecoveryReporter.retryPendingPublication(
           container: container
         )
@@ -145,6 +147,7 @@ public final class ContextNativeModule: Module {
         forSecurityApplicationGroupIdentifier: appGroupIdentifier
       ) else { throw NativeError("APP_GROUP_UNAVAILABLE") }
       do {
+        AppleVisionOCRProcessScope.imageCompressionStartup.waitUntilFinished()
         try ImageCompressionStartupRecoveryReporter.retryPendingPublication(
           container: container
         )

@@ -253,7 +253,43 @@ test('reorder invalidates packaged rows and restarts downstream packaging', asyn
 });
 
 test('preserves originals by default and requires explicit release for destructive removal', async () => {
-  const repo = repository();
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      budget: {
+        ...base.pack.budget,
+        latestEstimate: {
+          schemaVersion: 1,
+          estimatorVersion: 'context-budget-estimator-v1',
+          isEstimate: true,
+          sourceBytes: 20,
+          predictedOutputBytes: 12,
+          imageCount: 2,
+          pdfPageCount: 0,
+          textCharacterCount: 0,
+          estimatedTokens: 0,
+        },
+        latestOptimization: {
+          schemaVersion: 1,
+          planId: '523e4567-e89b-42d3-a456-426614174000',
+          estimatorVersion: 'context-budget-estimator-v1',
+          compressionVersion: 'image-compression-v1',
+          completedAt: '2026-08-10T00:00:01Z',
+          predictedOutputBytes: 12,
+          actualOutputBytes: 12,
+          predictedSavingsBytes: 8,
+          actualSavingsBytes: 8,
+          deviationBytes: 0,
+          withinBudget: true,
+          excludedItemIds: [],
+          items: [],
+        },
+      },
+    },
+  };
+  const repo = repository(graph);
   const controller = new PackLibraryController(async () => repo.value);
 
   await controller.removeItem(packId, firstId, 'preserve');
@@ -266,6 +302,8 @@ test('preserves originals by default and requires explicit release for destructi
     removedItemOriginalDisposition: 'release',
   });
   expect(repo.saves[0]?.items.map(item => item.id)).toEqual([secondId]);
+  expect(repo.saves[0]?.pack.budget.latestEstimate).toBeUndefined();
+  expect(repo.saves[0]?.pack.budget.latestOptimization).toBeUndefined();
 });
 
 test.each(['ready', 'exporting', 'exported'] as const)(

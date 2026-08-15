@@ -321,6 +321,37 @@ enum ImageCompressionProcessor {
   }
 }
 
+final class ImageCompressionStartupMaintenanceBarrier: @unchecked Sendable {
+  private let lock = NSLock()
+  private let completion = DispatchGroup()
+  private var started = false
+
+  func start(
+    queue: DispatchQueue = DispatchQueue.global(qos: .utility),
+    operation: @escaping @Sendable () -> Void
+  ) {
+    lock.lock()
+    guard !started else {
+      lock.unlock()
+      return
+    }
+    started = true
+    completion.enter()
+    lock.unlock()
+    queue.async { [completion] in
+      defer { completion.leave() }
+      operation()
+    }
+  }
+
+  func waitUntilFinished() {
+    lock.lock()
+    let shouldWait = started
+    lock.unlock()
+    if shouldWait { completion.wait() }
+  }
+}
+
 enum ImageCompressionStartupRecoveryReporter {
   static let eventId = "00000000-0000-4000-8000-000000000014"
   private static let operationLock = NSRecursiveLock()

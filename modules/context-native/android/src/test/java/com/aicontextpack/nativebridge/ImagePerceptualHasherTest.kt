@@ -637,6 +637,28 @@ class ImagePerceptualHasherTest {
     }
   }
 
+  @Test
+  fun firstRecoveryReadWaitsForStartupCleanupPublication() {
+    val barrier = ImageCompressionStartupMaintenanceBarrier()
+    val maintenanceStarted = java.util.concurrent.CountDownLatch(1)
+    val releaseMaintenance = java.util.concurrent.CountDownLatch(1)
+    val readFinished = java.util.concurrent.CountDownLatch(1)
+
+    barrier.start {
+      maintenanceStarted.countDown()
+      releaseMaintenance.await()
+    }
+    assertTrue(maintenanceStarted.await(1, java.util.concurrent.TimeUnit.SECONDS))
+    Thread {
+      barrier.awaitCompletion()
+      readFinished.countDown()
+    }.start()
+    assertFalse(readFinished.await(50, java.util.concurrent.TimeUnit.MILLISECONDS))
+
+    releaseMaintenance.countDown()
+    assertTrue(readFinished.await(1, java.util.concurrent.TimeUnit.SECONDS))
+  }
+
 
   private fun animationFixtures(): Map<String, ByteArray> {
     val lines = checkNotNull(

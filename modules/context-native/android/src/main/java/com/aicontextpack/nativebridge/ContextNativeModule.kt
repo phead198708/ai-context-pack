@@ -74,6 +74,7 @@ internal object AndroidImageHashProcessScope {
 
 internal object AndroidImageCompressionProcessScope {
   val registry = ImageHashTaskRegistry()
+  val startupMaintenance = ImageCompressionStartupMaintenanceBarrier()
   val executor = ThreadPoolExecutor(
     1,
     1,
@@ -351,17 +352,11 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       appContext.reactContext?.let { context ->
         context.registerComponentCallbacks(this@ContextNativeModule)
         callbackContext = context
+        startImageCompressionStartupMaintenance(context)
         Thread(
           {
             InboxArtifactHandoff.runStartupMaintenance(context.filesDir)
             ImageHashSnapshotStore.runStartupMaintenance(context)
-            val compressionFailure = ImageCompressionTemporaryStore.runStartupMaintenance(context)
-            runCatching {
-              ImageCompressionStartupRecoveryReporter.reconcile(
-                context.filesDir,
-                compressionFailure,
-              )
-            }
           },
           "ai-context-pack-tombstone-sweep",
         ).start()
@@ -415,6 +410,8 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
     AsyncFunction("getPendingRecoveryEvent") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       try {
+        startImageCompressionStartupMaintenance(context)
+        AndroidImageCompressionProcessScope.startupMaintenance.awaitCompletion()
         ImageCompressionStartupRecoveryReporter.retryPendingPublication(context.filesDir)
         MetadataEventStore.read(context.filesDir, "RecoveryEvents").firstOrNull()
       }
@@ -431,6 +428,8 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       if (id != ImageCompressionStartupRecoveryReporter.eventId) return@AsyncFunction false
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       try {
+        startImageCompressionStartupMaintenance(context)
+        AndroidImageCompressionProcessScope.startupMaintenance.awaitCompletion()
         ImageCompressionStartupRecoveryReporter.retryPendingPublication(context.filesDir)
         val failureCode = ImageCompressionTemporaryStore.runStartupMaintenance(context)
         ImageCompressionStartupRecoveryReporter.reconcile(context.filesDir, failureCode)
@@ -1192,6 +1191,18 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
 
   override fun onLowMemory() {
     ocrProcessor.setMemoryPressure(true)
+  }
+
+  private fun startImageCompressionStartupMaintenance(context: Context) {
+    AndroidImageCompressionProcessScope.startupMaintenance.start {
+      val compressionFailure = ImageCompressionTemporaryStore.runStartupMaintenance(context)
+      runCatching {
+        ImageCompressionStartupRecoveryReporter.reconcile(
+          context.filesDir,
+          compressionFailure,
+        )
+      }
+    }
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) = Unit

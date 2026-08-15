@@ -256,6 +256,45 @@ final class ImageCompressionProcessorTests: XCTestCase {
     )
   }
 
+  func testFirstRecoveryReadWaitsForStartupCleanupPublication() throws {
+    let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "compression-startup-barrier-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    defer { try? FileManager.default.removeItem(at: container) }
+    let barrier = ImageCompressionStartupMaintenanceBarrier()
+    let maintenanceStarted = DispatchSemaphore(value: 0)
+    let releaseMaintenance = DispatchSemaphore(value: 0)
+    let readFinished = DispatchSemaphore(value: 0)
+
+    barrier.start {
+      maintenanceStarted.signal()
+      releaseMaintenance.wait()
+      try? ImageCompressionStartupRecoveryReporter.reconcile(
+        container: container,
+        failureCode: "PIPELINE_RECOVERY_REQUIRED"
+      )
+    }
+    XCTAssertEqual(maintenanceStarted.wait(timeout: .now() + 1), .success)
+    DispatchQueue.global(qos: .userInitiated).async {
+      barrier.waitUntilFinished()
+      readFinished.signal()
+    }
+    XCTAssertEqual(readFinished.wait(timeout: .now() + 0.05), .timedOut)
+
+    releaseMaintenance.signal()
+    XCTAssertEqual(readFinished.wait(timeout: .now() + 1), .success)
+    XCTAssertEqual(
+      try RecoveryMetadataEventStore.read(container: container, folder: "RecoveryEvents")
+        .map { $0["code"] as? String },
+      ["PIPELINE_RECOVERY_REQUIRED"]
+    )
+    try ImageCompressionStartupRecoveryReporter.reconcile(
+      container: container,
+      failureCode: nil
+    )
+  }
+
   func testRotatedTextFixtureRemainsSystemReadableAfterCompactCompression() throws {
     let source = fixtureURL("ocr-rotated.jpg")
     let sourceMetadata = try metadata(source)

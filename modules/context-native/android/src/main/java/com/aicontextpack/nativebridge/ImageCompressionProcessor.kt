@@ -16,6 +16,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 
 internal object ImageCompressionProcessor {
   const val revision = "1"
@@ -392,6 +393,37 @@ internal object ImageCompressionProcessor {
   private fun isCanonicalTaskId(value: String): Boolean =
     value == value.lowercase() && runCatching { UUID.fromString(value).toString() == value }
       .getOrDefault(false)
+}
+
+internal class ImageCompressionStartupMaintenanceBarrier {
+  @Volatile private var completion: CountDownLatch? = null
+
+  fun start(operation: () -> Unit) {
+    val latch = synchronized(this) {
+      if (completion != null) null
+      else CountDownLatch(1).also { completion = it }
+    } ?: return
+    Thread(
+      {
+        try {
+          operation()
+        } finally {
+          latch.countDown()
+        }
+      },
+      "ai-context-pack-compression-startup",
+    ).apply { isDaemon = true }.start()
+  }
+
+  fun awaitCompletion() {
+    val latch = completion ?: return
+    try {
+      latch.await()
+    } catch (_: InterruptedException) {
+      Thread.currentThread().interrupt()
+      throw NativeException("NATIVE_EVENT_STORE_READ_FAILED")
+    }
+  }
 }
 
 internal object ImageCompressionStartupRecoveryReporter {
