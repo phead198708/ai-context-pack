@@ -459,6 +459,20 @@ export class PackLibraryController {
     });
   }
 
+  restoreBudgetExclusion(packId: string, itemId: string): Promise<void> {
+    return this.enqueue(async () => {
+      const repository = await this.getRepository();
+      const graph = await repository.findPackGraph(packId);
+      if (!graph || !graph.items.some(candidate => candidate.id === itemId))
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      await repository.restoreBudgetExclusion(
+        packId,
+        itemId,
+        this.timestamp(graph.pack),
+      );
+    });
+  }
+
   cancelProcessing(packId: string): Promise<void> {
     return this.enqueue(async () => {
       const repository = await this.getRepository();
@@ -532,6 +546,12 @@ function updatedPack(
 ): ContextPack {
   const budget = { ...pack.budget };
   delete budget.pendingOptimization;
+  const retainedItemIds = new Set(items.map(item => item.id));
+  const exclusions = budget.exclusions?.filter(exclusion =>
+    retainedItemIds.has(exclusion.itemId),
+  );
+  if (exclusions && exclusions.length > 0) budget.exclusions = exclusions;
+  else delete budget.exclusions;
   return {
     ...pack,
     updatedAt,

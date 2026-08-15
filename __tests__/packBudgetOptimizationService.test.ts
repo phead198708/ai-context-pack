@@ -418,6 +418,9 @@ test('previews and durably applies explicit item exclusions without encoding', a
 
   expect(plan).toMatchObject({
     excludedItemIds: [itemId],
+    budget: {
+      exclusions: [{ itemId, baselineInclusionMode: 'both' }],
+    },
     actions: [],
     estimate: {
       sourceBytes: original.byteCount,
@@ -431,6 +434,9 @@ test('previews and durably applies explicit item exclusions without encoding', a
   expect(result.actualSavingsBytes).toBe(original.byteCount);
   expect(native.compressImage).not.toHaveBeenCalled();
   expect(saves.at(-1)?.items[0]?.inclusionMode).toBe('excluded');
+  expect(saves.at(-1)?.pack.budget.exclusions).toEqual([
+    { itemId, baselineInclusionMode: 'both' },
+  ]);
 });
 
 const nonImageRepresentationCases = (['pdf', 'text', 'url'] as const).flatMap(

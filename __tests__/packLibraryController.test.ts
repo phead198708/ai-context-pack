@@ -104,6 +104,7 @@ function repository(graph = fixture()) {
     }),
     saveDuplicateDecisions: jest.fn().mockResolvedValue(undefined),
     restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
+    restoreBudgetExclusion: jest.fn().mockResolvedValue(undefined),
     savePackGraph: jest.fn(async (input: SavePackGraphInput) => {
       saves.push(input);
       return graph.revision + 1;
@@ -179,6 +180,7 @@ test('atomically invalidates a pending optimization during a later Pack mutation
     createdAt: base.pack.updatedAt,
     budget: BUDGET_PRESETS.compact,
     items: [],
+    exclusions: [],
     createArtifactId: () => '623e4567-e89b-42d3-a456-426614174000',
   });
   const graph: PersistedPackGraph = {
@@ -194,6 +196,42 @@ test('atomically invalidates a pending optimization during a later Pack mutation
   await controller.renamePack(packId, 'Replacement plan enabled');
 
   expect(repo.saves[0]?.pack.budget.pendingOptimization).toBeUndefined();
+});
+
+test('routes durable budget exclusion restoration through the atomic repository path', async () => {
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      estimatedTokens: 99,
+      budget: {
+        ...base.pack.budget,
+        exclusions: [
+          { itemId: firstId, baselineInclusionMode: 'original' },
+          { itemId: secondId, baselineInclusionMode: 'original' },
+        ],
+      },
+    },
+    items: base.items.map(item => ({
+      ...item,
+      inclusionMode: 'excluded' as const,
+    })),
+  };
+  const repo = repository(graph);
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:01Z',
+  );
+
+  await controller.restoreBudgetExclusion(packId, firstId);
+
+  expect(repo.value.restoreBudgetExclusion).toHaveBeenCalledWith(
+    packId,
+    firstId,
+    '2026-08-10T00:00:01Z',
+  );
+  expect(repo.saves).toHaveLength(0);
 });
 
 test('reorder invalidates packaged rows and restarts downstream packaging', async () => {
@@ -438,6 +476,7 @@ test('cancels budget optimization outside the controller mutation queue', async 
     createdAt: '2026-08-10T00:00:01Z',
     budget: BUDGET_PRESETS.balanced,
     items: [],
+    exclusions: [],
     createArtifactId: () => firstId,
   });
   let observedSignal: AbortSignal | undefined;

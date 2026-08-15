@@ -19,6 +19,7 @@ import { t, type AppLocale } from '../../ui/i18n';
 import { colors, spacing, typography } from '../../ui/tokens';
 import {
   budgetForPreset,
+  type BudgetRecommendationV1,
   type BudgetOptimizationPlanV1,
   type BudgetOptimizationResultV1,
 } from '../../domain/budgetOptimization';
@@ -36,6 +37,13 @@ type ScreenLoadState =
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly snapshot: PackLibrarySnapshot }
   | { readonly kind: 'error'; readonly code: string };
+
+const ACTUAL_OVER_BUDGET_RECOMMENDATIONS = [
+  'lower-quality',
+  'ocr-only',
+  'split-pack',
+  'remove-items',
+] as const satisfies readonly BudgetRecommendationV1[];
 
 export interface PackSelectionLoadState {
   controlledPackId: string | undefined;
@@ -528,6 +536,13 @@ function BudgetOptimizationReview({
       ),
     [items],
   );
+  const budgetExcludedItemIds = useMemo(
+    () =>
+      new Set(
+        (pack.budget.exclusions ?? []).map(exclusion => exclusion.itemId),
+      ),
+    [pack.budget.exclusions],
+  );
   const itemNameById = useMemo(
     () => new Map(items.map(item => [item.id, item.displayName])),
     [items],
@@ -539,10 +554,16 @@ function BudgetOptimizationReview({
         ...(pendingPlan?.excludedItemIds ?? []),
       ]),
   );
+  const priorFixedExcludedItemIds = useRef(fixedExcludedItemIds);
   useEffect(() => {
-    setExcludedItemIds(
-      current => new Set([...current, ...fixedExcludedItemIds]),
-    );
+    setExcludedItemIds(current => {
+      const next = new Set(current);
+      for (const itemId of priorFixedExcludedItemIds.current)
+        if (!fixedExcludedItemIds.has(itemId)) next.delete(itemId);
+      for (const itemId of fixedExcludedItemIds) next.add(itemId);
+      return next;
+    });
+    priorFixedExcludedItemIds.current = fixedExcludedItemIds;
   }, [fixedExcludedItemIds]);
   const choose = (value: BudgetPreset): void => {
     setPreset(value);
@@ -618,9 +639,28 @@ function BudgetOptimizationReview({
       <View style={styles.actions} testID="budget-exclusions">
         {items.map(item =>
           fixedExcludedItemIds.has(item.id) ? (
-            <Text key={item.id} style={styles.detail}>
-              {t(locale, 'budgetAlreadyExcluded', { item: item.displayName })}
-            </Text>
+            budgetExcludedItemIds.has(item.id) ? (
+              <Button
+                disabled={busy || pendingPlan !== undefined}
+                key={item.id}
+                label={t(locale, 'budgetRestoreExcludedItem', {
+                  item: item.displayName,
+                })}
+                onPress={() =>
+                  run(
+                    mutate(() =>
+                      controller.restoreBudgetExclusion(pack.id, item.id),
+                    ),
+                  )
+                }
+              />
+            ) : (
+              <Text key={item.id} style={styles.detail}>
+                {t(locale, 'budgetAlreadyExcluded', {
+                  item: item.displayName,
+                })}
+              </Text>
+            )
           ) : (
             <Button
               disabled={busy || pendingPlan !== undefined}
@@ -744,13 +784,30 @@ function BudgetOptimizationReview({
         </View>
       ) : null}
       {actual ? (
-        <Text style={styles.detail} testID="budget-actual-summary">
-          {t(locale, 'budgetActualSummary', {
-            output: actual.actualOutputBytes,
-            savings: actual.actualSavingsBytes,
-            deviation: actual.deviationBytes,
-          })}
-        </Text>
+        <>
+          <Text style={styles.detail} testID="budget-actual-summary">
+            {t(locale, 'budgetActualSummary', {
+              output: actual.actualOutputBytes,
+              savings: actual.actualSavingsBytes,
+              deviation: actual.deviationBytes,
+            })}
+          </Text>
+          {!actual.withinBudget ? (
+            <View accessibilityRole="alert" testID="budget-actual-over-alert">
+              <Text style={styles.warning}>
+                {t(locale, 'budgetActualOver', {
+                  output: actual.actualOutputBytes,
+                  maximum: pack.budget.maxOutputBytes,
+                })}
+              </Text>
+              <Text style={styles.warning} testID="budget-actual-remediation">
+                {t(locale, 'budgetRecommendations', {
+                  values: ACTUAL_OVER_BUDGET_RECOMMENDATIONS.join(', '),
+                })}
+              </Text>
+            </View>
+          ) : null}
+        </>
       ) : null}
     </View>
   );

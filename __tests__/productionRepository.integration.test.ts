@@ -1039,6 +1039,7 @@ describe('production repository against SQLite', () => {
           pdfPageCount: 0,
         },
       ],
+      exclusions: [],
       createArtifactId: () => 'c43e4567-e89b-42d3-a456-426614174000',
     });
     await repository.savePackGraph({
@@ -1061,6 +1062,195 @@ describe('production repository against SQLite', () => {
     await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
       pack: { budget: { pendingOptimization } },
     });
+  });
+
+  test('atomically reconciles duplicate decisions and restores budget exclusions across restarts', async () => {
+    const graph = (await repository.findPackGraph(packId))!;
+    const exclusionDecision = {
+      schemaVersion: 1,
+      packId,
+      itemId: firstItemId,
+      choice: 'keep',
+      baselineInclusionMode: 'both',
+      decidedAt: '2026-08-05T00:00:04Z',
+    } as const;
+    database
+      .prepare(
+        `INSERT INTO duplicate_decisions
+          (item_id, pack_id, payload_json, decided_at) VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        firstItemId,
+        packId,
+        JSON.stringify(exclusionDecision),
+        exclusionDecision.decidedAt,
+      );
+    const exclusions = [
+      { itemId: firstItemId, baselineInclusionMode: 'both' as const },
+      { itemId: secondItemId, baselineInclusionMode: 'both' as const },
+    ];
+    const latestEstimate = {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: 12,
+      predictedOutputBytes: 0,
+      imageCount: 0,
+      pdfPageCount: 0,
+      textCharacterCount: 0,
+      estimatedTokens: 0,
+    };
+    const latestOptimization = {
+      schemaVersion: 1 as const,
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      compressionVersion: 'image-compression-v1' as const,
+      completedAt: '2026-08-05T00:00:05Z',
+      predictedOutputBytes: 0,
+      actualOutputBytes: 0,
+      predictedSavingsBytes: 12,
+      actualSavingsBytes: 12,
+      deviationBytes: 0,
+      withinBudget: true,
+      excludedItemIds: [firstItemId, secondItemId],
+      items: [],
+    };
+
+    await repository.savePackGraph({
+      pack: {
+        ...graph.pack,
+        updatedAt: latestOptimization.completedAt,
+        budget: {
+          ...BUDGET_PRESETS.compact,
+          exclusions,
+          latestEstimate,
+          latestOptimization,
+        },
+        estimatedTokens: 0,
+      },
+      items: graph.items.map(item => ({
+        ...item,
+        inclusionMode: 'excluded' as const,
+      })),
+      expectedRevision: graph.revision,
+    });
+    expect(
+      database
+        .prepare(
+          'SELECT COUNT(*) AS count FROM duplicate_decisions WHERE item_id = ?',
+        )
+        .get(firstItemId),
+    ).toEqual({ count: 1 });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+    await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
+      pack: { budget: { exclusions, latestOptimization } },
+      items: [
+        expect.objectContaining({
+          id: firstItemId,
+          inclusionMode: 'excluded',
+        }),
+        expect.objectContaining({
+          id: secondItemId,
+          inclusionMode: 'excluded',
+        }),
+      ],
+    });
+    expect(
+      database
+        .prepare(
+          'SELECT payload_json FROM duplicate_decisions WHERE item_id = ?',
+        )
+        .get(firstItemId),
+    ).toEqual({ payload_json: JSON.stringify(exclusionDecision) });
+
+    database
+      .prepare(
+        `INSERT INTO duplicate_suggestions
+          (suggestion_key, pack_id, left_item_id, right_item_id, payload_json)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'budget-overlay-regression',
+        packId,
+        firstItemId,
+        secondItemId,
+        '{}',
+      );
+    const duplicateExclusion = {
+      ...exclusionDecision,
+      choice: 'exclude' as const,
+      decidedAt: '2026-08-05T00:00:05.500Z',
+    };
+    await repository.saveDuplicateDecisions(packId, [duplicateExclusion]);
+    await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
+      pack: { budget: { exclusions } },
+      items: [
+        expect.objectContaining({
+          id: firstItemId,
+          inclusionMode: 'excluded',
+        }),
+        expect.objectContaining({
+          id: secondItemId,
+          inclusionMode: 'excluded',
+        }),
+      ],
+    });
+
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-05T00:00:06Z',
+    );
+    await controller.restoreBudgetExclusion(packId, firstItemId);
+    let restored = (await repository.findPackGraph(packId))!;
+    expect(restored.items.map(item => item.inclusionMode)).toEqual([
+      'excluded',
+      'excluded',
+    ]);
+    expect(restored.pack.budget).toMatchObject({
+      exclusions: [exclusions[1]],
+    });
+    expect(restored.pack.budget.latestOptimization).toBeUndefined();
+    expect(
+      database
+        .prepare(
+          'SELECT payload_json FROM duplicate_decisions WHERE item_id = ?',
+        )
+        .get(firstItemId),
+    ).toEqual({ payload_json: JSON.stringify(duplicateExclusion) });
+    await repository.restoreDuplicateDecision(
+      packId,
+      firstItemId,
+      '2026-08-05T00:00:06.500Z',
+    );
+    restored = (await repository.findPackGraph(packId))!;
+    expect(restored.items.map(item => item.inclusionMode)).toEqual([
+      'both',
+      'excluded',
+    ]);
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+    const restartedController = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-05T00:00:07Z',
+    );
+    await restartedController.restoreBudgetExclusion(packId, secondItemId);
+    restored = (await repository.findPackGraph(packId))!;
+    expect(restored.items.map(item => item.inclusionMode)).toEqual([
+      'both',
+      'both',
+    ]);
+    expect(restored.pack.budget.exclusions).toBeUndefined();
   });
 
   test('invalidates a stale optimization and releases its partial derivative in the same Pack mutation', async () => {
@@ -1096,6 +1286,7 @@ describe('production repository against SQLite', () => {
           },
         },
       ],
+      exclusions: [],
       createArtifactId: () => budgetDerivativeId,
     });
     expect(pendingOptimization.actions).toEqual([

@@ -5,6 +5,7 @@ import {
   type BudgetOptimizationPlanV1,
   type BudgetOptimizationResultV1,
   type BudgetSourceItemV1,
+  type BudgetItemExclusionV1,
 } from '../../domain/budgetOptimization';
 import { createCanonicalUuid } from '../../domain/canonicalUuid';
 import { DomainError } from '../../domain/errors';
@@ -53,14 +54,27 @@ export class PackBudgetOptimizationService {
       repository.listArtifactRecords(),
       repository.findDuplicateAnalysis(packId),
     ]);
-    const exclusions = new Set(excludedItemIds);
+    const requestedExclusions = new Set(excludedItemIds);
     if (
-      exclusions.size !== excludedItemIds.length ||
+      requestedExclusions.size !== excludedItemIds.length ||
       excludedItemIds.some(
         excludedId => !graph.items.some(item => item.id === excludedId),
       )
     )
       throw new DomainError('SCHEMA_INVALID');
+    const priorExclusions = new Map(
+      (graph.pack.budget.exclusions ?? []).map(exclusion => [
+        exclusion.itemId,
+        exclusion,
+      ]),
+    );
+    for (const exclusion of priorExclusions.values()) {
+      const excludedItem = graph.items.find(
+        item => item.id === exclusion.itemId,
+      );
+      if (!excludedItem || excludedItem.inclusionMode !== 'excluded')
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    }
     const analyses = new Map(
       duplicateAnalysis.analyses.map(analysis => [analysis.itemId, analysis]),
     );
@@ -75,9 +89,17 @@ export class PackBudgetOptimizationService {
         .map(artifact => [artifact.itemId, artifact]),
     );
     const items: BudgetSourceItemV1[] = [];
+    const budgetExclusions: BudgetItemExclusionV1[] = [];
     for (const item of graph.items) {
       const included =
-        item.inclusionMode !== 'excluded' && !exclusions.has(item.id);
+        item.inclusionMode !== 'excluded' && !requestedExclusions.has(item.id);
+      const priorExclusion = priorExclusions.get(item.id);
+      if (priorExclusion) budgetExclusions.push(priorExclusion);
+      else if (!included && item.inclusionMode !== 'excluded')
+        budgetExclusions.push({
+          itemId: item.id,
+          baselineInclusionMode: item.inclusionMode,
+        });
       const includesOriginal =
         included && ['original', 'both'].includes(item.inclusionMode);
       const includesExtracted =
@@ -143,6 +165,9 @@ export class PackBudgetOptimizationService {
       createdAt: validTimestamp(this.now(), graph.pack.updatedAt),
       budget,
       items,
+      exclusions: budgetExclusions.sort((left, right) =>
+        left.itemId < right.itemId ? -1 : 1,
+      ),
       createArtifactId: () => this.createId(),
     });
   }

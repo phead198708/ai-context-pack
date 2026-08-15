@@ -5,7 +5,12 @@ import {
   decodeVersionedContract,
   type ContractDecodeResult,
 } from './compatibility';
-import type { Budget, BudgetPreset, ContextItemSource } from './models';
+import type {
+  Budget,
+  BudgetPreset,
+  ContextItemSource,
+  InclusionMode,
+} from './models';
 
 export const CONTEXT_BUDGET_ESTIMATOR_VERSION =
   'context-budget-estimator-v1' as const;
@@ -63,6 +68,11 @@ export interface BudgetSourceItemV1 {
   readonly textUtf8ByteCount: number;
   readonly pdfPageCount: number;
   readonly image?: ImageCompressionInspectionV1;
+}
+
+export interface BudgetItemExclusionV1 {
+  readonly itemId: string;
+  readonly baselineInclusionMode: Exclude<InclusionMode, 'excluded'>;
 }
 
 export type BudgetRecommendationV1 =
@@ -327,6 +337,7 @@ export function createBudgetOptimizationPlanV1(input: {
   readonly createdAt: string;
   readonly budget: Budget;
   readonly items: readonly BudgetSourceItemV1[];
+  readonly exclusions: readonly BudgetItemExclusionV1[];
   readonly createArtifactId: (itemId: string) => string;
 }): BudgetOptimizationPlanV1 {
   if (
@@ -341,6 +352,8 @@ export function createBudgetOptimizationPlanV1(input: {
   const planBudget = { ...input.budget };
   delete planBudget.pendingOptimization;
   assertUniqueBudgetItems(input.items);
+  if (!isBudgetItemExclusionArrayV1(input.exclusions))
+    throw new DomainError('SCHEMA_INVALID');
   const images = input.items.filter(
     (
       item,
@@ -443,6 +456,17 @@ export function createBudgetOptimizationPlanV1(input: {
     .filter(item => !item.included)
     .map(item => item.itemId)
     .sort();
+  if (
+    input.exclusions.some(
+      exclusion => !excludedItemIds.includes(exclusion.itemId),
+    )
+  )
+    throw new DomainError('SCHEMA_INVALID');
+  if (input.exclusions.length > 0)
+    planBudget.exclusions = input.exclusions.map(exclusion => ({
+      ...exclusion,
+    }));
+  else delete planBudget.exclusions;
   return {
     schemaVersion: 1,
     planId: input.planId,
@@ -580,6 +604,8 @@ export function isBudgetOptimizationPlanV1(
     'recommendations',
   ];
   const actions = Array.isArray(value.actions) ? value.actions : [];
+  if (!isSortedUniqueCanonicalIds(value.excludedItemIds)) return false;
+  const excludedItemIds = value.excludedItemIds;
   const outputArtifactIds = actions.flatMap(action =>
     isRecord(action) &&
     action.kind === 'compress' &&
@@ -617,7 +643,9 @@ export function isBudgetOptimizationPlanV1(
         0,
         value.estimate.sourceBytes - value.estimate.predictedOutputBytes,
       ) ||
-    !isSortedUniqueCanonicalIds(value.excludedItemIds) ||
+    (value.budget.exclusions ?? []).some(
+      exclusion => !excludedItemIds.includes(exclusion.itemId),
+    ) ||
     !Array.isArray(value.actions) ||
     !value.actions.every(isImageOptimizationActionV1) ||
     new Set(value.actions.map(action => action.itemId)).size !==
@@ -824,6 +852,7 @@ function isPlanBudget(value: unknown): value is Budget {
     'estimatorVersion',
     'latestEstimate',
     'latestOptimization',
+    'exclusions',
   ];
   return (
     Object.keys(value).every(key => allowed.includes(key)) &&
@@ -831,7 +860,35 @@ function isPlanBudget(value: unknown): value is Budget {
     (value.latestEstimate === undefined ||
       isPackBudgetEstimateV1(value.latestEstimate)) &&
     (value.latestOptimization === undefined ||
-      isBudgetOptimizationResultV1(value.latestOptimization))
+      isBudgetOptimizationResultV1(value.latestOptimization)) &&
+    (value.exclusions === undefined ||
+      isBudgetItemExclusionArrayV1(value.exclusions))
+  );
+}
+
+export function isBudgetItemExclusionV1(
+  value: unknown,
+): value is BudgetItemExclusionV1 {
+  return (
+    isRecord(value) &&
+    exactKeys(value, ['itemId', 'baselineInclusionMode']) &&
+    isCanonicalUuid(value.itemId) &&
+    (value.baselineInclusionMode === 'original' ||
+      value.baselineInclusionMode === 'extracted' ||
+      value.baselineInclusionMode === 'both')
+  );
+}
+
+export function isBudgetItemExclusionArrayV1(
+  value: unknown,
+): value is readonly BudgetItemExclusionV1[] {
+  return (
+    Array.isArray(value) &&
+    value.every(isBudgetItemExclusionV1) &&
+    value.every(
+      (exclusion, index) =>
+        index === 0 || value[index - 1]!.itemId < exclusion.itemId,
+    )
   );
 }
 
@@ -949,7 +1006,9 @@ function isSupportedBudget(value: Budget): boolean {
     Number.isFinite(value.imageQuality) &&
     value.imageQuality >= JPEG_MINIMUM_QUALITY &&
     value.imageQuality <= 1 &&
-    value.estimatorVersion === CONTEXT_BUDGET_ESTIMATOR_VERSION
+    value.estimatorVersion === CONTEXT_BUDGET_ESTIMATOR_VERSION &&
+    (value.exclusions === undefined ||
+      isBudgetItemExclusionArrayV1(value.exclusions))
   );
 }
 

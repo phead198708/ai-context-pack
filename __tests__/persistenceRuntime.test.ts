@@ -281,6 +281,7 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     return false;
   }
   async restoreDuplicateDecision() {}
+  async restoreBudgetExclusion() {}
 
   async recordRecoveryDiagnostic(input: RecoveryDiagnosticInput) {
     this.diagnostics.push(input);

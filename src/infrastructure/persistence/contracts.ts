@@ -304,6 +304,15 @@ export interface DuplicateAnalysisRepository {
   ): Promise<void>;
 }
 
+export interface BudgetOptimizationRepository {
+  /** Removes one durable budget overlay and restores the current underlying projection. */
+  restoreBudgetExclusion(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void>;
+}
+
 export interface QuarantineRecordInput {
   readonly id: string;
   /** Irreversible internal artifact UUID only; never a path or filename. */
@@ -391,6 +400,7 @@ export interface ProductionPersistenceRepository
     ExportRecordRepository,
     ArtifactRecordRepository,
     DuplicateAnalysisRepository,
+    BudgetOptimizationRepository,
     RecoveryDiagnosticsRepository,
     QuarantineRepository,
     CleanupLeaseRepository,

@@ -111,6 +111,7 @@ test('rejects a persisted pending optimization bound to another Pack', () => {
     createdAt: value.updatedAt,
     budget: BUDGET_PRESETS.compact,
     items: [],
+    exclusions: [],
     createArtifactId: () => 'b23e4567-e89b-42d3-a456-426614174000',
   });
 

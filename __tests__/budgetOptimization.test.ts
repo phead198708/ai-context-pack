@@ -70,6 +70,7 @@ describe('versioned Pack budget estimator', () => {
           createdAt,
           budget: BUDGET_PRESETS.compact,
           items,
+          exclusions: [],
           createArtifactId: itemId =>
             id(100 + items.findIndex(item => item.itemId === itemId)),
         });
@@ -101,6 +102,7 @@ describe('versioned Pack budget estimator', () => {
       createdAt,
       budget: BUDGET_PRESETS.balanced,
       items: [item],
+      exclusions: [],
       createArtifactId: () => id(100),
     });
 
@@ -122,6 +124,7 @@ describe('versioned Pack budget estimator', () => {
       createdAt,
       budget: BUDGET_PRESETS.compact,
       items: [item],
+      exclusions: [],
       createArtifactId: () => id(100),
     });
 
@@ -154,6 +157,7 @@ describe('versioned Pack budget estimator', () => {
           pdfPageCount: 0,
         },
       ],
+      exclusions: [],
       createArtifactId: () => id(100),
     });
 
@@ -175,6 +179,7 @@ describe('versioned Pack budget estimator', () => {
       createdAt,
       budget: BUDGET_PRESETS.balanced,
       items: [item],
+      exclusions: [],
       createArtifactId: () => id(100),
     });
     const action = plan.actions[0]!;
@@ -225,6 +230,7 @@ describe('versioned Pack budget estimator', () => {
       createdAt: '2026-08-14T00:00:00.000000999Z',
       budget: BUDGET_PRESETS.compact,
       items: [item],
+      exclusions: [],
       createArtifactId: () => id(100),
     });
     const action = plan.actions[0]!;
@@ -290,6 +296,7 @@ describe('versioned Pack budget estimator', () => {
           targetImageLongestEdge: 1_000_000,
         },
         items: [imageItem(1, 100, 10, 10)],
+        exclusions: [],
         createArtifactId: () => id(100),
       }),
     ).toThrow(new DomainError('SCHEMA_INVALID'));
@@ -302,6 +309,7 @@ describe('versioned Pack budget estimator', () => {
         createdAt,
         budget: BUDGET_PRESETS.compact,
         items: [largeImage],
+        exclusions: [],
         createArtifactId: () => largeImage.itemId,
       }),
     ).toThrow(new DomainError('SCHEMA_INVALID'));

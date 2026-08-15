@@ -176,12 +176,145 @@ function controller(): jest.Mocked<PackLibraryController> {
     analyzePack: jest.fn().mockResolvedValue(1),
     reviewDuplicateGroup: jest.fn().mockResolvedValue(undefined),
     restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
+    restoreBudgetExclusion: jest.fn().mockResolvedValue(undefined),
     cancelProcessing: jest.fn().mockResolvedValue(undefined),
     previewBudget: jest.fn(),
     applyBudget: jest.fn(),
     cancelBudget: jest.fn(),
   } as unknown as jest.Mocked<PackLibraryController>;
 }
+
+test('restores a persisted budget exclusion from the reopened Pack', async () => {
+  const persisted: PackLibrarySnapshot = {
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        budget: {
+          ...snapshot.selected!.pack.budget,
+          exclusions: [{ itemId: itemIds[0], baselineInclusionMode: 'both' }],
+        },
+      },
+      items: snapshot.selected!.items.map(item =>
+        item.id === itemIds[0]
+          ? { ...item, inclusionMode: 'excluded' as const }
+          : item,
+      ),
+    },
+  };
+  const value = controller();
+  value.load.mockResolvedValue(persisted);
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Include Complete image again'));
+
+  expect(value.restoreBudgetExclusion).toHaveBeenCalledWith(packId, itemIds[0]);
+  act(() => renderer.unmount());
+});
+
+test('surfaces an actual over-budget result after apply and after restart', async () => {
+  const maximum = 1_048_576;
+  const actualOutputBytes = maximum + 1;
+  const plan = {
+    schemaVersion: 1 as const,
+    planId: 'b23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 3,
+    createdAt: '2026-08-10T00:00:02Z',
+    preset: 'custom' as const,
+    estimatorVersion: 'context-budget-estimator-v1' as const,
+    compressionVersion: 'image-compression-v1' as const,
+    budget: {
+      preset: 'custom' as const,
+      maxOutputBytes: maximum,
+      minimumImageLongestEdge: 960,
+      targetImageLongestEdge: 1_600,
+      imageQuality: 0.82,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+    },
+    estimate: {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: maximum,
+      predictedOutputBytes: maximum,
+      imageCount: 0,
+      pdfPageCount: 0,
+      textCharacterCount: 0,
+      estimatedTokens: 0,
+    },
+    withinBudget: true,
+    predictedSavingsBytes: 0,
+    excludedItemIds: [],
+    actions: [],
+    recommendations: [],
+  };
+  const result = {
+    schemaVersion: 1 as const,
+    planId: plan.planId,
+    estimatorVersion: plan.estimatorVersion,
+    compressionVersion: plan.compressionVersion,
+    completedAt: '2026-08-10T00:00:03Z',
+    predictedOutputBytes: maximum,
+    actualOutputBytes,
+    predictedSavingsBytes: 0,
+    actualSavingsBytes: 0,
+    deviationBytes: 1,
+    withinBudget: false,
+    excludedItemIds: [],
+    items: [],
+  };
+  const reopened: PackLibrarySnapshot = {
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        budget: {
+          ...plan.budget,
+          latestEstimate: plan.estimate,
+          latestOptimization: result,
+        },
+      },
+    },
+  };
+  const value = controller();
+  value.load
+    .mockResolvedValueOnce(snapshot)
+    .mockResolvedValueOnce(snapshot)
+    .mockResolvedValue(reopened);
+  value.previewBudget.mockResolvedValue(plan);
+  value.applyBudget.mockResolvedValue(result);
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Custom maximum'));
+  await press(button(renderer, 'Preview optimization plan'));
+  await press(button(renderer, 'Create compressed derivatives'));
+
+  const appliedAlert = renderer.root.findByProps({
+    testID: 'budget-actual-over-alert',
+  });
+  expect(appliedAlert.props.accessibilityRole).toBe('alert');
+  expect(text(appliedAlert)).toContain(
+    `Actual output ${actualOutputBytes} bytes exceeds the selected maximum of ${maximum} bytes.`,
+  );
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-actual-remediation' })),
+  ).toContain('remove-items');
+  act(() => renderer.unmount());
+
+  const restartedController = controller();
+  restartedController.load.mockResolvedValue(reopened);
+  const restarted = await render(restartedController);
+  expect(
+    text(restarted.root.findByProps({ testID: 'budget-actual-over-alert' })),
+  ).toContain(String(maximum));
+  expect(
+    text(restarted.root.findByProps({ testID: 'budget-actual-remediation' })),
+  ).toContain('split-pack');
+  act(() => restarted.unmount());
+});
 
 async function render(
   value: jest.Mocked<PackLibraryController>,

@@ -1,5 +1,6 @@
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
 import {
+  isBudgetItemExclusionArrayV1,
   isBudgetOptimizationPlanV1,
   isBudgetOptimizationResultV1,
   isPackBudgetEstimateV1,
@@ -124,6 +125,15 @@ export function assertPackGraph(input: SavePackGraphInput): void {
     itemIds.add(item.id);
     indexes.add(item.sortIndex);
   }
+  if (
+    (input.pack.budget.exclusions ?? []).some(exclusion => {
+      const item = input.items.find(
+        candidate => candidate.id === exclusion.itemId,
+      );
+      return !item || item.inclusionMode !== 'excluded';
+    })
+  )
+    invalid();
   const runIds = new Set<string>();
   for (const run of input.startedPipelineRuns ?? []) {
     if (
@@ -312,6 +322,7 @@ function isBudget(value: unknown): value is Budget {
     'estimatorVersion',
     'latestEstimate',
     'latestOptimization',
+    'exclusions',
     'pendingOptimization',
   ];
   return (
@@ -333,6 +344,8 @@ function isBudget(value: unknown): value is Budget {
       isPackBudgetEstimateV1(value.latestEstimate)) &&
     (value.latestOptimization === undefined ||
       isBudgetOptimizationResultV1(value.latestOptimization)) &&
+    (value.exclusions === undefined ||
+      isBudgetItemExclusionArrayV1(value.exclusions)) &&
     (value.pendingOptimization === undefined ||
       isBudgetOptimizationPlanV1(value.pendingOptimization))
   );

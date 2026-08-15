@@ -42,6 +42,7 @@ const en = {
   budgetExcludeItem: 'Exclude {item} from plan',
   budgetIncludeItem: 'Include {item} in plan',
   budgetAlreadyExcluded: 'Already excluded: {item}',
+  budgetRestoreExcludedItem: 'Include {item} again',
   budgetExcludedSummary: 'Excluded item IDs: {values}',
   previewBudget: 'Preview optimization plan',
   applyBudget: 'Create compressed derivatives',
@@ -59,6 +60,8 @@ const en = {
   budgetRecommendations: 'Recommendations: {values}',
   budgetActualSummary:
     'Actual result: {output} bytes · saved {savings} bytes · deviation {deviation} bytes',
+  budgetActualOver:
+    'Actual output {output} bytes exceeds the selected maximum of {maximum} bytes.',
   cancelProcessing: 'Cancel processing',
   retryPack: 'Retry Pack processing',
   analyzeDuplicates: 'Analyze normalized content',
@@ -247,6 +250,7 @@ const zhHans: Record<keyof typeof en, string> = {
   budgetExcludeItem: '从方案中排除{item}',
   budgetIncludeItem: '将{item}加入方案',
   budgetAlreadyExcluded: '已排除：{item}',
+  budgetRestoreExcludedItem: '重新加入{item}',
   budgetExcludedSummary: '已排除项目 ID：{values}',
   previewBudget: '预览优化方案',
   applyBudget: '创建压缩派生文件',
@@ -264,6 +268,7 @@ const zhHans: Record<keyof typeof en, string> = {
   budgetRecommendations: '建议：{values}',
   budgetActualSummary:
     '实际结果：{output} 字节 · 节省 {savings} 字节 · 偏差 {deviation} 字节',
+  budgetActualOver: '实际输出 {output} 字节，超过所选上限 {maximum} 字节。',
   cancelProcessing: '取消处理',
   retryPack: '重试上下文包处理',
   analyzeDuplicates: '分析归一化内容',

@@ -1,6 +1,7 @@
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
 import type { ImportManifestV1 } from '../../domain/contracts';
+import type { BudgetItemExclusionV1 } from '../../domain/budgetOptimization';
 import {
   DomainError,
   isDomainErrorCode,
@@ -741,6 +742,7 @@ export class ExpoSqlitePersistenceRepository
       ]);
       let effectiveInput = input;
       let nextRevision: number;
+      let priorBudgetExclusions: readonly BudgetItemExclusionV1[] = [];
       if (!existing) {
         if (input.expectedRevision !== undefined)
           throw new DomainError('PERSISTENCE_CONFLICT');
@@ -759,6 +761,9 @@ export class ExpoSqlitePersistenceRepository
           existing.revision !== input.expectedRevision
         )
           throw new DomainError('PERSISTENCE_CONFLICT');
+        priorBudgetExclusions = decodePersisted(
+          () => decodeBudget(existing.budget_json).exclusions ?? [],
+        );
         const budget = await invalidatePendingOptimizationForPackMutation(
           transaction,
           input.pack.id,
@@ -799,6 +804,8 @@ export class ExpoSqlitePersistenceRepository
         effectiveInput.pack.createdAt,
         effectiveInput.pack.updatedAt,
         effectiveInput.removedItemOriginalDisposition ?? 'preserve',
+        priorBudgetExclusions,
+        effectiveInput.pack.budget.exclusions ?? [],
       );
       if (effectiveInput.cancelActivePipelineRuns)
         await transaction.run(
@@ -1975,11 +1982,19 @@ export class ExpoSqlitePersistenceRepository
     )
       throw new DomainError('SCHEMA_INVALID');
     await this.connection.exclusive(async transaction => {
-      const pack = await transaction.first<{ updated_at: string }>(
-        'SELECT updated_at FROM packs WHERE id = ? AND deleted_at IS NULL',
+      const pack = await transaction.first<{
+        updated_at: string;
+        budget_json: string;
+      }>(
+        'SELECT updated_at, budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
         [packId],
       );
       if (!pack) throw new DomainError('PERSISTENCE_CONFLICT');
+      const budgetExclusionByItemId = new Map(
+        (
+          decodePersisted(() => decodeBudget(pack.budget_json)).exclusions ?? []
+        ).map(exclusion => [exclusion.itemId, exclusion]),
+      );
       for (const decision of decisions) {
         const item = await transaction.first<{
           inclusion_mode: string;
@@ -2002,12 +2017,20 @@ export class ExpoSqlitePersistenceRepository
         const prior = existing
           ? decodeStoredJson(existing.payload_json, isDuplicateDecisionV1)
           : undefined;
+        const budgetExclusion = budgetExclusionByItemId.get(decision.itemId);
         if (
           prior?.baselineInclusionMode !== undefined &&
           prior.baselineInclusionMode !== decision.baselineInclusionMode
         )
           throw new DomainError('PERSISTENCE_CONFLICT');
-        if (
+        if (budgetExclusion) {
+          if (
+            budgetExclusion.baselineInclusionMode !==
+              decision.baselineInclusionMode ||
+            item.inclusion_mode !== 'excluded'
+          )
+            throw new DomainError('PERSISTENCE_CONFLICT');
+        } else if (
           prior === undefined &&
           item.inclusion_mode !== decision.baselineInclusionMode
         )
@@ -2030,7 +2053,9 @@ export class ExpoSqlitePersistenceRepository
           `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
            WHERE id = ? AND pack_id = ?`,
           [
-            decision.choice === 'exclude'
+            budgetExclusion
+              ? 'excluded'
+              : decision.choice === 'exclude'
               ? 'excluded'
               : decision.baselineInclusionMode,
             latestTimestamp([item.updated_at, decision.decidedAt]),
@@ -2063,8 +2088,11 @@ export class ExpoSqlitePersistenceRepository
     requireCanonicalId(itemId);
     requireIsoDateTime(restoredAt);
     await this.connection.exclusive(async transaction => {
-      const pack = await transaction.first<{ updated_at: string }>(
-        'SELECT updated_at FROM packs WHERE id = ? AND deleted_at IS NULL',
+      const pack = await transaction.first<{
+        updated_at: string;
+        budget_json: string;
+      }>(
+        'SELECT updated_at, budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
         [packId],
       );
       const item = await transaction.first<{
@@ -2085,11 +2113,20 @@ export class ExpoSqlitePersistenceRepository
       );
       if (decision.packId !== packId || decision.itemId !== itemId)
         throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-      const expectedInclusionMode =
-        decision.choice === 'exclude'
-          ? 'excluded'
-          : decision.baselineInclusionMode;
-      if (item.inclusion_mode !== expectedInclusionMode)
+      const budgetExclusion = (
+        decodePersisted(() => decodeBudget(pack.budget_json)).exclusions ?? []
+      ).find(exclusion => exclusion.itemId === itemId);
+      const expectedInclusionMode = budgetExclusion
+        ? 'excluded'
+        : decision.choice === 'exclude'
+        ? 'excluded'
+        : decision.baselineInclusionMode;
+      if (
+        item.inclusion_mode !== expectedInclusionMode ||
+        (budgetExclusion !== undefined &&
+          budgetExclusion.baselineInclusionMode !==
+            decision.baselineInclusionMode)
+      )
         throw new DomainError('PERSISTENCE_CONFLICT');
       const effectiveAt = latestTimestamp([
         pack.updated_at,
@@ -2100,7 +2137,12 @@ export class ExpoSqlitePersistenceRepository
       await transaction.run(
         `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
          WHERE id = ? AND pack_id = ?`,
-        [decision.baselineInclusionMode, effectiveAt, itemId, packId],
+        [
+          budgetExclusion ? 'excluded' : decision.baselineInclusionMode,
+          effectiveAt,
+          itemId,
+          packId,
+        ],
       );
       await transaction.run(
         'DELETE FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
@@ -2112,6 +2154,99 @@ export class ExpoSqlitePersistenceRepository
          WHERE id = ? AND deleted_at IS NULL`,
         [effectiveAt, packId],
       );
+    });
+  }
+
+  async restoreBudgetExclusion(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void> {
+    requireCanonicalId(packId);
+    requireCanonicalId(itemId);
+    requireIsoDateTime(restoredAt);
+    await this.connection.exclusive(async transaction => {
+      const pack = await transaction.first<{
+        updated_at: string;
+        budget_json: string;
+      }>(
+        'SELECT updated_at, budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      );
+      const item = await transaction.first<{
+        inclusion_mode: string;
+        updated_at: string;
+      }>(
+        'SELECT inclusion_mode, updated_at FROM context_items WHERE id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      if (!pack || !item) throw new DomainError('PERSISTENCE_CONFLICT');
+      const storedBudget = decodePersisted(() =>
+        decodeBudget(pack.budget_json),
+      );
+      const exclusion = storedBudget.exclusions?.find(
+        candidate => candidate.itemId === itemId,
+      );
+      if (!exclusion || item.inclusion_mode !== 'excluded')
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const decisionRow = await transaction.first<{ payload_json: string }>(
+        'SELECT payload_json FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      const decision = decisionRow
+        ? decodePersisted(() =>
+            decodeStoredJson(decisionRow.payload_json, isDuplicateDecisionV1),
+          )
+        : undefined;
+      if (
+        decision &&
+        (decision.packId !== packId ||
+          decision.itemId !== itemId ||
+          decision.baselineInclusionMode !== exclusion.baselineInclusionMode)
+      )
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const remainingExclusions = storedBudget.exclusions!.filter(
+        candidate => candidate.itemId !== itemId,
+      );
+      const nextBudget = { ...storedBudget };
+      delete nextBudget.pendingOptimization;
+      delete nextBudget.latestEstimate;
+      delete nextBudget.latestOptimization;
+      if (remainingExclusions.length > 0)
+        nextBudget.exclusions = remainingExclusions;
+      else delete nextBudget.exclusions;
+      const effectiveBudget =
+        await invalidatePendingOptimizationForPackMutation(
+          transaction,
+          packId,
+          nextBudget,
+          pack.budget_json,
+        );
+      const effectiveAt = latestTimestamp([
+        pack.updated_at,
+        item.updated_at,
+        ...(decision ? [decision.decidedAt] : []),
+        restoredAt,
+      ]);
+      await transaction.run(
+        `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
+         WHERE id = ? AND pack_id = ?`,
+        [
+          decision
+            ? duplicateDecisionInclusionMode(decision)
+            : exclusion.baselineInclusionMode,
+          effectiveAt,
+          itemId,
+          packId,
+        ],
+      );
+      const updated = await transaction.run(
+        `UPDATE packs SET budget_json = ?, estimated_tokens = 0,
+           updated_at = ?, revision = revision + 1
+         WHERE id = ? AND deleted_at IS NULL`,
+        [encodeBudget(effectiveBudget), effectiveAt, packId],
+      );
+      if (updated.changes !== 1) throw new DomainError('PERSISTENCE_CONFLICT');
     });
   }
 
@@ -2762,6 +2897,17 @@ async function loadContextItems(
   connection: SqlConnection,
   packId: string,
 ): Promise<readonly ContextItem[]> {
+  const budgetRow = await connection.first<{ budget_json: string }>(
+    'SELECT budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
+    [packId],
+  );
+  const budgetExclusionByItemId = new Map(
+    (budgetRow
+      ? decodePersisted(() => decodeBudget(budgetRow.budget_json)).exclusions ??
+        []
+      : []
+    ).map(exclusion => [exclusion.itemId, exclusion]),
+  );
   const rows = await connection.all<ContextItemRow>(
     `SELECT item.id, item.pack_id, item.source_type, item.media_type,
        item.original_display_name, item.original_sha256,
@@ -2813,14 +2959,25 @@ async function loadContextItems(
             row.duplicate_decision_json,
             isDuplicateDecisionV1,
           );
+          const budgetExclusion = budgetExclusionByItemId.get(item.id);
+          const duplicateInclusionMode =
+            duplicateDecisionInclusionMode(decision);
           if (
             row.duplicate_decision_pack_id !== packId ||
             decision.packId !== packId ||
             decision.itemId !== item.id ||
-            duplicateDecisionInclusionMode(decision) !== item.inclusionMode
+            (budgetExclusion
+              ? budgetExclusion.baselineInclusionMode !==
+                  decision.baselineInclusionMode ||
+                item.inclusionMode !== 'excluded'
+              : duplicateInclusionMode !== item.inclusionMode)
           )
             throw new DomainError('SCHEMA_INVALID');
-        }
+        } else if (
+          budgetExclusionByItemId.has(item.id) &&
+          item.inclusionMode !== 'excluded'
+        )
+          throw new DomainError('SCHEMA_INVALID');
         assertContextItem(item);
         if (item.sortIndex !== items.length)
           throw new DomainError('SCHEMA_INVALID');
@@ -2828,6 +2985,12 @@ async function loadContextItems(
       }),
     );
   }
+  if (
+    [...budgetExclusionByItemId.keys()].some(
+      itemId => !items.some(item => item.id === itemId),
+    )
+  )
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
   return items;
 }
 
@@ -2838,7 +3001,15 @@ async function replaceContextItems(
   createdAt: string,
   updatedAt: string,
   removedItemOriginalDisposition: 'preserve' | 'release',
+  priorBudgetExclusions: readonly BudgetItemExclusionV1[],
+  budgetExclusions: readonly BudgetItemExclusionV1[],
 ): Promise<void> {
+  const priorBudgetExclusionByItemId = new Map(
+    priorBudgetExclusions.map(exclusion => [exclusion.itemId, exclusion]),
+  );
+  const budgetExclusionByItemId = new Map(
+    budgetExclusions.map(exclusion => [exclusion.itemId, exclusion]),
+  );
   const existing = await transaction.all<{ id: string }>(
     'SELECT id FROM context_items WHERE pack_id = ?',
     [packId],
@@ -2926,6 +3097,12 @@ async function replaceContextItems(
           item.originalRelativePath)
     )
       throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+    const priorBudgetExclusion = priorBudgetExclusionByItemId.get(item.id);
+    const budgetExclusion = budgetExclusionByItemId.get(item.id);
+    if (priorBudgetExclusion && !existingItem)
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    if (budgetExclusion && !existingItem)
+      throw new DomainError('PERSISTENCE_CONFLICT');
     if (existingItem && existingItem.duplicate_decision_json !== null) {
       const encodedDecision = existingItem.duplicate_decision_json;
       const decision = decodePersisted(() =>
@@ -2938,9 +3115,41 @@ async function replaceContextItems(
       )
         throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
       const expectedInclusionMode = duplicateDecisionInclusionMode(decision);
-      if (inclusionMode(existingItem.inclusion_mode) !== expectedInclusionMode)
+      if (
+        priorBudgetExclusion
+          ? priorBudgetExclusion.baselineInclusionMode !==
+              decision.baselineInclusionMode ||
+            inclusionMode(existingItem.inclusion_mode) !== 'excluded'
+          : inclusionMode(existingItem.inclusion_mode) !== expectedInclusionMode
+      )
         throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-      if (item.inclusionMode !== expectedInclusionMode)
+      if (budgetExclusion) {
+        if (
+          item.inclusionMode !== 'excluded' ||
+          decision.baselineInclusionMode !==
+            budgetExclusion.baselineInclusionMode
+        )
+          throw new DomainError('PERSISTENCE_CONFLICT');
+      } else if (item.inclusionMode !== expectedInclusionMode)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+    } else if (existingItem) {
+      const existingInclusionMode = inclusionMode(existingItem.inclusion_mode);
+      if (
+        priorBudgetExclusion
+          ? existingInclusionMode !== 'excluded'
+          : budgetExclusion !== undefined &&
+            existingInclusionMode !== budgetExclusion.baselineInclusionMode
+      )
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      if (
+        budgetExclusion
+          ? item.inclusionMode !== 'excluded' ||
+            (priorBudgetExclusion !== undefined &&
+              priorBudgetExclusion.baselineInclusionMode !==
+                budgetExclusion.baselineInclusionMode)
+          : priorBudgetExclusion !== undefined &&
+            item.inclusionMode !== priorBudgetExclusion.baselineInclusionMode
+      )
         throw new DomainError('PERSISTENCE_CONFLICT');
     }
     await assertItemRelationships(transaction, item);
