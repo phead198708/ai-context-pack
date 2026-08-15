@@ -181,6 +181,29 @@ class ImageCompressionProcessorInstrumentedTest {
   }
 
   @Test
+  fun startupRecoveryPublicationFailureRemainsFailClosedUntilRetry() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val failure = assertThrows(NativeException::class.java) {
+      ImageCompressionStartupRecoveryReporter.reconcile(
+        context.filesDir,
+        "PIPELINE_RECOVERY_REQUIRED",
+        persistRecovery = { _, _, _ -> throw NativeException("STORAGE_WRITE_FAILED") },
+      )
+    }
+    assertEquals("STORAGE_WRITE_FAILED", failure.code)
+
+    ImageCompressionStartupRecoveryReporter.retryPendingPublication(context.filesDir)
+
+    assertEquals(
+      listOf("PIPELINE_RECOVERY_REQUIRED"),
+      MetadataEventStore.read(context.filesDir, "RecoveryEvents")
+        .filter { it["id"] == ImageCompressionStartupRecoveryReporter.eventId }
+        .map { it["code"] },
+    )
+    ImageCompressionStartupRecoveryReporter.reconcile(context.filesDir, null)
+  }
+
+  @Test
   fun rotatedTextFixtureRemainsSystemReadableAfterCompactCompression() {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val context = instrumentation.targetContext

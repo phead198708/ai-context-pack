@@ -1066,6 +1066,34 @@ describe('production repository against SQLite', () => {
 
   test('atomically reconciles duplicate decisions and restores budget exclusions across restarts', async () => {
     const graph = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-05T00:00:03Z',
+        '2026-08-05T00:01:03Z',
+      ),
+    ).resolves.toBe(true);
+    await repository.registerPublishedArtifact({
+      packId,
+      publicationLeaseOwnerId: exportId,
+      artifact: {
+        id: budgetDerivativeId,
+        itemId: firstItemId,
+        kind: 'compressed-image',
+        relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+        mediaType: 'image/jpeg',
+        byteCount: 2,
+        sha256: '9'.repeat(64),
+        processorVersion: {
+          processor: 'image-compression',
+          version: 'image-compression-v1',
+          contractVersion: 1,
+        },
+        createdAt: '2026-08-05T00:00:03Z',
+        immutable: true,
+      },
+    });
+    await repository.releaseCleanupLease(exportId);
     const exclusionDecision = {
       schemaVersion: 1,
       packId,
@@ -1113,7 +1141,17 @@ describe('production repository against SQLite', () => {
       deviationBytes: 0,
       withinBudget: true,
       excludedItemIds: [firstItemId, secondItemId],
-      items: [],
+      items: [
+        {
+          itemId: firstItemId,
+          action: 'compressed' as const,
+          predictedOutputBytes: 2,
+          actualOutputBytes: 2,
+          actualSavingsBytes: 2,
+          deviationBytes: 0,
+          artifactId: budgetDerivativeId,
+        },
+      ],
     };
 
     await repository.savePackGraph({
@@ -1130,6 +1168,10 @@ describe('production repository against SQLite', () => {
       },
       items: graph.items.map(item => ({
         ...item,
+        artifactIds:
+          item.id === firstItemId
+            ? [...item.artifactIds, budgetDerivativeId]
+            : item.artifactIds,
         inclusionMode: 'excluded' as const,
       })),
       expectedRevision: graph.revision,
@@ -1216,6 +1258,13 @@ describe('production repository against SQLite', () => {
       exclusions: [exclusions[1]],
     });
     expect(restored.pack.budget.latestOptimization).toBeUndefined();
+    await expect(
+      repository.listCleanupCandidates('2026-08-05T00:00:06.250Z'),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ artifactId: budgetDerivativeId }),
+      ]),
+    );
     expect(
       database
         .prepare(
@@ -1295,7 +1344,7 @@ describe('production repository against SQLite', () => {
         outputArtifactId: budgetDerivativeId,
       }),
     ]);
-    await repository.savePackGraph({
+    const checkpointRevision = await repository.savePackGraph({
       pack: {
         ...graph!.pack,
         updatedAt: pendingOptimization.createdAt,
@@ -1314,8 +1363,13 @@ describe('production repository against SQLite', () => {
     await repository.registerPublishedArtifact({
       packId,
       publicationLeaseOwnerId: exportId,
+      budgetOptimizationFence: {
+        planId: pendingOptimization.planId,
+        expectedRevision: checkpointRevision,
+      },
       artifact: {
         id: budgetDerivativeId,
+        itemId: firstItemId,
         kind: 'compressed-image',
         relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
         mediaType: 'image/jpeg',
@@ -1337,6 +1391,41 @@ describe('production repository against SQLite', () => {
     );
 
     await controller.renamePack(packId, 'Replacement plan enabled');
+
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-14T00:10:01Z',
+        '2026-08-14T00:11:01Z',
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      repository.registerPublishedArtifact({
+        packId,
+        publicationLeaseOwnerId: exportId,
+        budgetOptimizationFence: {
+          planId: pendingOptimization.planId,
+          expectedRevision: checkpointRevision,
+        },
+        artifact: {
+          id: budgetDerivativeId,
+          itemId: firstItemId,
+          kind: 'compressed-image',
+          relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+          mediaType: 'image/jpeg',
+          byteCount: 500_000,
+          sha256: '9'.repeat(64),
+          processorVersion: {
+            processor: 'image-compression',
+            version: 'image-compression-v1',
+            contractVersion: 1,
+          },
+          createdAt: pendingOptimization.createdAt,
+          immutable: true,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+    await repository.releaseCleanupLease(exportId);
 
     const updated = await repository.findPackGraph(packId);
     expect(updated?.pack.budget.pendingOptimization).toBeUndefined();

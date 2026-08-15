@@ -377,6 +377,12 @@ export class PackLibraryController {
       const priorById = new Map(
         snapshot.decisions.map(decision => [decision.itemId, decision]),
       );
+      const budgetExclusionById = new Map(
+        (graph.pack.budget.exclusions ?? []).map(exclusion => [
+          exclusion.itemId,
+          exclusion,
+        ]),
+      );
       const itemById = new Map(graph.items.map(item => [item.id, item]));
       const decidedAt = this.timestamp(graph.pack);
       const createDecision = (
@@ -392,7 +398,9 @@ export class PackLibraryController {
           itemId,
           choice,
           baselineInclusionMode:
-            priorById.get(itemId)?.baselineInclusionMode ?? item.inclusionMode,
+            priorById.get(itemId)?.baselineInclusionMode ??
+            budgetExclusionById.get(itemId)?.baselineInclusionMode ??
+            item.inclusionMode,
           source,
           decidedAt,
         };

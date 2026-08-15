@@ -185,6 +185,14 @@ export interface RegisterPublishedArtifactInput {
   readonly packId: string;
   /** The native file store has already verified these immutable bytes. */
   readonly artifact: Artifact;
+  /**
+   * Optional budget checkpoint fence. Registration succeeds only while this
+   * exact pending plan still owns the Pack revision and output artifact.
+   */
+  readonly budgetOptimizationFence?: {
+    readonly planId: string;
+    readonly expectedRevision: number;
+  };
   /** Global publication lease owner fenced in the registration transaction. */
   readonly publicationLeaseOwnerId: string;
   /** @deprecated Validated when present but never used as lease authority. */

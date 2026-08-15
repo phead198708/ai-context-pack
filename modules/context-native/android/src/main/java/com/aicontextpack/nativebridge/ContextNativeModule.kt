@@ -414,7 +414,10 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
 
     AsyncFunction("getPendingRecoveryEvent") {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
-      try { MetadataEventStore.read(context.filesDir, "RecoveryEvents").firstOrNull() }
+      try {
+        ImageCompressionStartupRecoveryReporter.retryPendingPublication(context.filesDir)
+        MetadataEventStore.read(context.filesDir, "RecoveryEvents").firstOrNull()
+      }
       catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
     }
 
@@ -422,6 +425,20 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
       val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
       try { MetadataEventStore.ack(context.filesDir, "RecoveryEvents", id) }
       catch (error: MetadataEventException) { throw NativeException(error.stableCode) }
+    }
+
+    AsyncFunction("retryRecoveryEvent") { id: String ->
+      if (id != ImageCompressionStartupRecoveryReporter.eventId) return@AsyncFunction false
+      val context = appContext.reactContext ?: throw NativeException("CONTEXT_UNAVAILABLE")
+      try {
+        ImageCompressionStartupRecoveryReporter.retryPendingPublication(context.filesDir)
+        val failureCode = ImageCompressionTemporaryStore.runStartupMaintenance(context)
+        ImageCompressionStartupRecoveryReporter.reconcile(context.filesDir, failureCode)
+        if (failureCode != null) throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        true
+      } catch (error: MetadataEventException) {
+        throw NativeException(error.stableCode)
+      }
     }
 
     AsyncFunction("handoffInbox") { ingestionId: String, packId: String, requiredHeadroomBytes: Double ->

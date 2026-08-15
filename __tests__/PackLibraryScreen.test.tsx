@@ -216,6 +216,26 @@ test('restores a persisted budget exclusion from the reopened Pack', async () =>
 test('surfaces an actual over-budget result after apply and after restart', async () => {
   const maximum = 1_048_576;
   const actualOutputBytes = maximum + 1;
+  const excludedSnapshot: PackLibrarySnapshot = {
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        budget: {
+          ...snapshot.selected!.pack.budget,
+          exclusions: [
+            { itemId: itemIds[0], baselineInclusionMode: 'both' as const },
+          ],
+        },
+      },
+      items: snapshot.selected!.items.map(item =>
+        item.id === itemIds[0]
+          ? { ...item, inclusionMode: 'excluded' as const }
+          : item,
+      ),
+    },
+  };
   const plan = {
     schemaVersion: 1 as const,
     planId: 'b23e4567-e89b-42d3-a456-426614174000',
@@ -246,7 +266,7 @@ test('surfaces an actual over-budget result after apply and after restart', asyn
     },
     withinBudget: true,
     predictedSavingsBytes: 0,
-    excludedItemIds: [],
+    excludedItemIds: [itemIds[0]],
     actions: [],
     recommendations: [],
   };
@@ -262,28 +282,45 @@ test('surfaces an actual over-budget result after apply and after restart', asyn
     actualSavingsBytes: 0,
     deviationBytes: 1,
     withinBudget: false,
-    excludedItemIds: [],
+    excludedItemIds: [itemIds[0]],
     items: [],
   };
   const reopened: PackLibrarySnapshot = {
-    ...snapshot,
+    ...excludedSnapshot,
     selected: {
-      ...snapshot.selected!,
+      ...excludedSnapshot.selected!,
       pack: {
-        ...snapshot.selected!.pack,
+        ...excludedSnapshot.selected!.pack,
         budget: {
           ...plan.budget,
+          exclusions: excludedSnapshot.selected!.pack.budget.exclusions!,
           latestEstimate: plan.estimate,
           latestOptimization: result,
         },
       },
     },
   };
+  const restored: PackLibrarySnapshot = {
+    ...reopened,
+    selected: {
+      ...reopened.selected!,
+      pack: {
+        ...reopened.selected!.pack,
+        budget: { ...plan.budget },
+      },
+      items: reopened.selected!.items.map(item =>
+        item.id === itemIds[0]
+          ? { ...item, inclusionMode: 'both' as const }
+          : item,
+      ),
+    },
+  };
   const value = controller();
   value.load
-    .mockResolvedValueOnce(snapshot)
-    .mockResolvedValueOnce(snapshot)
-    .mockResolvedValue(reopened);
+    .mockResolvedValueOnce(excludedSnapshot)
+    .mockResolvedValueOnce(excludedSnapshot)
+    .mockResolvedValueOnce(reopened)
+    .mockResolvedValue(restored);
   value.previewBudget.mockResolvedValue(plan);
   value.applyBudget.mockResolvedValue(result);
   const renderer = await render(value);
@@ -302,6 +339,10 @@ test('surfaces an actual over-budget result after apply and after restart', asyn
   expect(
     text(renderer.root.findByProps({ testID: 'budget-actual-remediation' })),
   ).toContain('remove-items');
+  await press(button(renderer, 'Include Complete image again'));
+  expect(
+    renderer.root.findAllByProps({ testID: 'budget-actual-over-alert' }),
+  ).toHaveLength(0);
   act(() => renderer.unmount());
 
   const restartedController = controller();

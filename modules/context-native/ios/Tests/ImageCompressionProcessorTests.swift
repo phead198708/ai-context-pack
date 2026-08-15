@@ -222,6 +222,40 @@ final class ImageCompressionProcessorTests: XCTestCase {
     )
   }
 
+  func testStartupRecoveryPublicationFailureRemainsFailClosedUntilRetry() throws {
+    let container = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "compression-recovery-write-failure-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    defer { try? FileManager.default.removeItem(at: container) }
+
+    XCTAssertThrowsError(
+      try ImageCompressionStartupRecoveryReporter.reconcile(
+        container: container,
+        failureCode: "PIPELINE_RECOVERY_REQUIRED",
+        persistRecovery: { _, _, _ in throw CocoaError(.fileWriteOutOfSpace) }
+      )
+    )
+    XCTAssertEqual(
+      try RecoveryMetadataEventStore.read(container: container, folder: "RecoveryEvents").count,
+      0
+    )
+
+    try ImageCompressionStartupRecoveryReporter.retryPendingPublication(
+      container: container
+    )
+
+    XCTAssertEqual(
+      try RecoveryMetadataEventStore.read(container: container, folder: "RecoveryEvents")
+        .map { $0["code"] as? String },
+      ["PIPELINE_RECOVERY_REQUIRED"]
+    )
+    try ImageCompressionStartupRecoveryReporter.reconcile(
+      container: container,
+      failureCode: nil
+    )
+  }
+
   func testRotatedTextFixtureRemainsSystemReadableAfterCompactCompression() throws {
     let source = fixtureURL("ocr-rotated.jpg")
     let sourceMetadata = try metadata(source)

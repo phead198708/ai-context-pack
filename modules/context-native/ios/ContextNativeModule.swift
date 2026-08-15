@@ -119,7 +119,15 @@ public final class ContextNativeModule: Module {
       guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) else {
         throw NativeError("APP_GROUP_UNAVAILABLE")
       }
-      do { return try RecoveryMetadataEventStore.read(container: container, folder: "RecoveryEvents").first }
+      do {
+        try ImageCompressionStartupRecoveryReporter.retryPendingPublication(
+          container: container
+        )
+        return try RecoveryMetadataEventStore.read(
+          container: container,
+          folder: "RecoveryEvents"
+        ).first
+      }
       catch let error as RecoveryMetadataEventError { throw NativeError(error.stableCode) }
       catch { throw NativeError("NATIVE_EVENT_STORE_READ_FAILED") }
     }
@@ -130,6 +138,32 @@ public final class ContextNativeModule: Module {
       do { return try RecoveryMetadataEventStore.ack(container: container, folder: "RecoveryEvents", id: id) }
       catch let error as RecoveryMetadataEventError { throw NativeError(error.stableCode) }
       catch { throw NativeError("NATIVE_RECOVERY_ACK_FAILED") }
+    }
+    AsyncFunction("retryRecoveryEvent") { (id: String) throws -> Bool in
+      guard id == ImageCompressionStartupRecoveryReporter.eventId else { return false }
+      guard let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      ) else { throw NativeError("APP_GROUP_UNAVAILABLE") }
+      do {
+        try ImageCompressionStartupRecoveryReporter.retryPendingPublication(
+          container: container
+        )
+        let failureCode = ImageCompressionTemporaryStore.runStartupMaintenance()
+        try ImageCompressionStartupRecoveryReporter.reconcile(
+          container: container,
+          failureCode: failureCode
+        )
+        if failureCode != nil { throw NativeError("PIPELINE_RECOVERY_REQUIRED") }
+        return true
+      } catch let error as NativeError {
+        throw error
+      } catch let error as RecoveryMetadataEventError {
+        throw NativeError(error.stableCode)
+      } catch let error as ImagePerceptualHashError {
+        throw NativeError(error.stableCode)
+      } catch {
+        throw NativeError("NATIVE_RECOVERY_ACK_FAILED")
+      }
     }
 
     AsyncFunction("handoffInbox") { (ingestionId: String, packId: String, requiredHeadroomBytes: Int64) throws -> [String: Any] in

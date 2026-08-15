@@ -577,6 +577,62 @@ test('preferred duplicate choice excludes peers without deleting originals', asy
   expect(repo.saves).toHaveLength(0);
 });
 
+test('uses a budget overlay baseline for a first duplicate decision', async () => {
+  const base = fixture();
+  const overlayGraph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      budget: {
+        ...base.pack.budget,
+        exclusions: [
+          { itemId: firstId, baselineInclusionMode: 'original' as const },
+        ],
+      },
+    },
+    items: base.items.map(item =>
+      item.id === firstId
+        ? { ...item, inclusionMode: 'excluded' as const }
+        : item,
+    ),
+  };
+  const repo = repository(overlayGraph);
+  const suggestion = {
+    schemaVersion: 1 as const,
+    key: `exact-binary:${firstId}:${secondId}`,
+    packId,
+    leftItemId: firstId,
+    rightItemId: secondId,
+    reason: 'exact-binary' as const,
+    confidence: 1,
+    expectedBytesSaved: 10,
+    expectedCharactersSaved: 0,
+  };
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: null,
+    analyses: [],
+    suggestions: [suggestion],
+    decisions: [],
+  });
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:06Z',
+  );
+
+  await controller.reviewDuplicateGroup(packId, [firstId, secondId], {
+    kind: 'exclude',
+    itemId: firstId,
+  });
+
+  expect(repo.value.saveDuplicateDecisions).toHaveBeenCalledWith(packId, [
+    expect.objectContaining({
+      itemId: firstId,
+      choice: 'exclude',
+      baselineInclusionMode: 'original',
+    }),
+  ]);
+});
+
 test('preferred duplicate choice leaves non-adjacent members of a suggestion chain unchanged', async () => {
   const base = fixture();
   const thirdItem: ContextItem = {

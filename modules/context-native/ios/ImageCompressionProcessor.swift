@@ -323,24 +323,51 @@ enum ImageCompressionProcessor {
 
 enum ImageCompressionStartupRecoveryReporter {
   static let eventId = "00000000-0000-4000-8000-000000000014"
+  private static let operationLock = NSRecursiveLock()
+  private static var unpublishedFailureCode: String?
 
-  static func reconcile(container: URL, failureCode: String?) throws {
-    if let failureCode {
-      guard failureCode == ImagePerceptualHashError.cleanupFailure.stableCode else {
-        throw ImagePerceptualHashError.cleanupFailure
-      }
+  static func reconcile(
+    container: URL,
+    failureCode: String?,
+    persistRecovery: (URL, String, String) throws -> Void = { container, code, id in
       try RecoveryMetadataEventStore.persistRecovery(
         container: container,
-        code: failureCode,
-        id: eventId
+        code: code,
+        id: id
       )
-      return
+    },
+    acknowledge: (URL, String) throws -> Bool = { container, id in
+      try RecoveryMetadataEventStore.ack(
+        container: container,
+        folder: "RecoveryEvents",
+        id: id
+      )
     }
-    _ = try RecoveryMetadataEventStore.ack(
-      container: container,
-      folder: "RecoveryEvents",
-      id: eventId
-    )
+  ) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    do {
+      if let failureCode {
+        guard failureCode == ImagePerceptualHashError.cleanupFailure.stableCode else {
+          throw ImagePerceptualHashError.cleanupFailure
+        }
+        try persistRecovery(container, failureCode, eventId)
+      } else {
+        _ = try acknowledge(container, eventId)
+      }
+      unpublishedFailureCode = nil
+    } catch {
+      if let failureCode { unpublishedFailureCode = failureCode }
+      throw error
+    }
+  }
+
+  static func retryPendingPublication(container: URL) throws {
+    operationLock.lock()
+    defer { operationLock.unlock() }
+    if let failureCode = unpublishedFailureCode {
+      try reconcile(container: container, failureCode: failureCode)
+    }
   }
 }
 

@@ -804,12 +804,16 @@ describe('native adapter runtime boundary', () => {
       ...mockNativeModule,
       ackPendingShareEvent: jest.fn().mockResolvedValue(false),
       ackRecoveryEvent: jest.fn().mockResolvedValue(false),
+      retryRecoveryEvent: jest.fn().mockResolvedValue(false),
     };
     const guarded = createNativeAdapter(native);
     await expect(guarded.ackPendingShareEvent('event')).rejects.toMatchObject({
       code: 'NATIVE_SHARE_ACK_FAILED',
     });
     await expect(guarded.ackRecoveryEvent('event')).rejects.toMatchObject({
+      code: 'NATIVE_RECOVERY_ACK_FAILED',
+    });
+    await expect(guarded.retryRecoveryEvent?.('event')).rejects.toMatchObject({
       code: 'NATIVE_RECOVERY_ACK_FAILED',
     });
   });
@@ -819,6 +823,9 @@ describe('native adapter runtime boundary', () => {
       code: 'NATIVE_SHARE_ACK_UNAVAILABLE',
     });
     await expect(adapter.ackRecoveryEvent('event')).rejects.toMatchObject({
+      code: 'NATIVE_RECOVERY_ACK_UNAVAILABLE',
+    });
+    await expect(adapter.retryRecoveryEvent?.('event')).rejects.toMatchObject({
       code: 'NATIVE_RECOVERY_ACK_UNAVAILABLE',
     });
   });

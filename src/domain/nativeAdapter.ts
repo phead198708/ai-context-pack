@@ -73,6 +73,8 @@ export interface NativeAdapter {
   ackEphemeralShareEvent(id: string): Promise<void>;
   getPendingRecoveryEvent(): Promise<RecoveryEvent | null>;
   ackRecoveryEvent(id: string): Promise<void>;
+  /** Retries and acknowledges a recovery operation only after native cleanup succeeds. */
+  retryRecoveryEvent?(id: string): Promise<void>;
   handoffInbox(
     ingestionId: string,
     packId: string,

@@ -648,9 +648,11 @@ function BudgetOptimizationReview({
                 })}
                 onPress={() =>
                   run(
-                    mutate(() =>
-                      controller.restoreBudgetExclusion(pack.id, item.id),
-                    ),
+                    mutate(async () => {
+                      await controller.restoreBudgetExclusion(pack.id, item.id);
+                      setResult(undefined);
+                      setPlan(undefined);
+                    }),
                   )
                 }
               />

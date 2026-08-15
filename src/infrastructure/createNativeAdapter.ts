@@ -62,6 +62,7 @@ export interface NativeMethods {
   ackEphemeralShareEvent?(id: string): Promise<unknown>;
   getPendingRecoveryEvent?(): Promise<unknown>;
   ackRecoveryEvent?(id: string): Promise<unknown>;
+  retryRecoveryEvent?(id: string): Promise<unknown>;
   handoffInbox?(
     ingestionId: string,
     packId: string,
@@ -213,6 +214,12 @@ export const createNativeAdapter = (
           if (!nativeModule.ackRecoveryEvent)
             throw new NativeBoundaryError('NATIVE_RECOVERY_ACK_UNAVAILABLE');
           if ((await nativeModule.ackRecoveryEvent(id)) !== true)
+            throw new NativeBoundaryError('NATIVE_RECOVERY_ACK_FAILED');
+        },
+        retryRecoveryEvent: async id => {
+          if (!nativeModule.retryRecoveryEvent)
+            throw new NativeBoundaryError('NATIVE_RECOVERY_ACK_UNAVAILABLE');
+          if ((await nativeModule.retryRecoveryEvent(id)) !== true)
             throw new NativeBoundaryError('NATIVE_RECOVERY_ACK_FAILED');
         },
         handoffInbox: async (ingestionId, packId, requiredHeadroomBytes) => {
@@ -744,6 +751,9 @@ export const createNativeAdapter = (
         ackEphemeralShareEvent: async () => undefined,
         getPendingRecoveryEvent: async () => null,
         ackRecoveryEvent: async () => undefined,
+        retryRecoveryEvent: async () => {
+          throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
+        },
         handoffInbox: async () => {
           throw new Error('NATIVE_ADAPTER_UNAVAILABLE');
         },

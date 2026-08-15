@@ -27,6 +27,9 @@ export interface RecoveryEvent {
   readonly code: 'INBOX_RECOVERY_REQUIRED' | 'PIPELINE_RECOVERY_REQUIRED';
 }
 
+export const IMAGE_COMPRESSION_RECOVERY_EVENT_ID =
+  '00000000-0000-4000-8000-000000000014' as const;
+
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 const shareImportErrorCodes: ReadonlySet<ShareImportErrorCode> = new Set([

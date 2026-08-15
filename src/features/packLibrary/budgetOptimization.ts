@@ -323,6 +323,10 @@ export class PackBudgetOptimizationService {
             packId: effectivePlan.packId,
             sourceFileUri: value.temporaryFileUri,
             artifact,
+            budgetOptimizationFence: {
+              planId: effectivePlan.planId,
+              expectedRevision: graph.revision,
+            },
           });
           throwIfAborted(options.signal);
           results.push({

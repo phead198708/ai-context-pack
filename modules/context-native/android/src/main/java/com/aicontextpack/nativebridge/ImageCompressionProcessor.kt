@@ -396,15 +396,37 @@ internal object ImageCompressionProcessor {
 
 internal object ImageCompressionStartupRecoveryReporter {
   const val eventId = "00000000-0000-4000-8000-000000000014"
+  @Volatile private var unpublishedFailureCode: String? = null
 
-  fun reconcile(filesDir: File, failureCode: String?) {
-    if (failureCode != null) {
-      if (failureCode != "PIPELINE_RECOVERY_REQUIRED")
-        throw NativeException("PIPELINE_RECOVERY_REQUIRED")
-      MetadataEventStore.persistRecovery(filesDir, failureCode, eventId)
-      return
+  @Synchronized
+  fun reconcile(
+    filesDir: File,
+    failureCode: String?,
+    persistRecovery: (File, String, String) -> Unit = { root, code, id ->
+      MetadataEventStore.persistRecovery(root, code, id)
+    },
+    acknowledge: (File, String) -> Unit = { root, id ->
+      MetadataEventStore.ack(root, "RecoveryEvents", id)
+    },
+  ) {
+    try {
+      if (failureCode != null) {
+        if (failureCode != "PIPELINE_RECOVERY_REQUIRED")
+          throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+        persistRecovery(filesDir, failureCode, eventId)
+      } else {
+        acknowledge(filesDir, eventId)
+      }
+      unpublishedFailureCode = null
+    } catch (error: Throwable) {
+      if (failureCode != null) unpublishedFailureCode = failureCode
+      throw error
     }
-    MetadataEventStore.ack(filesDir, "RecoveryEvents", eventId)
+  }
+
+  @Synchronized
+  fun retryPendingPublication(filesDir: File) {
+    unpublishedFailureCode?.let { reconcile(filesDir, it) }
   }
 }
 

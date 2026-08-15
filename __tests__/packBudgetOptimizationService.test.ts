@@ -262,6 +262,10 @@ test('previews metrics before encoding and publishes an immutable derivative', a
     byteCount: 500_000,
     sha256: 'b'.repeat(64),
   });
+  expect(registered[0]?.budgetOptimizationFence).toEqual({
+    planId,
+    expectedRevision: 8,
+  });
   expect(saves[0]?.pack.budget.pendingOptimization).toEqual(plan);
   expect(saves.at(-1)?.pack.budget.latestOptimization).toEqual(result);
   expect(saves.at(-1)?.pack.budget.pendingOptimization).toBeUndefined();
