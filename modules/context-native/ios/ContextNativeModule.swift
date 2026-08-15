@@ -41,13 +41,20 @@ public final class ContextNativeModule: Module {
       ) { [weak self] _ in
         self?.ocrProcessor.setMemoryPressure(true)
       }
+      let recoveryContainer = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier
+      )
       DispatchQueue.global(qos: .utility).async {
         ImageHashSnapshotStore.runStartupMaintenance()
-        ImageCompressionTemporaryStore.runStartupMaintenance()
+        let failureCode = ImageCompressionTemporaryStore.runStartupMaintenance()
+        if let recoveryContainer {
+          try? ImageCompressionStartupRecoveryReporter.reconcile(
+            container: recoveryContainer,
+            failureCode: failureCode
+          )
+        }
       }
-      guard let container = FileManager.default.containerURL(
-        forSecurityApplicationGroupIdentifier: appGroupIdentifier
-      ) else { return }
+      guard let container = recoveryContainer else { return }
       DispatchQueue.global(qos: .utility).async {
         InboxArtifactHandoff.runStartupMaintenance(container: container)
       }

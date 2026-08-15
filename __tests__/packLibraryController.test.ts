@@ -170,6 +170,32 @@ test('controller mutations clamp a rolled-back clock to the latest Pack update',
   expect(repo.saves[0]?.pack.updatedAt).toBe('2026-08-10T00:10:00Z');
 });
 
+test('atomically invalidates a pending optimization during a later Pack mutation', async () => {
+  const base = fixture();
+  const pendingOptimization = createBudgetOptimizationPlanV1({
+    planId: '523e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: base.revision - 1,
+    createdAt: base.pack.updatedAt,
+    budget: BUDGET_PRESETS.compact,
+    items: [],
+    createArtifactId: () => '623e4567-e89b-42d3-a456-426614174000',
+  });
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      budget: { ...base.pack.budget, pendingOptimization },
+    },
+  };
+  const repo = repository(graph);
+  const controller = new PackLibraryController(async () => repo.value);
+
+  await controller.renamePack(packId, 'Replacement plan enabled');
+
+  expect(repo.saves[0]?.pack.budget.pendingOptimization).toBeUndefined();
+});
+
 test('reorder invalidates packaged rows and restarts downstream packaging', async () => {
   const readyGraph = graphWithPackagedItems('ready');
   const repo = repository(readyGraph);

@@ -195,6 +195,24 @@ describe('InboxEventWorkflow integration', () => {
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledWith(ids[0]);
   });
 
+  test('surfaces compression startup cleanup through the durable recovery path', async () => {
+    const h = harness({
+      getPendingRecoveryEvent: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        id: ids[2],
+        code: 'PIPELINE_RECOVERY_REQUIRED',
+      }),
+    });
+
+    await h.workflow.bootstrap();
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'PIPELINE_RECOVERY_REQUIRED',
+    });
+    expect(h.native.scanInbox).not.toHaveBeenCalled();
+  });
+
   test('preserves false and missing ACK method error codes from the adapter', async () => {
     const falseAck = harness({
       ackPendingShareEvent: jest

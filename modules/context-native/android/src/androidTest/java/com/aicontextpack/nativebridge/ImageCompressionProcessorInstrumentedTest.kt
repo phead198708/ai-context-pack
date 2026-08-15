@@ -160,9 +160,24 @@ class ImageCompressionProcessorInstrumentedTest {
       "PIPELINE_RECOVERY_REQUIRED",
       ImageCompressionTemporaryStore.currentStartupFailureCode(),
     )
+    ImageCompressionStartupRecoveryReporter.reconcile(
+      context.filesDir,
+      "PIPELINE_RECOVERY_REQUIRED",
+    )
+    assertEquals(
+      listOf("PIPELINE_RECOVERY_REQUIRED"),
+      MetadataEventStore.read(context.filesDir, "RecoveryEvents")
+        .filter { it["id"] == ImageCompressionStartupRecoveryReporter.eventId }
+        .map { it["code"] },
+    )
     assertTrue(inherited.delete())
     assertNull(ImageCompressionTemporaryStore.runStartupMaintenance(context))
     assertNull(ImageCompressionTemporaryStore.currentStartupFailureCode())
+    ImageCompressionStartupRecoveryReporter.reconcile(context.filesDir, null)
+    assertTrue(
+      MetadataEventStore.read(context.filesDir, "RecoveryEvents")
+        .none { it["id"] == ImageCompressionStartupRecoveryReporter.eventId },
+    )
   }
 
   @Test

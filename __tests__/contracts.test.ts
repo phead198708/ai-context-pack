@@ -341,6 +341,15 @@ describe('versioned native contracts', () => {
       }),
     ).toBe(false);
   });
+  test('accepts the privacy-safe compression startup recovery event', () => {
+    expect(
+      isRecoveryEvent({
+        schemaVersion: 1,
+        id: '123e4567-e89b-42d3-a456-426614174000',
+        code: 'PIPELINE_RECOVERY_REQUIRED',
+      }),
+    ).toBe(true);
+  });
   test('does not let a deferred scan overwrite an invalidating failure', async () => {
     const gate = new LatestRequestGate();
     let resolveScan: ((value: string) => void) | undefined;

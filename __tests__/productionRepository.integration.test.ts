@@ -72,6 +72,7 @@ const thirdDerivedId = 'a53e4567-e89b-42d3-a456-426614174000';
 const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
 const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
 const cleanupMutationOwnerId = 'c33e4567-e89b-42d3-a456-426614174000';
+const budgetDerivativeId = 'c43e4567-e89b-42d3-a456-426614174000';
 const mainAppPackId = 'd23e4567-e89b-42d3-a456-426614174000';
 const mainAppIngestionId = 'e23e4567-e89b-42d3-a456-426614174000';
 const mainAppImageId = 'f23e4567-e89b-42d3-a456-426614174000';
@@ -1060,6 +1061,99 @@ describe('production repository against SQLite', () => {
     await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
       pack: { budget: { pendingOptimization } },
     });
+  });
+
+  test('invalidates a stale optimization and releases its partial derivative in the same Pack mutation', async () => {
+    const graph = await repository.findPackGraph(packId);
+    const pendingOptimization = createBudgetOptimizationPlanV1({
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      packId,
+      packRevision: graph!.revision,
+      createdAt: '2026-08-14T00:10:00Z',
+      budget: BUDGET_PRESETS.compact,
+      items: [
+        {
+          itemId: firstItemId,
+          sourceType: 'image',
+          included: true,
+          includeOriginal: true,
+          includeExtracted: false,
+          sourceByteCount: 4_000_000,
+          textCharacterCount: 0,
+          textUtf8ByteCount: 0,
+          pdfPageCount: 0,
+          image: {
+            schemaVersion: 1,
+            sourceByteCount: 4_000_000,
+            sourceSha256: 'a'.repeat(64),
+            sourceMediaType: 'image/png',
+            width: 4_000,
+            height: 3_000,
+            hasAlpha: false,
+            animated: false,
+            orientationApplied: true,
+            revision: '1',
+          },
+        },
+      ],
+      createArtifactId: () => budgetDerivativeId,
+    });
+    expect(pendingOptimization.actions).toEqual([
+      expect.objectContaining({
+        kind: 'compress',
+        outputArtifactId: budgetDerivativeId,
+      }),
+    ]);
+    await repository.savePackGraph({
+      pack: {
+        ...graph!.pack,
+        updatedAt: pendingOptimization.createdAt,
+        budget: { ...graph!.pack.budget, pendingOptimization },
+      },
+      items: graph!.items,
+      expectedRevision: graph!.revision,
+    });
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-14T00:10:00Z',
+        '2026-08-14T00:11:00Z',
+      ),
+    ).resolves.toBe(true);
+    await repository.registerPublishedArtifact({
+      packId,
+      publicationLeaseOwnerId: exportId,
+      artifact: {
+        id: budgetDerivativeId,
+        kind: 'compressed-image',
+        relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+        mediaType: 'image/jpeg',
+        byteCount: 500_000,
+        sha256: '9'.repeat(64),
+        processorVersion: {
+          processor: 'image-compression',
+          version: 'image-compression-v1',
+          contractVersion: 1,
+        },
+        createdAt: pendingOptimization.createdAt,
+        immutable: true,
+      },
+    });
+    await repository.releaseCleanupLease(exportId);
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-14T00:10:01Z',
+    );
+
+    await controller.renamePack(packId, 'Replacement plan enabled');
+
+    const updated = await repository.findPackGraph(packId);
+    expect(updated?.pack.budget.pendingOptimization).toBeUndefined();
+    await expect(
+      repository.listCleanupCandidates('2026-08-14T00:10:02Z'),
+    ).resolves.toContainEqual(
+      expect.objectContaining({ artifactId: budgetDerivativeId }),
+    );
   });
 
   test('maps malformed persisted values to recoverable storage divergence', async () => {

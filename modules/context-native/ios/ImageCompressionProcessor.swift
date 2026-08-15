@@ -321,6 +321,29 @@ enum ImageCompressionProcessor {
   }
 }
 
+enum ImageCompressionStartupRecoveryReporter {
+  static let eventId = "00000000-0000-4000-8000-000000000014"
+
+  static func reconcile(container: URL, failureCode: String?) throws {
+    if let failureCode {
+      guard failureCode == ImagePerceptualHashError.cleanupFailure.stableCode else {
+        throw ImagePerceptualHashError.cleanupFailure
+      }
+      try RecoveryMetadataEventStore.persistRecovery(
+        container: container,
+        code: failureCode,
+        id: eventId
+      )
+      return
+    }
+    _ = try RecoveryMetadataEventStore.ack(
+      container: container,
+      folder: "RecoveryEvents",
+      id: eventId
+    )
+  }
+}
+
 enum ImageCompressionTemporaryStore {
   private static let lock = NSLock()
   private static let maintenanceLock = NSLock()

@@ -394,6 +394,20 @@ internal object ImageCompressionProcessor {
       .getOrDefault(false)
 }
 
+internal object ImageCompressionStartupRecoveryReporter {
+  const val eventId = "00000000-0000-4000-8000-000000000014"
+
+  fun reconcile(filesDir: File, failureCode: String?) {
+    if (failureCode != null) {
+      if (failureCode != "PIPELINE_RECOVERY_REQUIRED")
+        throw NativeException("PIPELINE_RECOVERY_REQUIRED")
+      MetadataEventStore.persistRecovery(filesDir, failureCode, eventId)
+      return
+    }
+    MetadataEventStore.ack(filesDir, "RecoveryEvents", eventId)
+  }
+}
+
 internal object ImageCompressionTemporaryStore {
   private const val directoryName = "ImageCompression"
   private val sessionPrefix = "${UUID.randomUUID()}-"

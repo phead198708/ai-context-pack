@@ -355,7 +355,13 @@ class ContextNativeModule : Module(), ComponentCallbacks2 {
           {
             InboxArtifactHandoff.runStartupMaintenance(context.filesDir)
             ImageHashSnapshotStore.runStartupMaintenance(context)
-            ImageCompressionTemporaryStore.runStartupMaintenance(context)
+            val compressionFailure = ImageCompressionTemporaryStore.runStartupMaintenance(context)
+            runCatching {
+              ImageCompressionStartupRecoveryReporter.reconcile(
+                context.filesDir,
+                compressionFailure,
+              )
+            }
           },
           "ai-context-pack-tombstone-sweep",
         ).start()
@@ -1746,8 +1752,15 @@ object MetadataEventStore {
       (transactionId?.let { mapOf("transactionId" to it) } ?: emptyMap()) +
       (code?.let { mapOf("code" to it) } ?: emptyMap()), eventId)
 
-  fun persistRecovery(filesDir: File): Map<String, Any> =
-    persist(filesDir, "RecoveryEvents", mapOf("code" to "INBOX_RECOVERY_REQUIRED"), UUID.randomUUID().toString())
+  fun persistRecovery(
+    filesDir: File,
+    code: String = "INBOX_RECOVERY_REQUIRED",
+    eventId: String = UUID.randomUUID().toString(),
+  ): Map<String, Any> {
+    if (code !in recoveryCodes)
+      throw MetadataEventException("NATIVE_EVENT_SCHEMA_INVALID")
+    return persist(filesDir, "RecoveryEvents", mapOf("code" to code), eventId)
+  }
 
   fun read(filesDir: File, folder: String): List<Map<String, Any>> {
     val directory = File(filesDir, folder)
@@ -1765,7 +1778,7 @@ object MetadataEventStore {
           if (folder == "PendingShareEvents")
             check(value.getString("result") == "complete" || value.getString("result") == "failed")
           if (folder == "RecoveryEvents")
-            check(value.getString("code") == "INBOX_RECOVERY_REQUIRED")
+            check(value.getString("code") in recoveryCodes)
           mapOf(
             "schemaVersion" to 1,
             "id" to id,
@@ -1828,6 +1841,11 @@ object MetadataEventStore {
 
   private fun isCanonicalId(id: String): Boolean =
     canonicalIdPattern.matches(id) && runCatching { UUID.fromString(id).toString() }.getOrNull() == id
+
+  private val recoveryCodes = setOf(
+    "INBOX_RECOVERY_REQUIRED",
+    "PIPELINE_RECOVERY_REQUIRED",
+  )
 }
 
 class MetadataEventException(val stableCode: String) : Exception(stableCode)

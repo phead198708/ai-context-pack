@@ -530,9 +530,12 @@ function updatedPack(
   items: readonly ContextItem[],
   updatedAt: string,
 ): ContextPack {
+  const budget = { ...pack.budget };
+  delete budget.pendingOptimization;
   return {
     ...pack,
     updatedAt,
+    budget,
     orderedItemIds: items.map(item => item.id),
   };
 }

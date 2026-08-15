@@ -623,6 +623,11 @@ export class ExpoSqlitePersistenceRepository
           [input.packId, artifact.id],
         );
       }
+      if (insertedPack.changes === 0)
+        await invalidatePendingOptimizationForPackMutation(
+          transaction,
+          input.packId,
+        );
       await transaction.run(
         `UPDATE packs
          SET updated_at = CASE WHEN updated_at < ? THEN ? ELSE updated_at END,
@@ -730,9 +735,11 @@ export class ExpoSqlitePersistenceRepository
       const existing = await transaction.first<{
         revision: number;
         deleted_at: string | null;
-      }>('SELECT revision, deleted_at FROM packs WHERE id = ?', [
+        budget_json: string;
+      }>('SELECT revision, deleted_at, budget_json FROM packs WHERE id = ?', [
         input.pack.id,
       ]);
+      let effectiveInput = input;
       let nextRevision: number;
       if (!existing) {
         if (input.expectedRevision !== undefined)
@@ -752,6 +759,17 @@ export class ExpoSqlitePersistenceRepository
           existing.revision !== input.expectedRevision
         )
           throw new DomainError('PERSISTENCE_CONFLICT');
+        const budget = await invalidatePendingOptimizationForPackMutation(
+          transaction,
+          input.pack.id,
+          input.pack.budget,
+          existing.budget_json,
+        );
+        effectiveInput = {
+          ...input,
+          pack: { ...input.pack, budget },
+        };
+        assertPackGraph(effectiveInput);
         nextRevision = existing.revision + 1;
         const update = await transaction.run(
           `UPDATE packs SET schema_version = ?, title = ?, user_instruction = ?,
@@ -759,16 +777,16 @@ export class ExpoSqlitePersistenceRepository
              warning_codes_json = ?, revision = ?
            WHERE id = ? AND revision = ? AND deleted_at IS NULL`,
           [
-            input.pack.schemaVersion,
-            input.pack.title,
-            input.pack.userInstruction,
-            input.pack.updatedAt,
-            input.pack.state,
-            encodeBudget(input.pack.budget),
-            input.pack.estimatedTokens,
-            encodeStringArray(input.pack.warningCodes),
+            effectiveInput.pack.schemaVersion,
+            effectiveInput.pack.title,
+            effectiveInput.pack.userInstruction,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.state,
+            encodeBudget(effectiveInput.pack.budget),
+            effectiveInput.pack.estimatedTokens,
+            encodeStringArray(effectiveInput.pack.warningCodes),
             nextRevision,
-            input.pack.id,
+            effectiveInput.pack.id,
             input.expectedRevision,
           ],
         );
@@ -776,13 +794,13 @@ export class ExpoSqlitePersistenceRepository
       }
       await replaceContextItems(
         transaction,
-        input.pack.id,
-        input.items,
-        input.pack.createdAt,
-        input.pack.updatedAt,
-        input.removedItemOriginalDisposition ?? 'preserve',
+        effectiveInput.pack.id,
+        effectiveInput.items,
+        effectiveInput.pack.createdAt,
+        effectiveInput.pack.updatedAt,
+        effectiveInput.removedItemOriginalDisposition ?? 'preserve',
       );
-      if (input.cancelActivePipelineRuns)
+      if (effectiveInput.cancelActivePipelineRuns)
         await transaction.run(
           `UPDATE pipeline_runs SET status = 'cancelled',
              claim_session_id = NULL, claim_deadline_ms = NULL,
@@ -792,14 +810,14 @@ export class ExpoSqlitePersistenceRepository
                WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END
            WHERE pack_id = ? AND status IN ('queued', 'running', 'recovering')`,
           [
-            input.pack.updatedAt,
-            input.pack.updatedAt,
-            input.pack.updatedAt,
-            input.pack.updatedAt,
-            input.pack.id,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.id,
           ],
         );
-      for (const run of input.startedPipelineRuns ?? [])
+      for (const run of effectiveInput.startedPipelineRuns ?? [])
         await startPipelineRunInTransaction(transaction, run);
       return nextRevision;
     });
@@ -1209,6 +1227,10 @@ export class ExpoSqlitePersistenceRepository
            claim_deadline_ms = NULL WHERE id = ?`,
         [settledAt, settledAt, input.runId],
       );
+      await invalidatePendingOptimizationForPackMutation(
+        transaction,
+        run.pack_id,
+      );
       await transaction.run(
         `UPDATE packs SET updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
@@ -1285,6 +1307,10 @@ export class ExpoSqlitePersistenceRepository
          WHERE pack_id = ? AND id <> ?
            AND status IN ('queued', 'running', 'recovering')`,
         [settledAt, settledAt, run.pack_id, input.runId],
+      );
+      await invalidatePendingOptimizationForPackMutation(
+        transaction,
+        run.pack_id,
       );
       await transaction.run(
         `UPDATE packs SET state = 'failed', updated_at = ?, revision = revision + 1
@@ -2013,6 +2039,7 @@ export class ExpoSqlitePersistenceRepository
           ],
         );
       }
+      await invalidatePendingOptimizationForPackMutation(transaction, packId);
       await transaction.run(
         `UPDATE packs SET updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
@@ -2079,6 +2106,7 @@ export class ExpoSqlitePersistenceRepository
         'DELETE FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
         [itemId, packId],
       );
+      await invalidatePendingOptimizationForPackMutation(transaction, packId);
       await transaction.run(
         `UPDATE packs SET updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
@@ -3658,6 +3686,54 @@ function packSqlValues(pack: ContextPack): readonly SqlValue[] {
     pack.estimatedTokens,
     encodeStringArray(pack.warningCodes),
   ];
+}
+
+async function invalidatePendingOptimizationForPackMutation(
+  transaction: SqlConnection,
+  packId: string,
+  nextBudget?: ContextPack['budget'],
+  encodedCurrentBudget?: string,
+): Promise<ContextPack['budget']> {
+  const encoded =
+    encodedCurrentBudget ??
+    (
+      await transaction.first<{ budget_json: string }>(
+        'SELECT budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      )
+    )?.budget_json;
+  if (encoded === undefined) throw new DomainError('PERSISTENCE_CONFLICT');
+  const current = decodePersisted(() => decodeBudget(encoded));
+  const pending = current.pendingOptimization;
+  if (!pending) return nextBudget ?? current;
+  if (pending.packId !== packId)
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+
+  const budget = { ...(nextBudget ?? current) };
+  delete budget.pendingOptimization;
+  const retainedArtifactIds = new Set(
+    budget.latestOptimization?.items.flatMap(item =>
+      item.artifactId === undefined ? [] : [item.artifactId],
+    ) ?? [],
+  );
+  for (const action of pending.actions) {
+    if (
+      action.kind !== 'compress' ||
+      retainedArtifactIds.has(action.outputArtifactId)
+    )
+      continue;
+    await transaction.run(
+      `DELETE FROM artifact_references
+       WHERE owner_type = 'pack' AND owner_id = ? AND artifact_id = ?`,
+      [packId, action.outputArtifactId],
+    );
+  }
+  if (nextBudget === undefined)
+    await transaction.run('UPDATE packs SET budget_json = ? WHERE id = ?', [
+      encodeBudget(budget),
+      packId,
+    ]);
+  return budget;
 }
 
 function decodeRiskFindingRow(row: RiskFindingRow): RiskFinding {

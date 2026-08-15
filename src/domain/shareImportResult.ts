@@ -24,7 +24,7 @@ export interface PendingShareEvent {
 export interface RecoveryEvent {
   readonly schemaVersion: 1;
   readonly id: string;
-  readonly code: 'INBOX_RECOVERY_REQUIRED';
+  readonly code: 'INBOX_RECOVERY_REQUIRED' | 'PIPELINE_RECOVERY_REQUIRED';
 }
 
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -62,7 +62,8 @@ export const isRecoveryEvent = (value: unknown): value is RecoveryEvent =>
   record(value) &&
   value.schemaVersion === 1 &&
   isCanonicalUuid(value.id) &&
-  value.code === 'INBOX_RECOVERY_REQUIRED';
+  (value.code === 'INBOX_RECOVERY_REQUIRED' ||
+    value.code === 'PIPELINE_RECOVERY_REQUIRED');
 
 export function shareImportErrorCode(result: unknown): string | null {
   if (isPendingShareEvent(result)) result = result.result;
