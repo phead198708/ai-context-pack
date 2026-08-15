@@ -1064,6 +1064,130 @@ describe('production repository against SQLite', () => {
     });
   });
 
+  test('fails closed before releasing a pending output whose persisted identity is corrupted', async () => {
+    const graph = (await repository.findPackGraph(packId))!;
+    const pendingOptimization = createBudgetOptimizationPlanV1({
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      packId,
+      packRevision: graph.revision,
+      createdAt: '2026-08-14T00:20:00Z',
+      budget: BUDGET_PRESETS.compact,
+      items: [
+        {
+          itemId: firstItemId,
+          sourceType: 'image',
+          included: true,
+          includeOriginal: true,
+          includeExtracted: false,
+          sourceByteCount: 4_000_000,
+          textCharacterCount: 0,
+          textUtf8ByteCount: 0,
+          pdfPageCount: 0,
+          image: {
+            schemaVersion: 1,
+            sourceByteCount: 4_000_000,
+            sourceSha256: 'a'.repeat(64),
+            sourceMediaType: 'image/png',
+            width: 4_000,
+            height: 3_000,
+            hasAlpha: false,
+            animated: false,
+            orientationApplied: true,
+            revision: '1',
+          },
+        },
+      ],
+      exclusions: [],
+      createArtifactId: () => budgetDerivativeId,
+    });
+    await repository.savePackGraph({
+      pack: {
+        ...graph.pack,
+        updatedAt: pendingOptimization.createdAt,
+        budget: { ...graph.pack.budget, pendingOptimization },
+      },
+      items: graph.items,
+      expectedRevision: graph.revision,
+    });
+    const missingOutputCheckpoint = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.savePackGraph({
+        pack: {
+          ...missingOutputCheckpoint.pack,
+          title: 'Missing pending output discarded',
+          updatedAt: '2026-08-14T00:20:01Z',
+        },
+        items: missingOutputCheckpoint.items,
+        expectedRevision: missingOutputCheckpoint.revision,
+      }),
+    ).resolves.toBe(missingOutputCheckpoint.revision + 1);
+    const afterMissingOutput = (await repository.findPackGraph(packId))!;
+    expect(afterMissingOutput.pack.budget.pendingOptimization).toBeUndefined();
+    const pendingAgain = {
+      ...pendingOptimization,
+      planId: 'b53e4567-e89b-42d3-a456-426614174000',
+      packRevision: afterMissingOutput.revision,
+      createdAt: '2026-08-14T00:20:02Z',
+    };
+    await repository.savePackGraph({
+      pack: {
+        ...afterMissingOutput.pack,
+        updatedAt: pendingAgain.createdAt,
+        budget: {
+          ...afterMissingOutput.pack.budget,
+          pendingOptimization: pendingAgain,
+        },
+      },
+      items: afterMissingOutput.items,
+      expectedRevision: afterMissingOutput.revision,
+    });
+    const checkpoint = (await repository.findPackGraph(packId))!;
+    const persistedBudget = JSON.parse(
+      (
+        database
+          .prepare('SELECT budget_json FROM packs WHERE id = ?')
+          .get(packId) as { budget_json: string }
+      ).budget_json,
+    ) as {
+      pendingOptimization: {
+        actions: [{ kind: 'compress'; outputArtifactId: string }];
+      };
+    };
+    persistedBudget.pendingOptimization.actions[0].outputArtifactId =
+      secondItemId;
+    database
+      .prepare('UPDATE packs SET budget_json = ? WHERE id = ?')
+      .run(JSON.stringify(persistedBudget), packId);
+
+    await expect(
+      repository.savePackGraph({
+        pack: {
+          ...checkpoint.pack,
+          title: 'This mutation must roll back',
+          updatedAt: '2026-08-14T00:20:03Z',
+        },
+        items: checkpoint.items,
+        expectedRevision: checkpoint.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    expect(
+      database
+        .prepare(
+          `SELECT artifact_id FROM artifact_references
+           WHERE owner_type = 'pack' AND owner_id = ? ORDER BY artifact_id`,
+        )
+        .all(packId),
+    ).toEqual(
+      expect.arrayContaining([
+        { artifact_id: firstItemId },
+        { artifact_id: secondItemId },
+      ]),
+    );
+    expect(
+      database.prepare('SELECT title FROM packs WHERE id = ?').get(packId),
+    ).toEqual({ title: checkpoint.pack.title });
+  });
+
   test('atomically reconciles duplicate decisions and restores budget exclusions across restarts', async () => {
     const graph = (await repository.findPackGraph(packId))!;
     await expect(

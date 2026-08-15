@@ -780,24 +780,25 @@ export class ExpoSqlitePersistenceRepository
           contentProjectionChanged && carriesExistingCompletedOptimization
             ? withoutCompletedBudgetOptimization(input.pack.budget)
             : input.pack.budget;
-        const releasedOptimizationArtifactIds = new Set([
-          ...(await releaseOptimizationArtifactReferences(
+        const releasedCompletedArtifactIds =
+          await releaseOptimizationArtifactReferences(
             transaction,
             input.pack.id,
             currentBudget.latestOptimization,
             requestedBudget.latestOptimization,
-          )),
-          ...pendingOptimizationArtifactIdsToRelease(
-            currentBudget,
+          );
+        const invalidatedPending =
+          await invalidatePendingOptimizationForPackMutation(
+            transaction,
+            input.pack.id,
             requestedBudget,
-          ),
+            existing.budget_json,
+          );
+        const releasedOptimizationArtifactIds = new Set([
+          ...releasedCompletedArtifactIds,
+          ...invalidatedPending.releasedArtifactIds,
         ]);
-        const budget = await invalidatePendingOptimizationForPackMutation(
-          transaction,
-          input.pack.id,
-          requestedBudget,
-          existing.budget_json,
-        );
+        const budget = invalidatedPending.budget;
         effectiveInput = {
           ...input,
           pack: { ...input.pack, budget },
@@ -2292,7 +2293,7 @@ export class ExpoSqlitePersistenceRepository
       if (remainingExclusions.length > 0)
         nextBudget.exclusions = remainingExclusions;
       else delete nextBudget.exclusions;
-      const effectiveBudget =
+      const { budget: effectiveBudget } =
         await invalidatePendingOptimizationForPackMutation(
           transaction,
           packId,
@@ -4014,7 +4015,10 @@ async function invalidatePendingOptimizationForPackMutation(
   packId: string,
   nextBudget?: ContextPack['budget'],
   encodedCurrentBudget?: string,
-): Promise<ContextPack['budget']> {
+): Promise<{
+  readonly budget: ContextPack['budget'];
+  readonly releasedArtifactIds: readonly string[];
+}> {
   const encoded =
     encodedCurrentBudget ??
     (
@@ -4026,28 +4030,26 @@ async function invalidatePendingOptimizationForPackMutation(
   if (encoded === undefined) throw new DomainError('PERSISTENCE_CONFLICT');
   const current = decodePersisted(() => decodeBudget(encoded));
   const pending = current.pendingOptimization;
-  if (!pending) return nextBudget ?? current;
+  if (!pending)
+    return { budget: nextBudget ?? current, releasedArtifactIds: [] };
   if (pending.packId !== packId)
     throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
 
   const budget = { ...(nextBudget ?? current) };
   delete budget.pendingOptimization;
-  for (const artifactId of pendingOptimizationArtifactIdsToRelease(
-    current,
-    budget,
-  )) {
-    await transaction.run(
-      `DELETE FROM artifact_references
-       WHERE owner_type = 'pack' AND owner_id = ? AND artifact_id = ?`,
-      [packId, artifactId],
+  const releasedArtifactIds =
+    await releasePendingOptimizationArtifactReferences(
+      transaction,
+      packId,
+      current,
+      budget,
     );
-  }
   if (nextBudget === undefined)
     await transaction.run('UPDATE packs SET budget_json = ? WHERE id = ?', [
       encodeBudget(budget),
       packId,
     ]);
-  return budget;
+  return { budget, releasedArtifactIds };
 }
 
 async function invalidateCompletedOptimizationForPackContentMutation(
@@ -4071,12 +4073,13 @@ async function invalidateCompletedOptimizationForPackContentMutation(
     packId,
     current.latestOptimization,
   );
-  const effective = await invalidatePendingOptimizationForPackMutation(
-    transaction,
-    packId,
-    next,
-    encoded,
-  );
+  const { budget: effective } =
+    await invalidatePendingOptimizationForPackMutation(
+      transaction,
+      packId,
+      next,
+      encoded,
+    );
   await transaction.run('UPDATE packs SET budget_json = ? WHERE id = ?', [
     encodeBudget(effective),
     packId,
@@ -4121,10 +4124,12 @@ async function packContentProjectionChanged(
   );
 }
 
-function pendingOptimizationArtifactIdsToRelease(
+async function releasePendingOptimizationArtifactReferences(
+  transaction: SqlConnection,
+  packId: string,
   current: ContextPack['budget'],
   next: ContextPack['budget'],
-): readonly string[] {
+): Promise<readonly string[]> {
   const pending = current.pendingOptimization;
   if (!pending) return [];
   const retainedArtifactIds = new Set(
@@ -4132,11 +4137,23 @@ function pendingOptimizationArtifactIdsToRelease(
       item.artifactId === undefined ? [] : [item.artifactId],
     ) ?? [],
   );
-  return pending.actions.flatMap(action =>
-    action.kind === 'compress' &&
-    !retainedArtifactIds.has(action.outputArtifactId)
-      ? [action.outputArtifactId]
-      : [],
+  const artifactsById = new Map<string, string>();
+  for (const action of pending.actions) {
+    if (
+      action.kind !== 'compress' ||
+      retainedArtifactIds.has(action.outputArtifactId)
+    )
+      continue;
+    const priorItemId = artifactsById.get(action.outputArtifactId);
+    if (priorItemId !== undefined && priorItemId !== action.itemId)
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    artifactsById.set(action.outputArtifactId, action.itemId);
+  }
+  return releasePackCompressedArtifactReferences(
+    transaction,
+    packId,
+    artifactsById,
+    true,
   );
 }
 
@@ -4163,6 +4180,20 @@ async function releaseOptimizationArtifactReferences(
       throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
     artifactsById.set(item.artifactId, item.itemId);
   }
+  return releasePackCompressedArtifactReferences(
+    transaction,
+    packId,
+    artifactsById,
+  );
+}
+
+async function releasePackCompressedArtifactReferences(
+  transaction: SqlConnection,
+  packId: string,
+  artifactsById: ReadonlyMap<string, string>,
+  allowMissing = false,
+): Promise<readonly string[]> {
+  const releasableArtifactIds: string[] = [];
   for (const [artifactId, itemId] of artifactsById) {
     const artifact = await transaction.first<{
       item_id: string | null;
@@ -4178,6 +4209,7 @@ async function releaseOptimizationArtifactReferences(
        FROM artifacts artifact WHERE artifact.id = ?`,
       [packId, artifactId],
     );
+    if (!artifact && allowMissing) continue;
     if (
       !artifact ||
       artifact.item_id !== itemId ||
@@ -4185,14 +4217,15 @@ async function releaseOptimizationArtifactReferences(
       artifact.referenced !== 1
     )
       throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    releasableArtifactIds.push(artifactId);
   }
-  for (const artifactId of artifactsById.keys())
+  for (const artifactId of releasableArtifactIds)
     await transaction.run(
       `DELETE FROM artifact_references
        WHERE owner_type = 'pack' AND owner_id = ? AND artifact_id = ?`,
       [packId, artifactId],
     );
-  return [...artifactsById.keys()];
+  return releasableArtifactIds;
 }
 
 function decodeRiskFindingRow(row: RiskFindingRow): RiskFinding {
