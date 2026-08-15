@@ -1,5 +1,11 @@
 import { DomainError } from '../../domain/errors';
+import { latestIsoDateTime } from '../../domain/isoDateTime';
 import type { ContextItem, ContextPack } from '../../domain/models';
+import type { Budget } from '../../domain/models';
+import type {
+  BudgetOptimizationPlanV1,
+  BudgetOptimizationResultV1,
+} from '../../domain/budgetOptimization';
 import {
   groupDuplicateSuggestionsV1,
   type DuplicateDecisionChoiceV1,
@@ -20,20 +26,61 @@ import {
   type RetryPlan,
 } from './domain';
 import { createPipelineRun, type PackProcessingScheduler } from './processing';
+import type { PackBudgetOptimizationService } from './budgetOptimization';
 
 export type RemovedOriginalDisposition = 'preserve' | 'release';
 
 export class PackLibraryController {
   private chain = Promise.resolve();
+  private activeBudgetCancellation: AbortController | undefined;
 
   constructor(
     private readonly getRepository: () => Promise<ProductionPersistenceRepository>,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly processing?: PackProcessingScheduler,
+    private readonly budgetOptimization?: PackBudgetOptimizationService,
   ) {}
 
   recoverProcessing(): Promise<void> {
     return this.processing?.recover() ?? Promise.resolve();
+  }
+
+  previewBudget(
+    packId: string,
+    budget: Budget,
+    excludedItemIds: readonly string[] = [],
+  ): Promise<BudgetOptimizationPlanV1> {
+    if (!this.budgetOptimization)
+      return Promise.reject(new DomainError('DOMAIN_INVALID_TRANSITION'));
+    return this.enqueue(() =>
+      this.budgetOptimization!.preview(packId, budget, excludedItemIds),
+    );
+  }
+
+  applyBudget(
+    plan: BudgetOptimizationPlanV1,
+  ): Promise<BudgetOptimizationResultV1> {
+    if (!this.budgetOptimization)
+      return Promise.reject(new DomainError('DOMAIN_INVALID_TRANSITION'));
+    if (this.activeBudgetCancellation)
+      return Promise.reject(new DomainError('DOMAIN_INVALID_TRANSITION'));
+    const cancellation = new AbortController();
+    this.activeBudgetCancellation = cancellation;
+    return this.enqueue(async () => {
+      try {
+        return await this.budgetOptimization!.apply(plan, {
+          signal: cancellation.signal,
+        });
+      } finally {
+        if (this.activeBudgetCancellation === cancellation)
+          this.activeBudgetCancellation = undefined;
+      }
+    });
+  }
+
+  /** Bypasses the mutation queue held by the active optimization. */
+  cancelBudget(): void {
+    this.activeBudgetCancellation?.abort();
   }
 
   async load(selectedPackId?: string): Promise<PackLibrarySnapshot> {
@@ -330,6 +377,12 @@ export class PackLibraryController {
       const priorById = new Map(
         snapshot.decisions.map(decision => [decision.itemId, decision]),
       );
+      const budgetExclusionById = new Map(
+        (graph.pack.budget.exclusions ?? []).map(exclusion => [
+          exclusion.itemId,
+          exclusion,
+        ]),
+      );
       const itemById = new Map(graph.items.map(item => [item.id, item]));
       const decidedAt = this.timestamp(graph.pack);
       const createDecision = (
@@ -345,7 +398,9 @@ export class PackLibraryController {
           itemId,
           choice,
           baselineInclusionMode:
-            priorById.get(itemId)?.baselineInclusionMode ?? item.inclusionMode,
+            priorById.get(itemId)?.baselineInclusionMode ??
+            budgetExclusionById.get(itemId)?.baselineInclusionMode ??
+            item.inclusionMode,
           source,
           decidedAt,
         };
@@ -412,6 +467,20 @@ export class PackLibraryController {
     });
   }
 
+  restoreBudgetExclusion(packId: string, itemId: string): Promise<void> {
+    return this.enqueue(async () => {
+      const repository = await this.getRepository();
+      const graph = await repository.findPackGraph(packId);
+      if (!graph || !graph.items.some(candidate => candidate.id === itemId))
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      await repository.restoreBudgetExclusion(
+        packId,
+        itemId,
+        this.timestamp(graph.pack),
+      );
+    });
+  }
+
   cancelProcessing(packId: string): Promise<void> {
     return this.enqueue(async () => {
       const repository = await this.getRepository();
@@ -451,11 +520,16 @@ export class PackLibraryController {
       const graph = await repository.findPackGraph(packId);
       if (!graph) throw new DomainError('PERSISTENCE_CONFLICT');
       const changed = change(graph);
+      const contentProjectionChanged = packContentProjectionChanged(
+        graph.items,
+        changed.items,
+      );
       await repository.savePackGraph({
         pack: updatedPack(
           changed.pack,
           changed.items,
           this.timestamp(changed.pack),
+          contentProjectionChanged,
         ),
         items: changed.items,
         expectedRevision: graph.revision,
@@ -465,12 +539,7 @@ export class PackLibraryController {
   }
 
   private timestamp(pack: ContextPack): string {
-    const value = this.now();
-    if (!Number.isFinite(Date.parse(value)))
-      throw new DomainError('SCHEMA_INVALID');
-    return [value, pack.createdAt, pack.updatedAt].reduce((latest, candidate) =>
-      Date.parse(candidate) > Date.parse(latest) ? candidate : latest,
-    );
+    return latestIsoDateTime([this.now(), pack.createdAt, pack.updatedAt]);
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
@@ -487,12 +556,45 @@ function updatedPack(
   pack: ContextPack,
   items: readonly ContextItem[],
   updatedAt: string,
+  invalidateCompletedOptimization = false,
 ): ContextPack {
+  const budget = { ...pack.budget };
+  delete budget.pendingOptimization;
+  if (invalidateCompletedOptimization) {
+    delete budget.latestEstimate;
+    delete budget.latestOptimization;
+  }
+  const retainedItemIds = new Set(items.map(item => item.id));
+  const exclusions = budget.exclusions?.filter(exclusion =>
+    retainedItemIds.has(exclusion.itemId),
+  );
+  if (exclusions && exclusions.length > 0) budget.exclusions = exclusions;
+  else delete budget.exclusions;
   return {
     ...pack,
     updatedAt,
+    budget,
     orderedItemIds: items.map(item => item.id),
   };
+}
+
+function packContentProjectionChanged(
+  current: readonly ContextItem[],
+  next: readonly ContextItem[],
+): boolean {
+  return (
+    current.length !== next.length ||
+    current.some((item, index) => {
+      const candidate = next[index];
+      return (
+        candidate === undefined ||
+        candidate.id !== item.id ||
+        candidate.sortIndex !== item.sortIndex ||
+        candidate.inclusionMode !== item.inclusionMode ||
+        !sameStringSet(candidate.artifactIds, item.artifactIds)
+      );
+    })
+  );
 }
 
 function packStateForRetry(state: ContextPack['state']): ContextPack['state'] {

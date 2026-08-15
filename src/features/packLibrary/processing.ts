@@ -4,6 +4,11 @@ import {
   isDomainErrorCode,
   type DomainErrorCode,
 } from '../../domain/errors';
+import {
+  compareIsoDateTimes,
+  isIsoDateTime,
+  latestIsoDateTime,
+} from '../../domain/isoDateTime';
 import type { Artifact } from '../../domain/models';
 import {
   fingerprintNormalizedTextAsyncV1,
@@ -1373,20 +1378,16 @@ function utf8ByteCount(value: string): number {
 }
 
 function validatedTimestamp(value: string, minimum?: string): string {
-  const valueEpoch = Date.parse(value);
-  const minimumEpoch = minimum === undefined ? valueEpoch : Date.parse(minimum);
-  if (!Number.isFinite(valueEpoch) || !Number.isFinite(minimumEpoch))
+  if (
+    !isIsoDateTime(value) ||
+    (minimum !== undefined && !isIsoDateTime(minimum))
+  )
     throw new DomainError('SCHEMA_INVALID');
-  return valueEpoch < minimumEpoch ? minimum! : value;
+  return minimum !== undefined && compareIsoDateTimes(value, minimum) < 0
+    ? minimum
+    : value;
 }
 
 function latestTimestamp(values: readonly string[]): string {
-  if (values.length === 0) throw new DomainError('SCHEMA_INVALID');
-  values.forEach(value => {
-    if (!Number.isFinite(Date.parse(value)))
-      throw new DomainError('SCHEMA_INVALID');
-  });
-  return values.reduce((latest, value) =>
-    Date.parse(value) > Date.parse(latest) ? value : latest,
-  );
+  return latestIsoDateTime(values);
 }

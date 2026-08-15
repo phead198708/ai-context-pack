@@ -1,5 +1,8 @@
 import { DomainError } from '../../domain/errors';
-import { createCanonicalUuid } from '../../domain/canonicalUuid';
+import {
+  createCanonicalUuid,
+  isCanonicalUuid,
+} from '../../domain/canonicalUuid';
 import type { Artifact } from '../../domain/models';
 import type { NativeAdapter } from '../../domain/nativeAdapter';
 import { DEVELOPMENT_RESET_CONFIRMATION } from './contracts';
@@ -17,6 +20,7 @@ import type {
   DevelopmentResetRepository,
   PublishArtifactInput,
   PublishedArtifactFile,
+  RegisterPublishedArtifactInput,
 } from './contracts';
 import { assertArtifact } from './modelCodec';
 import { startCleanupLeaseHeartbeat } from './cleanupLeaseHeartbeat';
@@ -101,6 +105,7 @@ export interface PublishAndRegisterArtifactInput {
   readonly packId: string;
   readonly sourceFileUri: string;
   readonly artifact: Artifact;
+  readonly budgetOptimizationFence?: RegisterPublishedArtifactInput['budgetOptimizationFence'];
 }
 
 /** Makes bytes domain-visible only after native hash verification and DB commit. */
@@ -158,6 +163,9 @@ export class PublishedArtifactCoordinator {
         const result = await this.repository.registerPublishedArtifact({
           packId: input.packId,
           artifact: input.artifact,
+          ...(input.budgetOptimizationFence
+            ? { budgetOptimizationFence: input.budgetOptimizationFence }
+            : {}),
           publicationLeaseOwnerId: publicationOwnerId,
         });
         heartbeat.assertOwned();
@@ -389,6 +397,13 @@ function assertPublishAndRegisterInput(
   input: PublishAndRegisterArtifactInput,
 ): void {
   assertArtifact(input.artifact);
+  if (
+    input.budgetOptimizationFence !== undefined &&
+    (!isCanonicalUuid(input.budgetOptimizationFence.planId) ||
+      !Number.isSafeInteger(input.budgetOptimizationFence.expectedRevision) ||
+      input.budgetOptimizationFence.expectedRevision < 1)
+  )
+    throw new DomainError('SCHEMA_INVALID');
   const area = input.artifact.relativePath.split('/')[2];
   const expectedArea =
     input.artifact.kind === 'original'

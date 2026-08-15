@@ -16,6 +16,8 @@ import {
   decodeRiskFindingV1,
   isExportManifestV1,
   isImagePerceptualHashV1,
+  isImageCompressionInspectionV1,
+  isImageCompressionResultV1,
   isImportManifestV1,
   isOCRResultV1,
   isPDFPageExtractionV1,
@@ -26,6 +28,10 @@ import {
 } from '../src/domain/validation';
 import { DOMAIN_ERROR_CATALOG } from '../src/domain/errors';
 import { decodeImagePerceptualHashV1 } from '../src/domain/duplicateDetection';
+import {
+  decodeImageCompressionInspectionV1,
+  decodeImageCompressionResultV1,
+} from '../src/domain/budgetOptimization';
 
 const { readFileSync, readdirSync } = jest.requireActual<{
   readonly readFileSync: (path: string, encoding: 'utf8') => string;
@@ -98,6 +104,18 @@ const contracts: readonly {
     schema: 'image-perceptual-hash-v1.schema.json',
     validate: isImagePerceptualHashV1,
     decode: value => decodeImagePerceptualHashV1(value),
+  },
+  {
+    fixture: 'image-compression-inspection-v1.json',
+    schema: 'image-compression-inspection-v1.schema.json',
+    validate: isImageCompressionInspectionV1,
+    decode: value => decodeImageCompressionInspectionV1(value),
+  },
+  {
+    fixture: 'image-compression-result-v1.json',
+    schema: 'image-compression-result-v1.schema.json',
+    validate: isImageCompressionResultV1,
+    decode: value => decodeImageCompressionResultV1(value),
   },
 ];
 
@@ -432,7 +450,7 @@ describe('V1 contract fixtures and machine-readable schemas', () => {
     },
   );
 
-  test('schema and fixture directories contain exactly the six required contracts', () => {
+  test('schema and fixture directories contain exactly the required contracts', () => {
     expect(readdirSync(schemaDirectory).sort()).toEqual(
       compiledContracts.map(contract => contract.schema).sort(),
     );

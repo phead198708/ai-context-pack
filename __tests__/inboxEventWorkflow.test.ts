@@ -6,6 +6,7 @@ import {
 } from '../src/domain/inboxEventWorkflow';
 import type { NativeAdapter } from '../src/domain/nativeAdapter';
 import type { PendingShareEvent } from '../src/domain/shareImportResult';
+import { IMAGE_COMPRESSION_RECOVERY_EVENT_ID } from '../src/domain/shareImportResult';
 import { NativeBoundaryError } from '../src/infrastructure/createNativeAdapter';
 
 const ids = [
@@ -37,6 +38,7 @@ function harness(
     ackEphemeralShareEvent: jest.fn().mockResolvedValue(undefined),
     getPendingRecoveryEvent: jest.fn().mockResolvedValue(null),
     ackRecoveryEvent: jest.fn().mockResolvedValue(undefined),
+    retryRecoveryEvent: jest.fn().mockResolvedValue(undefined),
     handoffInbox: jest.fn().mockResolvedValue([]),
     acknowledgeInbox: jest.fn().mockResolvedValue(undefined),
     publishMainAppImport: jest.fn(),
@@ -193,6 +195,59 @@ describe('InboxEventWorkflow integration', () => {
     await h.workflow.retry();
     expect(h.native.ackRecoveryEvent).toHaveBeenCalledWith(ids[2]);
     expect(h.native.ackPendingShareEvent).toHaveBeenCalledWith(ids[0]);
+  });
+
+  test('surfaces compression startup cleanup through the durable recovery path', async () => {
+    const h = harness({
+      getPendingRecoveryEvent: jest.fn().mockResolvedValue({
+        schemaVersion: 1,
+        id: ids[2],
+        code: 'PIPELINE_RECOVERY_REQUIRED',
+      }),
+    });
+
+    await h.workflow.bootstrap();
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'PIPELINE_RECOVERY_REQUIRED',
+    });
+    expect(h.native.scanInbox).not.toHaveBeenCalled();
+  });
+
+  test('retries compression cleanup before removing its fixed recovery event', async () => {
+    const recovery = {
+      schemaVersion: 1 as const,
+      id: IMAGE_COMPRESSION_RECOVERY_EVENT_ID,
+      code: 'PIPELINE_RECOVERY_REQUIRED' as const,
+    };
+    let pending: typeof recovery | null = recovery;
+    const retryRecoveryEvent = jest
+      .fn()
+      .mockRejectedValueOnce({ code: 'PIPELINE_RECOVERY_REQUIRED' })
+      .mockImplementationOnce(async () => {
+        pending = null;
+      });
+    const h = harness({
+      getPendingRecoveryEvent: jest.fn(() => Promise.resolve(pending)),
+      retryRecoveryEvent,
+    });
+
+    await h.workflow.bootstrap();
+    await h.workflow.retry();
+
+    expect(h.states.at(-1)).toEqual({
+      kind: 'error',
+      code: 'PIPELINE_RECOVERY_REQUIRED',
+    });
+    expect(h.native.ackRecoveryEvent).not.toHaveBeenCalled();
+    expect(h.native.scanInbox).not.toHaveBeenCalled();
+
+    await h.workflow.retry();
+
+    expect(retryRecoveryEvent).toHaveBeenCalledTimes(2);
+    expect(h.native.ackRecoveryEvent).not.toHaveBeenCalled();
+    expect(h.native.scanInbox).toHaveBeenCalledTimes(1);
   });
 
   test('preserves false and missing ACK method error codes from the adapter', async () => {

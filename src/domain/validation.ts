@@ -28,6 +28,10 @@ import { isCanonicalUuid } from './canonicalUuid';
 import { isValidUnicodeScalarString, utf8ByteCount } from './mainAppImport';
 
 export { isImagePerceptualHashV1 } from './duplicateDetection';
+export {
+  isImageCompressionInspectionV1,
+  isImageCompressionResultV1,
+} from './budgetOptimization';
 
 const mediaTypePattern =
   /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;

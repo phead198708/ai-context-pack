@@ -19,6 +19,22 @@
       "license": "MIT"
     },
     {
+      "path": "contracts/image-compression-inspection-v1.json",
+      "sha256": "52bab4dbfb34e6fdcb61c0cb94539c2d266396ba0f7583d7c687598028c4633e",
+      "kind": "contract",
+      "purpose": "canonical ImageCompressionInspectionV1 parity payload",
+      "source": "project-authored synthetic image metadata payload",
+      "license": "MIT"
+    },
+    {
+      "path": "contracts/image-compression-result-v1.json",
+      "sha256": "7ab0b14a86d919c11f3e8c7e825350933b69aacca1c27f0473c416dabca9870e",
+      "kind": "contract",
+      "purpose": "canonical ImageCompressionResultV1 parity payload",
+      "source": "project-authored fake UUID and derivative metadata payload",
+      "license": "MIT"
+    },
+    {
       "path": "contracts/image-perceptual-hash-v1.json",
       "sha256": "4e0774c89558485c52b03d9cced8934657814581daa4bd388369c5d5bb1d3407",
       "kind": "contract",

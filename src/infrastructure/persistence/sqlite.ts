@@ -1,6 +1,7 @@
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 import { isCanonicalUuid } from '../../domain/canonicalUuid';
 import type { ImportManifestV1 } from '../../domain/contracts';
+import type { BudgetItemExclusionV1 } from '../../domain/budgetOptimization';
 import {
   DomainError,
   isDomainErrorCode,
@@ -623,6 +624,11 @@ export class ExpoSqlitePersistenceRepository
           [input.packId, artifact.id],
         );
       }
+      if (insertedPack.changes === 0)
+        await invalidateCompletedOptimizationForPackContentMutation(
+          transaction,
+          input.packId,
+        );
       await transaction.run(
         `UPDATE packs
          SET updated_at = CASE WHEN updated_at < ? THEN ? ELSE updated_at END,
@@ -730,10 +736,13 @@ export class ExpoSqlitePersistenceRepository
       const existing = await transaction.first<{
         revision: number;
         deleted_at: string | null;
-      }>('SELECT revision, deleted_at FROM packs WHERE id = ?', [
+        budget_json: string;
+      }>('SELECT revision, deleted_at, budget_json FROM packs WHERE id = ?', [
         input.pack.id,
       ]);
+      let effectiveInput = input;
       let nextRevision: number;
+      let priorBudgetExclusions: readonly BudgetItemExclusionV1[] = [];
       if (!existing) {
         if (input.expectedRevision !== undefined)
           throw new DomainError('PERSISTENCE_CONFLICT');
@@ -752,6 +761,59 @@ export class ExpoSqlitePersistenceRepository
           existing.revision !== input.expectedRevision
         )
           throw new DomainError('PERSISTENCE_CONFLICT');
+        const currentBudget = decodePersisted(() =>
+          decodeBudget(existing.budget_json),
+        );
+        priorBudgetExclusions = currentBudget.exclusions ?? [];
+        const contentProjectionChanged = await packContentProjectionChanged(
+          transaction,
+          input.pack.id,
+          input.items,
+        );
+        const carriesExistingCompletedOptimization =
+          currentBudget.latestOptimization !== undefined &&
+          input.pack.budget.latestOptimization?.planId ===
+            currentBudget.latestOptimization.planId &&
+          input.pack.budget.latestOptimization.completedAt ===
+            currentBudget.latestOptimization.completedAt;
+        const requestedBudget =
+          contentProjectionChanged && carriesExistingCompletedOptimization
+            ? withoutCompletedBudgetOptimization(input.pack.budget)
+            : input.pack.budget;
+        const releasedCompletedArtifactIds =
+          await releaseOptimizationArtifactReferences(
+            transaction,
+            input.pack.id,
+            currentBudget.latestOptimization,
+            requestedBudget.latestOptimization,
+          );
+        const invalidatedPending =
+          await invalidatePendingOptimizationForPackMutation(
+            transaction,
+            input.pack.id,
+            requestedBudget,
+            existing.budget_json,
+          );
+        const releasedOptimizationArtifactIds = new Set([
+          ...releasedCompletedArtifactIds,
+          ...invalidatedPending.releasedArtifactIds,
+        ]);
+        const budget = invalidatedPending.budget;
+        effectiveInput = {
+          ...input,
+          pack: { ...input.pack, budget },
+          items:
+            releasedOptimizationArtifactIds.size === 0
+              ? input.items
+              : input.items.map(item => ({
+                  ...item,
+                  artifactIds: item.artifactIds.filter(
+                    artifactId =>
+                      !releasedOptimizationArtifactIds.has(artifactId),
+                  ),
+                })),
+        };
+        assertPackGraph(effectiveInput);
         nextRevision = existing.revision + 1;
         const update = await transaction.run(
           `UPDATE packs SET schema_version = ?, title = ?, user_instruction = ?,
@@ -759,16 +821,16 @@ export class ExpoSqlitePersistenceRepository
              warning_codes_json = ?, revision = ?
            WHERE id = ? AND revision = ? AND deleted_at IS NULL`,
           [
-            input.pack.schemaVersion,
-            input.pack.title,
-            input.pack.userInstruction,
-            input.pack.updatedAt,
-            input.pack.state,
-            encodeBudget(input.pack.budget),
-            input.pack.estimatedTokens,
-            encodeStringArray(input.pack.warningCodes),
+            effectiveInput.pack.schemaVersion,
+            effectiveInput.pack.title,
+            effectiveInput.pack.userInstruction,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.state,
+            encodeBudget(effectiveInput.pack.budget),
+            effectiveInput.pack.estimatedTokens,
+            encodeStringArray(effectiveInput.pack.warningCodes),
             nextRevision,
-            input.pack.id,
+            effectiveInput.pack.id,
             input.expectedRevision,
           ],
         );
@@ -776,13 +838,15 @@ export class ExpoSqlitePersistenceRepository
       }
       await replaceContextItems(
         transaction,
-        input.pack.id,
-        input.items,
-        input.pack.createdAt,
-        input.pack.updatedAt,
-        input.removedItemOriginalDisposition ?? 'preserve',
+        effectiveInput.pack.id,
+        effectiveInput.items,
+        effectiveInput.pack.createdAt,
+        effectiveInput.pack.updatedAt,
+        effectiveInput.removedItemOriginalDisposition ?? 'preserve',
+        priorBudgetExclusions,
+        effectiveInput.pack.budget.exclusions ?? [],
       );
-      if (input.cancelActivePipelineRuns)
+      if (effectiveInput.cancelActivePipelineRuns)
         await transaction.run(
           `UPDATE pipeline_runs SET status = 'cancelled',
              claim_session_id = NULL, claim_deadline_ms = NULL,
@@ -792,14 +856,14 @@ export class ExpoSqlitePersistenceRepository
                WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END
            WHERE pack_id = ? AND status IN ('queued', 'running', 'recovering')`,
           [
-            input.pack.updatedAt,
-            input.pack.updatedAt,
-            input.pack.updatedAt,
-            input.pack.updatedAt,
-            input.pack.id,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.updatedAt,
+            effectiveInput.pack.id,
           ],
         );
-      for (const run of input.startedPipelineRuns ?? [])
+      for (const run of effectiveInput.startedPipelineRuns ?? [])
         await startPipelineRunInTransaction(transaction, run);
       return nextRevision;
     });
@@ -1209,6 +1273,16 @@ export class ExpoSqlitePersistenceRepository
            claim_deadline_ms = NULL WHERE id = ?`,
         [settledAt, settledAt, input.runId],
       );
+      if (input.artifact)
+        await invalidateCompletedOptimizationForPackContentMutation(
+          transaction,
+          run.pack_id,
+        );
+      else
+        await invalidatePendingOptimizationForPackMutation(
+          transaction,
+          run.pack_id,
+        );
       await transaction.run(
         `UPDATE packs SET updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
@@ -1285,6 +1359,10 @@ export class ExpoSqlitePersistenceRepository
          WHERE pack_id = ? AND id <> ?
            AND status IN ('queued', 'running', 'recovering')`,
         [settledAt, settledAt, run.pack_id, input.runId],
+      );
+      await invalidatePendingOptimizationForPackMutation(
+        transaction,
+        run.pack_id,
       );
       await transaction.run(
         `UPDATE packs SET state = 'failed', updated_at = ?, revision = revision + 1
@@ -1567,6 +1645,14 @@ export class ExpoSqlitePersistenceRepository
     input: RegisterPublishedArtifactInput,
   ): Promise<'created' | 'replayed'> {
     validatePublishedArtifact(input);
+    if (input.budgetOptimizationFence) {
+      requireCanonicalId(input.budgetOptimizationFence.planId);
+      if (
+        !Number.isSafeInteger(input.budgetOptimizationFence.expectedRevision) ||
+        input.budgetOptimizationFence.expectedRevision < 1
+      )
+        throw new DomainError('SCHEMA_INVALID');
+    }
     requireCanonicalId(input.publicationLeaseOwnerId);
     if (input.publicationLeaseObservedAt !== undefined)
       requireIsoDateTime(input.publicationLeaseObservedAt);
@@ -1949,11 +2035,20 @@ export class ExpoSqlitePersistenceRepository
     )
       throw new DomainError('SCHEMA_INVALID');
     await this.connection.exclusive(async transaction => {
-      const pack = await transaction.first<{ updated_at: string }>(
-        'SELECT updated_at FROM packs WHERE id = ? AND deleted_at IS NULL',
+      const pack = await transaction.first<{
+        updated_at: string;
+        budget_json: string;
+      }>(
+        'SELECT updated_at, budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
         [packId],
       );
       if (!pack) throw new DomainError('PERSISTENCE_CONFLICT');
+      const budgetExclusionByItemId = new Map(
+        (
+          decodePersisted(() => decodeBudget(pack.budget_json)).exclusions ?? []
+        ).map(exclusion => [exclusion.itemId, exclusion]),
+      );
+      let contentProjectionChanged = false;
       for (const decision of decisions) {
         const item = await transaction.first<{
           inclusion_mode: string;
@@ -1976,16 +2071,30 @@ export class ExpoSqlitePersistenceRepository
         const prior = existing
           ? decodeStoredJson(existing.payload_json, isDuplicateDecisionV1)
           : undefined;
+        const budgetExclusion = budgetExclusionByItemId.get(decision.itemId);
         if (
           prior?.baselineInclusionMode !== undefined &&
           prior.baselineInclusionMode !== decision.baselineInclusionMode
         )
           throw new DomainError('PERSISTENCE_CONFLICT');
-        if (
+        if (budgetExclusion) {
+          if (
+            budgetExclusion.baselineInclusionMode !==
+              decision.baselineInclusionMode ||
+            item.inclusion_mode !== 'excluded'
+          )
+            throw new DomainError('PERSISTENCE_CONFLICT');
+        } else if (
           prior === undefined &&
           item.inclusion_mode !== decision.baselineInclusionMode
         )
           throw new DomainError('PERSISTENCE_CONFLICT');
+        const nextInclusionMode = budgetExclusion
+          ? 'excluded'
+          : decision.choice === 'exclude'
+          ? 'excluded'
+          : decision.baselineInclusionMode;
+        contentProjectionChanged ||= item.inclusion_mode !== nextInclusionMode;
         await transaction.run(
           `INSERT INTO duplicate_decisions (item_id, pack_id, payload_json, decided_at)
            VALUES (?, ?, ?, ?)
@@ -2004,15 +2113,21 @@ export class ExpoSqlitePersistenceRepository
           `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
            WHERE id = ? AND pack_id = ?`,
           [
-            decision.choice === 'exclude'
-              ? 'excluded'
-              : decision.baselineInclusionMode,
+            nextInclusionMode,
             latestTimestamp([item.updated_at, decision.decidedAt]),
             decision.itemId,
             packId,
           ],
         );
       }
+      if (contentProjectionChanged)
+        await invalidateCompletedOptimizationForPackContentMutation(
+          transaction,
+          packId,
+          pack.budget_json,
+        );
+      else
+        await invalidatePendingOptimizationForPackMutation(transaction, packId);
       await transaction.run(
         `UPDATE packs SET updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
@@ -2036,8 +2151,11 @@ export class ExpoSqlitePersistenceRepository
     requireCanonicalId(itemId);
     requireIsoDateTime(restoredAt);
     await this.connection.exclusive(async transaction => {
-      const pack = await transaction.first<{ updated_at: string }>(
-        'SELECT updated_at FROM packs WHERE id = ? AND deleted_at IS NULL',
+      const pack = await transaction.first<{
+        updated_at: string;
+        budget_json: string;
+      }>(
+        'SELECT updated_at, budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
         [packId],
       );
       const item = await transaction.first<{
@@ -2058,11 +2176,20 @@ export class ExpoSqlitePersistenceRepository
       );
       if (decision.packId !== packId || decision.itemId !== itemId)
         throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-      const expectedInclusionMode =
-        decision.choice === 'exclude'
-          ? 'excluded'
-          : decision.baselineInclusionMode;
-      if (item.inclusion_mode !== expectedInclusionMode)
+      const budgetExclusion = (
+        decodePersisted(() => decodeBudget(pack.budget_json)).exclusions ?? []
+      ).find(exclusion => exclusion.itemId === itemId);
+      const expectedInclusionMode = budgetExclusion
+        ? 'excluded'
+        : decision.choice === 'exclude'
+        ? 'excluded'
+        : decision.baselineInclusionMode;
+      if (
+        item.inclusion_mode !== expectedInclusionMode ||
+        (budgetExclusion !== undefined &&
+          budgetExclusion.baselineInclusionMode !==
+            decision.baselineInclusionMode)
+      )
         throw new DomainError('PERSISTENCE_CONFLICT');
       const effectiveAt = latestTimestamp([
         pack.updated_at,
@@ -2073,17 +2200,131 @@ export class ExpoSqlitePersistenceRepository
       await transaction.run(
         `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
          WHERE id = ? AND pack_id = ?`,
-        [decision.baselineInclusionMode, effectiveAt, itemId, packId],
+        [
+          budgetExclusion ? 'excluded' : decision.baselineInclusionMode,
+          effectiveAt,
+          itemId,
+          packId,
+        ],
       );
       await transaction.run(
         'DELETE FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
         [itemId, packId],
       );
+      if (
+        item.inclusion_mode !==
+        (budgetExclusion ? 'excluded' : decision.baselineInclusionMode)
+      )
+        await invalidateCompletedOptimizationForPackContentMutation(
+          transaction,
+          packId,
+          pack.budget_json,
+        );
+      else
+        await invalidatePendingOptimizationForPackMutation(transaction, packId);
       await transaction.run(
         `UPDATE packs SET updated_at = ?, revision = revision + 1
          WHERE id = ? AND deleted_at IS NULL`,
         [effectiveAt, packId],
       );
+    });
+  }
+
+  async restoreBudgetExclusion(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void> {
+    requireCanonicalId(packId);
+    requireCanonicalId(itemId);
+    requireIsoDateTime(restoredAt);
+    await this.connection.exclusive(async transaction => {
+      const pack = await transaction.first<{
+        updated_at: string;
+        budget_json: string;
+      }>(
+        'SELECT updated_at, budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      );
+      const item = await transaction.first<{
+        inclusion_mode: string;
+        updated_at: string;
+      }>(
+        'SELECT inclusion_mode, updated_at FROM context_items WHERE id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      if (!pack || !item) throw new DomainError('PERSISTENCE_CONFLICT');
+      const storedBudget = decodePersisted(() =>
+        decodeBudget(pack.budget_json),
+      );
+      const exclusion = storedBudget.exclusions?.find(
+        candidate => candidate.itemId === itemId,
+      );
+      if (!exclusion || item.inclusion_mode !== 'excluded')
+        throw new DomainError('PERSISTENCE_CONFLICT');
+      const decisionRow = await transaction.first<{ payload_json: string }>(
+        'SELECT payload_json FROM duplicate_decisions WHERE item_id = ? AND pack_id = ?',
+        [itemId, packId],
+      );
+      const decision = decisionRow
+        ? decodePersisted(() =>
+            decodeStoredJson(decisionRow.payload_json, isDuplicateDecisionV1),
+          )
+        : undefined;
+      if (
+        decision &&
+        (decision.packId !== packId ||
+          decision.itemId !== itemId ||
+          decision.baselineInclusionMode !== exclusion.baselineInclusionMode)
+      )
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      const remainingExclusions = storedBudget.exclusions!.filter(
+        candidate => candidate.itemId !== itemId,
+      );
+      await releaseOptimizationArtifactReferences(
+        transaction,
+        packId,
+        storedBudget.latestOptimization,
+      );
+      const nextBudget = { ...storedBudget };
+      delete nextBudget.pendingOptimization;
+      delete nextBudget.latestEstimate;
+      delete nextBudget.latestOptimization;
+      if (remainingExclusions.length > 0)
+        nextBudget.exclusions = remainingExclusions;
+      else delete nextBudget.exclusions;
+      const { budget: effectiveBudget } =
+        await invalidatePendingOptimizationForPackMutation(
+          transaction,
+          packId,
+          nextBudget,
+          pack.budget_json,
+        );
+      const effectiveAt = latestTimestamp([
+        pack.updated_at,
+        item.updated_at,
+        ...(decision ? [decision.decidedAt] : []),
+        restoredAt,
+      ]);
+      await transaction.run(
+        `UPDATE context_items SET inclusion_mode = ?, updated_at = ?
+         WHERE id = ? AND pack_id = ?`,
+        [
+          decision
+            ? duplicateDecisionInclusionMode(decision)
+            : exclusion.baselineInclusionMode,
+          effectiveAt,
+          itemId,
+          packId,
+        ],
+      );
+      const updated = await transaction.run(
+        `UPDATE packs SET budget_json = ?, estimated_tokens = 0,
+           updated_at = ?, revision = revision + 1
+         WHERE id = ? AND deleted_at IS NULL`,
+        [encodeBudget(effectiveBudget), effectiveAt, packId],
+      );
+      if (updated.changes !== 1) throw new DomainError('PERSISTENCE_CONFLICT');
     });
   }
 
@@ -2611,7 +2852,7 @@ export class ExpoSqlitePersistenceRepository
 }
 
 const DEFAULT_BUDGET_JSON =
-  '{"preset":"balanced","maxOutputBytes":10485760,"minimumImageLongestEdge":1280,"imageQuality":0.82,"estimatorVersion":"v1"}';
+  '{"preset":"balanced","maxOutputBytes":10485760,"minimumImageLongestEdge":960,"targetImageLongestEdge":1600,"imageQuality":0.82,"estimatorVersion":"context-budget-estimator-v1"}';
 const INBOX_PROCESSOR_JSON =
   '{"processor":"inbox-handoff","version":"1","contractVersion":1}';
 
@@ -2734,6 +2975,17 @@ async function loadContextItems(
   connection: SqlConnection,
   packId: string,
 ): Promise<readonly ContextItem[]> {
+  const budgetRow = await connection.first<{ budget_json: string }>(
+    'SELECT budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
+    [packId],
+  );
+  const budgetExclusionByItemId = new Map(
+    (budgetRow
+      ? decodePersisted(() => decodeBudget(budgetRow.budget_json)).exclusions ??
+        []
+      : []
+    ).map(exclusion => [exclusion.itemId, exclusion]),
+  );
   const rows = await connection.all<ContextItemRow>(
     `SELECT item.id, item.pack_id, item.source_type, item.media_type,
        item.original_display_name, item.original_sha256,
@@ -2750,8 +3002,12 @@ async function loadContextItems(
   const items: ContextItem[] = [];
   for (const row of rows) {
     const artifacts = await connection.all<{ id: string }>(
-      'SELECT id FROM artifacts WHERE item_id = ? ORDER BY created_at, id',
-      [row.id],
+      `SELECT artifact.id FROM artifacts artifact
+       JOIN artifact_references reference
+         ON reference.artifact_id = artifact.id
+        AND reference.owner_type = 'pack' AND reference.owner_id = ?
+       WHERE artifact.item_id = ? ORDER BY artifact.created_at, artifact.id`,
+      [packId, row.id],
     );
     const findings = await connection.all<{ id: string }>(
       'SELECT id FROM risk_findings WHERE item_id = ? ORDER BY created_at, id',
@@ -2785,14 +3041,25 @@ async function loadContextItems(
             row.duplicate_decision_json,
             isDuplicateDecisionV1,
           );
+          const budgetExclusion = budgetExclusionByItemId.get(item.id);
+          const duplicateInclusionMode =
+            duplicateDecisionInclusionMode(decision);
           if (
             row.duplicate_decision_pack_id !== packId ||
             decision.packId !== packId ||
             decision.itemId !== item.id ||
-            duplicateDecisionInclusionMode(decision) !== item.inclusionMode
+            (budgetExclusion
+              ? budgetExclusion.baselineInclusionMode !==
+                  decision.baselineInclusionMode ||
+                item.inclusionMode !== 'excluded'
+              : duplicateInclusionMode !== item.inclusionMode)
           )
             throw new DomainError('SCHEMA_INVALID');
-        }
+        } else if (
+          budgetExclusionByItemId.has(item.id) &&
+          item.inclusionMode !== 'excluded'
+        )
+          throw new DomainError('SCHEMA_INVALID');
         assertContextItem(item);
         if (item.sortIndex !== items.length)
           throw new DomainError('SCHEMA_INVALID');
@@ -2800,6 +3067,12 @@ async function loadContextItems(
       }),
     );
   }
+  if (
+    [...budgetExclusionByItemId.keys()].some(
+      itemId => !items.some(item => item.id === itemId),
+    )
+  )
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
   return items;
 }
 
@@ -2810,7 +3083,15 @@ async function replaceContextItems(
   createdAt: string,
   updatedAt: string,
   removedItemOriginalDisposition: 'preserve' | 'release',
+  priorBudgetExclusions: readonly BudgetItemExclusionV1[],
+  budgetExclusions: readonly BudgetItemExclusionV1[],
 ): Promise<void> {
+  const priorBudgetExclusionByItemId = new Map(
+    priorBudgetExclusions.map(exclusion => [exclusion.itemId, exclusion]),
+  );
+  const budgetExclusionByItemId = new Map(
+    budgetExclusions.map(exclusion => [exclusion.itemId, exclusion]),
+  );
   const existing = await transaction.all<{ id: string }>(
     'SELECT id FROM context_items WHERE pack_id = ?',
     [packId],
@@ -2898,6 +3179,12 @@ async function replaceContextItems(
           item.originalRelativePath)
     )
       throw new DomainError('STORAGE_ARTIFACT_IMMUTABLE');
+    const priorBudgetExclusion = priorBudgetExclusionByItemId.get(item.id);
+    const budgetExclusion = budgetExclusionByItemId.get(item.id);
+    if (priorBudgetExclusion && !existingItem)
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    if (budgetExclusion && !existingItem)
+      throw new DomainError('PERSISTENCE_CONFLICT');
     if (existingItem && existingItem.duplicate_decision_json !== null) {
       const encodedDecision = existingItem.duplicate_decision_json;
       const decision = decodePersisted(() =>
@@ -2910,9 +3197,41 @@ async function replaceContextItems(
       )
         throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
       const expectedInclusionMode = duplicateDecisionInclusionMode(decision);
-      if (inclusionMode(existingItem.inclusion_mode) !== expectedInclusionMode)
+      if (
+        priorBudgetExclusion
+          ? priorBudgetExclusion.baselineInclusionMode !==
+              decision.baselineInclusionMode ||
+            inclusionMode(existingItem.inclusion_mode) !== 'excluded'
+          : inclusionMode(existingItem.inclusion_mode) !== expectedInclusionMode
+      )
         throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
-      if (item.inclusionMode !== expectedInclusionMode)
+      if (budgetExclusion) {
+        if (
+          item.inclusionMode !== 'excluded' ||
+          decision.baselineInclusionMode !==
+            budgetExclusion.baselineInclusionMode
+        )
+          throw new DomainError('PERSISTENCE_CONFLICT');
+      } else if (item.inclusionMode !== expectedInclusionMode)
+        throw new DomainError('PERSISTENCE_CONFLICT');
+    } else if (existingItem) {
+      const existingInclusionMode = inclusionMode(existingItem.inclusion_mode);
+      if (
+        priorBudgetExclusion
+          ? existingInclusionMode !== 'excluded'
+          : budgetExclusion !== undefined &&
+            existingInclusionMode !== budgetExclusion.baselineInclusionMode
+      )
+        throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+      if (
+        budgetExclusion
+          ? item.inclusionMode !== 'excluded' ||
+            (priorBudgetExclusion !== undefined &&
+              priorBudgetExclusion.baselineInclusionMode !==
+                budgetExclusion.baselineInclusionMode)
+          : priorBudgetExclusion !== undefined &&
+            item.inclusionMode !== priorBudgetExclusion.baselineInclusionMode
+      )
         throw new DomainError('PERSISTENCE_CONFLICT');
     }
     await assertItemRelationships(transaction, item);
@@ -2974,8 +3293,14 @@ async function assertItemRelationships(
          WHERE reference.artifact_id = artifact.id
            AND reference.owner_type = 'pack' AND reference.owner_id = ?
        ) AS referenced
-     FROM artifacts artifact WHERE artifact.item_id = ? ORDER BY artifact.id`,
-    [item.packId, item.id],
+     FROM artifacts artifact WHERE artifact.item_id = ?
+       AND EXISTS(
+         SELECT 1 FROM artifact_references reference
+         WHERE reference.artifact_id = artifact.id
+           AND reference.owner_type = 'pack' AND reference.owner_id = ?
+       )
+     ORDER BY artifact.id`,
+    [item.packId, item.id, item.packId],
   );
   const findings = await transaction.all<{ id: string }>(
     'SELECT id FROM risk_findings WHERE item_id = ? ORDER BY id',
@@ -3123,13 +3448,38 @@ async function loadPipelineRunForSettlement(
 
 async function registerPublishedArtifactInTransaction(
   transaction: SqlConnection,
-  input: Pick<RegisterPublishedArtifactInput, 'packId' | 'artifact'>,
+  input: Pick<
+    RegisterPublishedArtifactInput,
+    'packId' | 'artifact' | 'budgetOptimizationFence'
+  >,
 ): Promise<'created' | 'replayed'> {
-  const pack = await transaction.first<{ id: string }>(
-    'SELECT id FROM packs WHERE id = ? AND deleted_at IS NULL',
+  const pack = await transaction.first<{
+    id: string;
+    revision: number;
+    budget_json: string;
+  }>(
+    'SELECT id, revision, budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
     [input.packId],
   );
   if (!pack) throw new DomainError('PERSISTENCE_CONFLICT');
+  if (input.budgetOptimizationFence) {
+    const pending = decodePersisted(
+      () => decodeBudget(pack.budget_json).pendingOptimization,
+    );
+    const action = pending?.actions.find(
+      candidate =>
+        candidate.kind === 'compress' &&
+        candidate.outputArtifactId === input.artifact.id,
+    );
+    if (
+      pack.revision !== input.budgetOptimizationFence.expectedRevision ||
+      pending?.planId !== input.budgetOptimizationFence.planId ||
+      !action ||
+      action.itemId !== input.artifact.itemId ||
+      input.artifact.kind !== 'compressed-image'
+    )
+      throw new DomainError('PERSISTENCE_CONFLICT');
+  }
   if (input.artifact.itemId !== undefined) {
     const item = await transaction.first<{ id: string }>(
       'SELECT id FROM context_items WHERE id = ? AND pack_id = ?',
@@ -3658,6 +4008,224 @@ function packSqlValues(pack: ContextPack): readonly SqlValue[] {
     pack.estimatedTokens,
     encodeStringArray(pack.warningCodes),
   ];
+}
+
+async function invalidatePendingOptimizationForPackMutation(
+  transaction: SqlConnection,
+  packId: string,
+  nextBudget?: ContextPack['budget'],
+  encodedCurrentBudget?: string,
+): Promise<{
+  readonly budget: ContextPack['budget'];
+  readonly releasedArtifactIds: readonly string[];
+}> {
+  const encoded =
+    encodedCurrentBudget ??
+    (
+      await transaction.first<{ budget_json: string }>(
+        'SELECT budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      )
+    )?.budget_json;
+  if (encoded === undefined) throw new DomainError('PERSISTENCE_CONFLICT');
+  const current = decodePersisted(() => decodeBudget(encoded));
+  const pending = current.pendingOptimization;
+  if (!pending)
+    return { budget: nextBudget ?? current, releasedArtifactIds: [] };
+  if (pending.packId !== packId)
+    throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+
+  const budget = { ...(nextBudget ?? current) };
+  delete budget.pendingOptimization;
+  const releasedArtifactIds =
+    await releasePendingOptimizationArtifactReferences(
+      transaction,
+      packId,
+      current,
+      budget,
+    );
+  if (nextBudget === undefined)
+    await transaction.run('UPDATE packs SET budget_json = ? WHERE id = ?', [
+      encodeBudget(budget),
+      packId,
+    ]);
+  return { budget, releasedArtifactIds };
+}
+
+async function invalidateCompletedOptimizationForPackContentMutation(
+  transaction: SqlConnection,
+  packId: string,
+  encodedCurrentBudget?: string,
+): Promise<void> {
+  const encoded =
+    encodedCurrentBudget ??
+    (
+      await transaction.first<{ budget_json: string }>(
+        'SELECT budget_json FROM packs WHERE id = ? AND deleted_at IS NULL',
+        [packId],
+      )
+    )?.budget_json;
+  if (encoded === undefined) throw new DomainError('PERSISTENCE_CONFLICT');
+  const current = decodePersisted(() => decodeBudget(encoded));
+  const next = withoutCompletedBudgetOptimization(current);
+  await releaseOptimizationArtifactReferences(
+    transaction,
+    packId,
+    current.latestOptimization,
+  );
+  const { budget: effective } =
+    await invalidatePendingOptimizationForPackMutation(
+      transaction,
+      packId,
+      next,
+      encoded,
+    );
+  await transaction.run('UPDATE packs SET budget_json = ? WHERE id = ?', [
+    encodeBudget(effective),
+    packId,
+  ]);
+}
+
+function withoutCompletedBudgetOptimization(
+  budget: ContextPack['budget'],
+): ContextPack['budget'] {
+  const next = { ...budget };
+  delete next.pendingOptimization;
+  delete next.latestEstimate;
+  delete next.latestOptimization;
+  return next;
+}
+
+async function packContentProjectionChanged(
+  transaction: SqlConnection,
+  packId: string,
+  items: readonly ContextItem[],
+): Promise<boolean> {
+  const current = await transaction.all<{
+    id: string;
+    inclusion_mode: string;
+    sort_index: number;
+  }>(
+    `SELECT id, inclusion_mode, sort_index FROM context_items
+     WHERE pack_id = ? ORDER BY sort_index`,
+    [packId],
+  );
+  return (
+    current.length !== items.length ||
+    current.some((row, index) => {
+      const item = items[index];
+      return (
+        item === undefined ||
+        row.id !== item.id ||
+        row.inclusion_mode !== item.inclusionMode ||
+        row.sort_index !== item.sortIndex
+      );
+    })
+  );
+}
+
+async function releasePendingOptimizationArtifactReferences(
+  transaction: SqlConnection,
+  packId: string,
+  current: ContextPack['budget'],
+  next: ContextPack['budget'],
+): Promise<readonly string[]> {
+  const pending = current.pendingOptimization;
+  if (!pending) return [];
+  const retainedArtifactIds = new Set(
+    next.latestOptimization?.items.flatMap(item =>
+      item.artifactId === undefined ? [] : [item.artifactId],
+    ) ?? [],
+  );
+  const artifactsById = new Map<string, string>();
+  for (const action of pending.actions) {
+    if (
+      action.kind !== 'compress' ||
+      retainedArtifactIds.has(action.outputArtifactId)
+    )
+      continue;
+    const priorItemId = artifactsById.get(action.outputArtifactId);
+    if (priorItemId !== undefined && priorItemId !== action.itemId)
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    artifactsById.set(action.outputArtifactId, action.itemId);
+  }
+  return releasePackCompressedArtifactReferences(
+    transaction,
+    packId,
+    artifactsById,
+    true,
+  );
+}
+
+async function releaseOptimizationArtifactReferences(
+  transaction: SqlConnection,
+  packId: string,
+  result: ContextPack['budget']['latestOptimization'],
+  retainedResult?: ContextPack['budget']['latestOptimization'],
+): Promise<readonly string[]> {
+  const retainedArtifactIds = new Set(
+    retainedResult?.items.flatMap(item =>
+      item.artifactId === undefined ? [] : [item.artifactId],
+    ) ?? [],
+  );
+  const artifactsById = new Map<string, string>();
+  for (const item of result?.items ?? []) {
+    if (
+      item.artifactId === undefined ||
+      retainedArtifactIds.has(item.artifactId)
+    )
+      continue;
+    const priorItemId = artifactsById.get(item.artifactId);
+    if (priorItemId !== undefined && priorItemId !== item.itemId)
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    artifactsById.set(item.artifactId, item.itemId);
+  }
+  return releasePackCompressedArtifactReferences(
+    transaction,
+    packId,
+    artifactsById,
+  );
+}
+
+async function releasePackCompressedArtifactReferences(
+  transaction: SqlConnection,
+  packId: string,
+  artifactsById: ReadonlyMap<string, string>,
+  allowMissing = false,
+): Promise<readonly string[]> {
+  const releasableArtifactIds: string[] = [];
+  for (const [artifactId, itemId] of artifactsById) {
+    const artifact = await transaction.first<{
+      item_id: string | null;
+      kind: string;
+      referenced: number;
+    }>(
+      `SELECT artifact.item_id, artifact.kind,
+         EXISTS(
+           SELECT 1 FROM artifact_references reference
+           WHERE reference.artifact_id = artifact.id
+             AND reference.owner_type = 'pack' AND reference.owner_id = ?
+         ) AS referenced
+       FROM artifacts artifact WHERE artifact.id = ?`,
+      [packId, artifactId],
+    );
+    if (!artifact && allowMissing) continue;
+    if (
+      !artifact ||
+      artifact.item_id !== itemId ||
+      artifact.kind !== 'compressed-image' ||
+      artifact.referenced !== 1
+    )
+      throw new DomainError('STORAGE_DIVERGENCE_DETECTED');
+    releasableArtifactIds.push(artifactId);
+  }
+  for (const artifactId of releasableArtifactIds)
+    await transaction.run(
+      `DELETE FROM artifact_references
+       WHERE owner_type = 'pack' AND owner_id = ? AND artifact_id = ?`,
+      [packId, artifactId],
+    );
+  return releasableArtifactIds;
 }
 
 function decodeRiskFindingRow(row: RiskFindingRow): RiskFinding {

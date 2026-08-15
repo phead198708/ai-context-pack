@@ -49,6 +49,8 @@ private object ContractFixtureEncoder {
     "risk-finding-v1.json" to riskFinding(),
     "export-manifest-v1.json" to exportManifest(),
     "image-perceptual-hash-v1.json" to imagePerceptualHash(),
+    "image-compression-inspection-v1.json" to imageCompressionInspection(),
+    "image-compression-result-v1.json" to imageCompressionResult(),
   )
 
   private fun importManifest() = JSONObject()
@@ -165,4 +167,32 @@ private object ContractFixtureEncoder {
     .put("orientationApplied", true)
     .put("durationMs", 2)
     .put("revision", "1")
+
+  private fun imageCompressionInspection() = JSONObject()
+    .put("schemaVersion", 1)
+    .put("sourceByteCount", 128)
+    .put("sourceSha256", "a".repeat(64))
+    .put("sourceMediaType", "image/png")
+    .put("width", 640)
+    .put("height", 480)
+    .put("hasAlpha", true)
+    .put("animated", false)
+    .put("orientationApplied", true)
+    .put("revision", "1")
+
+  private fun imageCompressionResult() = JSONObject()
+    .put("schemaVersion", 1)
+    .put("taskId", runId)
+    .put("sourceSha256", "a".repeat(64))
+    .put("temporaryFileUri", "file:///tmp/$runId.tmp")
+    .put("outputByteCount", 96)
+    .put("outputSha256", "b".repeat(64))
+    .put("width", 320)
+    .put("height", 240)
+    .put("mediaType", "image/png")
+    .put("quality", 1)
+    .put("alphaPreserved", true)
+    .put("engine", "core-graphics")
+    .put("revision", "1")
+    .put("durationMs", 2)
 }

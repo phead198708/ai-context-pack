@@ -1,4 +1,10 @@
 import type { DomainErrorCode } from './errors';
+import type {
+  BudgetItemExclusionV1,
+  BudgetOptimizationPlanV1,
+  BudgetOptimizationResultV1,
+  PackBudgetEstimateV1,
+} from './budgetOptimization';
 
 export type PackId = string;
 export type ItemId = string;
@@ -46,8 +52,15 @@ export interface Budget {
   readonly preset: BudgetPreset;
   readonly maxOutputBytes: number;
   readonly minimumImageLongestEdge: number;
+  readonly targetImageLongestEdge: number;
   readonly imageQuality: number;
   readonly estimatorVersion: string;
+  readonly latestEstimate?: PackBudgetEstimateV1;
+  readonly latestOptimization?: BudgetOptimizationResultV1;
+  /** Reversible budget-only exclusions with their pre-exclusion projection. */
+  readonly exclusions?: readonly BudgetItemExclusionV1[];
+  /** Durable exact-plan checkpoint until optimization commits to the Pack. */
+  readonly pendingOptimization?: BudgetOptimizationPlanV1;
 }
 
 export interface ContextPack {

@@ -1,4 +1,8 @@
 import type { ContextItem, ContextPack } from '../src/domain/models';
+import {
+  BUDGET_PRESETS,
+  createBudgetOptimizationPlanV1,
+} from '../src/domain/budgetOptimization';
 import type {
   PersistedArtifactRecord,
   PersistedPackGraph,
@@ -10,7 +14,10 @@ import {
   retryPlanForItem,
   stateAtRetryCheckpoint,
 } from '../src/features/packLibrary/domain';
-import { assertContextItem } from '../src/infrastructure/persistence/modelCodec';
+import {
+  assertContextItem,
+  assertContextPack,
+} from '../src/infrastructure/persistence/modelCodec';
 
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const itemIds = [
@@ -34,6 +41,7 @@ function pack(state: ContextPack['state'] = 'processing'): ContextPack {
       preset: 'balanced',
       maxOutputBytes: 10_485_760,
       minimumImageLongestEdge: 1_280,
+      targetImageLongestEdge: 1_280,
       imageQuality: 0.82,
       estimatorVersion: 'v1',
     },
@@ -93,6 +101,27 @@ function artifact(
     immutable: true,
   };
 }
+
+test('rejects a persisted pending optimization bound to another Pack', () => {
+  const value = pack();
+  const pendingOptimization = createBudgetOptimizationPlanV1({
+    planId: '923e4567-e89b-42d3-a456-426614174000',
+    packId: 'a23e4567-e89b-42d3-a456-426614174000',
+    packRevision: 1,
+    createdAt: value.updatedAt,
+    budget: BUDGET_PRESETS.compact,
+    items: [],
+    exclusions: [],
+    createArtifactId: () => 'b23e4567-e89b-42d3-a456-426614174000',
+  });
+
+  expect(() =>
+    assertContextPack({
+      ...value,
+      budget: { ...value.budget, pendingOptimization },
+    }),
+  ).toThrow('SCHEMA_INVALID');
+});
 
 test('renders successful, processing, failed, duplicate, and low-confidence items without omission', () => {
   const duplicateHash = 'a'.repeat(64);

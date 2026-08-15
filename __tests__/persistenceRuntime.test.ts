@@ -86,6 +86,7 @@ function packGraph(id: string, createdAt: string): PersistedPackGraph {
         preset: 'balanced',
         maxOutputBytes: 25 * 1024 * 1024,
         minimumImageLongestEdge: 1_280,
+        targetImageLongestEdge: 1_280,
         imageQuality: 0.82,
         estimatorVersion: '1',
       },
@@ -280,6 +281,7 @@ class RuntimeRepository implements ProductionPersistenceRepository {
     return false;
   }
   async restoreDuplicateDecision() {}
+  async restoreBudgetExclusion() {}
 
   async recordRecoveryDiagnostic(input: RecoveryDiagnosticInput) {
     this.diagnostics.push(input);

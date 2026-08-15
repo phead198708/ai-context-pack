@@ -1,4 +1,9 @@
 import type { ContextItem, ContextPack } from '../src/domain/models';
+import {
+  BUDGET_PRESETS,
+  createBudgetOptimizationPlanV1,
+} from '../src/domain/budgetOptimization';
+import { DomainError } from '../src/domain/errors';
 import type {
   PersistedArtifactRecord,
   PersistedPackGraph,
@@ -7,6 +12,7 @@ import type {
 } from '../src/infrastructure/persistence/contracts';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
 import type { PackProcessingScheduler } from '../src/features/packLibrary/processing';
+import type { PackBudgetOptimizationService } from '../src/features/packLibrary/budgetOptimization';
 
 const packId = '123e4567-e89b-42d3-a456-426614174000';
 const firstId = '223e4567-e89b-42d3-a456-426614174000';
@@ -26,6 +32,7 @@ function fixture(): PersistedPackGraph {
       preset: 'balanced',
       maxOutputBytes: 10_485_760,
       minimumImageLongestEdge: 1_280,
+      targetImageLongestEdge: 1_280,
       imageQuality: 0.82,
       estimatorVersion: 'v1',
     },
@@ -97,6 +104,7 @@ function repository(graph = fixture()) {
     }),
     saveDuplicateDecisions: jest.fn().mockResolvedValue(undefined),
     restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
+    restoreBudgetExclusion: jest.fn().mockResolvedValue(undefined),
     savePackGraph: jest.fn(async (input: SavePackGraphInput) => {
       saves.push(input);
       return graph.revision + 1;
@@ -163,6 +171,69 @@ test('controller mutations clamp a rolled-back clock to the latest Pack update',
   expect(repo.saves[0]?.pack.updatedAt).toBe('2026-08-10T00:10:00Z');
 });
 
+test('atomically invalidates a pending optimization during a later Pack mutation', async () => {
+  const base = fixture();
+  const pendingOptimization = createBudgetOptimizationPlanV1({
+    planId: '523e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: base.revision - 1,
+    createdAt: base.pack.updatedAt,
+    budget: BUDGET_PRESETS.compact,
+    items: [],
+    exclusions: [],
+    createArtifactId: () => '623e4567-e89b-42d3-a456-426614174000',
+  });
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      budget: { ...base.pack.budget, pendingOptimization },
+    },
+  };
+  const repo = repository(graph);
+  const controller = new PackLibraryController(async () => repo.value);
+
+  await controller.renamePack(packId, 'Replacement plan enabled');
+
+  expect(repo.saves[0]?.pack.budget.pendingOptimization).toBeUndefined();
+});
+
+test('routes durable budget exclusion restoration through the atomic repository path', async () => {
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      estimatedTokens: 99,
+      budget: {
+        ...base.pack.budget,
+        exclusions: [
+          { itemId: firstId, baselineInclusionMode: 'original' },
+          { itemId: secondId, baselineInclusionMode: 'original' },
+        ],
+      },
+    },
+    items: base.items.map(item => ({
+      ...item,
+      inclusionMode: 'excluded' as const,
+    })),
+  };
+  const repo = repository(graph);
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:01Z',
+  );
+
+  await controller.restoreBudgetExclusion(packId, firstId);
+
+  expect(repo.value.restoreBudgetExclusion).toHaveBeenCalledWith(
+    packId,
+    firstId,
+    '2026-08-10T00:00:01Z',
+  );
+  expect(repo.saves).toHaveLength(0);
+});
+
 test('reorder invalidates packaged rows and restarts downstream packaging', async () => {
   const readyGraph = graphWithPackagedItems('ready');
   const repo = repository(readyGraph);
@@ -182,7 +253,43 @@ test('reorder invalidates packaged rows and restarts downstream packaging', asyn
 });
 
 test('preserves originals by default and requires explicit release for destructive removal', async () => {
-  const repo = repository();
+  const base = fixture();
+  const graph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      budget: {
+        ...base.pack.budget,
+        latestEstimate: {
+          schemaVersion: 1,
+          estimatorVersion: 'context-budget-estimator-v1',
+          isEstimate: true,
+          sourceBytes: 20,
+          predictedOutputBytes: 12,
+          imageCount: 2,
+          pdfPageCount: 0,
+          textCharacterCount: 0,
+          estimatedTokens: 0,
+        },
+        latestOptimization: {
+          schemaVersion: 1,
+          planId: '523e4567-e89b-42d3-a456-426614174000',
+          estimatorVersion: 'context-budget-estimator-v1',
+          compressionVersion: 'image-compression-v1',
+          completedAt: '2026-08-10T00:00:01Z',
+          predictedOutputBytes: 12,
+          actualOutputBytes: 12,
+          predictedSavingsBytes: 8,
+          actualSavingsBytes: 8,
+          deviationBytes: 0,
+          withinBudget: true,
+          excludedItemIds: [],
+          items: [],
+        },
+      },
+    },
+  };
+  const repo = repository(graph);
   const controller = new PackLibraryController(async () => repo.value);
 
   await controller.removeItem(packId, firstId, 'preserve');
@@ -195,6 +302,8 @@ test('preserves originals by default and requires explicit release for destructi
     removedItemOriginalDisposition: 'release',
   });
   expect(repo.saves[0]?.items.map(item => item.id)).toEqual([secondId]);
+  expect(repo.saves[0]?.pack.budget.latestEstimate).toBeUndefined();
+  expect(repo.saves[0]?.pack.budget.latestOptimization).toBeUndefined();
 });
 
 test.each(['ready', 'exporting', 'exported'] as const)(
@@ -397,6 +506,55 @@ test('keeps cancellation reachable while analyze settlement remains pending', as
   await expect(analysis).resolves.toBe(2);
 });
 
+test('cancels budget optimization outside the controller mutation queue', async () => {
+  const plan = createBudgetOptimizationPlanV1({
+    planId: 'a23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 7,
+    createdAt: '2026-08-10T00:00:01Z',
+    budget: BUDGET_PRESETS.balanced,
+    items: [],
+    exclusions: [],
+    createArtifactId: () => firstId,
+  });
+  let observedSignal: AbortSignal | undefined;
+  const apply = jest.fn(
+    (_plan: typeof plan, options: { readonly signal?: AbortSignal } = {}) =>
+      new Promise<never>((_resolve, reject) => {
+        observedSignal = options.signal;
+        options.signal?.addEventListener(
+          'abort',
+          () => reject(new DomainError('PIPELINE_STAGE_FAILED')),
+          { once: true },
+        );
+      }),
+  );
+  const optimization = {
+    apply,
+  } as unknown as PackBudgetOptimizationService;
+  const controller = new PackLibraryController(
+    async () => repository().value,
+    () => '2026-08-10T00:00:02Z',
+    undefined,
+    optimization,
+  );
+
+  const pending = controller.applyBudget(plan);
+  const rejection = pending.then(
+    () => undefined,
+    error => error,
+  );
+  for (let attempt = 0; attempt < 20 && !observedSignal; attempt += 1)
+    await Promise.resolve();
+
+  controller.cancelBudget();
+
+  expect(observedSignal?.aborted).toBe(true);
+  await expect(rejection).resolves.toMatchObject({
+    code: 'PIPELINE_STAGE_FAILED',
+  });
+});
+
 test('preferred duplicate choice excludes peers without deleting originals', async () => {
   const repo = repository();
   const suggestion = {
@@ -455,6 +613,62 @@ test('preferred duplicate choice excludes peers without deleting originals', asy
     }),
   ]);
   expect(repo.saves).toHaveLength(0);
+});
+
+test('uses a budget overlay baseline for a first duplicate decision', async () => {
+  const base = fixture();
+  const overlayGraph: PersistedPackGraph = {
+    ...base,
+    pack: {
+      ...base.pack,
+      budget: {
+        ...base.pack.budget,
+        exclusions: [
+          { itemId: firstId, baselineInclusionMode: 'original' as const },
+        ],
+      },
+    },
+    items: base.items.map(item =>
+      item.id === firstId
+        ? { ...item, inclusionMode: 'excluded' as const }
+        : item,
+    ),
+  };
+  const repo = repository(overlayGraph);
+  const suggestion = {
+    schemaVersion: 1 as const,
+    key: `exact-binary:${firstId}:${secondId}`,
+    packId,
+    leftItemId: firstId,
+    rightItemId: secondId,
+    reason: 'exact-binary' as const,
+    confidence: 1,
+    expectedBytesSaved: 10,
+    expectedCharactersSaved: 0,
+  };
+  (repo.value.findDuplicateAnalysis as jest.Mock).mockResolvedValue({
+    manifest: null,
+    analyses: [],
+    suggestions: [suggestion],
+    decisions: [],
+  });
+  const controller = new PackLibraryController(
+    async () => repo.value,
+    () => '2026-08-10T00:00:06Z',
+  );
+
+  await controller.reviewDuplicateGroup(packId, [firstId, secondId], {
+    kind: 'exclude',
+    itemId: firstId,
+  });
+
+  expect(repo.value.saveDuplicateDecisions).toHaveBeenCalledWith(packId, [
+    expect.objectContaining({
+      itemId: firstId,
+      choice: 'exclude',
+      baselineInclusionMode: 'original',
+    }),
+  ]);
 });
 
 test('preferred duplicate choice leaves non-adjacent members of a suggestion chain unchanged', async () => {

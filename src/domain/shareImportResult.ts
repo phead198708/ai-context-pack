@@ -24,8 +24,11 @@ export interface PendingShareEvent {
 export interface RecoveryEvent {
   readonly schemaVersion: 1;
   readonly id: string;
-  readonly code: 'INBOX_RECOVERY_REQUIRED';
+  readonly code: 'INBOX_RECOVERY_REQUIRED' | 'PIPELINE_RECOVERY_REQUIRED';
 }
+
+export const IMAGE_COMPRESSION_RECOVERY_EVENT_ID =
+  '00000000-0000-4000-8000-000000000014' as const;
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
@@ -62,7 +65,8 @@ export const isRecoveryEvent = (value: unknown): value is RecoveryEvent =>
   record(value) &&
   value.schemaVersion === 1 &&
   isCanonicalUuid(value.id) &&
-  value.code === 'INBOX_RECOVERY_REQUIRED';
+  (value.code === 'INBOX_RECOVERY_REQUIRED' ||
+    value.code === 'PIPELINE_RECOVERY_REQUIRED');
 
 export function shareImportErrorCode(result: unknown): string | null {
   if (isPendingShareEvent(result)) result = result.result;

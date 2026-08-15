@@ -177,13 +177,17 @@ enum RecoveryMetadataEventStore {
 
   static func persistRecovery(
     container: URL,
+    code: String = "INBOX_RECOVERY_REQUIRED",
+    id: String = UUID().uuidString.lowercased(),
     operationHook: OperationHook = { _ in }
   ) throws {
-    let id = UUID().uuidString.lowercased()
+    guard canonicalEventId(id), recoveryCodes.contains(code) else {
+      throw RecoveryMetadataEventError.schemaInvalid
+    }
     let event: [String: Any] = [
       "schemaVersion": 1,
       "id": id,
-      "code": "INBOX_RECOVERY_REQUIRED",
+      "code": code,
       "createdAtMs": Int64(Date().timeIntervalSince1970 * 1_000)
     ]
     let directory = container.appendingPathComponent("RecoveryEvents", isDirectory: true)
@@ -227,7 +231,8 @@ enum RecoveryMetadataEventStore {
               let id = event["id"] as? String,
               canonicalEventId(id),
               url.deletingPathExtension().lastPathComponent == id,
-              event["code"] as? String == "INBOX_RECOVERY_REQUIRED",
+              let code = event["code"] as? String,
+              recoveryCodes.contains(code),
               event["createdAtMs"] is NSNumber else {
           throw RecoveryMetadataEventError.schemaInvalid
         }
@@ -275,4 +280,9 @@ enum RecoveryMetadataEventStore {
           let uuid = UUID(uuidString: value) else { return false }
     return uuid.uuidString.lowercased() == value
   }
+
+  private static let recoveryCodes: Set<String> = [
+    "INBOX_RECOVERY_REQUIRED",
+    "PIPELINE_RECOVERY_REQUIRED",
+  ]
 }

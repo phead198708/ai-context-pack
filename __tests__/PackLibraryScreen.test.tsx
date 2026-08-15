@@ -63,6 +63,7 @@ const snapshot: PackLibrarySnapshot = {
         preset: 'balanced',
         maxOutputBytes: 10_485_760,
         minimumImageLongestEdge: 1_280,
+        targetImageLongestEdge: 1_280,
         imageQuality: 0.82,
         estimatorVersion: 'v1',
       },
@@ -175,9 +176,186 @@ function controller(): jest.Mocked<PackLibraryController> {
     analyzePack: jest.fn().mockResolvedValue(1),
     reviewDuplicateGroup: jest.fn().mockResolvedValue(undefined),
     restoreDuplicateDecision: jest.fn().mockResolvedValue(undefined),
+    restoreBudgetExclusion: jest.fn().mockResolvedValue(undefined),
     cancelProcessing: jest.fn().mockResolvedValue(undefined),
+    previewBudget: jest.fn(),
+    applyBudget: jest.fn(),
+    cancelBudget: jest.fn(),
   } as unknown as jest.Mocked<PackLibraryController>;
 }
+
+test('restores a persisted budget exclusion from the reopened Pack', async () => {
+  const persisted: PackLibrarySnapshot = {
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        budget: {
+          ...snapshot.selected!.pack.budget,
+          exclusions: [{ itemId: itemIds[0], baselineInclusionMode: 'both' }],
+        },
+      },
+      items: snapshot.selected!.items.map(item =>
+        item.id === itemIds[0]
+          ? { ...item, inclusionMode: 'excluded' as const }
+          : item,
+      ),
+    },
+  };
+  const value = controller();
+  value.load.mockResolvedValue(persisted);
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Include Complete image again'));
+
+  expect(value.restoreBudgetExclusion).toHaveBeenCalledWith(packId, itemIds[0]);
+  act(() => renderer.unmount());
+});
+
+test('surfaces an actual over-budget result after apply and after restart', async () => {
+  const maximum = 1_048_576;
+  const actualOutputBytes = maximum + 1;
+  const excludedSnapshot: PackLibrarySnapshot = {
+    ...snapshot,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        budget: {
+          ...snapshot.selected!.pack.budget,
+          exclusions: [
+            { itemId: itemIds[0], baselineInclusionMode: 'both' as const },
+          ],
+        },
+      },
+      items: snapshot.selected!.items.map(item =>
+        item.id === itemIds[0]
+          ? { ...item, inclusionMode: 'excluded' as const }
+          : item,
+      ),
+    },
+  };
+  const plan = {
+    schemaVersion: 1 as const,
+    planId: 'b23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 3,
+    createdAt: '2026-08-10T00:00:02Z',
+    preset: 'custom' as const,
+    estimatorVersion: 'context-budget-estimator-v1' as const,
+    compressionVersion: 'image-compression-v1' as const,
+    budget: {
+      preset: 'custom' as const,
+      maxOutputBytes: maximum,
+      minimumImageLongestEdge: 960,
+      targetImageLongestEdge: 1_600,
+      imageQuality: 0.82,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+    },
+    estimate: {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: maximum,
+      predictedOutputBytes: maximum,
+      imageCount: 0,
+      pdfPageCount: 0,
+      textCharacterCount: 0,
+      estimatedTokens: 0,
+    },
+    withinBudget: true,
+    predictedSavingsBytes: 0,
+    excludedItemIds: [itemIds[0]],
+    actions: [],
+    recommendations: [],
+  };
+  const result = {
+    schemaVersion: 1 as const,
+    planId: plan.planId,
+    estimatorVersion: plan.estimatorVersion,
+    compressionVersion: plan.compressionVersion,
+    completedAt: '2026-08-10T00:00:03Z',
+    predictedOutputBytes: maximum,
+    actualOutputBytes,
+    predictedSavingsBytes: 0,
+    actualSavingsBytes: 0,
+    deviationBytes: 1,
+    withinBudget: false,
+    excludedItemIds: [itemIds[0]],
+    items: [],
+  };
+  const reopened: PackLibrarySnapshot = {
+    ...excludedSnapshot,
+    selected: {
+      ...excludedSnapshot.selected!,
+      pack: {
+        ...excludedSnapshot.selected!.pack,
+        budget: {
+          ...plan.budget,
+          exclusions: excludedSnapshot.selected!.pack.budget.exclusions!,
+          latestEstimate: plan.estimate,
+          latestOptimization: result,
+        },
+      },
+    },
+  };
+  const restored: PackLibrarySnapshot = {
+    ...reopened,
+    selected: {
+      ...reopened.selected!,
+      pack: {
+        ...reopened.selected!.pack,
+        budget: { ...plan.budget },
+      },
+      items: reopened.selected!.items.map(item =>
+        item.id === itemIds[0]
+          ? { ...item, inclusionMode: 'both' as const }
+          : item,
+      ),
+    },
+  };
+  const value = controller();
+  value.load
+    .mockResolvedValueOnce(excludedSnapshot)
+    .mockResolvedValueOnce(excludedSnapshot)
+    .mockResolvedValueOnce(reopened)
+    .mockResolvedValue(restored);
+  value.previewBudget.mockResolvedValue(plan);
+  value.applyBudget.mockResolvedValue(result);
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Custom maximum'));
+  await press(button(renderer, 'Preview optimization plan'));
+  await press(button(renderer, 'Create compressed derivatives'));
+
+  const appliedAlert = renderer.root.findByProps({
+    testID: 'budget-actual-over-alert',
+  });
+  expect(appliedAlert.props.accessibilityRole).toBe('alert');
+  expect(text(appliedAlert)).toContain(
+    `Actual output ${actualOutputBytes} bytes exceeds the selected maximum of ${maximum} bytes.`,
+  );
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-actual-remediation' })),
+  ).toContain('remove-items');
+  await press(button(renderer, 'Include Complete image again'));
+  expect(
+    renderer.root.findAllByProps({ testID: 'budget-actual-over-alert' }),
+  ).toHaveLength(0);
+  act(() => renderer.unmount());
+
+  const restartedController = controller();
+  restartedController.load.mockResolvedValue(reopened);
+  const restarted = await render(restartedController);
+  expect(
+    text(restarted.root.findByProps({ testID: 'budget-actual-over-alert' })),
+  ).toContain(String(maximum));
+  expect(
+    text(restarted.root.findByProps({ testID: 'budget-actual-remediation' })),
+  ).toContain('split-pack');
+  act(() => restarted.unmount());
+});
 
 async function render(
   value: jest.Mocked<PackLibraryController>,
@@ -446,6 +624,246 @@ test('renders all required library views and every partial-failure item state', 
     await Promise.resolve();
   });
   expect(value.reorderItem).toHaveBeenCalledWith(packId, itemIds[1], 2);
+  act(() => renderer.unmount());
+});
+
+test('previews a versioned budget plan and reports actual compression savings', async () => {
+  const value = controller();
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+  value.load.mockResolvedValue({
+    ...snapshot,
+    sections: {
+      ...snapshot.sections,
+      processing: [
+        ...snapshot.sections.processing,
+        {
+          ...snapshot.sections.processing[0]!,
+          id: otherPackId,
+          title: 'Other Pack',
+        },
+      ],
+    },
+  });
+  const plan = {
+    schemaVersion: 1 as const,
+    planId: 'a23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 3,
+    createdAt: '2026-08-10T00:00:01Z',
+    preset: 'compact' as const,
+    estimatorVersion: 'context-budget-estimator-v1' as const,
+    compressionVersion: 'image-compression-v1' as const,
+    budget: {
+      preset: 'compact' as const,
+      maxOutputBytes: 5_242_880,
+      minimumImageLongestEdge: 720,
+      targetImageLongestEdge: 1_280,
+      imageQuality: 0.7,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+    },
+    estimate: {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: 1_024,
+      predictedOutputBytes: 512,
+      imageCount: 1,
+      pdfPageCount: 2,
+      textCharacterCount: 400,
+      estimatedTokens: 526,
+    },
+    withinBudget: true,
+    predictedSavingsBytes: 512,
+    excludedItemIds: [itemIds[1]],
+    actions: [
+      {
+        kind: 'compress' as const,
+        itemId: itemIds[0],
+        outputArtifactId: 'b23e4567-e89b-42d3-a456-426614174000',
+        sourceByteCount: 1_024,
+        sourceSha256: 'a'.repeat(64),
+        sourceMediaType: 'image/png',
+        sourceWidth: 640,
+        sourceHeight: 480,
+        targetWidth: 320,
+        targetHeight: 240,
+        targetLongestEdge: 320,
+        quality: 1,
+        outputMediaType: 'image/png' as const,
+        preserveAlpha: true,
+        predictedOutputBytes: 512,
+      },
+    ],
+    recommendations: [],
+  };
+  const result = {
+    schemaVersion: 1 as const,
+    planId: plan.planId,
+    estimatorVersion: plan.estimatorVersion,
+    compressionVersion: plan.compressionVersion,
+    completedAt: '2026-08-10T00:00:02Z',
+    predictedOutputBytes: 512,
+    actualOutputBytes: 480,
+    predictedSavingsBytes: 512,
+    actualSavingsBytes: 544,
+    deviationBytes: -32,
+    withinBudget: true,
+    excludedItemIds: plan.excludedItemIds,
+    items: [
+      {
+        itemId: itemIds[0],
+        action: 'compressed' as const,
+        predictedOutputBytes: 512,
+        actualOutputBytes: 480,
+        actualSavingsBytes: 544,
+        deviationBytes: -32,
+        artifactId: 'b23e4567-e89b-42d3-a456-426614174000',
+      },
+    ],
+  };
+  value.previewBudget.mockResolvedValue(plan);
+  let finishApply: ((value: typeof result) => void) | undefined;
+  value.applyBudget.mockImplementationOnce(
+    () =>
+      new Promise(resolve => {
+        finishApply = resolve;
+      }),
+  );
+  const renderer = await render(value);
+
+  await press(button(renderer, 'Compact'));
+  await press(button(renderer, 'Exclude Processing PDF from plan'));
+  await press(button(renderer, 'Preview optimization plan'));
+  expect(value.previewBudget).toHaveBeenCalledWith(packId, plan.budget, [
+    itemIds[1],
+  ]);
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-estimator-version' })),
+  ).toContain('context-budget-estimator-v1');
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-estimate-summary' })),
+  ).toContain('526');
+  expect(
+    renderer.root.findByProps({ testID: `budget-action-${itemIds[0]}` }),
+  ).toBeDefined();
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-excluded-summary' })),
+  ).toContain('Processing PDF');
+
+  await press(button(renderer, 'Create compressed derivatives'));
+  expect(value.applyBudget).toHaveBeenCalledWith(plan);
+  const otherPack = button(renderer, 'Open Other Pack');
+  expect(otherPack.props.accessibilityState?.disabled).toBe(true);
+  await press(otherPack);
+  expect(
+    value.load.mock.calls.some(([selected]) => selected === otherPackId),
+  ).toBe(false);
+  expect(
+    renderer.root.findByProps({ testID: `pack-editor-${packId}` }),
+  ).toBeDefined();
+  const cancel = button(renderer, 'Cancel budget optimization');
+  expect(cancel.props.accessibilityState?.disabled).toBe(false);
+  await press(cancel);
+  expect(value.cancelBudget).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    finishApply?.(result);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-actual-summary' })),
+  ).toContain('480');
+  expect(
+    text(renderer.root.findByProps({ testID: 'budget-actual-summary' })),
+  ).toContain('-32');
+  act(() => renderer.unmount());
+});
+
+test('drops Pack-local optimization state after an idle Pack switch', async () => {
+  const otherPackId = 'a23e4567-e89b-42d3-a456-426614174000';
+  const pendingOptimization = {
+    schemaVersion: 1 as const,
+    planId: 'b23e4567-e89b-42d3-a456-426614174000',
+    packId,
+    packRevision: 3,
+    createdAt: '2026-08-10T00:00:02Z',
+    preset: 'compact' as const,
+    estimatorVersion: 'context-budget-estimator-v1' as const,
+    compressionVersion: 'image-compression-v1' as const,
+    budget: {
+      preset: 'compact' as const,
+      maxOutputBytes: 5_242_880,
+      minimumImageLongestEdge: 720,
+      targetImageLongestEdge: 1_280,
+      imageQuality: 0.7,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+    },
+    estimate: {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: 0,
+      predictedOutputBytes: 0,
+      imageCount: 0,
+      pdfPageCount: 0,
+      textCharacterCount: 0,
+      estimatedTokens: 0,
+    },
+    withinBudget: true,
+    predictedSavingsBytes: 0,
+    excludedItemIds: [],
+    actions: [],
+    recommendations: [],
+  };
+  const sections = {
+    ...snapshot.sections,
+    processing: [
+      ...snapshot.sections.processing,
+      {
+        ...snapshot.sections.processing[0]!,
+        id: otherPackId,
+        title: 'Other Pack',
+      },
+    ],
+  };
+  const withPending: PackLibrarySnapshot = {
+    ...snapshot,
+    sections,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        budget: { ...snapshot.selected!.pack.budget, pendingOptimization },
+      },
+    },
+  };
+  const otherSnapshot: PackLibrarySnapshot = {
+    ...snapshot,
+    sections,
+    selected: {
+      ...snapshot.selected!,
+      pack: {
+        ...snapshot.selected!.pack,
+        id: otherPackId,
+        title: 'Other Pack',
+      },
+    },
+  };
+  const value = controller();
+  value.load.mockImplementation(async selected =>
+    selected === otherPackId ? otherSnapshot : withPending,
+  );
+  const renderer = await render(value);
+  expect(renderer.root.findByProps({ testID: 'budget-plan' })).toBeDefined();
+
+  await press(button(renderer, 'Open Other Pack'));
+
+  expect(
+    renderer.root.findByProps({ testID: `pack-editor-${otherPackId}` }),
+  ).toBeDefined();
+  expect(renderer.root.findAllByProps({ testID: 'budget-plan' })).toHaveLength(
+    0,
+  );
   act(() => renderer.unmount());
 });
 

@@ -20,6 +20,7 @@ let package = Package(
         "InboxRecoverySupport.swift",
         "InboxWriterOwnership.swift",
         "ImagePerceptualHasher.swift",
+        "ImageCompressionProcessor.swift",
         "AppleVisionOCRProcessor.swift",
         "ApplePDFProcessor.swift",
         "MainAppImportPublisher.swift",

@@ -2,6 +2,7 @@ import type { ImportManifestV1 } from './contracts';
 import { isCanonicalUuid } from './canonicalUuid';
 import type { ContextPack } from './models';
 import {
+  IMAGE_COMPRESSION_RECOVERY_EVENT_ID,
   isPendingShareEvent,
   type PendingShareEvent,
 } from './shareImportResult';
@@ -251,7 +252,14 @@ export class InboxEventWorkflow {
     try {
       let recovery = await this.native.getPendingRecoveryEvent();
       while (recovery) {
-        await this.native.ackRecoveryEvent(recovery.id);
+        if (
+          recovery.id === IMAGE_COMPRESSION_RECOVERY_EVENT_ID &&
+          recovery.code === 'PIPELINE_RECOVERY_REQUIRED'
+        ) {
+          if (!this.native.retryRecoveryEvent)
+            throw new Error('NATIVE_RECOVERY_RETRY_UNAVAILABLE');
+          await this.native.retryRecoveryEvent(recovery.id);
+        } else await this.native.ackRecoveryEvent(recovery.id);
         this.clear(`recovery:${recovery.id}`);
         recovery = await this.native.getPendingRecoveryEvent();
       }

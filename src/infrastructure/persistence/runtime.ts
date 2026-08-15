@@ -1,5 +1,6 @@
 import type { ImportManifestV1 } from '../../domain/contracts';
 import { createCanonicalUuid } from '../../domain/canonicalUuid';
+import { BUDGET_PRESETS } from '../../domain/budgetOptimization';
 import { DomainError } from '../../domain/errors';
 import type { ContextPack } from '../../domain/models';
 import type {
@@ -148,13 +149,7 @@ export async function createEmptyDraftPack(
     createdAt: timestamp,
     updatedAt: timestamp,
     state: 'draft',
-    budget: {
-      preset: 'balanced',
-      maxOutputBytes: 10_485_760,
-      minimumImageLongestEdge: 1_280,
-      imageQuality: 0.82,
-      estimatorVersion: 'v1',
-    },
+    budget: { ...BUDGET_PRESETS.balanced },
     estimatedTokens: 0,
     orderedItemIds: [],
     exportRecordIds: [],

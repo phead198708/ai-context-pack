@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "taskId": "323e4567-e89b-42d3-a456-426614174000",
+  "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "temporaryFileUri": "file:///tmp/323e4567-e89b-42d3-a456-426614174000.tmp",
+  "outputByteCount": 96,
+  "outputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "width": 320,
+  "height": 240,
+  "mediaType": "image/png",
+  "quality": 1,
+  "alphaPreserved": true,
+  "engine": "core-graphics",
+  "revision": "1",
+  "durationMs": 2
+}

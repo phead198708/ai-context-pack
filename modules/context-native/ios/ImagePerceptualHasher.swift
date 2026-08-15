@@ -9,6 +9,7 @@ enum ImagePerceptualHashError: Error {
   case resourceLimit
   case cancelled
   case integrityFailure
+  case cleanupFailure
 
   var stableCode: String {
     switch self {
@@ -16,6 +17,7 @@ enum ImagePerceptualHashError: Error {
     case .resourceLimit: return "RESOURCE_MEMORY_PRESSURE"
     case .cancelled: return "PIPELINE_STAGE_FAILED"
     case .integrityFailure: return "ARTIFACT_INTEGRITY_FAILED"
+    case .cleanupFailure: return "PIPELINE_RECOVERY_REQUIRED"
     }
   }
 }

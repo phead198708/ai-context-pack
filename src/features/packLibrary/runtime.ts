@@ -9,6 +9,7 @@ import {
   NativeExtractionStageWorker,
   type RecoveredPackProcessingCompletion,
 } from './processing';
+import { PackBudgetOptimizationService } from './budgetOptimization';
 
 export type PackProcessingFailureListener = (code: DomainErrorCode) => void;
 export type PackProcessingCompletionListener = (
@@ -72,4 +73,5 @@ export const packLibraryController = new PackLibraryController(
   productionRepository,
   undefined,
   processingCoordinator,
+  new PackBudgetOptimizationService(productionRepository, nativeAdapter),
 );

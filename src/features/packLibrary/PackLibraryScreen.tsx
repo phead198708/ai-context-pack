@@ -17,6 +17,13 @@ import {
 } from 'react-native';
 import { t, type AppLocale } from '../../ui/i18n';
 import { colors, spacing, typography } from '../../ui/tokens';
+import {
+  budgetForPreset,
+  type BudgetRecommendationV1,
+  type BudgetOptimizationPlanV1,
+  type BudgetOptimizationResultV1,
+} from '../../domain/budgetOptimization';
+import type { BudgetPreset } from '../../domain/models';
 import type { PackLibraryController } from './controller';
 import {
   PACK_LIBRARY_SECTIONS,
@@ -30,6 +37,13 @@ type ScreenLoadState =
   | { readonly kind: 'loading' }
   | { readonly kind: 'ready'; readonly snapshot: PackLibrarySnapshot }
   | { readonly kind: 'error'; readonly code: string };
+
+const ACTUAL_OVER_BUDGET_RECOMMENDATIONS = [
+  'lower-quality',
+  'ocr-only',
+  'split-pack',
+  'remove-items',
+] as const satisfies readonly BudgetRecommendationV1[];
 
 export interface PackSelectionLoadState {
   controlledPackId: string | undefined;
@@ -69,15 +83,23 @@ export function PackLibraryScreen({
   const [mutationErrorCode, setMutationErrorCode] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [budgetApplyingPackId, setBudgetApplyingPackId] = useState<
+    string | undefined
+  >(undefined);
   const busyRef = useRef(false);
   const cancellingRef = useRef(false);
+  const budgetApplyingPackIdRef = useRef<string | undefined>(undefined);
   const selectionLoadStateRef = useRef<PackSelectionLoadState>({
     controlledPackId: selectedPackId,
     activePackId: selectedPackId,
     loadGeneration: 0,
   });
   const selectionLoadState = selectionLoadStateRef.current;
-  synchronizeControlledPackSelection(selectionLoadState, selectedPackId);
+  const effectiveSelectedPackId = budgetApplyingPackId ?? selectedPackId;
+  synchronizeControlledPackSelection(
+    selectionLoadState,
+    effectiveSelectedPackId,
+  );
   const load = useCallback(
     async (packId?: string): Promise<void> => {
       const generation = selectionLoadState.loadGeneration + 1;
@@ -102,11 +124,11 @@ export function PackLibraryScreen({
   );
   useEffect(() => {
     setLoadState({ kind: 'loading' });
-    run(load(selectedPackId));
+    run(load(effectiveSelectedPackId));
     return () => {
       selectionLoadState.loadGeneration += 1;
     };
-  }, [load, refreshKey, selectedPackId, selectionLoadState]);
+  }, [effectiveSelectedPackId, load, refreshKey, selectionLoadState]);
 
   const mutate = useCallback(
     async (operation: () => Promise<unknown>): Promise<void> => {
@@ -148,6 +170,19 @@ export function PackLibraryScreen({
       }
     },
     [controller, load, onChanged, selectionLoadState],
+  );
+
+  const setBudgetApplying = useCallback(
+    (packId: string, applying: boolean): void => {
+      if (applying) {
+        budgetApplyingPackIdRef.current = packId;
+        setBudgetApplyingPackId(packId);
+      } else if (budgetApplyingPackIdRef.current === packId) {
+        budgetApplyingPackIdRef.current = undefined;
+        setBudgetApplyingPackId(undefined);
+      }
+    },
+    [],
   );
 
   const mutationError = mutationErrorCode ? (
@@ -200,11 +235,13 @@ export function PackLibraryScreen({
       {mutationError}
       {PACK_LIBRARY_SECTIONS.map(section => (
         <LibrarySection
+          disabled={budgetApplyingPackId !== undefined}
           key={section}
           locale={locale}
           rows={loadState.snapshot.sections[section]}
           section={section}
           select={packId => {
+            if (budgetApplyingPackIdRef.current !== undefined) return;
             selectionLoadState.activePackId = packId;
             onSelectPack(packId);
             run(load(packId));
@@ -221,6 +258,7 @@ export function PackLibraryScreen({
           key={detail.pack.id}
           locale={locale}
           mutate={mutate}
+          setBudgetApplying={setBudgetApplying}
         />
       ) : (
         <Text style={styles.detail} testID="pack-library-no-selection">
@@ -255,11 +293,13 @@ function MutationErrorBanner({
 }
 
 function LibrarySection({
+  disabled,
   locale,
   rows,
   section,
   select,
 }: {
+  readonly disabled: boolean;
   readonly locale: AppLocale;
   readonly rows: PackLibrarySnapshot['sections'][PackLibrarySection];
   readonly section: PackLibrarySection;
@@ -285,8 +325,12 @@ function LibrarySection({
           <Pressable
             accessibilityLabel={t(locale, 'openPack', { title: row.title })}
             accessibilityRole="button"
+            accessibilityState={{ disabled }}
+            disabled={disabled}
             key={row.id}
-            onPress={() => select(row.id)}
+            onPress={() => {
+              if (!disabled) select(row.id);
+            }}
             style={styles.packRow}
             testID={`pack-row-${row.id}`}
           >
@@ -309,6 +353,7 @@ function PackEditor({
   detail,
   locale,
   mutate,
+  setBudgetApplying,
 }: {
   readonly busy: boolean;
   readonly cancelling: boolean;
@@ -317,6 +362,7 @@ function PackEditor({
   readonly detail: NonNullable<PackLibrarySnapshot['selected']>;
   readonly locale: AppLocale;
   readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
+  readonly setBudgetApplying: (packId: string, applying: boolean) => void;
 }): React.JSX.Element {
   const [title, setTitle, acknowledgeTitle] = usePersistedDraft(
     detail.pack.title,
@@ -381,6 +427,16 @@ function PackEditor({
           )
         }
       />
+      <BudgetOptimizationReview
+        busy={busy}
+        controller={controller}
+        key={detail.pack.id}
+        locale={locale}
+        mutate={mutate}
+        pack={detail.pack}
+        items={detail.items}
+        setBudgetApplying={setBudgetApplying}
+      />
       {['processing', 'recovering'].includes(detail.pack.state) ? (
         <Button
           disabled={cancelling}
@@ -430,6 +486,331 @@ function PackEditor({
           total={detail.items.length}
         />
       ))}
+    </View>
+  );
+}
+
+function BudgetOptimizationReview({
+  busy,
+  controller,
+  locale,
+  mutate,
+  pack,
+  items,
+  setBudgetApplying,
+}: {
+  readonly busy: boolean;
+  readonly controller: PackLibraryController;
+  readonly locale: AppLocale;
+  readonly mutate: (operation: () => Promise<unknown>) => Promise<void>;
+  readonly pack: NonNullable<PackLibrarySnapshot['selected']>['pack'];
+  readonly items: readonly PackItemRow[];
+  readonly setBudgetApplying: (packId: string, applying: boolean) => void;
+}): React.JSX.Element {
+  const pendingPlan = pack.budget.pendingOptimization;
+  const [preset, setPreset] = useState<BudgetPreset>(
+    pendingPlan?.preset ?? pack.budget.preset,
+  );
+  const [customMiB, setCustomMiB] = useState(
+    String(
+      Math.max(
+        1,
+        Math.round(
+          (pendingPlan?.budget.maxOutputBytes ?? pack.budget.maxOutputBytes) /
+            1_048_576,
+        ),
+      ),
+    ),
+  );
+  const [plan, setPlan] = useState<BudgetOptimizationPlanV1 | undefined>(
+    pendingPlan,
+  );
+  const [result, setResult] = useState<BudgetOptimizationResultV1>();
+  const [applying, setApplying] = useState(false);
+  const fixedExcludedItemIds = useMemo(
+    () =>
+      new Set(
+        items
+          .filter(item => item.inclusionMode === 'excluded')
+          .map(item => item.id),
+      ),
+    [items],
+  );
+  const budgetExcludedItemIds = useMemo(
+    () =>
+      new Set(
+        (pack.budget.exclusions ?? []).map(exclusion => exclusion.itemId),
+      ),
+    [pack.budget.exclusions],
+  );
+  const itemNameById = useMemo(
+    () => new Map(items.map(item => [item.id, item.displayName])),
+    [items],
+  );
+  const [excludedItemIds, setExcludedItemIds] = useState<ReadonlySet<string>>(
+    () =>
+      new Set([
+        ...fixedExcludedItemIds,
+        ...(pendingPlan?.excludedItemIds ?? []),
+      ]),
+  );
+  const priorFixedExcludedItemIds = useRef(fixedExcludedItemIds);
+  useEffect(() => {
+    setExcludedItemIds(current => {
+      const next = new Set(current);
+      for (const itemId of priorFixedExcludedItemIds.current)
+        if (!fixedExcludedItemIds.has(itemId)) next.delete(itemId);
+      for (const itemId of fixedExcludedItemIds) next.add(itemId);
+      return next;
+    });
+    priorFixedExcludedItemIds.current = fixedExcludedItemIds;
+  }, [fixedExcludedItemIds]);
+  const choose = (value: BudgetPreset): void => {
+    setPreset(value);
+    setPlan(undefined);
+    setResult(undefined);
+  };
+  const selectedBudget = (): ReturnType<typeof budgetForPreset> =>
+    budgetForPreset(
+      preset,
+      preset === 'custom'
+        ? Math.round(Number(customMiB) * 1_048_576)
+        : undefined,
+    );
+  const actual = result ?? pack.budget.latestOptimization;
+  const toggleExclusion = (itemId: string): void => {
+    if (fixedExcludedItemIds.has(itemId)) return;
+    setExcludedItemIds(current => {
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+    setPlan(undefined);
+    setResult(undefined);
+  };
+  return (
+    <View style={styles.card} testID="budget-optimization">
+      <Text accessibilityRole="header" style={styles.sectionTitle}>
+        {t(locale, 'budgetOptimization')}
+      </Text>
+      <Text style={styles.detail} testID="budget-estimator-version">
+        {t(locale, 'budgetEstimatorVersion', {
+          version: plan?.estimatorVersion ?? pack.budget.estimatorVersion,
+        })}
+      </Text>
+      <Text style={styles.detail}>{t(locale, 'budgetEstimateNotice')}</Text>
+      <View style={styles.actions}>
+        <Button
+          disabled={busy || pendingPlan !== undefined}
+          label={t(locale, 'budgetPresetQuality')}
+          onPress={() => choose('quality')}
+        />
+        <Button
+          disabled={busy || pendingPlan !== undefined}
+          label={t(locale, 'budgetPresetBalanced')}
+          onPress={() => choose('balanced')}
+        />
+        <Button
+          disabled={busy || pendingPlan !== undefined}
+          label={t(locale, 'budgetPresetCompact')}
+          onPress={() => choose('compact')}
+        />
+        <Button
+          disabled={busy || pendingPlan !== undefined}
+          label={t(locale, 'budgetPresetCustom')}
+          onPress={() => choose('custom')}
+        />
+      </View>
+      {preset === 'custom' ? (
+        <TextInput
+          accessibilityLabel={t(locale, 'budgetCustomMiB')}
+          editable={!busy && pendingPlan === undefined}
+          keyboardType="number-pad"
+          maxLength={3}
+          onChangeText={value => {
+            setCustomMiB(value);
+            setPlan(undefined);
+          }}
+          style={styles.input}
+          value={customMiB}
+        />
+      ) : null}
+      <View style={styles.actions} testID="budget-exclusions">
+        {items.map(item =>
+          fixedExcludedItemIds.has(item.id) ? (
+            budgetExcludedItemIds.has(item.id) ? (
+              <Button
+                disabled={busy || pendingPlan !== undefined}
+                key={item.id}
+                label={t(locale, 'budgetRestoreExcludedItem', {
+                  item: item.displayName,
+                })}
+                onPress={() =>
+                  run(
+                    mutate(async () => {
+                      await controller.restoreBudgetExclusion(pack.id, item.id);
+                      setResult(undefined);
+                      setPlan(undefined);
+                    }),
+                  )
+                }
+              />
+            ) : (
+              <Text key={item.id} style={styles.detail}>
+                {t(locale, 'budgetAlreadyExcluded', {
+                  item: item.displayName,
+                })}
+              </Text>
+            )
+          ) : (
+            <Button
+              disabled={busy || pendingPlan !== undefined}
+              key={item.id}
+              label={t(
+                locale,
+                excludedItemIds.has(item.id)
+                  ? 'budgetIncludeItem'
+                  : 'budgetExcludeItem',
+                { item: item.displayName },
+              )}
+              onPress={() => toggleExclusion(item.id)}
+            />
+          ),
+        )}
+      </View>
+      <Button
+        disabled={
+          busy ||
+          pendingPlan !== undefined ||
+          (preset === 'custom' &&
+            (!Number.isFinite(Number(customMiB)) || Number(customMiB) < 1))
+        }
+        label={t(locale, 'previewBudget')}
+        onPress={() =>
+          run(
+            mutate(async () => {
+              const value = await controller.previewBudget(
+                pack.id,
+                selectedBudget(),
+                [...excludedItemIds].sort(),
+              );
+              setPlan(value);
+              setResult(undefined);
+            }),
+          )
+        }
+      />
+      {plan ? (
+        <View testID="budget-plan">
+          <Text style={styles.detail} testID="budget-estimate-summary">
+            {t(locale, 'budgetEstimateSummary', {
+              source: plan.estimate.sourceBytes,
+              output: plan.estimate.predictedOutputBytes,
+              images: plan.estimate.imageCount,
+              pages: plan.estimate.pdfPageCount,
+              characters: plan.estimate.textCharacterCount,
+              tokens: plan.estimate.estimatedTokens,
+            })}
+          </Text>
+          <Text style={plan.withinBudget ? styles.detail : styles.warning}>
+            {t(
+              locale,
+              plan.withinBudget ? 'budgetPlanWithin' : 'budgetPlanOver',
+            )}
+          </Text>
+          {plan.excludedItemIds.length > 0 ? (
+            <Text style={styles.detail} testID="budget-excluded-summary">
+              {t(locale, 'budgetExcludedSummary', {
+                values: plan.excludedItemIds
+                  .map(itemId => itemNameById.get(itemId) ?? itemId)
+                  .join(', '),
+              })}
+            </Text>
+          ) : null}
+          {plan.actions.map(action => (
+            <Text
+              key={action.itemId}
+              style={styles.detail}
+              testID={`budget-action-${action.itemId}`}
+            >
+              {action.kind === 'compress'
+                ? t(locale, 'budgetActionCompress', {
+                    item: itemNameById.get(action.itemId) ?? action.itemId,
+                    source: action.sourceByteCount,
+                    output: action.predictedOutputBytes,
+                    width: action.targetWidth,
+                    height: action.targetHeight,
+                    format: action.outputMediaType,
+                    quality: action.quality,
+                  })
+                : t(locale, 'budgetActionKeep', {
+                    item: itemNameById.get(action.itemId) ?? action.itemId,
+                    bytes: action.sourceByteCount,
+                  })}
+            </Text>
+          ))}
+          {plan.recommendations.length > 0 ? (
+            <Text style={styles.warning} testID="budget-recommendations">
+              {t(locale, 'budgetRecommendations', {
+                values: plan.recommendations.join(', '),
+              })}
+            </Text>
+          ) : null}
+          <Button
+            disabled={busy || !plan.withinBudget}
+            label={t(locale, 'applyBudget')}
+            onPress={() =>
+              run(
+                mutate(async () => {
+                  setApplying(true);
+                  setBudgetApplying(pack.id, true);
+                  try {
+                    setResult(await controller.applyBudget(plan));
+                    setPlan(undefined);
+                  } finally {
+                    setApplying(false);
+                    setBudgetApplying(pack.id, false);
+                  }
+                }),
+              )
+            }
+          />
+          {applying ? (
+            <Button
+              disabled={false}
+              label={t(locale, 'cancelBudget')}
+              onPress={() => controller.cancelBudget()}
+            />
+          ) : null}
+        </View>
+      ) : null}
+      {actual ? (
+        <>
+          <Text style={styles.detail} testID="budget-actual-summary">
+            {t(locale, 'budgetActualSummary', {
+              output: actual.actualOutputBytes,
+              savings: actual.actualSavingsBytes,
+              deviation: actual.deviationBytes,
+            })}
+          </Text>
+          {!actual.withinBudget ? (
+            <View accessibilityRole="alert" testID="budget-actual-over-alert">
+              <Text style={styles.warning}>
+                {t(locale, 'budgetActualOver', {
+                  output: actual.actualOutputBytes,
+                  maximum: pack.budget.maxOutputBytes,
+                })}
+              </Text>
+              <Text style={styles.warning} testID="budget-actual-remediation">
+                {t(locale, 'budgetRecommendations', {
+                  values: ACTUAL_OVER_BUDGET_RECOMMENDATIONS.join(', '),
+                })}
+              </Text>
+            </View>
+          ) : null}
+        </>
+      ) : null}
     </View>
   );
 }

@@ -185,6 +185,14 @@ export interface RegisterPublishedArtifactInput {
   readonly packId: string;
   /** The native file store has already verified these immutable bytes. */
   readonly artifact: Artifact;
+  /**
+   * Optional budget checkpoint fence. Registration succeeds only while this
+   * exact pending plan still owns the Pack revision and output artifact.
+   */
+  readonly budgetOptimizationFence?: {
+    readonly planId: string;
+    readonly expectedRevision: number;
+  };
   /** Global publication lease owner fenced in the registration transaction. */
   readonly publicationLeaseOwnerId: string;
   /** @deprecated Validated when present but never used as lease authority. */
@@ -304,6 +312,15 @@ export interface DuplicateAnalysisRepository {
   ): Promise<void>;
 }
 
+export interface BudgetOptimizationRepository {
+  /** Removes one durable budget overlay and restores the current underlying projection. */
+  restoreBudgetExclusion(
+    packId: string,
+    itemId: string,
+    restoredAt: string,
+  ): Promise<void>;
+}
+
 export interface QuarantineRecordInput {
   readonly id: string;
   /** Irreversible internal artifact UUID only; never a path or filename. */
@@ -391,6 +408,7 @@ export interface ProductionPersistenceRepository
     ExportRecordRepository,
     ArtifactRecordRepository,
     DuplicateAnalysisRepository,
+    BudgetOptimizationRepository,
     RecoveryDiagnosticsRepository,
     QuarantineRepository,
     CleanupLeaseRepository,

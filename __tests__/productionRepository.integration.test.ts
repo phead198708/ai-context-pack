@@ -18,6 +18,10 @@ import {
   type DuplicateAnalysisItemV1,
 } from '../src/domain/duplicateDetection';
 import { PackLibraryController } from '../src/features/packLibrary/controller';
+import {
+  BUDGET_PRESETS,
+  createBudgetOptimizationPlanV1,
+} from '../src/domain/budgetOptimization';
 
 type SqlValue = string | number | null;
 interface NodeStatement {
@@ -68,6 +72,7 @@ const thirdDerivedId = 'a53e4567-e89b-42d3-a456-426614174000';
 const oldQuarantineId = 'b23e4567-e89b-42d3-a456-426614174000';
 const recentQuarantineId = 'c23e4567-e89b-42d3-a456-426614174000';
 const cleanupMutationOwnerId = 'c33e4567-e89b-42d3-a456-426614174000';
+const budgetDerivativeId = 'c43e4567-e89b-42d3-a456-426614174000';
 const mainAppPackId = 'd23e4567-e89b-42d3-a456-426614174000';
 const mainAppIngestionId = 'e23e4567-e89b-42d3-a456-426614174000';
 const mainAppImageId = 'f23e4567-e89b-42d3-a456-426614174000';
@@ -962,6 +967,7 @@ describe('production repository against SQLite', () => {
         preset: 'balanced',
         maxOutputBytes: 10_485_760,
         minimumImageLongestEdge: 1_280,
+        targetImageLongestEdge: 1_280,
         imageQuality: 0.82,
         estimatorVersion: 'v1',
       },
@@ -1010,6 +1016,772 @@ describe('production repository against SQLite', () => {
     const graph = await repository.findPackGraph(emptyPackId);
     expect(graph?.revision).toBe(2);
     expect(graph?.pack.orderedItemIds).toEqual([appendedItemId]);
+  });
+
+  test('restores a pending budget optimization plan after reopening SQLite', async () => {
+    const graph = await repository.findPackGraph(packId);
+    const pendingOptimization = createBudgetOptimizationPlanV1({
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      packId,
+      packRevision: graph!.revision,
+      createdAt: '2026-08-14T00:10:00Z',
+      budget: BUDGET_PRESETS.compact,
+      items: [
+        {
+          itemId: firstItemId,
+          sourceType: 'text',
+          included: true,
+          includeOriginal: true,
+          includeExtracted: false,
+          sourceByteCount: 4,
+          textCharacterCount: 0,
+          textUtf8ByteCount: 0,
+          pdfPageCount: 0,
+        },
+      ],
+      exclusions: [],
+      createArtifactId: () => 'c43e4567-e89b-42d3-a456-426614174000',
+    });
+    await repository.savePackGraph({
+      pack: {
+        ...graph!.pack,
+        updatedAt: pendingOptimization.createdAt,
+        budget: { ...graph!.pack.budget, pendingOptimization },
+      },
+      items: graph!.items,
+      expectedRevision: graph!.revision,
+    });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+
+    await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
+      pack: { budget: { pendingOptimization } },
+    });
+  });
+
+  test('fails closed before releasing a pending output whose persisted identity is corrupted', async () => {
+    const graph = (await repository.findPackGraph(packId))!;
+    const pendingOptimization = createBudgetOptimizationPlanV1({
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      packId,
+      packRevision: graph.revision,
+      createdAt: '2026-08-14T00:20:00Z',
+      budget: BUDGET_PRESETS.compact,
+      items: [
+        {
+          itemId: firstItemId,
+          sourceType: 'image',
+          included: true,
+          includeOriginal: true,
+          includeExtracted: false,
+          sourceByteCount: 4_000_000,
+          textCharacterCount: 0,
+          textUtf8ByteCount: 0,
+          pdfPageCount: 0,
+          image: {
+            schemaVersion: 1,
+            sourceByteCount: 4_000_000,
+            sourceSha256: 'a'.repeat(64),
+            sourceMediaType: 'image/png',
+            width: 4_000,
+            height: 3_000,
+            hasAlpha: false,
+            animated: false,
+            orientationApplied: true,
+            revision: '1',
+          },
+        },
+      ],
+      exclusions: [],
+      createArtifactId: () => budgetDerivativeId,
+    });
+    await repository.savePackGraph({
+      pack: {
+        ...graph.pack,
+        updatedAt: pendingOptimization.createdAt,
+        budget: { ...graph.pack.budget, pendingOptimization },
+      },
+      items: graph.items,
+      expectedRevision: graph.revision,
+    });
+    const missingOutputCheckpoint = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.savePackGraph({
+        pack: {
+          ...missingOutputCheckpoint.pack,
+          title: 'Missing pending output discarded',
+          updatedAt: '2026-08-14T00:20:01Z',
+        },
+        items: missingOutputCheckpoint.items,
+        expectedRevision: missingOutputCheckpoint.revision,
+      }),
+    ).resolves.toBe(missingOutputCheckpoint.revision + 1);
+    const afterMissingOutput = (await repository.findPackGraph(packId))!;
+    expect(afterMissingOutput.pack.budget.pendingOptimization).toBeUndefined();
+    const pendingAgain = {
+      ...pendingOptimization,
+      planId: 'b53e4567-e89b-42d3-a456-426614174000',
+      packRevision: afterMissingOutput.revision,
+      createdAt: '2026-08-14T00:20:02Z',
+    };
+    await repository.savePackGraph({
+      pack: {
+        ...afterMissingOutput.pack,
+        updatedAt: pendingAgain.createdAt,
+        budget: {
+          ...afterMissingOutput.pack.budget,
+          pendingOptimization: pendingAgain,
+        },
+      },
+      items: afterMissingOutput.items,
+      expectedRevision: afterMissingOutput.revision,
+    });
+    const checkpoint = (await repository.findPackGraph(packId))!;
+    const persistedBudget = JSON.parse(
+      (
+        database
+          .prepare('SELECT budget_json FROM packs WHERE id = ?')
+          .get(packId) as { budget_json: string }
+      ).budget_json,
+    ) as {
+      pendingOptimization: {
+        actions: [{ kind: 'compress'; outputArtifactId: string }];
+      };
+    };
+    persistedBudget.pendingOptimization.actions[0].outputArtifactId =
+      secondItemId;
+    database
+      .prepare('UPDATE packs SET budget_json = ? WHERE id = ?')
+      .run(JSON.stringify(persistedBudget), packId);
+
+    await expect(
+      repository.savePackGraph({
+        pack: {
+          ...checkpoint.pack,
+          title: 'This mutation must roll back',
+          updatedAt: '2026-08-14T00:20:03Z',
+        },
+        items: checkpoint.items,
+        expectedRevision: checkpoint.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    expect(
+      database
+        .prepare(
+          `SELECT artifact_id FROM artifact_references
+           WHERE owner_type = 'pack' AND owner_id = ? ORDER BY artifact_id`,
+        )
+        .all(packId),
+    ).toEqual(
+      expect.arrayContaining([
+        { artifact_id: firstItemId },
+        { artifact_id: secondItemId },
+      ]),
+    );
+    expect(
+      database.prepare('SELECT title FROM packs WHERE id = ?').get(packId),
+    ).toEqual({ title: checkpoint.pack.title });
+  });
+
+  test('atomically reconciles duplicate decisions and restores budget exclusions across restarts', async () => {
+    const graph = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-05T00:00:03Z',
+        '2026-08-05T00:01:03Z',
+      ),
+    ).resolves.toBe(true);
+    await repository.registerPublishedArtifact({
+      packId,
+      publicationLeaseOwnerId: exportId,
+      artifact: {
+        id: budgetDerivativeId,
+        itemId: firstItemId,
+        kind: 'compressed-image',
+        relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+        mediaType: 'image/jpeg',
+        byteCount: 2,
+        sha256: '9'.repeat(64),
+        processorVersion: {
+          processor: 'image-compression',
+          version: 'image-compression-v1',
+          contractVersion: 1,
+        },
+        createdAt: '2026-08-05T00:00:03Z',
+        immutable: true,
+      },
+    });
+    await repository.releaseCleanupLease(exportId);
+    const exclusionDecision = {
+      schemaVersion: 1,
+      packId,
+      itemId: firstItemId,
+      choice: 'keep',
+      baselineInclusionMode: 'both',
+      decidedAt: '2026-08-05T00:00:04Z',
+    } as const;
+    database
+      .prepare(
+        `INSERT INTO duplicate_decisions
+          (item_id, pack_id, payload_json, decided_at) VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        firstItemId,
+        packId,
+        JSON.stringify(exclusionDecision),
+        exclusionDecision.decidedAt,
+      );
+    const exclusions = [
+      { itemId: firstItemId, baselineInclusionMode: 'both' as const },
+      { itemId: secondItemId, baselineInclusionMode: 'both' as const },
+    ];
+    const latestEstimate = {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: 12,
+      predictedOutputBytes: 0,
+      imageCount: 0,
+      pdfPageCount: 0,
+      textCharacterCount: 0,
+      estimatedTokens: 0,
+    };
+    const latestOptimization = {
+      schemaVersion: 1 as const,
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      compressionVersion: 'image-compression-v1' as const,
+      completedAt: '2026-08-05T00:00:05Z',
+      predictedOutputBytes: 0,
+      actualOutputBytes: 0,
+      predictedSavingsBytes: 12,
+      actualSavingsBytes: 12,
+      deviationBytes: 0,
+      withinBudget: true,
+      excludedItemIds: [firstItemId, secondItemId],
+      items: [
+        {
+          itemId: firstItemId,
+          action: 'compressed' as const,
+          predictedOutputBytes: 2,
+          actualOutputBytes: 2,
+          actualSavingsBytes: 2,
+          deviationBytes: 0,
+          artifactId: budgetDerivativeId,
+        },
+      ],
+    };
+
+    await repository.savePackGraph({
+      pack: {
+        ...graph.pack,
+        updatedAt: latestOptimization.completedAt,
+        budget: {
+          ...BUDGET_PRESETS.compact,
+          exclusions,
+          latestEstimate,
+          latestOptimization,
+        },
+        estimatedTokens: 0,
+      },
+      items: graph.items.map(item => ({
+        ...item,
+        artifactIds:
+          item.id === firstItemId
+            ? [...item.artifactIds, budgetDerivativeId]
+            : item.artifactIds,
+        inclusionMode: 'excluded' as const,
+      })),
+      expectedRevision: graph.revision,
+    });
+    expect(
+      database
+        .prepare(
+          'SELECT COUNT(*) AS count FROM duplicate_decisions WHERE item_id = ?',
+        )
+        .get(firstItemId),
+    ).toEqual({ count: 1 });
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+    await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
+      pack: { budget: { exclusions, latestOptimization } },
+      items: [
+        expect.objectContaining({
+          id: firstItemId,
+          inclusionMode: 'excluded',
+        }),
+        expect.objectContaining({
+          id: secondItemId,
+          inclusionMode: 'excluded',
+        }),
+      ],
+    });
+    expect(
+      database
+        .prepare(
+          'SELECT payload_json FROM duplicate_decisions WHERE item_id = ?',
+        )
+        .get(firstItemId),
+    ).toEqual({ payload_json: JSON.stringify(exclusionDecision) });
+
+    database
+      .prepare(
+        `INSERT INTO duplicate_suggestions
+          (suggestion_key, pack_id, left_item_id, right_item_id, payload_json)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'budget-overlay-regression',
+        packId,
+        firstItemId,
+        secondItemId,
+        '{}',
+      );
+    const duplicateExclusion = {
+      ...exclusionDecision,
+      choice: 'exclude' as const,
+      decidedAt: '2026-08-05T00:00:05.500Z',
+    };
+    await repository.saveDuplicateDecisions(packId, [duplicateExclusion]);
+    await expect(repository.findPackGraph(packId)).resolves.toMatchObject({
+      pack: { budget: { exclusions } },
+      items: [
+        expect.objectContaining({
+          id: firstItemId,
+          inclusionMode: 'excluded',
+        }),
+        expect.objectContaining({
+          id: secondItemId,
+          inclusionMode: 'excluded',
+        }),
+      ],
+    });
+
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-05T00:00:06Z',
+    );
+    await controller.restoreBudgetExclusion(packId, firstItemId);
+    let restored = (await repository.findPackGraph(packId))!;
+    expect(restored.items.map(item => item.inclusionMode)).toEqual([
+      'excluded',
+      'excluded',
+    ]);
+    expect(restored.pack.budget).toMatchObject({
+      exclusions: [exclusions[1]],
+    });
+    expect(restored.pack.budget.latestOptimization).toBeUndefined();
+    await expect(
+      repository.listCleanupCandidates('2026-08-05T00:00:06.250Z'),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ artifactId: budgetDerivativeId }),
+      ]),
+    );
+    expect(
+      database
+        .prepare(
+          'SELECT payload_json FROM duplicate_decisions WHERE item_id = ?',
+        )
+        .get(firstItemId),
+    ).toEqual({ payload_json: JSON.stringify(duplicateExclusion) });
+    await repository.restoreDuplicateDecision(
+      packId,
+      firstItemId,
+      '2026-08-05T00:00:06.500Z',
+    );
+    restored = (await repository.findPackGraph(packId))!;
+    expect(restored.items.map(item => item.inclusionMode)).toEqual([
+      'both',
+      'excluded',
+    ]);
+
+    database.close();
+    database = new DatabaseSync(databasePath);
+    repository = new ExpoSqlitePersistenceRepository(
+      new NodeSqlConnection(database) as never,
+    );
+    await repository.initialize();
+    const restartedController = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-05T00:00:07Z',
+    );
+    await restartedController.restoreBudgetExclusion(packId, secondItemId);
+    restored = (await repository.findPackGraph(packId))!;
+    expect(restored.items.map(item => item.inclusionMode)).toEqual([
+      'both',
+      'both',
+    ]);
+    expect(restored.pack.budget.exclusions).toBeUndefined();
+  });
+
+  test('fails closed before releasing a completed derivative whose persisted identity is corrupted', async () => {
+    const graph = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-15T00:00:00Z',
+        '2026-08-15T00:01:00Z',
+      ),
+    ).resolves.toBe(true);
+    await repository.registerPublishedArtifact({
+      packId,
+      publicationLeaseOwnerId: exportId,
+      artifact: {
+        id: budgetDerivativeId,
+        itemId: firstItemId,
+        kind: 'compressed-image',
+        relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+        mediaType: 'image/jpeg',
+        byteCount: 2,
+        sha256: '9'.repeat(64),
+        processorVersion: {
+          processor: 'image-compression',
+          version: 'image-compression-v1',
+          contractVersion: 1,
+        },
+        createdAt: '2026-08-15T00:00:00Z',
+        immutable: true,
+      },
+    });
+    await repository.releaseCleanupLease(exportId);
+    const exclusion = {
+      itemId: firstItemId,
+      baselineInclusionMode: 'both' as const,
+    };
+    const latestOptimization = {
+      schemaVersion: 1 as const,
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      compressionVersion: 'image-compression-v1' as const,
+      completedAt: '2026-08-15T00:00:01Z',
+      predictedOutputBytes: 2,
+      actualOutputBytes: 2,
+      predictedSavingsBytes: 2,
+      actualSavingsBytes: 2,
+      deviationBytes: 0,
+      withinBudget: true,
+      excludedItemIds: [firstItemId],
+      items: [
+        {
+          itemId: firstItemId,
+          action: 'compressed' as const,
+          predictedOutputBytes: 2,
+          actualOutputBytes: 2,
+          actualSavingsBytes: 2,
+          deviationBytes: 0,
+          artifactId: budgetDerivativeId,
+        },
+      ],
+    };
+    await repository.savePackGraph({
+      pack: {
+        ...graph.pack,
+        updatedAt: latestOptimization.completedAt,
+        budget: {
+          ...graph.pack.budget,
+          exclusions: [exclusion],
+          latestOptimization,
+        },
+      },
+      items: graph.items.map(item => ({
+        ...item,
+        inclusionMode:
+          item.id === firstItemId ? ('excluded' as const) : item.inclusionMode,
+        artifactIds:
+          item.id === firstItemId
+            ? [...item.artifactIds, budgetDerivativeId]
+            : item.artifactIds,
+      })),
+      expectedRevision: graph.revision,
+    });
+    const persistedBudget = JSON.parse(
+      (
+        database
+          .prepare('SELECT budget_json FROM packs WHERE id = ?')
+          .get(packId) as { budget_json: string }
+      ).budget_json,
+    ) as { latestOptimization: { items: [{ artifactId: string }] } };
+    persistedBudget.latestOptimization.items[0].artifactId = firstItemId;
+    database
+      .prepare('UPDATE packs SET budget_json = ? WHERE id = ?')
+      .run(JSON.stringify(persistedBudget), packId);
+
+    await expect(
+      repository.restoreBudgetExclusion(
+        packId,
+        firstItemId,
+        '2026-08-15T00:00:02Z',
+      ),
+    ).rejects.toMatchObject({ code: 'STORAGE_DIVERGENCE_DETECTED' });
+    expect(
+      database
+        .prepare(
+          `SELECT artifact_id FROM artifact_references
+           WHERE owner_type = 'pack' AND owner_id = ? ORDER BY artifact_id`,
+        )
+        .all(packId),
+    ).toEqual(
+      expect.arrayContaining([
+        { artifact_id: firstItemId },
+        { artifact_id: budgetDerivativeId },
+      ]),
+    );
+  });
+
+  test('atomically invalidates completed optimization and releases derivatives when Pack content is removed', async () => {
+    const graph = (await repository.findPackGraph(packId))!;
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-15T00:10:00Z',
+        '2026-08-15T00:11:00Z',
+      ),
+    ).resolves.toBe(true);
+    await repository.registerPublishedArtifact({
+      packId,
+      publicationLeaseOwnerId: exportId,
+      artifact: {
+        id: budgetDerivativeId,
+        itemId: firstItemId,
+        kind: 'compressed-image',
+        relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+        mediaType: 'image/jpeg',
+        byteCount: 2,
+        sha256: '9'.repeat(64),
+        processorVersion: {
+          processor: 'image-compression',
+          version: 'image-compression-v1',
+          contractVersion: 1,
+        },
+        createdAt: '2026-08-15T00:10:00Z',
+        immutable: true,
+      },
+    });
+    await repository.releaseCleanupLease(exportId);
+    const latestEstimate = {
+      schemaVersion: 1 as const,
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      isEstimate: true as const,
+      sourceBytes: 12,
+      predictedOutputBytes: 10,
+      imageCount: 1,
+      pdfPageCount: 1,
+      textCharacterCount: 0,
+      estimatedTokens: 0,
+    };
+    const latestOptimization = {
+      schemaVersion: 1 as const,
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      estimatorVersion: 'context-budget-estimator-v1' as const,
+      compressionVersion: 'image-compression-v1' as const,
+      completedAt: '2026-08-15T00:10:01Z',
+      predictedOutputBytes: 10,
+      actualOutputBytes: 10,
+      predictedSavingsBytes: 2,
+      actualSavingsBytes: 2,
+      deviationBytes: 0,
+      withinBudget: true,
+      excludedItemIds: [] as string[],
+      items: [
+        {
+          itemId: firstItemId,
+          action: 'compressed' as const,
+          predictedOutputBytes: 2,
+          actualOutputBytes: 2,
+          actualSavingsBytes: 2,
+          deviationBytes: 0,
+          artifactId: budgetDerivativeId,
+        },
+      ],
+    };
+    const optimizedRevision = await repository.savePackGraph({
+      pack: {
+        ...graph.pack,
+        updatedAt: latestOptimization.completedAt,
+        budget: {
+          ...graph.pack.budget,
+          latestEstimate,
+          latestOptimization,
+        },
+      },
+      items: graph.items.map(item => ({
+        ...item,
+        artifactIds:
+          item.id === firstItemId
+            ? [...item.artifactIds, budgetDerivativeId]
+            : item.artifactIds,
+      })),
+      expectedRevision: graph.revision,
+    });
+    const optimized = (await repository.findPackGraph(packId))!;
+    expect(optimized.revision).toBe(optimizedRevision);
+
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-15T00:10:02Z',
+    );
+    await controller.removeItem(packId, secondItemId, 'preserve');
+
+    const updated = (await repository.findPackGraph(packId))!;
+    expect(updated.pack.budget.latestEstimate).toBeUndefined();
+    expect(updated.pack.budget.latestOptimization).toBeUndefined();
+    expect(updated.items).toEqual([
+      expect.objectContaining({
+        id: firstItemId,
+        artifactIds: [firstItemId],
+      }),
+    ]);
+    await expect(
+      repository.listCleanupCandidates('2026-08-15T00:10:03Z'),
+    ).resolves.toContainEqual(
+      expect.objectContaining({ artifactId: budgetDerivativeId }),
+    );
+  });
+
+  test('invalidates a stale optimization and releases its partial derivative in the same Pack mutation', async () => {
+    const graph = await repository.findPackGraph(packId);
+    const pendingOptimization = createBudgetOptimizationPlanV1({
+      planId: 'b43e4567-e89b-42d3-a456-426614174000',
+      packId,
+      packRevision: graph!.revision,
+      createdAt: '2026-08-14T00:10:00Z',
+      budget: BUDGET_PRESETS.compact,
+      items: [
+        {
+          itemId: firstItemId,
+          sourceType: 'image',
+          included: true,
+          includeOriginal: true,
+          includeExtracted: false,
+          sourceByteCount: 4_000_000,
+          textCharacterCount: 0,
+          textUtf8ByteCount: 0,
+          pdfPageCount: 0,
+          image: {
+            schemaVersion: 1,
+            sourceByteCount: 4_000_000,
+            sourceSha256: 'a'.repeat(64),
+            sourceMediaType: 'image/png',
+            width: 4_000,
+            height: 3_000,
+            hasAlpha: false,
+            animated: false,
+            orientationApplied: true,
+            revision: '1',
+          },
+        },
+      ],
+      exclusions: [],
+      createArtifactId: () => budgetDerivativeId,
+    });
+    expect(pendingOptimization.actions).toEqual([
+      expect.objectContaining({
+        kind: 'compress',
+        outputArtifactId: budgetDerivativeId,
+      }),
+    ]);
+    const checkpointRevision = await repository.savePackGraph({
+      pack: {
+        ...graph!.pack,
+        updatedAt: pendingOptimization.createdAt,
+        budget: { ...graph!.pack.budget, pendingOptimization },
+      },
+      items: graph!.items,
+      expectedRevision: graph!.revision,
+    });
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-14T00:10:00Z',
+        '2026-08-14T00:11:00Z',
+      ),
+    ).resolves.toBe(true);
+    await repository.registerPublishedArtifact({
+      packId,
+      publicationLeaseOwnerId: exportId,
+      budgetOptimizationFence: {
+        planId: pendingOptimization.planId,
+        expectedRevision: checkpointRevision,
+      },
+      artifact: {
+        id: budgetDerivativeId,
+        itemId: firstItemId,
+        kind: 'compressed-image',
+        relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+        mediaType: 'image/jpeg',
+        byteCount: 500_000,
+        sha256: '9'.repeat(64),
+        processorVersion: {
+          processor: 'image-compression',
+          version: 'image-compression-v1',
+          contractVersion: 1,
+        },
+        createdAt: pendingOptimization.createdAt,
+        immutable: true,
+      },
+    });
+    await repository.releaseCleanupLease(exportId);
+    const controller = new PackLibraryController(
+      async () => repository,
+      () => '2026-08-14T00:10:01Z',
+    );
+
+    await controller.renamePack(packId, 'Replacement plan enabled');
+
+    await expect(
+      repository.acquireCleanupLease(
+        exportId,
+        '2026-08-14T00:10:01Z',
+        '2026-08-14T00:11:01Z',
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      repository.registerPublishedArtifact({
+        packId,
+        publicationLeaseOwnerId: exportId,
+        budgetOptimizationFence: {
+          planId: pendingOptimization.planId,
+          expectedRevision: checkpointRevision,
+        },
+        artifact: {
+          id: budgetDerivativeId,
+          itemId: firstItemId,
+          kind: 'compressed-image',
+          relativePath: ownedDerivedPath(packId, budgetDerivativeId, 'jpg'),
+          mediaType: 'image/jpeg',
+          byteCount: 500_000,
+          sha256: '9'.repeat(64),
+          processorVersion: {
+            processor: 'image-compression',
+            version: 'image-compression-v1',
+            contractVersion: 1,
+          },
+          createdAt: pendingOptimization.createdAt,
+          immutable: true,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'PERSISTENCE_CONFLICT' });
+    await repository.releaseCleanupLease(exportId);
+
+    const updated = await repository.findPackGraph(packId);
+    expect(updated?.pack.budget.pendingOptimization).toBeUndefined();
+    await expect(
+      repository.listCleanupCandidates('2026-08-14T00:10:02Z'),
+    ).resolves.toContainEqual(
+      expect.objectContaining({ artifactId: budgetDerivativeId }),
+    );
   });
 
   test('maps malformed persisted values to recoverable storage divergence', async () => {
